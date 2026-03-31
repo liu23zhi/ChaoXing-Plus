@@ -73,8 +73,11 @@ export class StudyManager {
   // ─── Private ──────────────────────────────────────────────────────────────
 
   private observeTaskChanges(): void {
-    // When the DOM changes (new task loaded), check if we should auto-complete.
-    const disconnect = observeDOM(document, () => {
+    // Task-item elements live in the parent study page, not in the knowledge-cards
+    // iframe. Observe whichever document actually holds them so that task-state
+    // mutations (e.g. icon-finish being added) are detected correctly.
+    const targetDoc = this.getTaskDocument();
+    const disconnect = observeDOM(targetDoc, () => {
       if (!this.running) return;
       this.handleCurrentTask();
     });
@@ -82,6 +85,23 @@ export class StudyManager {
 
     // Also handle immediately.
     this.handleCurrentTask();
+  }
+
+  /**
+   * Return the document that contains the task-point sidebar items.
+   * When the content script runs inside the knowledge-cards iframe the sidebar
+   * lives in the parent (top) frame, so we use window.top.document when it is
+   * same-origin and accessible.
+   */
+  private getTaskDocument(): Document {
+    try {
+      if (window.top && window.top !== window && window.top.document) {
+        return window.top.document;
+      }
+    } catch {
+      // Cross-origin access denied; fall back to the current document.
+    }
+    return document;
   }
 
   private handleCurrentTask(): void {
@@ -134,15 +154,21 @@ export class StudyManager {
       }
       logger.info('PPT/文档任务点翻页完成');
     } else {
-      // Just wait a moment; Chaoxing counts time-on-page.
-      await sleep(2_000);
-      if (this.isCurrentTaskMarkedDone()) {
-        // Log: single-page document task is confirmed complete by the page state.
-        logger.info('文档任务点已完成（单页）');
-      } else {
-        // Log: single-page document task is not complete yet; continue waiting.
+      // Single-page document: Chaoxing registers completion via time-on-page XHR.
+      // Poll until the sidebar task-item gains the icon-finish class (or timeout).
+      const POLL_INTERVAL_MS = 3_000;
+      const MAX_WAIT_MS = 120_000; // up to 2 minutes
+      const deadline = Date.now() + MAX_WAIT_MS;
+      while (Date.now() < deadline) {
+        await sleep(POLL_INTERVAL_MS);
+        if (!this.running) return;
+        if (this.isCurrentTaskMarkedDone()) {
+          logger.info('文档任务点已完成（单页）');
+          return;
+        }
         logger.debug('单页文档仍未完成，等待页面计时上报…');
       }
+      logger.warn('单页文档等待超时（2分钟），请手动完成或刷新页面后重试');
     }
   }
 
@@ -167,7 +193,8 @@ export class StudyManager {
   }
 
   private getCurrentTaskToken(): string {
-    const current = document.querySelector<HTMLElement>(SEL.TASK_ITEM_ACTIVE);
+    const doc = this.getTaskDocument();
+    const current = doc.querySelector<HTMLElement>(SEL.TASK_ITEM_ACTIVE);
     if (!current) return window.location.href;
     const jobId = current.getAttribute('jobid') ?? '';
     const title = (current.getAttribute('title') ?? current.textContent ?? '').trim();
@@ -175,7 +202,8 @@ export class StudyManager {
   }
 
   private isCurrentTaskMarkedDone(): boolean {
-    const current = document.querySelector<HTMLElement>(SEL.TASK_ITEM_ACTIVE);
+    const doc = this.getTaskDocument();
+    const current = doc.querySelector<HTMLElement>(SEL.TASK_ITEM_ACTIVE);
     if (!current) return false;
     return current.classList.contains('icon-finish');
   }
