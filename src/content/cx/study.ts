@@ -235,10 +235,16 @@ export class StudyManager {
   }
 
   private isCurrentTaskMarkedDone(): boolean {
+    // Primary: check isPassed on the job element inside this iframe document.
+    // Chaoxing sets isPassed="true" on the job <span> after the backend XHR
+    // confirms the task is recorded, regardless of what happens to icon-current
+    // in the parent sidebar (which may have moved to the next task already).
+    if (document.querySelector('[jobid][isPassed="true"]')) return true;
+
+    // Fallback: icon-finish on the currently-active sidebar item in parent page.
     const doc = this.getTaskDocument();
     const current = doc.querySelector<HTMLElement>(SEL.TASK_ITEM_ACTIVE);
-    if (!current) return false;
-    return current.classList.contains('icon-finish');
+    return current?.classList.contains('icon-finish') ?? false;
   }
 }
 
