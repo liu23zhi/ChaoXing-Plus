@@ -25,9 +25,7 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.chaoxing.com/*",
-        "*://*.edu.cn/*chaoxing*",
-        "*://*.xueyinonline.com/*"
+        "*://*.chaoxing.com/*"
       ],
       "js": [
         "content.js"
@@ -41,8 +39,7 @@
     "tabs"
   ],
   "host_permissions": [
-    "*://*.chaoxing.com/*",
-    "*://*.xueyinonline.com/*"
+    "*://*.chaoxing.com/*"
   ],
   "web_accessible_resources": [
     {
@@ -54,9 +51,7 @@
         "vendor/swal-bridge.js"
       ],
       "matches": [
-        "*://*.chaoxing.com/*",
-        "*://*.xueyinonline.com/*",
-        "*://*.edu.cn/*"
+        "*://*.chaoxing.com/*"
       ]
     }
   ]
