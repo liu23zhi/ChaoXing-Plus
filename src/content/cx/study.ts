@@ -48,6 +48,7 @@ export class StudyManager {
   private stopCleanup: (() => void) | null = null;
   private currentTaskToken = '';
   private currentTaskRunning = false;
+  private pageHookBridgeRequested = false;
 
   constructor(settings: Settings) {
     this.settings = settings;
@@ -70,7 +71,37 @@ export class StudyManager {
     this.stopCleanup?.();
   }
 
-  // ─── Private ──────────────────────────────────────────────────────────────
+  // ─── Page-context hooks ───────────────────────────────────────────────────
+
+  /**
+   * Ensure the page-hooks bridge script (page-hooks.js) is loaded into the
+   * page context so that hook events can be handled there.  Idempotent.
+   */
+  private ensurePageHookBridge(): void {
+    if (this.pageHookBridgeRequested) return;
+    this.pageHookBridgeRequested = true;
+    const id = 'cx-plus-page-hooks-bridge';
+    if (document.getElementById(id)) return;
+    const script = document.createElement('script');
+    script.id = id;
+    script.src = chrome.runtime.getURL('page-hooks.js');
+    script.async = false;
+    (document.head || document.documentElement).appendChild(script);
+  }
+
+  private dispatchPageHook(type: string, payload?: Record<string, unknown>): void {
+    this.ensurePageHookBridge();
+    const emit = () => {
+      document.dispatchEvent(new CustomEvent('cx-plus:page-hook', {
+        detail: { type, payload: payload ?? {} },
+      }));
+    };
+    // Bridge script may not be ready immediately after <script src> append;
+    // retry at 50 ms and 300 ms to cover the script-load latency window.
+    emit();
+    setTimeout(emit, 50);
+    setTimeout(emit, 300);
+  }
 
   private observeTaskChanges(): void {
     // Task-item elements live in the parent study page, not in the knowledge-cards
@@ -154,8 +185,10 @@ export class StudyManager {
       }
       logger.info('PPT/文档任务点翻页完成');
     } else {
-      // Single-page document: Chaoxing registers completion via time-on-page XHR.
-      // Poll until the sidebar task-item gains the icon-finish class (or timeout).
+      // Single-page document: call Chaoxing's finishJob() in page context
+      // (mirrors ocsjs JobRunner.read), then poll until the sidebar icon
+      // confirms the task is marked done.
+      this.dispatchPageHook('callDocFinishJob');
       const POLL_INTERVAL_MS = 3_000;
       const MAX_WAIT_MS = 120_000; // up to 2 minutes
       const deadline = Date.now() + MAX_WAIT_MS;

@@ -313,6 +313,32 @@
     window.addEventListener('load', patch, { once: true, passive: true });
   }
 
+  function callDocFinishJob() {
+    // Mirrors ocsjs JobRunner.read(): call finishJob() on the document viewer
+    // iframe window. Chaoxing exposes this function to signal that a single-page
+    // document has been viewed; calling it triggers the backend XHR that marks
+    // the task point as passed and updates the sidebar icon to icon-finish.
+    var iframes = document.querySelectorAll('iframe');
+    for (var i = 0; i < iframes.length; i++) {
+      try {
+        var win = iframes[i].contentWindow;
+        if (!win) continue;
+        if (typeof win.finishJob === 'function') {
+          win.finishJob();
+          console.info(`[超星助手] 已调用文档完成方法 (finishJob on iframe ${i})`);
+          return;
+        }
+      } catch (e) {
+        // cross-origin iframe — skip
+      }
+    }
+    // Fallback: finishJob may be on the current window in some page layouts.
+    if (typeof window.finishJob === 'function') {
+      window.finishJob();
+      console.info('[超星助手] 已调用文档完成方法 (finishJob on current window)');
+    }
+  }
+
   document.addEventListener('cx-plus:page-hook', (event) => {
     const detail = event?.detail || {};
     const type = detail.type;
@@ -322,6 +348,7 @@
     if (type === 'injectRateEnforcer') return installRateEnforcer(payload);
     if (type === 'injectVideoJsRateBypass') return installVideoJsRateBypass();
     if (type === 'injectHighRatePatch') return installHighRatePatch(payload);
+    if (type === 'callDocFinishJob') return callDocFinishJob();
   });
 
   console.info('[超星助手] page-hooks bridge ready');
