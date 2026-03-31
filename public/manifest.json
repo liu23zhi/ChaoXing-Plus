@@ -56,7 +56,7 @@
       "matches": [
         "*://*.chaoxing.com/*",
         "*://*.xueyinonline.com/*",
-        "*://*.edu.cn/*chaoxing*"
+        "*://*.edu.cn/*"
       ]
     }
   ]
