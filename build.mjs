@@ -1,135 +1,120 @@
 import { createRequire } from 'module';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { copyFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'fs';
+import { copyFileSync, mkdirSync, existsSync, writeFileSync } from 'fs';
 
-// Use createRequire so that the CommonJS resolver locates vite's package.json
-// via its `main` field rather than the ESM exports map.  This avoids a known
-// Node.js 24 regression on Windows/WSL where the ESM exports-map matching
-// fails for packages accessed through Windows-style filesystem paths
-// (e.g. C:\...), causing the build to crash with "Cannot find package …/index.js".
-// Silence vite's deprecation notice for this intentional CJS fallback.
 process.env.VITE_CJS_IGNORE_WARNING = '1';
 const _require = createRequire(import.meta.url);
 const { build } = _require('vite');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-async function buildContentScript() {
-  await build({
-    configFile: false,
-    build: {
-      lib: {
-        entry: resolve(__dirname, 'src/content/index.ts'),
-        formats: ['iife'],
-        name: 'ChaoxingPlus',
-        fileName: () => 'content.js',
-      },
-      rollupOptions: {
-        output: {
-          entryFileNames: 'content.js',
-          inlineDynamicImports: true,
-        },
-      },
-      outDir: 'dist',
-      emptyOutDir: false,
-    },
-  });
-}
-
-async function buildBackground() {
-  await build({
-    configFile: false,
-    build: {
-      lib: {
-        entry: resolve(__dirname, 'src/background/index.ts'),
-        formats: ['es'],
-        fileName: () => 'background.js',
-      },
-      rollupOptions: {
-        output: {
-          entryFileNames: 'background.js',
-          inlineDynamicImports: true,
-        },
-      },
-      outDir: 'dist',
-      emptyOutDir: false,
-    },
-  });
-}
-
-async function buildPopup() {
-  await build({
-    configFile: false,
-    base: './',
-    root: resolve(__dirname, 'src/popup'),
-    build: {
-      rollupOptions: {
-        input: {
-          popup: resolve(__dirname, 'src/popup/index.html'),
-        },
-        output: {
-          entryFileNames: 'popup.js',
-          assetFileNames: '[name][extname]',
-        },
-      },
-      outDir: resolve(__dirname, 'dist/popup'),
-      emptyOutDir: true,
-    },
-  });
-}
+const watchMode = process.argv.includes('--watch');
 
 function copyStaticFiles() {
-  mkdirSync('dist/icons', { recursive: true });
-  copyFileSync('public/manifest.json', 'dist/manifest.json');
-  if (existsSync('public/page-hooks.js')) {
-    copyFileSync('public/page-hooks.js', 'dist/page-hooks.js');
+  mkdirSync('dist', { recursive: true });
+
+  const manifest = {
+    manifest_version: 3,
+    name: 'ChaoXing Plus Tools',
+    version: '2.0.0',
+    description: '给超星网站使用的自动学习与自动搜题扩展。',
+    icons: {
+      '512': 'icon_512X512.png'
+    },
+    action: {
+      default_popup: 'popup.html'
+    },
+    content_scripts: [
+      {
+        matches: [
+          '*://*.chaoxing.com/*',
+          '*://*.edu.cn/*',
+          '*://*.org.cn/*',
+          '*://*.xueyinonline.com/*',
+          '*://*.hnsyu.net/*',
+          '*://*.qutjxjy.cn/*',
+          '*://*.ynny.cn/*',
+          '*://*.hnvist.cn/*',
+          '*://*.fjlecb.cn/*',
+          '*://*.gdhkmooc.com/*',
+          '*://*.cugbonline.cn/*',
+          '*://*.zjelib.cn/*',
+          '*://*.cqrspx.cn/*',
+          '*://*.neauce.com/*',
+          '*://*.zhihui-yun.com/*',
+          '*://*.cqie.cn/*',
+          '*://*.ccqmxx.com/*',
+          '*://*.jxgmxy.com/*',
+          '*://*.jnzyjsxy.cn/*',
+          '*://*.sslibrary.com/*'
+        ],
+        js: ['extension-entry.js'],
+        run_at: 'document_start',
+        all_frames: true,
+        match_about_blank: true,
+        match_origin_as_fallback: true
+      }
+    ],
+    web_accessible_resources: [
+      {
+        matches: ['<all_urls>'],
+        resources: ['chaoxing-plus.js', 'vendor/sweetalert2.min.css', 'vendor/sweetalert2.all.min.js']
+      }
+    ]
+  };
+
+  writeFileSync('dist/manifest.json', JSON.stringify(manifest, null, 2));
+
+  if (existsSync('src/extension-entry.js')) {
+    copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
+
+  if (existsSync('icon/icon_512X512.png')) {
+    copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');
+  }
+
+  if (existsSync('src/popup.html')) {
+    copyFileSync('src/popup.html', 'dist/popup.html');
+  }
+
+  if (existsSync('src/popup.js')) {
+    copyFileSync('src/popup.js', 'dist/popup.js');
+  }
+
   if (existsSync('node_modules/sweetalert2/dist/sweetalert2.min.css')) {
     mkdirSync('dist/vendor', { recursive: true });
     copyFileSync('node_modules/sweetalert2/dist/sweetalert2.min.css', 'dist/vendor/sweetalert2.min.css');
   }
+
   if (existsSync('node_modules/sweetalert2/dist/sweetalert2.all.min.js')) {
     mkdirSync('dist/vendor', { recursive: true });
     copyFileSync('node_modules/sweetalert2/dist/sweetalert2.all.min.js', 'dist/vendor/sweetalert2.all.min.js');
   }
-  if (existsSync('public/vendor/swal-bridge.js')) {
-    mkdirSync('dist/vendor', { recursive: true });
-    copyFileSync('public/vendor/swal-bridge.js', 'dist/vendor/swal-bridge.js');
-  }
-
-  const iconsSrc = 'public/icons';
-  if (existsSync(iconsSrc)) {
-    const files = readdirSync(iconsSrc);
-    files.forEach((file) => {
-      const srcPath = `${iconsSrc}/${file}`;
-      const destPath = `dist/icons/${file}`;
-      if (statSync(srcPath).isFile()) {
-        copyFileSync(srcPath, destPath);
-      }
-    });
-  }
 }
 
 async function main() {
-  console.log('🔨 Building Chaoxing Plus extension...');
+  await build({
+    configFile: false,
+    build: {
+      watch: watchMode ? {} : null,
+      lib: {
+        entry: resolve(__dirname, 'src/index.ts'),
+        formats: ['iife'],
+        name: 'ChaoxingPlusScript',
+        fileName: () => 'chaoxing-plus.js'
+      },
+      rollupOptions: {
+        output: {
+          entryFileNames: 'chaoxing-plus.js',
+          inlineDynamicImports: true
+        }
+      },
+      outDir: 'dist',
+      emptyOutDir: true
+    }
+  });
 
-  mkdirSync('dist', { recursive: true });
-
-  console.log('  [1/4] Copying static files...');
   copyStaticFiles();
-
-  console.log('  [2/4] Building background service worker...');
-  await buildBackground();
-
-  console.log('  [3/4] Building content script...');
-  await buildContentScript();
-
-  console.log('  [4/4] Building popup...');
-  await buildPopup();
-
-  console.log('✅ Build complete! Extension output: dist/');
-  console.log('   Load dist/ as an unpacked extension in Chrome/Edge.');
 }
 
 main().catch((err) => {

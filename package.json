@@ -1,20 +1,23 @@
 {
   "name": "chaoxing-plus",
-  "version": "1.0.0",
-  "description": "超星学习通浏览器扩展 - 自动化学习助手",
+  "version": "2.0.0",
+  "description": "单平台版 ocsjs 风格超星脚本工程",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node build.mjs --watch",
-    "build": "node scripts/generate-icons.mjs && node build.mjs",
+    "build": "node build.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/chrome": "^0.1.37",
+    "@types/md5": "^2.3.5",
+    "@types/node": "^24.0.0",
     "typescript": "^5.4.5",
     "vite": "^5.4.0"
   },
   "dependencies": {
-    "sweetalert2": "^11.26.24"
+    "md5": "^2.3.0",
+    "sweetalert2": "^11.26.24",
+    "typr.js": "^1.0.0"
   }
 }
