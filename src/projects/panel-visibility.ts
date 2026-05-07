@@ -1,7 +1,7 @@
-export function shouldShowFloatingPanel(_context?: {
+export function shouldShowFloatingPanel(context?: {
   selfWindow?: unknown;
   topWindow?: unknown;
   parentWindow?: unknown;
 }) {
-  return true;
+  return context?.selfWindow === context?.topWindow;
 }

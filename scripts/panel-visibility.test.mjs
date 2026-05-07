@@ -13,7 +13,7 @@ async function loadPanelVisibilityModule() {
   }
 }
 
-test('floating panel remains visible in deeply nested iframes', async () => {
+test('floating panel stays hidden in deeply nested iframes so only the outermost page owns it', async () => {
   const mod = await loadPanelVisibilityModule();
 
   assert.equal(typeof mod.shouldShowFloatingPanel, 'function');
@@ -23,7 +23,7 @@ test('floating panel remains visible in deeply nested iframes', async () => {
       topWindow: {},
       parentWindow: {}
     }),
-    true
+    false
   );
 });
 

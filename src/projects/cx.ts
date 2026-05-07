@@ -6,7 +6,8 @@ import {
   domSearch,
   OCSWorker,
   request,
-  type SearchInformation
+  type SearchInformation,
+  type SimplifyWorkResult
 } from '../core/index.js';
 import { Project, $gm } from '../runtime/index.js';
 import { $message } from '../runtime/message.js';
@@ -186,6 +187,16 @@ function workResultsMethods() {
     setResults?: (results: unknown) => void;
     appendResults?: (results: unknown) => void;
     updateWorkStateByResults?: (results: unknown) => void;
+    patchResult?: (index: number, patch: Partial<SimplifyWorkResult>) => void;
+    setRuntimeControls?: (controls: {
+      isRunning: () => boolean;
+      isStopped: () => boolean;
+      stop: () => void;
+      continuate: () => void;
+      retryQuestion: (index: number) => Promise<SimplifyWorkResult | undefined>;
+      canRetryQuestion?: (index: number) => boolean;
+    }) => void;
+    clearRuntimeControls?: () => void;
     createWorkResultsPanel?: () => HTMLElement;
   };
 }
@@ -1362,125 +1373,161 @@ const JobRunner = {
         .trim();
     };
 
-    const worker = new OCSWorker({
-      root: roots,
-      elements: {
-        title: '.Zy_TItle .clearfix',
-        options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
-        type: 'input[id^="answertype"]',
-        lineAnswerInput: '.line_answer input[name^=answer]',
-        lineSelectBox: '.line_answer_ct .selectBox '
-      },
-      thread: thread ?? 1,
-      answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
-      answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
-      answerer: (elements, ctx) => {
-        const title = chapterTestTaskQuestionTitleTransform(elements.title);
-        if (!title) {
-          throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-        }
+    const createChapterWorker = (questionRoots: HTMLElement[]) =>
+      new OCSWorker({
+        root: questionRoots,
+        elements: {
+          title: '.Zy_TItle .clearfix',
+          options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
+          type: 'input[id^="answertype"]',
+          lineAnswerInput: '.line_answer input[name^=answer]',
+          lineSelectBox: '.line_answer_ct .selectBox '
+        },
+        thread: thread ?? 1,
+        answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
+        answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
+        answerer: (elements, ctx) => {
+          const title = chapterTestTaskQuestionTitleTransform(elements.title);
+          if (!title) {
+            throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
+          }
 
-        const typeInput = elements.type[0] as HTMLInputElement | undefined;
-        const provider = async () => {
-          await sleep((period ?? 3) * 1000);
-          return defaultAnswerWrapperHandler(answererWrappers, {
-            type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
-            title,
-            options:
-              ctx.type === 'completion'
-                ? ''
-                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
-          });
-        };
-
-        const searchInCaches = appsMethods().searchAnswerInCaches;
-        return searchInCaches ? searchInCaches(title, provider) : provider();
-      },
-      work: async (ctx) => {
-        const { elements, searchInfos } = ctx;
-        const typeInput = elements.type[0] as HTMLInputElement | undefined;
-        const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
-
-        if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
-          const resolver = createDefaultQuestionResolver(ctx)[type];
-
-          const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
-            if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
-              const checked =
-                option.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
-                option.parentElement?.getAttribute('aria-checked') === 'true';
-              if (!checked) {
-                option.click();
-              }
-            } else if (questionType === 'completion' && option && answer.trim()) {
-              const text = option.parentElement?.querySelector('textarea');
-              const textareaFrame = option.parentElement?.querySelector('iframe');
-              if (text) {
-                text.value = answer;
-              }
-              if (textareaFrame?.contentDocument) {
-                textareaFrame.contentDocument.body.innerHTML = answer;
-              }
-              option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
-            }
+          const typeInput = elements.type[0] as HTMLInputElement | undefined;
+          const provider = async () => {
+            await sleep((period ?? 3) * 1000);
+            return defaultAnswerWrapperHandler(answererWrappers, {
+              type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
+              title,
+              options:
+                ctx.type === 'completion'
+                  ? ''
+                  : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
+            });
           };
 
-          return resolver(searchInfos, elements.options.map((option) => optimizationElementWithImage(option)), handler as any);
-        } else if (type === 'line') {
-          for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
-            let ans = answers;
-            if (ans.length === 1) {
-              ans = splitAnswer(ans[0]);
-            }
-            if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
-              for (let index = 0; index < elements.lineSelectBox.length; index++) {
-                const box = elements.lineSelectBox[index];
-                if (ans[index]) {
-                  box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
-                  await sleep(200);
+          const searchInCaches = appsMethods().searchAnswerInCaches;
+          return searchInCaches ? searchInCaches(title, provider) : provider();
+        },
+        work: async (ctx) => {
+          const { elements, searchInfos } = ctx;
+          const typeInput = elements.type[0] as HTMLInputElement | undefined;
+          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+
+          if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
+            const resolver = createDefaultQuestionResolver(ctx)[type];
+
+            const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
+              if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
+                const checked =
+                  option.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
+                  option.parentElement?.getAttribute('aria-checked') === 'true';
+                if (!checked) {
+                  option.click();
                 }
+              } else if (questionType === 'completion' && option && answer.trim()) {
+                const text = option.parentElement?.querySelector('textarea');
+                const textareaFrame = option.parentElement?.querySelector('iframe');
+                if (text) {
+                  text.value = answer;
+                }
+                if (textareaFrame?.contentDocument) {
+                  textareaFrame.contentDocument.body.innerHTML = answer;
+                }
+                option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
               }
-              return { finish: true };
+            };
+
+            return resolver(searchInfos, elements.options.map((option) => optimizationElementWithImage(option)), handler as any);
+          } else if (type === 'line') {
+            for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
+              let ans = answers;
+              if (ans.length === 1) {
+                ans = splitAnswer(ans[0]);
+              }
+              if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
+                for (let index = 0; index < elements.lineSelectBox.length; index++) {
+                  const box = elements.lineSelectBox[index];
+                  if (ans[index]) {
+                    box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
+                    await sleep(200);
+                  }
+                }
+                return { finish: true };
+              }
             }
+
+            return { finish: false };
           }
 
           return { finish: false };
+        },
+        async onResultsUpdate(curr, currentIndex, res) {
+          const simplified = simplifyWorkResult(res, chapterTestTaskQuestionTitleTransform);
+          workResultsMethods().setResults?.(simplified);
+          workResultsMethods().updateWorkStateByResults?.(res);
+
+          const currentRoot = questionRoots[currentIndex];
+          const typeInput = currentRoot?.querySelector<HTMLInputElement>('input[id^="answertype"]');
+          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+          if (currentRoot) {
+            workResultsMethods().patchResult?.(currentIndex, { manual: detectManualAnswer(currentRoot, type) });
+          }
+
+          if (curr.result?.finish) {
+            appsMethods().addQuestionCacheFromWorkResult?.(simplified.filter((_, index) => index === res.indexOf(curr)));
+          }
+        },
+        async onElementSearched(elements) {
+          const typeInput = elements.type[0] as HTMLInputElement | undefined;
+          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+          if (type === 'judgement') {
+            elements.options.forEach((option) => {
+              const opt = option?.textContent?.trim() || '';
+              if (opt.includes('对') || opt.includes('错')) {
+                return;
+              }
+              if (opt === 'True' || opt === '對') {
+                option.textContent = '√';
+              } else if (opt === 'False' || opt === '錯') {
+                option.textContent = 'x';
+              } else {
+                const ri = option.querySelector('.ri');
+                const span = document.createElement('span');
+                span.innerText = ri ? '√' : '×';
+                option.appendChild(span);
+              }
+            });
+          }
+        }
+      });
+
+    const worker = createChapterWorker(roots);
+    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+
+    workResultsMethods().setRuntimeControls?.({
+      isRunning: () => worker.isRunning,
+      isStopped: () => worker.isStop,
+      stop: () => worker.emit('stop'),
+      continuate: () => worker.emit('continuate'),
+      canRetryQuestion: (index) => Boolean(roots[index]),
+      retryQuestion: async (index) => {
+        const root = roots[index];
+        if (!root) {
+          return undefined;
         }
 
-        return { finish: false };
-      },
-      async onResultsUpdate(curr, _, res) {
-        const simplified = simplifyWorkResult(res, chapterTestTaskQuestionTitleTransform);
-        workResultsMethods().setResults?.(simplified);
-
-        if (curr.result?.finish) {
-          appsMethods().addQuestionCacheFromWorkResult?.(simplified.filter((_, index) => index === res.indexOf(curr)));
-        }
-        workResultsMethods().updateWorkStateByResults?.(res);
-      },
-      async onElementSearched(elements) {
-        const typeInput = elements.type[0] as HTMLInputElement | undefined;
-        const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
-        if (type === 'judgement') {
-          elements.options.forEach((option) => {
-            const opt = option?.textContent?.trim() || '';
-            if (opt.includes('对') || opt.includes('错')) {
-              return;
-            }
-            if (opt === 'True' || opt === '對') {
-              option.textContent = '√';
-            } else if (opt === 'False' || opt === '錯') {
-              option.textContent = 'x';
-            } else {
-              const ri = option.querySelector('.ri');
-              const span = document.createElement('span');
-              span.innerText = ri ? '√' : '×';
-              option.appendChild(span);
-            }
-          });
-        }
+        const retryWorker = createChapterWorker([root]);
+        const retriedResults = await retryWorker.doWork();
+        return {
+          ...simplifyWorkResult(retriedResults, chapterTestTaskQuestionTitleTransform)[0],
+          manual: false,
+          retrying: false
+        };
       }
     });
+
+    worker.on('done', clearRuntimeControls);
+    worker.on('close', clearRuntimeControls);
 
     const results = await worker.doWork();
     const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
@@ -1585,127 +1632,165 @@ function workOrExam(
     );
   };
 
-  const worker = new OCSWorker({
-    root: '.questionLi',
-    elements: {
-      title: [(root) => root.querySelector('h3') as HTMLElement],
-      options: '.answerBg .answer_p, .textDIV, .eidtDiv',
-      type: type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]',
-      lineAnswerInput: '.line_answer input[name^=answer]',
-      lineSelectBox: '.line_answer_ct .selectBox ',
-      reading: '.reading_answer',
-      filling: '.filling_answer'
-    },
-    thread: thread ?? 1,
-    answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
-    answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
-    answerer: (elements, ctx) => {
-      if (!elements.title) {
-        throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-      }
-      const title = workOrExamQuestionTitleTransform(elements.title);
-      if (!title) {
-        throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
-      }
+  const createWorkOrExamWorker = (questionRoots: string | HTMLElement[]) =>
+    new OCSWorker({
+      root: questionRoots,
+      elements: {
+        title: [(root) => root.querySelector('h3') as HTMLElement],
+        options: '.answerBg .answer_p, .textDIV, .eidtDiv',
+        type: type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]',
+        lineAnswerInput: '.line_answer input[name^=answer]',
+        lineSelectBox: '.line_answer_ct .selectBox ',
+        reading: '.reading_answer',
+        filling: '.filling_answer'
+      },
+      thread: thread ?? 1,
+      answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
+      answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
+      answerer: (elements, ctx) => {
+        if (!elements.title) {
+          throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
+        }
+        const title = workOrExamQuestionTitleTransform(elements.title);
+        if (!title) {
+          throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
+        }
 
-      const typeInput = elements.type[0] as HTMLInputElement | undefined;
-      const provider = async () => {
-        await sleep((period ?? 3) * 1000);
-        return defaultAnswerWrapperHandler(answererWrappers, {
-          type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
-          title,
-          options:
-            ctx.type === 'completion'
-              ? ''
-              : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
-        });
-      };
+        const typeInput = elements.type[0] as HTMLInputElement | undefined;
+        const provider = async () => {
+          await sleep((period ?? 3) * 1000);
+          return defaultAnswerWrapperHandler(answererWrappers, {
+            type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
+            title,
+            options:
+              ctx.type === 'completion'
+                ? ''
+                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
+          });
+        };
 
-      const searchInCaches = appsMethods().searchAnswerInCaches;
-      return searchInCaches ? searchInCaches(title, provider) : provider();
-    },
-    work: async (ctx) => {
-      const { elements, searchInfos } = ctx;
-      const typeInput = elements.type[0] as HTMLInputElement | undefined;
-      const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+        const searchInCaches = appsMethods().searchAnswerInCaches;
+        return searchInCaches ? searchInCaches(title, provider) : provider();
+      },
+      work: async (ctx) => {
+        const { elements, searchInfos } = ctx;
+        const typeInput = elements.type[0] as HTMLInputElement | undefined;
+        const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
 
-      if (questionType && ['completion', 'multiple', 'judgement', 'single'].includes(questionType)) {
-        const resolver = createDefaultQuestionResolver(ctx)[questionType as 'completion' | 'multiple' | 'judgement' | 'single'];
-        return resolver(
-          searchInfos,
-          elements.options.map((option) => optimizationElementWithImage(option)),
-          async (resolvedType, answer, option) => {
-            if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
-              if (option.parentElement && option.parentElement.querySelectorAll('[class*="check_answer"]').length === 0) {
-                option.click();
+        if (questionType && ['completion', 'multiple', 'judgement', 'single'].includes(questionType)) {
+          const resolver = createDefaultQuestionResolver(ctx)[questionType as 'completion' | 'multiple' | 'judgement' | 'single'];
+          return resolver(
+            searchInfos,
+            elements.options.map((option) => optimizationElementWithImage(option)),
+            async (resolvedType, answer, option) => {
+              if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
+                if (option.parentElement && option.parentElement.querySelectorAll('[class*="check_answer"]').length === 0) {
+                  option.click();
+                  await sleep(500);
+                }
+              } else if (resolvedType === 'completion' && option && answer.trim()) {
+                const text = option.querySelector('textarea');
+                const textareaFrame = option.querySelector('iframe');
+                if (text) {
+                  text.value = answer;
+                }
+                if (textareaFrame?.contentDocument) {
+                  textareaFrame.contentDocument.body.innerHTML = answer;
+                }
+                option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
                 await sleep(500);
               }
-            } else if (resolvedType === 'completion' && option && answer.trim()) {
-              const text = option.querySelector('textarea');
-              const textareaFrame = option.querySelector('iframe');
-              if (text) {
-                text.value = answer;
-              }
-              if (textareaFrame?.contentDocument) {
-                textareaFrame.contentDocument.body.innerHTML = answer;
-              }
-              option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
-              await sleep(500);
             }
-          }
-        );
-      }
-
-      if (questionType === 'line') {
-        for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
-          let ans = answers;
-          if (ans.length === 1) {
-            ans = splitAnswer(ans[0]);
-          }
-          if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
-            for (let index = 0; index < elements.lineSelectBox.length; index++) {
-              const box = elements.lineSelectBox[index];
-              if (ans[index]) {
-                box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
-                await sleep(200);
-              }
-            }
-            return { finish: true };
-          }
+          );
         }
+
+        if (questionType === 'line') {
+          for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
+            let ans = answers;
+            if (ans.length === 1) {
+              ans = splitAnswer(ans[0]);
+            }
+            if (ans.filter(Boolean).length !== 0 && elements.lineAnswerInput) {
+              for (let index = 0; index < elements.lineSelectBox.length; index++) {
+                const box = elements.lineSelectBox[index];
+                if (ans[index]) {
+                  box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
+                  await sleep(200);
+                }
+              }
+              return { finish: true };
+            }
+          }
+          return { finish: false };
+        }
+
+        if (questionType === 'fill') {
+          return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[]);
+        }
+
+        if (questionType === 'reader') {
+          return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[]);
+        }
+
         return { finish: false };
-      }
+      },
+      async onResultsUpdate(current, currentIndex, res) {
+        const simplified = simplifyWorkResult(res, workOrExamQuestionTitleTransform);
 
-      if (questionType === 'fill') {
-        return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[]);
-      }
+        if (!preview_mode) {
+          if (current.result?.finish) {
+            workResultsMethods().appendResults?.(simplified);
+            appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
+          }
+          return;
+        }
 
-      if (questionType === 'reader') {
-        return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[]);
-      }
+        workResultsMethods().setResults?.(simplified);
+        workResultsMethods().updateWorkStateByResults?.(res);
 
-      return { finish: false };
-    },
-    async onResultsUpdate(current, _, res) {
-      const simplified = simplifyWorkResult(res, workOrExamQuestionTitleTransform);
+        const currentRoot = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))[currentIndex];
+        const typeInput = currentRoot?.querySelector<HTMLInputElement>(type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]');
+        const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+        if (currentRoot) {
+          workResultsMethods().patchResult?.(currentIndex, { manual: detectManualAnswer(currentRoot, questionType) });
+        }
 
-      if (!preview_mode) {
         if (current.result?.finish) {
-          workResultsMethods().appendResults?.(simplified);
           appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
         }
-        return;
       }
+    });
 
-      workResultsMethods().setResults?.(simplified);
-      workResultsMethods().updateWorkStateByResults?.(res);
-      if (current.result?.finish) {
-        appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
-      }
-    }
-  });
+  const worker = createWorkOrExamWorker('.questionLi');
 
   if (preview_mode) {
+    const liveRoots = () => Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
+    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+
+    workResultsMethods().setRuntimeControls?.({
+      isRunning: () => worker.isRunning,
+      isStopped: () => worker.isStop,
+      stop: () => worker.emit('stop'),
+      continuate: () => worker.emit('continuate'),
+      canRetryQuestion: (index) => Boolean(liveRoots()[index]),
+      retryQuestion: async (index) => {
+        const root = liveRoots()[index];
+        if (!root) {
+          return undefined;
+        }
+
+        const retryWorker = createWorkOrExamWorker([root]);
+        const retriedResults = await retryWorker.doWork();
+        return {
+          ...simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0],
+          manual: false,
+          retrying: false
+        };
+      }
+    });
+
+    worker.on('done', clearRuntimeControls);
+    worker.on('close', clearRuntimeControls);
     void worker
       .doWork()
       .then(() => {
@@ -1735,6 +1820,31 @@ function workOrExam(
   }
 
   return worker;
+}
+
+function detectManualAnswer(root: HTMLElement, type: ReturnType<typeof getQuestionType>) {
+  if (type === 'single' || type === 'multiple' || type === 'judgement') {
+    return (
+      Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"], label input')).some((input) => {
+        const element = input as HTMLInputElement;
+        return element.checked || element.getAttribute('checked') === 'checked';
+      }) || root.querySelector('[aria-checked="true"]') !== null
+    );
+  }
+
+  if (type === 'completion' || type === 'fill' || type === 'reader') {
+    return (
+      Array.from(root.querySelectorAll('textarea')).some((input) => (input as HTMLTextAreaElement).value.trim()) ||
+      Array.from(root.querySelectorAll('iframe')).some((frame) => frame.contentDocument?.body?.innerText?.trim()) ||
+      Array.from(root.querySelectorAll('.filling_answer, .reading_answer')).some((el) => el.textContent?.trim())
+    );
+  }
+
+  if (type === 'line') {
+    return root.querySelector('.line_answer_ct .selectBox [class*="active"]') !== null;
+  }
+
+  return false;
 }
 
 function getQuestionType(

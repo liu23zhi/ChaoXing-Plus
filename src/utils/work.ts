@@ -1,4 +1,13 @@
 import type { SimplifyWorkResult } from '../core/index.js';
+import { runtimeStore } from '../runtime/index.js';
+import { $modal } from '../runtime/message.js';
+import {
+  DEFAULT_TIKU_BASE_URL,
+  TIKU_ADAPTER_BASEURL_KEY,
+  TIKU_ADAPTER_KEY_KEY,
+  getTikuAdapterConfigProblem,
+  resolveTikuAdapterBaseUrl
+} from '../projects/tiku-adapter-config.js';
 
 export function optimizationElementWithImage(root: HTMLElement, cloneNode = false): HTMLElement {
   const clone = cloneNode ? (root.cloneNode(true) as HTMLElement) : root;
@@ -39,8 +48,29 @@ export function simplifyWorkResult<T extends { ctx?: any; error?: string; reques
   }));
 }
 
+function getTikuAdapterWarningMessage() {
+  const storedBaseurl = runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, DEFAULT_TIKU_BASE_URL);
+  const storedKey = runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '');
+
+  const baseurl = resolveTikuAdapterBaseUrl(typeof storedBaseurl === 'string' ? storedBaseurl : '', DEFAULT_TIKU_BASE_URL);
+  const key = typeof storedKey === 'string' ? storedKey.trim() : '';
+  const problem = getTikuAdapterConfigProblem({ baseurl, key });
+
+  if (problem === 'missing-key') {
+    return '请先填写题库 key。';
+  }
+
+  if (problem === 'missing-baseurl' || problem === 'invalid-baseurl') {
+    return '请先填写正确的题库 baseurl。';
+  }
+
+  return '当前未配置题库';
+}
+
 export function answerWrapperEmptyWarning(_duration: number) {
-  console.warn('[chaoxing-plus] 当前未配置题库');
+  const message = getTikuAdapterWarningMessage();
+  console.warn(`[chaoxing-plus] ${message}`);
+  void $modal.alert(message);
 }
 
 export interface CommonWorkStarterOptions<T> {

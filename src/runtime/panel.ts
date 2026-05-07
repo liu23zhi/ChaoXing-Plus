@@ -1,5 +1,30 @@
 import type { ScriptPanel } from './types.js';
 
+function claimTopWindowPanelOwnership() {
+  let ownerFrameHref = '';
+
+  try {
+    const topRoot = window.top?.document.documentElement;
+    if (!topRoot) {
+      return true;
+    }
+
+    ownerFrameHref = topRoot.dataset.chaoxingPlusPanelOwner || '';
+    if (!ownerFrameHref) {
+      ownerFrameHref = window.location.href;
+      topRoot.dataset.chaoxingPlusPanelOwner = ownerFrameHref;
+    }
+
+    if (ownerFrameHref !== window.location.href) {
+      return false;
+    }
+  } catch {
+    return window.self === window.top;
+  }
+
+  return true;
+}
+
 export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel {
   let root = document.getElementById(id);
   if (!root) {
@@ -17,6 +42,10 @@ export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel
     root.style.boxShadow = '0 8px 24px rgba(0,0,0,0.12)';
     root.style.borderRadius = '12px';
     root.style.padding = '12px';
+    if (!claimTopWindowPanelOwnership()) {
+      root.style.display = 'none';
+      root.dataset.chaoxingPlusLockedOut = 'true';
+    }
     (document.body || document.documentElement).appendChild(root);
   }
 

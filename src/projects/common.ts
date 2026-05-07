@@ -3,8 +3,25 @@ import { Project, runtimeStore } from '../runtime/index.js';
 import { $modal } from '../runtime/message.js';
 import type { ScriptPanel, ConfigDefinition } from '../runtime/types.js';
 import { playbackRate, volume } from '../utils/configs.js';
-import { createDefaultWorkResultsPanelUiState, toggleWorkResultsPanelCollapsed, formatEnabledStudyTaskCapabilitySummary } from './study-panel-state.js';
+import {
+  createDefaultWorkResultsPanelUiState,
+  toggleWorkResultsPanelCollapsed,
+  formatEnabledStudyTaskCapabilitySummary
+} from './study-panel-state.js';
 import { shouldShowFloatingPanel } from './panel-visibility.js';
+import {
+  formatWorkResultStatus,
+  resolveWorkResultTone
+} from './work-results-status.js';
+import {
+  DEFAULT_TIKU_BASE_URL,
+  TIKU_ADAPTER_BASEURL_KEY,
+  TIKU_ADAPTER_KEY_KEY,
+  createTikuAdapterAnswererWrapper,
+  getTikuAdapterConfigProblem,
+  isValidTikuAdapterBaseUrl,
+  resolveTikuAdapterBaseUrl
+} from './tiku-adapter-config.js';
 
 export interface CommonWorkOptions {
   period: number;
@@ -16,6 +33,15 @@ export interface CommonWorkOptions {
   answerSeparators: string;
   answerMatchMode: 'exact' | 'includes' | 'similar';
 }
+
+type WorkResultsRuntimeControls = {
+  isRunning: () => boolean;
+  isStopped: () => boolean;
+  stop: () => void;
+  continuate: () => void;
+  retryQuestion: (index: number) => Promise<SimplifyWorkResult | undefined>;
+  canRetryQuestion?: (index: number) => boolean;
+};
 
 type WorkResultsView = 'numbers' | 'questions';
 type QuestionPositionSyncHandlerType = 'cx';
@@ -89,6 +115,7 @@ const state = {
     currentResultIndex: 0,
     type: runtimeStore.get(WORK_RESULTS_VIEW_KEY, 'numbers' as WorkResultsView),
     questionPositionSyncHandlerType: undefined as QuestionPositionSyncHandlerType | undefined,
+    runtimeControls: undefined as WorkResultsRuntimeControls | undefined,
     ui: createDefaultWorkResultsPanelUiState()
   },
   apps: {
@@ -108,16 +135,65 @@ const questionPositionSyncHandlers: Record<QuestionPositionSyncHandlerType, (ind
   }
 };
 
+function getStoredTikuAdapterConfig() {
+  const baseurl = runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, DEFAULT_TIKU_BASE_URL);
+  const key = runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '');
+
+  return {
+    baseurl: typeof baseurl === 'string' ? baseurl : DEFAULT_TIKU_BASE_URL,
+    key: typeof key === 'string' ? key : ''
+  };
+}
+
 function getWorkOptions(): CommonWorkOptions {
-  return runtimeStore.get(WORK_OPTIONS_KEY, defaultWorkOptions);
+  const stored = runtimeStore.get(WORK_OPTIONS_KEY, defaultWorkOptions);
+  const tikuConfig = getStoredTikuAdapterConfig();
+  const resolvedBaseurl = resolveTikuAdapterBaseUrl(tikuConfig.baseurl, DEFAULT_TIKU_BASE_URL);
+  const dynamicProblem = getTikuAdapterConfigProblem({
+    baseurl: resolvedBaseurl,
+    key: tikuConfig.key
+  });
+
+  const dynamicWrapper = dynamicProblem
+    ? undefined
+    : createTikuAdapterAnswererWrapper({
+        baseurl: resolvedBaseurl,
+        key: tikuConfig.key
+      });
+
+  return {
+    ...stored,
+    answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
+  };
+}
+
+function mergeIncomingWorkResults(results: SimplifyWorkResult[]) {
+  return results.map((item, index) => ({
+    ...item,
+    manual: item.manual ?? state.workResults.results[index]?.manual ?? false,
+    retrying: item.retrying ?? false
+  }));
+}
+
+function patchWorkResult(index: number, patch: Partial<SimplifyWorkResult>) {
+  if (!state.workResults.results[index]) {
+    return;
+  }
+
+  const next = state.workResults.results.slice();
+  next[index] = {
+    ...next[index],
+    ...patch
+  };
+  setWorkResults(next);
 }
 
 function setWorkResults(results: SimplifyWorkResult[]) {
-  state.workResults.results = results;
-  if (state.workResults.currentResultIndex >= results.length) {
-    state.workResults.currentResultIndex = Math.max(results.length - 1, 0);
+  state.workResults.results = mergeIncomingWorkResults(results);
+  if (state.workResults.currentResultIndex >= state.workResults.results.length) {
+    state.workResults.currentResultIndex = Math.max(state.workResults.results.length - 1, 0);
   }
-  runtimeStore.set(WORK_RESULTS_KEY, results);
+  runtimeStore.set(WORK_RESULTS_KEY, state.workResults.results);
   renderWorkResultsPanel();
 }
 
@@ -545,25 +621,9 @@ function createMetricChip(label: string, value: string) {
   return chip;
 }
 
-function getResultTone(result: SimplifyWorkResult): 'success' | 'warning' | 'danger' | 'idle' | 'info' {
-  if (result.error) {
-    return 'danger';
-  }
-  if (result.finish || result.resolved) {
-    return 'success';
-  }
-  if (result.requested && result.searchInfos.length === 0) {
-    return 'warning';
-  }
-  if (result.requested) {
-    return 'info';
-  }
-  return 'idle';
-}
-
 function createStatusBadge(result: SimplifyWorkResult) {
-  const tone = getResultTone(result);
-  const badge = createElement('div', { text: formatStatus(result) });
+  const tone = resolveWorkResultTone(result, false);
+  const badge = createElement('div', { text: formatWorkResultStatus(result) });
   badge.style.display = 'inline-flex';
   badge.style.alignItems = 'center';
   badge.style.width = 'fit-content';
@@ -572,15 +632,15 @@ function createStatusBadge(result: SimplifyWorkResult) {
   badge.style.fontSize = '12px';
   badge.style.fontWeight = '700';
 
-  if (tone === 'success') {
-    badge.style.background = 'rgba(34, 197, 94, 0.12)';
-    badge.style.color = '#15803d';
+  if (tone === 'manual') {
+    badge.style.background = 'rgba(250, 204, 21, 0.14)';
+    badge.style.color = '#a16207';
     return badge;
   }
 
-  if (tone === 'warning') {
-    badge.style.background = 'rgba(245, 158, 11, 0.14)';
-    badge.style.color = '#b45309';
+  if (tone === 'success') {
+    badge.style.background = 'rgba(34, 197, 94, 0.12)';
+    badge.style.color = '#15803d';
     return badge;
   }
 
@@ -590,34 +650,9 @@ function createStatusBadge(result: SimplifyWorkResult) {
     return badge;
   }
 
-  if (tone === 'info') {
-    badge.style.background = 'rgba(59, 130, 246, 0.12)';
-    badge.style.color = '#1d4ed8';
-    return badge;
-  }
-
   badge.style.background = 'rgba(148, 163, 184, 0.12)';
   badge.style.color = '#64748b';
   return badge;
-}
-
-function formatStatus(result: SimplifyWorkResult) {
-  if (!result.requested && !result.resolved) {
-    return '等待搜索中';
-  }
-  if (result.error) {
-    return `失败：${result.error}`;
-  }
-  if (result.searchInfos.length === 0) {
-    return '未搜索到答案';
-  }
-  if (result.finish) {
-    return '已完成';
-  }
-  if (!result.resolved) {
-    return '等待答题中';
-  }
-  return '已搜索但未完成';
 }
 
 function getWorkResultStats() {
@@ -674,6 +709,48 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   metaRow.append(typeMeta, createStatusBadge(result));
   titleWrap.append(title, metaRow);
   container.append(titleWrap);
+
+  const runtimeControls = state.workResults.runtimeControls;
+  const selectedIndex = state.workResults.currentResultIndex;
+  const canRetry = Boolean(
+    runtimeControls?.retryQuestion && (runtimeControls.canRetryQuestion?.(selectedIndex) ?? true)
+  );
+
+  const detailActions = createElement('div');
+  detailActions.style.display = 'flex';
+  detailActions.style.gap = '8px';
+  detailActions.style.flexWrap = 'wrap';
+
+  const retryButton = createElement('button', { text: result.retrying ? '正在重答...' : '重答本题' });
+  retryButton.disabled = !canRetry || Boolean(result.retrying);
+  retryButton.onclick = async () => {
+    if (!runtimeControls || !canRetry || result.retrying) {
+      return;
+    }
+
+    patchWorkResult(selectedIndex, { retrying: true, error: undefined, manual: false });
+    try {
+      const retried = await runtimeControls.retryQuestion(selectedIndex);
+      if (retried) {
+        patchWorkResult(selectedIndex, {
+          ...retried,
+          retrying: false,
+          manual: false
+        });
+      } else {
+        patchWorkResult(selectedIndex, { retrying: false });
+      }
+    } catch (err) {
+      patchWorkResult(selectedIndex, {
+        retrying: false,
+        error: (err as Error).message || String(err)
+      });
+    }
+  };
+
+  applyActionButtonStyle(retryButton, 'primary');
+  detailActions.append(retryButton);
+  container.append(detailActions);
 
   if (result.error) {
     const error = createElement('div', { text: result.error });
@@ -1239,6 +1316,110 @@ function createStudySettingsPanel() {
   return container;
 }
 
+function createTikuAdapterConfigSection() {
+  const stored = getStoredTikuAdapterConfig();
+
+  const container = createElement('div');
+  applySectionCardStyle(container, {
+    padding: '14px',
+    background: 'rgba(248, 250, 252, 0.86)',
+    border: '1px solid rgba(148, 163, 184, 0.18)'
+  });
+  container.style.display = 'grid';
+  container.style.gap = '12px';
+
+  const header = createElement('div');
+  header.style.display = 'grid';
+  header.style.gap = '6px';
+
+  const title = createElement('div', { text: '题库配置' });
+  title.style.fontSize = '15px';
+  title.style.fontWeight = '800';
+  title.style.color = '#0f172a';
+
+  const description = createElement('div', {
+    text: '默认对接 POST {baseurl}/adapter-service/search，并使用 Authorization: Bearer <key>。本地保存优先于编译期默认地址。'
+  });
+  description.style.fontSize = '12px';
+  description.style.color = '#64748b';
+  description.style.lineHeight = '1.7';
+
+  header.append(title, description);
+
+  const baseurlWrap = createElement('div');
+  baseurlWrap.style.display = 'grid';
+  baseurlWrap.style.gap = '8px';
+
+  const baseurlLabel = createElement('label', { text: 'baseurl' });
+  baseurlLabel.style.fontSize = '12px';
+  baseurlLabel.style.fontWeight = '700';
+  baseurlLabel.style.color = '#334155';
+
+  const baseurlRow = createElement('div');
+  baseurlRow.style.display = 'flex';
+  baseurlRow.style.gap = '8px';
+  baseurlRow.style.flexWrap = 'wrap';
+
+  const baseurlInput = document.createElement('input');
+  baseurlInput.type = 'text';
+  baseurlInput.value = stored.baseurl || DEFAULT_TIKU_BASE_URL;
+  baseurlInput.placeholder = DEFAULT_TIKU_BASE_URL || 'https://your-tiku.example.com';
+  baseurlInput.style.flex = '1';
+  baseurlInput.style.minWidth = '220px';
+  baseurlInput.style.padding = '10px 12px';
+  baseurlInput.style.borderRadius = '12px';
+  baseurlInput.style.border = '1px solid rgba(226, 232, 240, 0.95)';
+  baseurlInput.style.background = 'rgba(255,255,255,0.98)';
+
+  const saveButton = createElement('button', { text: '保存' });
+  applyActionButtonStyle(saveButton, 'primary');
+  saveButton.onclick = async () => {
+    runtimeStore.set(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
+    runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
+    await $modal.alert('题库配置已保存。');
+  };
+
+  const jumpButton = createElement('button', { text: '跳转' });
+  applyActionButtonStyle(jumpButton, 'default');
+  jumpButton.onclick = async () => {
+    const normalized = resolveTikuAdapterBaseUrl(baseurlInput.value, DEFAULT_TIKU_BASE_URL);
+    if (!isValidTikuAdapterBaseUrl(normalized)) {
+      await $modal.alert('请先填写正确的题库 baseurl。');
+      return;
+    }
+
+    window.open(normalized, '_blank', 'noopener,noreferrer');
+  };
+
+  baseurlRow.append(baseurlInput, saveButton, jumpButton);
+  baseurlWrap.append(baseurlLabel, baseurlRow);
+
+  const keyWrap = createElement('div');
+  keyWrap.style.display = 'grid';
+  keyWrap.style.gap = '8px';
+
+  const keyLabel = createElement('label', { text: 'key' });
+  keyLabel.style.fontSize = '12px';
+  keyLabel.style.fontWeight = '700';
+  keyLabel.style.color = '#334155';
+
+  const keyInput = document.createElement('input');
+  keyInput.type = 'password';
+  keyInput.value = stored.key;
+  keyInput.placeholder = '请输入访问令牌';
+  keyInput.style.padding = '10px 12px';
+  keyInput.style.borderRadius = '12px';
+  keyInput.style.border = '1px solid rgba(226, 232, 240, 0.95)';
+  keyInput.style.background = 'rgba(255,255,255,0.98)';
+  keyInput.oninput = () => {
+    runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value);
+  };
+
+  keyWrap.append(keyLabel, keyInput);
+  container.append(header, baseurlWrap, keyWrap);
+  return container;
+}
+
 function createWorkResultsPanel() {
   const container = createElement('div');
   container.style.display = 'grid';
@@ -1314,6 +1495,22 @@ function createWorkResultsPanel() {
   heroActions.style.display = 'flex';
   heroActions.style.gap = '8px';
   heroActions.style.flexWrap = 'wrap';
+
+  const runtimeControls = state.workResults.runtimeControls;
+  if (runtimeControls?.isRunning()) {
+    const isPaused = runtimeControls.isStopped();
+    const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });
+    pauseButton.onclick = () => {
+      if (isPaused) {
+        runtimeControls.continuate();
+      } else {
+        runtimeControls.stop();
+      }
+      renderWorkResultsPanel();
+    };
+    applyActionButtonStyle(pauseButton, 'primary');
+    heroActions.append(pauseButton);
+  }
 
   const typeButton = createElement('button', {
     text: state.workResults.type === 'numbers' ? '切换为题目列表' : '切换为序号列表'
@@ -1397,7 +1594,8 @@ function createWorkResultsPanel() {
       row.style.gap = '8px';
 
       state.workResults.results.forEach((result, index) => {
-        const button = createElement('button', { text: String(index + 1), title: formatStatus(result) });
+        const button = createElement('button', { text: String(index + 1), title: formatWorkResultStatus(result) });
+        const tone = resolveWorkResultTone(result, index === state.workResults.currentResultIndex);
         button.style.minWidth = '38px';
         button.style.height = '38px';
         button.style.borderRadius = '12px';
@@ -1405,15 +1603,26 @@ function createWorkResultsPanel() {
         button.style.cursor = 'pointer';
         button.style.fontWeight = '700';
         button.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.05)';
-        button.style.background = index === state.workResults.currentResultIndex ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)' : 'rgba(255,255,255,0.96)';
-        button.style.color = index === state.workResults.currentResultIndex ? '#fff' : '#334155';
 
-        if (result.finish) {
+        if (tone === 'selected') {
+          button.style.background = 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)';
+          button.style.borderColor = '#2563eb';
+          button.style.color = '#fff';
+        } else if (tone === 'manual') {
+          button.style.background = 'rgba(254, 249, 195, 0.96)';
+          button.style.borderColor = '#facc15';
+          button.style.color = '#854d0e';
+        } else if (tone === 'success') {
+          button.style.background = 'rgba(240, 253, 244, 0.96)';
           button.style.borderColor = '#4ade80';
-        } else if (result.requested && result.searchInfos.length === 0) {
-          button.style.borderColor = '#fbbf24';
-        } else if (result.error) {
+          button.style.color = '#15803d';
+        } else if (tone === 'danger') {
+          button.style.background = 'rgba(254, 242, 242, 0.96)';
           button.style.borderColor = '#f87171';
+          button.style.color = '#b91c1c';
+        } else {
+          button.style.background = 'rgba(255,255,255,0.96)';
+          button.style.color = '#334155';
         }
 
         button.onclick = () => selectResult(index);
@@ -1424,13 +1633,30 @@ function createWorkResultsPanel() {
     } else {
       state.workResults.results.forEach((result, index) => {
         const item = createElement('button');
+        const tone = resolveWorkResultTone(result, index === state.workResults.currentResultIndex);
         item.style.textAlign = 'left';
         item.style.padding = '12px';
         item.style.borderRadius = '14px';
-        item.style.border = `1px solid ${index === state.workResults.currentResultIndex ? 'rgba(37, 99, 235, 0.24)' : 'rgba(226, 232, 240, 0.95)'}`;
-        item.style.background = index === state.workResults.currentResultIndex ? 'rgba(239, 246, 255, 0.98)' : 'rgba(255,255,255,0.96)';
         item.style.cursor = 'pointer';
         item.style.boxShadow = '0 8px 22px rgba(15, 23, 42, 0.05)';
+        item.style.borderLeft = index === state.workResults.currentResultIndex ? '4px solid #2563eb' : '4px solid transparent';
+
+        if (tone === 'selected') {
+          item.style.border = '1px solid rgba(37, 99, 235, 0.24)';
+          item.style.background = 'rgba(239, 246, 255, 0.98)';
+        } else if (tone === 'manual') {
+          item.style.border = '1px solid rgba(250, 204, 21, 0.45)';
+          item.style.background = 'rgba(254, 252, 232, 0.96)';
+        } else if (tone === 'success') {
+          item.style.border = '1px solid rgba(74, 222, 128, 0.45)';
+          item.style.background = 'rgba(240, 253, 244, 0.96)';
+        } else if (tone === 'danger') {
+          item.style.border = '1px solid rgba(248, 113, 113, 0.4)';
+          item.style.background = 'rgba(254, 242, 242, 0.96)';
+        } else {
+          item.style.border = '1px solid rgba(226, 232, 240, 0.95)';
+          item.style.background = 'rgba(255,255,255,0.96)';
+        }
 
         const title = createElement('div', { text: `${index + 1}. ${result.question || '未识别题目'}` });
         title.style.fontWeight = '700';
@@ -1438,7 +1664,7 @@ function createWorkResultsPanel() {
         title.style.color = '#0f172a';
         title.style.lineHeight = '1.6';
 
-        const status = createElement('div', { text: formatStatus(result) });
+        const status = createElement('div', { text: formatWorkResultStatus(result) });
         status.style.fontSize = '12px';
         status.style.color = '#64748b';
         status.style.marginTop = '6px';
@@ -1453,6 +1679,7 @@ function createWorkResultsPanel() {
   }
 
   container.append(resultsSection);
+  container.append(createTikuAdapterConfigSection());
 
   const cacheSection = createElement('div');
   applySectionCardStyle(cacheSection, {
@@ -1747,6 +1974,22 @@ export const CommonProject = Project.create({
           },
           appendResults(results: SimplifyWorkResult[]) {
             setWorkResults(state.workResults.results.concat(results));
+          },
+          setRuntimeControls(controls: WorkResultsRuntimeControls) {
+            state.workResults.runtimeControls = controls;
+            renderWorkResultsPanel();
+          },
+          clearRuntimeControls() {
+            state.workResults.runtimeControls = undefined;
+            setWorkResults(
+              state.workResults.results.map((item) => ({
+                ...item,
+                retrying: false
+              }))
+            );
+          },
+          patchResult(index: number, patch: Partial<SimplifyWorkResult>) {
+            patchWorkResult(index, patch);
           },
           updateWorkStateByResults(results: { requested: boolean; resolved: boolean }[]) {
             const merged = state.workResults.results.map((item, index) => ({

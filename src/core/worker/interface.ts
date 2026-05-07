@@ -74,6 +74,10 @@ export interface SimplifyWorkResult {
 	requested: boolean;
 	/** 正在等待 答题 线程处理 */
 	resolved: boolean;
+	/** 是否存在人工介入 */
+	manual?: boolean;
+	/** 是否正在单题重答 */
+	retrying?: boolean;
 	/** 查题信息 */
 	searchInfos: {
 		/** 题目名 */

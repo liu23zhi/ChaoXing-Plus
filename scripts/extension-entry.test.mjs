@@ -17,3 +17,12 @@ test('extension entry does not write URL-derived injection markers into dataset 
   assert.equal(source.includes('root.dataset[injectedKey]'), false);
   assert.equal(source.includes('root.dataset[styleInjectedKey]'), false);
 });
+
+test('extension entry bootstraps and persists shared tiku config through chrome storage', async () => {
+  const source = await readFile(extensionEntryPath, 'utf8');
+
+  assert.equal(source.includes('common.settings.tiku-adapter.baseurl'), true);
+  assert.equal(source.includes('common.settings.tiku-adapter.key'), true);
+  assert.equal(source.includes('chrome.storage.local.get'), true);
+  assert.equal(source.includes('chaoxing-plus:shared-store-sync'), true);
+});

@@ -9,6 +9,7 @@ const { build } = _require('vite');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const watchMode = process.argv.includes('--watch');
+const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? '';
 
 function copyStaticFiles() {
   mkdirSync('dist', { recursive: true });
@@ -21,6 +22,7 @@ function copyStaticFiles() {
     icons: {
       '512': 'icon_512X512.png'
     },
+    permissions: ['storage'],
     action: {
       default_popup: 'popup.html'
     },
@@ -95,6 +97,9 @@ function copyStaticFiles() {
 async function main() {
   await build({
     configFile: false,
+    define: {
+      __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl)
+    },
     build: {
       watch: watchMode ? {} : null,
       lib: {
