@@ -25,6 +25,7 @@ import {
 import { $console } from './background.js';
 import { CommonProject, type CommonWorkOptions } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
+import { resolveManualAnswerState } from './cx-manual-state.js';
 
 let topWindow: Window = window.top ?? window;
 
@@ -188,6 +189,7 @@ function workResultsMethods() {
     appendResults?: (results: unknown) => void;
     updateWorkStateByResults?: (results: unknown) => void;
     patchResult?: (index: number, patch: Partial<SimplifyWorkResult>) => void;
+    getResults?: () => SimplifyWorkResult[];
     setRuntimeControls?: (controls: {
       isRunning: () => boolean;
       isStopped: () => boolean;
@@ -1470,7 +1472,13 @@ const JobRunner = {
           const typeInput = currentRoot?.querySelector<HTMLInputElement>('input[id^="answertype"]');
           const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
           if (currentRoot) {
-            workResultsMethods().patchResult?.(currentIndex, { manual: detectManualAnswer(currentRoot, type) });
+            const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
+            workResultsMethods().patchResult?.(currentIndex, {
+              manual: detectManualAnswer(currentRoot, type, {
+                previousManual,
+                result: curr
+              })
+            });
           }
 
           if (curr.result?.finish) {
@@ -1752,7 +1760,13 @@ function workOrExam(
         const typeInput = currentRoot?.querySelector<HTMLInputElement>(type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]');
         const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
         if (currentRoot) {
-          workResultsMethods().patchResult?.(currentIndex, { manual: detectManualAnswer(currentRoot, questionType) });
+          const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
+          workResultsMethods().patchResult?.(currentIndex, {
+            manual: detectManualAnswer(currentRoot, questionType, {
+              previousManual,
+              result: current
+            })
+          });
         }
 
         if (current.result?.finish) {
@@ -1822,29 +1836,22 @@ function workOrExam(
   return worker;
 }
 
-function detectManualAnswer(root: HTMLElement, type: ReturnType<typeof getQuestionType>) {
-  if (type === 'single' || type === 'multiple' || type === 'judgement') {
-    return (
-      Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"], label input')).some((input) => {
-        const element = input as HTMLInputElement;
-        return element.checked || element.getAttribute('checked') === 'checked';
-      }) || root.querySelector('[aria-checked="true"]') !== null
-    );
+function detectManualAnswer(
+  root: HTMLElement,
+  type: ReturnType<typeof getQuestionType>,
+  options?: {
+    previousManual?: boolean;
+    result?: {
+      requested?: boolean;
+      resolved?: boolean;
+      finish?: boolean;
+      result?: {
+        finish?: boolean;
+      };
+    };
   }
-
-  if (type === 'completion' || type === 'fill' || type === 'reader') {
-    return (
-      Array.from(root.querySelectorAll('textarea')).some((input) => (input as HTMLTextAreaElement).value.trim()) ||
-      Array.from(root.querySelectorAll('iframe')).some((frame) => frame.contentDocument?.body?.innerText?.trim()) ||
-      Array.from(root.querySelectorAll('.filling_answer, .reading_answer')).some((el) => el.textContent?.trim())
-    );
-  }
-
-  if (type === 'line') {
-    return root.querySelector('.line_answer_ct .selectBox [class*="active"]') !== null;
-  }
-
-  return false;
+) {
+  return resolveManualAnswerState({ root, type, ...options });
 }
 
 function getQuestionType(

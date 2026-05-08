@@ -19,7 +19,13 @@ test('cx registers runtime stop continue and retry controls with the common work
 test('cx syncs manual-answer state back into the common result entries', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 
-  assert.equal(source.includes('function detectManualAnswer(root: HTMLElement, type:'), true);
-  assert.equal(source.includes('workResultsMethods().patchResult?.(currentIndex, { manual: detectManualAnswer('), true);
+  assert.equal(source.includes("import { resolveManualAnswerState } from './cx-manual-state.js';"), true);
+  assert.equal(source.includes('function detectManualAnswer('), true);
+  assert.equal(source.includes('return resolveManualAnswerState({ root, type, ...options });'), true);
+  assert.equal(source.includes('const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;'), true);
+  assert.equal(source.includes('manual: detectManualAnswer(currentRoot, type, {'), true);
+  assert.equal(source.includes('manual: detectManualAnswer(currentRoot, questionType, {'), true);
+  assert.equal(source.includes('result: curr'), true);
+  assert.equal(source.includes('result: current'), true);
   assert.equal(source.includes('manual: false,'), true);
 });
