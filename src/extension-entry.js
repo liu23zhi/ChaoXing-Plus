@@ -74,17 +74,36 @@
   const injectedMarkerKey = 'cxPlusInjected';
   const styleInjectedMarkerKey = 'cxPlusSwalStyleInjected';
 
+  function getSwalStyleDocument() {
+    try {
+      const topDocument = window.top?.document;
+      if (topDocument?.documentElement) {
+        return topDocument;
+      }
+    } catch {
+      // ignore cross-frame access errors and fall back to the current document
+    }
+
+    return document;
+  }
+
   const injectStyle = () => {
-    if (root.dataset[styleInjectedMarkerKey] === frameMarker) {
+    const targetDocument = getSwalStyleDocument();
+    const targetRoot = targetDocument.documentElement;
+    if (!targetRoot) {
       return;
     }
-    root.dataset[styleInjectedMarkerKey] = frameMarker;
 
-    const link = document.createElement('link');
+    if (targetRoot.dataset[styleInjectedMarkerKey] === frameMarker) {
+      return;
+    }
+    targetRoot.dataset[styleInjectedMarkerKey] = frameMarker;
+
+    const link = targetDocument.createElement('link');
     link.rel = 'stylesheet';
     link.href = chrome.runtime.getURL('vendor/sweetalert2.min.css');
     link.dataset.source = 'chaoxing-plus-extension';
-    (document.head || root).appendChild(link);
+    (targetDocument.head || targetRoot).appendChild(link);
   };
 
   const inject = () => {
