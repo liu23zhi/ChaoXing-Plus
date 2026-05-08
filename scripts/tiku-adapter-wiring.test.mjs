@@ -37,6 +37,24 @@ test('common panel renders updated tiku adapter labels and bottom action buttons
   assert.equal(source.includes('题库配置已保存。'), true);
 });
 
+test('common panel defines a shared wrap style for long question text', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes('function applyQuestionTextWrapStyle(element: HTMLElement)'), true);
+  assert.equal(source.includes("element.style.whiteSpace = 'normal';"), true);
+  assert.equal(source.includes("element.style.overflowWrap = 'anywhere';"), true);
+  assert.equal(source.includes("element.style.wordBreak = 'break-word';"), true);
+});
+
+test('common panel applies the shared wrap style to work-result and tiku question text', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("const title = createElement('div', { text: result.question || '未识别题目' });"), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(title);'), true);
+  assert.equal(source.includes("const question = createElement('div', { text: entry[0] || '' });"), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(question);'), true);
+});
+
 test('common settings build answerer wrappers from stored tiku adapter config', async () => {
   const source = await readFile(commonPath, 'utf8');
 

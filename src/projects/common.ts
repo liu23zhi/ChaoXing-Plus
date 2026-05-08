@@ -552,6 +552,12 @@ function createElement<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+function applyQuestionTextWrapStyle(element: HTMLElement) {
+  element.style.whiteSpace = 'normal';
+  element.style.overflowWrap = 'anywhere';
+  element.style.wordBreak = 'break-word';
+}
+
 function applySectionCardStyle(
   element: HTMLElement,
   options: {
@@ -692,6 +698,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   title.style.fontWeight = '700';
   title.style.lineHeight = '1.6';
   title.style.color = '#0f172a';
+  applyQuestionTextWrapStyle(title);
 
   const metaRow = createElement('div');
   metaRow.style.display = 'flex';
@@ -834,7 +841,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
         question.style.fontSize = '12px';
         question.style.color = '#64748b';
         question.style.marginTop = '6px';
-        question.style.wordBreak = 'break-word';
+        applyQuestionTextWrapStyle(question);
 
         item.append(answer, question);
         list.append(item);
