@@ -99,7 +99,7 @@ test('previous manual state stays true after later automatic updates complete', 
   );
 });
 
-test('unfinished filled answers still count as manual intervention', async () => {
+test('unfinished filled answers still count as manual intervention before a search happens', async () => {
   const mod = await loadHelperModule();
 
   assert.equal(
@@ -108,11 +108,29 @@ test('unfinished filled answers still count as manual intervention', async () =>
       type: 'completion',
       previousManual: false,
       result: {
-        requested: true,
+        requested: false,
         resolved: false,
         finish: false
       }
     }),
     true
+  );
+});
+
+test('requested but unresolved unanswered results do not become manual just because the DOM already has answer widgets', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(
+    mod.resolveManualAnswerState({
+      root: createRoot({ fillText: '系统题面残留' }),
+      type: 'fill',
+      previousManual: false,
+      result: {
+        requested: true,
+        resolved: false,
+        finish: false
+      }
+    }),
+    false
   );
 });

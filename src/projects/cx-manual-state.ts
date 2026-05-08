@@ -42,8 +42,8 @@ function detectAnsweredDomState(root: HTMLElement, type: CXManualStateQuestionTy
   return false;
 }
 
-function hasAutomaticFinish(result?: CXManualStateResult) {
-  return result?.finish === true || result?.result?.finish === true;
+function hasAutomaticAttempt(result?: CXManualStateResult) {
+  return result?.requested === true;
 }
 
 export function resolveManualAnswerState(options: {
@@ -58,7 +58,7 @@ export function resolveManualAnswerState(options: {
     return true;
   }
 
-  if (hasAutomaticFinish(result)) {
+  if (hasAutomaticAttempt(result)) {
     return false;
   }
 

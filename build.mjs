@@ -9,7 +9,7 @@ const { build } = _require('vite');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const watchMode = process.argv.includes('--watch');
-const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? '';
+const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? 'https://tiku.zelly.cn/';
 
 function copyStaticFiles() {
   mkdirSync('dist', { recursive: true });

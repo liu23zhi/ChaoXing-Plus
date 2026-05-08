@@ -11,7 +11,7 @@ const typesPath = resolve(process.cwd(), 'src', 'types.d.ts');
 test('build script injects the default tiku baseurl define', async () => {
   const source = await readFile(buildScriptPath, 'utf8');
 
-  assert.equal(source.includes('process.env.DEFAULT_TIKU_BASE_URL'), true);
+  assert.equal(source.includes("process.env.DEFAULT_TIKU_BASE_URL ?? 'https://tiku.zelly.cn/'"), true);
   assert.equal(source.includes('__DEFAULT_TIKU_BASE_URL__'), true);
   assert.equal(source.includes('define:'), true);
 });
@@ -46,4 +46,12 @@ test('empty-wrapper warning explains whether baseurl or key is missing', async (
   assert.equal(source.includes('请先填写题库 key。'), true);
   assert.equal(source.includes('请先填写正确的题库 baseurl。'), true);
   assert.equal(source.includes('getTikuAdapterConfigProblem'), true);
+});
+
+test('missing-key warning offers a jump action to the configured tiku baseurl', async () => {
+  const source = await readFile(workUtilPath, 'utf8');
+
+  assert.equal(source.includes('denyButtonText: problem === \'missing-key\' ? \'跳转\' : undefined'), true);
+  assert.equal(source.includes("window.open(baseurl, '_blank', 'noopener,noreferrer');"), true);
+  assert.equal(source.includes('void $modal.alert({'), true);
 });

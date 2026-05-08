@@ -48,7 +48,7 @@ export function simplifyWorkResult<T extends { ctx?: any; error?: string; reques
   }));
 }
 
-function getTikuAdapterWarningMessage() {
+function getTikuAdapterWarningState() {
   const storedBaseurl = runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, DEFAULT_TIKU_BASE_URL);
   const storedKey = runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '');
 
@@ -57,20 +57,42 @@ function getTikuAdapterWarningMessage() {
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
 
   if (problem === 'missing-key') {
-    return '请先填写题库 key。';
+    return {
+      message: '请先填写题库 key。',
+      problem,
+      baseurl
+    };
   }
 
   if (problem === 'missing-baseurl' || problem === 'invalid-baseurl') {
-    return '请先填写正确的题库 baseurl。';
+    return {
+      message: '请先填写正确的题库 baseurl。',
+      problem,
+      baseurl
+    };
   }
 
-  return '当前未配置题库';
+  return {
+    message: '当前未配置题库',
+    problem,
+    baseurl
+  };
 }
 
 export function answerWrapperEmptyWarning(_duration: number) {
-  const message = getTikuAdapterWarningMessage();
+  const { message, problem, baseurl } = getTikuAdapterWarningState();
   console.warn(`[chaoxing-plus] ${message}`);
-  void $modal.alert(message);
+  void $modal.alert({
+    content: message,
+    denyButtonText: problem === 'missing-key' ? '跳转' : undefined,
+    onDeny: async () => {
+      if (!baseurl) {
+        return;
+      }
+
+      window.open(baseurl, '_blank', 'noopener,noreferrer');
+    }
+  });
 }
 
 export interface CommonWorkStarterOptions<T> {

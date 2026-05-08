@@ -2,12 +2,32 @@ import Swal from 'sweetalert2';
 
 const toastEnabled = false;
 
+function getTopWindowSwal() {
+  const selfWindow = window as Window & { Swal?: typeof Swal };
+  if (window.self === window.top) {
+    selfWindow.Swal = selfWindow.Swal || Swal;
+    return selfWindow.Swal;
+  }
+
+  try {
+    const topWindow = window.top as Window & { Swal?: typeof Swal };
+    if (topWindow?.Swal && typeof topWindow.Swal.fire === 'function') {
+      return topWindow.Swal as typeof Swal;
+    }
+  } catch {
+    // ignore cross-frame access errors and fall back to local Swal
+  }
+
+  return Swal;
+}
+
 function toast(icon: 'info' | 'success' | 'warning' | 'error', text: string, timer = 3000) {
   if (!toastEnabled) {
     return;
   }
 
-  void Swal.fire({
+  const runtimeSwal = getTopWindowSwal();
+  void runtimeSwal.fire({
     toast: true,
     position: 'top-end',
     timer,
@@ -41,15 +61,23 @@ export const $message = {
 };
 
 export const $modal = {
-  async alert(args: { content: string } | string): Promise<void> {
+  async alert(args: { content: string; denyButtonText?: string; onDeny?: () => Promise<void> | void } | string): Promise<void> {
+    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
-    await Swal.fire({ icon: 'info', text: content, confirmButtonText: '知道了' });
+    const denyButtonText = typeof args === 'string' ? undefined : args.denyButtonText;
+    const onDeny = typeof args === 'string' ? undefined : args.onDeny;
+    const result = await runtimeSwal.fire({ icon: 'info', text: content, confirmButtonText: '知道了', showDenyButton: Boolean(denyButtonText), denyButtonText });
+
+    if (result.isDenied) {
+      await onDeny?.();
+    }
   },
   async notice(args: { content: string; duration?: number; icon?: 'info' | 'success' | 'warning' | 'error' } | string): Promise<void> {
+    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
     const duration = typeof args === 'string' ? 3000 : args.duration ?? 3000;
     const icon = typeof args === 'string' ? 'info' : args.icon ?? 'info';
-    await Swal.fire({
+    await runtimeSwal.fire({
       icon,
       text: content,
       timer: duration > 0 ? duration : undefined,
@@ -61,8 +89,9 @@ export const $modal = {
     });
   },
   async confirm(args: { content: string } | string): Promise<boolean> {
+    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
-    const result = await Swal.fire({
+    const result = await runtimeSwal.fire({
       icon: 'question',
       text: content,
       showCancelButton: true,
