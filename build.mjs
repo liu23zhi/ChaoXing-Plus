@@ -14,42 +14,46 @@ const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? 'https://tiku.ze
 function copyStaticFiles() {
   mkdirSync('dist', { recursive: true });
 
+  const chaoxingHosts = [
+    '*://*.chaoxing.com/*',
+    '*://*.edu.cn/*',
+    '*://*.org.cn/*',
+    '*://*.xueyinonline.com/*',
+    '*://*.hnsyu.net/*',
+    '*://*.qutjxjy.cn/*',
+    '*://*.ynny.cn/*',
+    '*://*.hnvist.cn/*',
+    '*://*.fjlecb.cn/*',
+    '*://*.gdhkmooc.com/*',
+    '*://*.cugbonline.cn/*',
+    '*://*.zjelib.cn/*',
+    '*://*.cqrspx.cn/*',
+    '*://*.neauce.com/*',
+    '*://*.zhihui-yun.com/*',
+    '*://*.cqie.cn/*',
+    '*://*.ccqmxx.com/*',
+    '*://*.jxgmxy.com/*',
+    '*://*.jnzyjsxy.cn/*',
+    '*://*.sslibrary.com/*'
+  ];
+
   const manifest = {
     manifest_version: 3,
-    name: 'ChaoXing Plus Tools',
+    default_locale: 'zh_CN',
+    name: '超星学习助手',
     version: '2.0.0',
     description: '给超星网站使用的自动学习与自动搜题扩展。',
     icons: {
       '512': 'icon_512X512.png'
     },
     permissions: ['storage'],
+    host_permissions: chaoxingHosts,
     action: {
       default_popup: 'popup.html'
     },
     content_scripts: [
       {
-        matches: [
-          '*://*.chaoxing.com/*',
-          '*://*.edu.cn/*',
-          '*://*.org.cn/*',
-          '*://*.xueyinonline.com/*',
-          '*://*.hnsyu.net/*',
-          '*://*.qutjxjy.cn/*',
-          '*://*.ynny.cn/*',
-          '*://*.hnvist.cn/*',
-          '*://*.fjlecb.cn/*',
-          '*://*.gdhkmooc.com/*',
-          '*://*.cugbonline.cn/*',
-          '*://*.zjelib.cn/*',
-          '*://*.cqrspx.cn/*',
-          '*://*.neauce.com/*',
-          '*://*.zhihui-yun.com/*',
-          '*://*.cqie.cn/*',
-          '*://*.ccqmxx.com/*',
-          '*://*.jxgmxy.com/*',
-          '*://*.jnzyjsxy.cn/*',
-          '*://*.sslibrary.com/*'
-        ],
+        matches: chaoxingHosts,
         js: ['extension-entry.js'],
         run_at: 'document_start',
         all_frames: true,
@@ -66,6 +70,8 @@ function copyStaticFiles() {
   };
 
   writeFileSync('dist/manifest.json', JSON.stringify(manifest, null, 2));
+  mkdirSync('dist/_locales/zh_CN', { recursive: true });
+  writeFileSync('dist/_locales/zh_CN/messages.json', JSON.stringify({}, null, 2));
 
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');

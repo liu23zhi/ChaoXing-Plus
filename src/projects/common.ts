@@ -1217,7 +1217,7 @@ function createStudySettingsPanel() {
   title.style.color = '#0f172a';
 
   const description = createElement('div', {
-    text: '这里的设置会直接作用于当前学习流程。开关项已改为状态方块，选择项改为平铺按钮，便于快速切换。'
+    text: '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
   description.style.color = '#64748b';
@@ -1338,7 +1338,7 @@ function createTikuAdapterConfigSection() {
   title.style.color = '#0f172a';
 
   const description = createElement('div', {
-    text: '默认对接 POST {baseurl}/adapter-service/search，并使用 Authorization: Bearer <key>。本地保存优先于编译期默认地址。'
+    text: '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
   description.style.color = '#64748b';
@@ -1350,7 +1350,7 @@ function createTikuAdapterConfigSection() {
   baseurlWrap.style.display = 'grid';
   baseurlWrap.style.gap = '8px';
 
-  const baseurlLabel = createElement('label', { text: 'baseurl' });
+  const baseurlLabel = createElement('label', { text: '题库地址' });
   baseurlLabel.style.fontSize = '12px';
   baseurlLabel.style.fontWeight = '700';
   baseurlLabel.style.color = '#334155';
@@ -1391,14 +1391,14 @@ function createTikuAdapterConfigSection() {
     window.open(normalized, '_blank', 'noopener,noreferrer');
   };
 
-  baseurlRow.append(baseurlInput, saveButton, jumpButton);
+  baseurlRow.append(baseurlInput);
   baseurlWrap.append(baseurlLabel, baseurlRow);
 
   const keyWrap = createElement('div');
   keyWrap.style.display = 'grid';
   keyWrap.style.gap = '8px';
 
-  const keyLabel = createElement('label', { text: 'key' });
+  const keyLabel = createElement('label', { text: '令牌' });
   keyLabel.style.fontSize = '12px';
   keyLabel.style.fontWeight = '700';
   keyLabel.style.color = '#334155';
@@ -1415,8 +1415,14 @@ function createTikuAdapterConfigSection() {
     runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value);
   };
 
+  const actionsRow = createElement('div');
+  actionsRow.style.display = 'flex';
+  actionsRow.style.gap = '8px';
+  actionsRow.style.flexWrap = 'wrap';
+  actionsRow.append(saveButton, jumpButton);
+
   keyWrap.append(keyLabel, keyInput);
-  container.append(header, baseurlWrap, keyWrap);
+  container.append(header, baseurlWrap, keyWrap, actionsRow);
   return container;
 }
 

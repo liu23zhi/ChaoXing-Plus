@@ -22,13 +22,19 @@ test('type declarations expose the injected tiku baseurl global', async () => {
   assert.equal(source.includes('declare const __DEFAULT_TIKU_BASE_URL__: string;'), true);
 });
 
-test('common panel renders tiku adapter baseurl, key, save, and jump controls', async () => {
+test('common panel renders updated tiku adapter labels and bottom action buttons', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes("const saveButton = createElement('button', { text: '保存' });"), true);
-  assert.equal(source.includes("saveButton.onclick = async () => {"), true);
+  assert.equal(source.includes("const baseurlLabel = createElement('label', { text: '题库地址' });"), true);
+  assert.equal(source.includes("const keyLabel = createElement('label', { text: '令牌' });"), true);
+  assert.equal(source.includes('这里的设置会直接作用于当前学习流程。'), true);
+  assert.equal(source.includes('默认对接 POST {baseurl}/adapter-service/search'), false);
+  assert.equal(source.includes('开关项已改为状态方块，选择项改为平铺按钮，便于快速切换。'), false);
+  assert.equal(source.includes('const actionsRow = createElement(\'div\');'), true);
+  assert.equal(source.includes('actionsRow.append(saveButton, jumpButton);'), true);
+  assert.equal(source.includes('container.append(header, baseurlWrap, keyWrap, actionsRow);'), true);
+  assert.equal(source.includes('baseurlRow.append(baseurlInput);'), true);
   assert.equal(source.includes('题库配置已保存。'), true);
-  assert.equal(source.includes('跳转'), true);
 });
 
 test('common settings build answerer wrappers from stored tiku adapter config', async () => {
