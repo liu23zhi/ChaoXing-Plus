@@ -55,6 +55,29 @@ test('common panel applies the shared wrap style to work-result and tiku questio
   assert.equal(source.includes('applyQuestionTextWrapStyle(question);'), true);
 });
 
+test('common panel applies the shared wrap style to long tiku error text', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes('text: info.error ? `错误：${info.error}` : `结果数：${info.results.length}`'), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(sub);'), true);
+});
+
+test('common panel applies the shared wrap style to top-level work-result errors and app cache links', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("const error = createElement('div', { text: result.error });"), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(error);'), true);
+  assert.equal(source.includes('link.textContent = cache.homepage;'), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(link);'), true);
+});
+
+test('common panel applies the shared wrap style to cache source metadata in both panels', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });"), true);
+  assert.equal(source.includes('applyQuestionTextWrapStyle(meta);'), true);
+});
+
 test('common settings build answerer wrappers from stored tiku adapter config', async () => {
   const source = await readFile(commonPath, 'utf8');
 

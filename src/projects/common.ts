@@ -766,6 +766,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     error.style.borderRadius = '12px';
     error.style.background = 'rgba(254, 242, 242, 0.95)';
     error.style.border = '1px solid rgba(248, 113, 113, 0.2)';
+    applyQuestionTextWrapStyle(error);
     container.append(error);
   }
 
@@ -803,6 +804,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     });
     sub.style.fontSize = '12px';
     sub.style.color = info.error ? '#c0392b' : '#64748b';
+    applyQuestionTextWrapStyle(sub);
 
     headerRow.append(header, sub);
     block.append(headerRow);
@@ -1777,6 +1779,7 @@ function createWorkResultsPanel() {
       meta.style.fontSize = '12px';
       meta.style.color = '#64748b';
       meta.style.marginTop = '6px';
+      applyQuestionTextWrapStyle(meta);
 
       item.append(title, answer, meta);
       cacheList.append(item);
@@ -1862,6 +1865,7 @@ function createAppsPanel() {
     meta.style.fontSize = '12px';
     meta.style.color = '#666';
     meta.style.marginTop = '6px';
+    applyQuestionTextWrapStyle(meta);
 
     item.append(title, answer, meta);
 
@@ -1874,6 +1878,7 @@ function createAppsPanel() {
       link.style.display = 'block';
       link.style.fontSize = '12px';
       link.style.marginTop = '4px';
+      applyQuestionTextWrapStyle(link);
       item.append(link);
     }
 
