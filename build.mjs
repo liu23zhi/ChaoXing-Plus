@@ -16,8 +16,6 @@ function copyStaticFiles() {
 
   const chaoxingHosts = [
     '*://*.chaoxing.com/*',
-    '*://*.edu.cn/*',
-    '*://*.org.cn/*',
     '*://*.xueyinonline.com/*',
     '*://*.hnsyu.net/*',
     '*://*.qutjxjy.cn/*',

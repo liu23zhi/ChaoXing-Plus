@@ -7,8 +7,6 @@ const manifestPath = resolve(process.cwd(), 'dist', 'manifest.json');
 const localePath = resolve(process.cwd(), 'dist', '_locales', 'zh_CN', 'messages.json');
 const expectedChaoxingHosts = [
   '*://*.chaoxing.com/*',
-  '*://*.edu.cn/*',
-  '*://*.org.cn/*',
   '*://*.xueyinonline.com/*',
   '*://*.hnsyu.net/*',
   '*://*.qutjxjy.cn/*',
@@ -42,6 +40,16 @@ test('manifest uses zh_CN locale, chaoxing helper name, and chaoxing host permis
   assert.equal(manifest.default_locale, 'zh_CN');
   assert.equal(manifest.name, '超星学习助手');
   assert.deepEqual(manifest.host_permissions, expectedChaoxingHosts);
+});
+
+test('manifest does not inject into broad edu.cn or org.cn domains', async () => {
+  const source = await readFile(manifestPath, 'utf8');
+  const manifest = JSON.parse(source);
+
+  assert.equal(manifest.host_permissions.includes('*://*.edu.cn/*'), false);
+  assert.equal(manifest.host_permissions.includes('*://*.org.cn/*'), false);
+  assert.equal(manifest.content_scripts[0].matches.includes('*://*.edu.cn/*'), false);
+  assert.equal(manifest.content_scripts[0].matches.includes('*://*.org.cn/*'), false);
 });
 
 test('dist includes the zh_CN locale messages required by the manifest locale setting', async () => {
