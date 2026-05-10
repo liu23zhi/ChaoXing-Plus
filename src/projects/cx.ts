@@ -9,7 +9,7 @@ import {
   type SearchInformation,
   type SimplifyWorkResult
 } from '../core/index.js';
-import { Project, $gm } from '../runtime/index.js';
+import { Project, $gm, runtimeStore } from '../runtime/index.js';
 import { $message } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
@@ -22,6 +22,11 @@ import {
   simplifyWorkResult,
   splitAnswer
 } from '../utils/work.js';
+import {
+  requestTikuAdapterAIFallback,
+  TIKU_ADAPTER_BASEURL_KEY,
+  TIKU_ADAPTER_KEY_KEY
+} from './tiku-adapter-config.js';
 import { $console } from './background.js';
 import { CommonProject, type CommonWorkOptions } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
@@ -122,12 +127,38 @@ export type StudyOptions = {
   enablePPT: boolean;
   enableAnswer: boolean;
   enableChapterTest: boolean;
+  enableVisibleQuestionFallback: boolean;
   enableHyperlink: boolean;
   notifyWhenHasFaceRecognition: boolean;
   workOptions: CommonWorkOptions;
 };
 
 type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
+
+type SearchJobResult = {
+  job?: Job;
+  visibleContentState: VisibleContentState;
+};
+
+function mergeVisibleContentState(current: VisibleContentState, next: VisibleContentState): VisibleContentState {
+  if (next === 'standard-job' || next === 'finished-job') {
+    return next;
+  }
+  if (current === 'standard-job' || current === 'finished-job') {
+    return current;
+  }
+  if (current === 'visible-nonjob' || next === 'visible-nonjob') {
+    return 'visible-nonjob';
+  }
+  if (current === 'visible-unmapped' || next === 'visible-unmapped') {
+    return 'visible-unmapped';
+  }
+  return 'empty';
+}
+
+function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState): boolean {
+  return visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped';
+}
 
 export type Attachment = {
   isPassed: boolean | undefined;
@@ -159,7 +190,9 @@ const defaultWorkOptions: CommonWorkOptions = {
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
   answerSeparators: '#,|,;,；',
-  answerMatchMode: 'includes'
+  answerMatchMode: 'includes',
+  enableAIFallbackAnswer: false,
+  aiFallbackFailureAction: 'pause'
 };
 
 function settingsMethods() {
@@ -205,6 +238,13 @@ function workResultsMethods() {
   };
 }
 
+function getStoredTikuAdapterConfig() {
+  return {
+    baseurl: runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, ''),
+    key: runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '')
+  };
+}
+
 function getWorkOptions(): CommonWorkOptions {
   return settingsMethods().getWorkOptions?.() ?? defaultWorkOptions;
 }
@@ -242,6 +282,7 @@ function buildStudyOptions(raw: Record<string, unknown>): StudyOptions {
     enablePPT: toBoolean(raw.enablePPT, true),
     enableAnswer: automationFlags.enableAnswer,
     enableChapterTest: automationFlags.enableChapterTest,
+    enableVisibleQuestionFallback: toBoolean(raw.enableVisibleQuestionFallback, true),
     enableHyperlink: toBoolean(raw.enableHyperlink, true),
     notifyWhenHasFaceRecognition: toBoolean(raw.notifyWhenHasFaceRecognition, true),
     workOptions: getWorkOptions()
@@ -493,6 +534,11 @@ export const CXProject = Project.create({
         enableChapterTest: {
           label: '章节测试自动答题',
           attrs: { type: 'checkbox', title: '开启后自动搜索并填写章节测试答案。' },
+          defaultValue: true
+        },
+        enableVisibleQuestionFallback: {
+          label: '可见题目兜底答题',
+          attrs: { type: 'checkbox', title: '当页面中存在题目但未识别成标准任务点时，仍尝试进入章节测试答题。' },
           defaultValue: true
         },
         enableHyperlink: {
@@ -928,9 +974,7 @@ export async function study(opts: StudyOptions) {
 
   const runJobs = async (): Promise<void> => {
     const result = searchJob(opts, searchedJobs);
-    if (result.visibleContentState !== 'empty') {
-      visibleContentState = result.visibleContentState;
-    }
+    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
     const job = result.job;
     if (job && job.func) {
       try {
@@ -1078,7 +1122,7 @@ function searchIFrame(root: Document) {
 function searchJob(
   opts: StudyOptions,
   searchedJobs: Job[]
-): { job?: Job; visibleContentState: VisibleContentState } {
+): SearchJobResult {
   const knowCardWin = $gm.unsafeWindow as Window & Record<string, any>;
 
   const searchJobElement = (root: HTMLIFrameElement) => {
@@ -1095,7 +1139,7 @@ function searchJob(
     );
   };
 
-  const search = (root: HTMLIFrameElement): { job?: Job; visibleContentState: VisibleContentState } => {
+  const search = (root: HTMLIFrameElement): SearchJobResult => {
     const win = root.contentWindow;
     const { videojs, read, chapterTest, hyperlink, pptWithAudio, timereader } = searchJobElement(root);
 
@@ -1166,6 +1210,13 @@ function searchJob(
               $console.log(msg);
               await JobRunner.chapter(root, opts.workOptions);
             };
+          } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
+            func = async () => {
+              const msg = '正在尝试兜底处理当前可见题目';
+              $message.info(msg);
+              $console.log(msg);
+              await JobRunner.chapter(root, opts.workOptions);
+            };
           }
         }
       } else if (read || pptWithAudio || timereader) {
@@ -1215,19 +1266,17 @@ function searchJob(
     return { visibleContentState: 'empty' };
   };
 
-  let bestVisibleContentState: VisibleContentState = 'empty';
+  let visibleContentState: VisibleContentState = 'empty';
 
   for (const iframe of searchIFrame(knowCardWin.document)) {
     const result = search(iframe);
     if (result.job) {
       return result;
     }
-    if (result.visibleContentState !== 'empty' && bestVisibleContentState === 'empty') {
-      bestVisibleContentState = result.visibleContentState;
-    }
+    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
   }
 
-  return { visibleContentState: bestVisibleContentState };
+  return { visibleContentState };
 }
 
 export function fixedVideoProgress() {
@@ -1425,14 +1474,49 @@ const JobRunner = {
           const typeInput = elements.type[0] as HTMLInputElement | undefined;
           const provider = async () => {
             await sleep((period ?? 3) * 1000);
-            return defaultAnswerWrapperHandler(answererWrappers, {
-              type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
+            const type = (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown';
+            const optionsText =
+              ctx.type === 'completion'
+                ? ''
+                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
+            const searchInfos = await defaultAnswerWrapperHandler(answererWrappers, {
+              type,
               title,
-              options:
-                ctx.type === 'completion'
-                  ? ''
-                  : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
+              options: optionsText
             });
+
+            if (options.enableAIFallbackAnswer && searchInfos.every((info) => info.results.length === 0)) {
+              const tikuConfig = getStoredTikuAdapterConfig();
+              const fallbackInfos = await requestTikuAdapterAIFallback(tikuConfig, {
+                title,
+                type,
+                options: optionsText
+              });
+              const fallbackInfo = fallbackInfos[0];
+              const error = fallbackInfo?.response?.error;
+
+              if (error && error.code === 'AI_UNAVAILABLE') {
+                $console.warn('AI 兜底未配置，已跳过 AI 搜题');
+              }
+
+              const hasFallbackAnswer = fallbackInfos.some((info) => info.results.length > 0);
+              if (hasFallbackAnswer) {
+                return searchInfos.concat(fallbackInfos);
+              }
+
+              const msg = '检测到题目但当前无法安全自动作答，请手动处理。';
+              showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+              $message.warn({ content: msg, duration: 0 });
+              $console.warn(msg);
+
+              if (options.aiFallbackFailureAction === 'skip') {
+                return searchInfos.concat(fallbackInfos);
+              }
+
+              throw new Error(msg);
+            }
+
+            return searchInfos;
           };
 
           const searchInCaches = appsMethods().searchAnswerInCaches;

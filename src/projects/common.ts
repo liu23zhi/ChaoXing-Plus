@@ -32,6 +32,8 @@ export interface CommonWorkOptions {
   redundanceWordsText: string;
   answerSeparators: string;
   answerMatchMode: 'exact' | 'includes' | 'similar';
+  enableAIFallbackAnswer: boolean;
+  aiFallbackFailureAction: 'pause' | 'skip';
 }
 
 type WorkResultsRuntimeControls = {
@@ -75,7 +77,9 @@ const defaultWorkOptions: CommonWorkOptions = {
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
   answerSeparators: '#,|,;,；',
-  answerMatchMode: 'includes'
+  answerMatchMode: 'includes',
+  enableAIFallbackAnswer: false,
+  aiFallbackFailureAction: 'pause'
 };
 
 const answerCache = new Map<string, SearchInformation[]>();
@@ -163,6 +167,8 @@ function getWorkOptions(): CommonWorkOptions {
 
   return {
     ...stored,
+    enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
+    aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
   };
 }
@@ -1188,6 +1194,19 @@ function createStudySettingsPanel() {
       attrs: { type: 'checkbox', title: '开启后自动搜索并填写章节测试答案。' },
       defaultValue: true
     },
+    enableAIFallbackAnswer: {
+      label: 'AI 兜底搜题',
+      attrs: { type: 'checkbox', title: '普通题库失败后，允许调用 tikuAdapter AI fallback。' },
+      defaultValue: false
+    },
+    aiFallbackFailureAction: {
+      label: 'AI 兜底失败后行为',
+      options: [
+        ['pause', '停留当前页'],
+        ['skip', '继续后续流程']
+      ],
+      defaultValue: 'pause'
+    },
     enableHyperlink: {
       label: '链接任务自动完成',
       attrs: { type: 'checkbox', title: '开启后自动完成链接型任务点。' },
@@ -1237,7 +1256,15 @@ function createStudySettingsPanel() {
 
   const mediaKeys = ['playbackRate', 'volume', 'muteMedia', 'videoQuizStrategy'];
   const progressKeys = ['mode', 'restudy', 'forceLearn', 'backToFirstWhenFinish'];
-  const taskKeys = ['enableMedia', 'enablePPT', 'enableChapterTest', 'enableHyperlink', 'notifyWhenHasFaceRecognition'];
+  const taskKeys = [
+    'enableMedia',
+    'enablePPT',
+    'enableChapterTest',
+    'enableAIFallbackAnswer',
+    'aiFallbackFailureAction',
+    'enableHyperlink',
+    'notifyWhenHasFaceRecognition'
+  ];
 
   const createSettingsGroup = (
     groupTitle: string,

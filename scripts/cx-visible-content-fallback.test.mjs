@@ -13,3 +13,28 @@ test('cx study exposes visible-content fallback states and avoids treating visib
   assert.equal(source.includes('检测到页面存在可处理内容，但当前未识别为标准任务点。'), true);
   assert.equal(source.includes('页面任务点已完成，即将跳转。'), true);
 });
+
+test('cx study merges visible-content states instead of keeping the first non-empty state', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('function mergeVisibleContentState('), true);
+  assert.equal(source.includes('visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);'), true);
+});
+
+
+test('cx chapter test fallback runs when TiMu is visible without a standard job attachment', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('enableVisibleQuestionFallback'), true);
+  assert.equal(source.includes("visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped'"), true);
+  assert.equal(source.includes('await JobRunner.chapter(root, opts.workOptions);'), true);
+  assert.equal(source.includes('正在尝试兜底处理当前可见题目'), true);
+});
+
+test('cx fallback flow does not treat AI_UNAVAILABLE as page completion', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('AI 兜底未配置，已跳过 AI 搜题'), true);
+  assert.equal(source.includes("error.code === 'AI_UNAVAILABLE'"), true);
+  assert.equal(source.includes('检测到题目但当前无法安全自动作答，请手动处理。'), true);
+});
