@@ -27,12 +27,17 @@ test('extension entry bootstraps and persists shared tiku config through chrome 
   assert.equal(source.includes('chaoxing-plus:shared-store-sync'), true);
 });
 
-test('extension entry injects SweetAlert2 styles into the top document for top-window modals', async () => {
+test('extension entry prepares an isolated SweetAlert2 shadow host in the top document', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
 
   assert.equal(source.includes('function getSwalStyleDocument()'), true);
-  assert.equal(source.includes('const topDocument = window.top?.document;'), true);
-  assert.equal(source.includes('const targetDocument = getSwalStyleDocument();'), true);
-  assert.equal(source.includes('(targetDocument.head || targetRoot).appendChild(link);'), true);
-  assert.equal(source.includes('(document.head || root).appendChild(link);'), false);
+  assert.equal(source.includes("const swalHostId = 'chaoxing-plus-swal-host';"), true);
+  assert.equal(source.includes("const swalTargetId = 'chaoxing-plus-swal-target';"), true);
+  assert.equal(source.includes("const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });"), true);
+  assert.equal(source.includes("link.dataset.source = 'chaoxing-plus-extension-swal-style';"), true);
+  assert.equal(source.includes("style.dataset.source = 'chaoxing-plus-extension-swal-reset';"), true);
+  assert.equal(source.includes("style.textContent = ':host{all:initial;}.swal2-popup{font-size:16px!important;}';"), true);
+  assert.equal(source.includes('mount.id = swalTargetId;'), true);
+  assert.equal(source.includes('(targetDocument.body || targetDocument.documentElement).appendChild(host);'), true);
+  assert.equal(source.includes('(targetDocument.head || targetRoot).appendChild(link);'), false);
 });

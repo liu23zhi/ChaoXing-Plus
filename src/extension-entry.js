@@ -72,7 +72,8 @@
   const currentUrl = location.href;
   const frameMarker = btoa(unescape(encodeURIComponent(currentUrl))).replace(/=+$/g, '');
   const injectedMarkerKey = 'cxPlusInjected';
-  const styleInjectedMarkerKey = 'cxPlusSwalStyleInjected';
+  const swalHostId = 'chaoxing-plus-swal-host';
+  const swalTargetId = 'chaoxing-plus-swal-target';
 
   function getSwalStyleDocument() {
     try {
@@ -94,16 +95,39 @@
       return;
     }
 
-    if (targetRoot.dataset[styleInjectedMarkerKey] === frameMarker) {
-      return;
+    let host = targetDocument.getElementById(swalHostId);
+    if (!host) {
+      host = targetDocument.createElement('div');
+      host.id = swalHostId;
+      host.dataset.source = 'chaoxing-plus-extension';
+      (targetDocument.body || targetDocument.documentElement).appendChild(host);
     }
-    targetRoot.dataset[styleInjectedMarkerKey] = frameMarker;
 
-    const link = targetDocument.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = chrome.runtime.getURL('vendor/sweetalert2.min.css');
-    link.dataset.source = 'chaoxing-plus-extension';
-    (targetDocument.head || targetRoot).appendChild(link);
+    const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
+
+    let link = shadowRoot.querySelector('link[data-source="chaoxing-plus-extension-swal-style"]');
+    if (!link) {
+      link = targetDocument.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = chrome.runtime.getURL('vendor/sweetalert2.min.css');
+      link.dataset.source = 'chaoxing-plus-extension-swal-style';
+      shadowRoot.appendChild(link);
+    }
+
+    let style = shadowRoot.querySelector('style[data-source="chaoxing-plus-extension-swal-reset"]');
+    if (!style) {
+      style = targetDocument.createElement('style');
+      style.dataset.source = 'chaoxing-plus-extension-swal-reset';
+      style.textContent = ':host{all:initial;}.swal2-popup{font-size:16px!important;}';
+      shadowRoot.appendChild(style);
+    }
+
+    let mount = shadowRoot.getElementById(swalTargetId);
+    if (!mount) {
+      mount = targetDocument.createElement('div');
+      mount.id = swalTargetId;
+      shadowRoot.appendChild(mount);
+    }
   };
 
   const inject = () => {

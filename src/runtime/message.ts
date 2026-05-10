@@ -1,9 +1,12 @@
-import Swal from 'sweetalert2';
+import Swal, { type SweetAlertOptions } from 'sweetalert2';
 
 const toastEnabled = false;
 const swalAliasKey = '__chaoxing_plus_swal__';
+const swalTargetId = 'chaoxing-plus-swal-target';
 
 type SwalOwnerWindow = Window & Record<string, unknown>;
+
+type SwalFireOptions = SweetAlertOptions;
 
 function getTopWindowSwal() {
   const selfWindow = window as unknown as SwalOwnerWindow;
@@ -23,13 +26,35 @@ function getTopWindowSwal() {
   return Swal;
 }
 
+function resolveSwalTarget() {
+  try {
+    const topDocument = window.top?.document;
+    const host = topDocument?.getElementById('chaoxing-plus-swal-host');
+    const target = host?.shadowRoot?.getElementById(swalTargetId);
+    if (target) {
+      return target;
+    }
+  } catch {
+    // ignore cross-frame access errors and fall back to default target
+  }
+
+  return undefined;
+}
+
+function fireSwal(options: SwalFireOptions) {
+  const runtimeSwal = getTopWindowSwal();
+  return runtimeSwal.fire({
+    ...options,
+    target: resolveSwalTarget()
+  });
+}
+
 function toast(icon: 'info' | 'success' | 'warning' | 'error', text: string, timer = 3000) {
   if (!toastEnabled) {
     return;
   }
 
-  const runtimeSwal = getTopWindowSwal();
-  void runtimeSwal.fire({
+  void fireSwal({
     toast: true,
     position: 'top-end',
     timer,
@@ -64,22 +89,20 @@ export const $message = {
 
 export const $modal = {
   async alert(args: { content: string; denyButtonText?: string; onDeny?: () => Promise<void> | void } | string): Promise<void> {
-    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
     const denyButtonText = typeof args === 'string' ? undefined : args.denyButtonText;
     const onDeny = typeof args === 'string' ? undefined : args.onDeny;
-    const result = await runtimeSwal.fire({ icon: 'info', text: content, confirmButtonText: '知道了', showDenyButton: Boolean(denyButtonText), denyButtonText });
+    const result = await fireSwal({ icon: 'info', text: content, confirmButtonText: '知道了', showDenyButton: Boolean(denyButtonText), denyButtonText });
 
     if (result.isDenied) {
       await onDeny?.();
     }
   },
   async notice(args: { content: string; duration?: number; icon?: 'info' | 'success' | 'warning' | 'error' } | string): Promise<void> {
-    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
     const duration = typeof args === 'string' ? 3000 : args.duration ?? 3000;
     const icon = typeof args === 'string' ? 'info' : args.icon ?? 'info';
-    await runtimeSwal.fire({
+    await fireSwal({
       icon,
       text: content,
       timer: duration > 0 ? duration : undefined,
@@ -91,9 +114,8 @@ export const $modal = {
     });
   },
   async confirm(args: { content: string } | string): Promise<boolean> {
-    const runtimeSwal = getTopWindowSwal();
     const content = typeof args === 'string' ? args : args.content;
-    const result = await runtimeSwal.fire({
+    const result = await fireSwal({
       icon: 'question',
       text: content,
       showCancelButton: true,

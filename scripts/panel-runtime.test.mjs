@@ -25,8 +25,10 @@ test('modal alerts route Swal calls through an isolated extension alias instead 
   const source = await readFile(modalRuntimePath, 'utf8');
 
   assert.equal(source.includes('const swalAliasKey = \'__chaoxing_plus_swal__\';'), true);
+  assert.equal(source.includes("const swalTargetId = 'chaoxing-plus-swal-target';"), true);
   assert.equal(source.includes('return ownerWindow[swalAliasKey] as typeof Swal;'), true);
   assert.equal(source.includes('topWindow?.Swal && typeof topWindow.Swal.fire === \'function\''), false);
-  assert.equal(source.includes('const runtimeSwal = getTopWindowSwal();'), true);
-  assert.equal(source.includes("const result = await runtimeSwal.fire({ icon: 'info', text: content, confirmButtonText: '知道了'"), true);
+  assert.equal(source.includes('const target = host?.shadowRoot?.getElementById(swalTargetId);'), true);
+  assert.equal(source.includes('target: resolveSwalTarget()'), true);
+  assert.equal(source.includes("const result = await fireSwal({ icon: 'info', text: content, confirmButtonText: '知道了'"), true);
 });
