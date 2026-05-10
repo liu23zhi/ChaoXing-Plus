@@ -20,3 +20,12 @@ test('cx study merges visible-content states instead of keeping the first non-em
   assert.equal(source.includes('function mergeVisibleContentState('), true);
   assert.equal(source.includes('visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);'), true);
 });
+
+test('cx chapter test fallback runs when TiMu is visible without a standard job attachment', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('enableVisibleQuestionFallback'), true);
+  assert.equal(source.includes("visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped'"), true);
+  assert.equal(source.includes('await JobRunner.chapter(root, opts.workOptions);'), true);
+  assert.equal(source.includes('正在尝试兜底处理当前可见题目'), true);
+});

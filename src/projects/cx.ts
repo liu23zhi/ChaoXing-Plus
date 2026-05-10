@@ -123,6 +123,7 @@ export type StudyOptions = {
   enablePPT: boolean;
   enableAnswer: boolean;
   enableChapterTest: boolean;
+  enableVisibleQuestionFallback: boolean;
   enableHyperlink: boolean;
   notifyWhenHasFaceRecognition: boolean;
   workOptions: CommonWorkOptions;
@@ -169,6 +170,10 @@ function mergeVisibleContentState(current: VisibleContentState, next: VisibleCon
     return 'visible-unmapped';
   }
   return 'empty';
+}
+
+function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState): boolean {
+  return visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped';
 }
 
 const defaultWorkOptions: CommonWorkOptions = {
@@ -262,6 +267,7 @@ function buildStudyOptions(raw: Record<string, unknown>): StudyOptions {
     enablePPT: toBoolean(raw.enablePPT, true),
     enableAnswer: automationFlags.enableAnswer,
     enableChapterTest: automationFlags.enableChapterTest,
+    enableVisibleQuestionFallback: toBoolean(raw.enableVisibleQuestionFallback, true),
     enableHyperlink: toBoolean(raw.enableHyperlink, true),
     notifyWhenHasFaceRecognition: toBoolean(raw.notifyWhenHasFaceRecognition, true),
     workOptions: getWorkOptions()
@@ -513,6 +519,11 @@ export const CXProject = Project.create({
         enableChapterTest: {
           label: '章节测试自动答题',
           attrs: { type: 'checkbox', title: '开启后自动搜索并填写章节测试答案。' },
+          defaultValue: true
+        },
+        enableVisibleQuestionFallback: {
+          label: '可见题目兜底答题',
+          attrs: { type: 'checkbox', title: '当页面中存在题目但未识别成标准任务点时，仍尝试进入章节测试答题。' },
           defaultValue: true
         },
         enableHyperlink: {
@@ -1179,6 +1190,13 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
             } else if (workType === 'job') {
               func = async () => {
                 const msg = `正在处理章节测试 : ${jobName}`;
+                $message.info(msg);
+                $console.log(msg);
+                await JobRunner.chapter(root, opts.workOptions);
+              };
+            } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
+              func = async () => {
+                const msg = '正在尝试兜底处理当前可见题目';
                 $message.info(msg);
                 $console.log(msg);
                 await JobRunner.chapter(root, opts.workOptions);
