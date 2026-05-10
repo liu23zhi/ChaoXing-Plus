@@ -21,11 +21,12 @@ test('panel root creation appends to body with documentElement fallback', async 
   assert.equal(source.includes('(document.body || document.documentElement).appendChild(root);'), true);
 });
 
-test('modal alerts route Swal calls through the top window when available', async () => {
+test('modal alerts route Swal calls through an isolated extension alias instead of page window.Swal', async () => {
   const source = await readFile(modalRuntimePath, 'utf8');
 
-  assert.equal(source.includes('function getTopWindowSwal()'), true);
-  assert.equal(source.includes('return topWindow.Swal as typeof Swal;'), true);
+  assert.equal(source.includes('const swalAliasKey = \'__chaoxing_plus_swal__\';'), true);
+  assert.equal(source.includes('return ownerWindow[swalAliasKey] as typeof Swal;'), true);
+  assert.equal(source.includes('topWindow?.Swal && typeof topWindow.Swal.fire === \'function\''), false);
   assert.equal(source.includes('const runtimeSwal = getTopWindowSwal();'), true);
   assert.equal(source.includes("const result = await runtimeSwal.fire({ icon: 'info', text: content, confirmButtonText: '知道了'"), true);
 });

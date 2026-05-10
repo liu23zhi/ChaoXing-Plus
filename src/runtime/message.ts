@@ -1,19 +1,21 @@
 import Swal from 'sweetalert2';
 
 const toastEnabled = false;
+const swalAliasKey = '__chaoxing_plus_swal__';
+
+type SwalOwnerWindow = Window & Record<string, unknown>;
 
 function getTopWindowSwal() {
-  const selfWindow = window as Window & { Swal?: typeof Swal };
+  const selfWindow = window as unknown as SwalOwnerWindow;
   if (window.self === window.top) {
-    selfWindow.Swal = selfWindow.Swal || Swal;
-    return selfWindow.Swal;
+    selfWindow[swalAliasKey] = selfWindow[swalAliasKey] || Swal;
+    return selfWindow[swalAliasKey] as typeof Swal;
   }
 
   try {
-    const topWindow = window.top as Window & { Swal?: typeof Swal };
-    if (topWindow?.Swal && typeof topWindow.Swal.fire === 'function') {
-      return topWindow.Swal as typeof Swal;
-    }
+    const ownerWindow = window.top as unknown as SwalOwnerWindow;
+    ownerWindow[swalAliasKey] = ownerWindow[swalAliasKey] || Swal;
+    return ownerWindow[swalAliasKey] as typeof Swal;
   } catch {
     // ignore cross-frame access errors and fall back to local Swal
   }
@@ -101,3 +103,4 @@ export const $modal = {
     return result.isConfirmed;
   }
 };
+
