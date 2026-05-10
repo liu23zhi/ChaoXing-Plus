@@ -31,10 +31,29 @@ test('cx chapter test fallback runs when TiMu is visible without a standard job 
   assert.equal(source.includes('正在尝试兜底处理当前可见题目'), true);
 });
 
-test('cx fallback flow does not treat AI_UNAVAILABLE as page completion', async () => {
+
+test('cx chapter runner reads chapter questions as a collection instead of collapsing a single query result to an empty array', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes('AI 兜底未配置，已跳过 AI 搜题'), true);
-  assert.equal(source.includes("error.code === 'AI_UNAVAILABLE'"), true);
-  assert.equal(source.includes('检测到题目但当前无法安全自动作答，请手动处理。'), true);
+  assert.equal(source.includes("const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameDocument);"), true);
+  assert.equal(source.includes("const roots = Array.isArray(TiMu) ? (TiMu as HTMLElement[]) : [];"), false);
+  assert.equal(source.includes('未找到章节测试题目，已跳过。'), true);
+});
+
+test('cx chapter diagnostics log outer and inner iframe evidence before skipping', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('章节测试候选 iframe 诊断'), true);
+  assert.equal(source.includes('frameDataJobid'), true);
+  assert.equal(source.includes('frameData_jobid'), true);
+  assert.equal(source.includes('directChapterTest'), true);
+  assert.equal(source.includes('nestedIframeCount'), true);
+  assert.equal(source.includes('章节测试候选 iframe 诊断详情：src='), true);
+  assert.equal(source.includes('章节测试框架诊断'), true);
+  assert.equal(source.includes('directTiMuCount'), true);
+  assert.equal(source.includes('nestedWorkIframeCount'), true);
+  assert.equal(source.includes('章节测试框架诊断详情：src='), true);
+  assert.equal(source.includes('innerFrameExists'), true);
+  assert.equal(source.includes('innerTiMuCount'), true);
+  assert.equal(source.includes('章节测试未命中题目详情：innerFrameExists='), true);
 });

@@ -4,6 +4,7 @@ import {
   createDefaultQuestionResolver,
   defaultAnswerWrapperHandler,
   domSearch,
+  domSearchAll,
   OCSWorker,
   request,
   type SearchInformation,
@@ -1161,6 +1162,22 @@ function searchJob(
         return String(attachmentJobId) === String(targetJobId);
       });
 
+      if (chapterTest) {
+        const chapterCandidateDebug = {
+          src: root.getAttribute('src') ?? '',
+          _src: root.getAttribute('_src') ?? '',
+          jobid: root.getAttribute('jobid') ?? '',
+          frameDataJobid: frameData.jobid,
+          frameData_jobid: frameData._jobid,
+          directChapterTest: !!chapterTest,
+          nestedIframeCount: win.document.querySelectorAll('iframe').length
+        };
+        $console.info('章节测试候选 iframe 诊断', chapterCandidateDebug);
+        $console.info(
+          `章节测试候选 iframe 诊断详情：src=${chapterCandidateDebug.src} _src=${chapterCandidateDebug._src} jobid=${chapterCandidateDebug.jobid} frameDataJobid=${String(chapterCandidateDebug.frameDataJobid ?? '')} frameData_jobid=${String(chapterCandidateDebug.frameData_jobid ?? '')} directChapterTest=${String(chapterCandidateDebug.directChapterTest)} nestedIframeCount=${chapterCandidateDebug.nestedIframeCount}`
+        );
+      }
+
       if (!attachment) {
         return { visibleContentState: 'visible-unmapped' };
       }
@@ -1425,10 +1442,34 @@ const JobRunner = {
       return;
     }
 
-    const { TiMu } = domSearch({ TiMu: '.TiMu' }, frameDocument);
-    const roots = Array.isArray(TiMu) ? (TiMu as HTMLElement[]) : [];
+    const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameDocument);
+    const roots = TiMu;
+    const nestedWorkIframes = Array.from(frameDocument.querySelectorAll<HTMLIFrameElement>('iframe')).filter((item) => {
+      const name = item.getAttribute('name') ?? '';
+      const id = item.getAttribute('id') ?? '';
+      const src = item.getAttribute('src') ?? item.getAttribute('_src') ?? '';
+      return name === 'frame_content' || id === 'frame_content' || /work/i.test(src);
+    });
+    const chapterFrameDebug = {
+      src: frame.getAttribute('src') ?? '',
+      _src: frame.getAttribute('_src') ?? '',
+      jobid: frame.getAttribute('jobid') ?? '',
+      directTiMuCount: roots.length,
+      nestedWorkIframeCount: nestedWorkIframes.length
+    };
+    $console.info('章节测试框架诊断', chapterFrameDebug);
+    $console.info(
+      `章节测试框架诊断详情：src=${chapterFrameDebug.src} _src=${chapterFrameDebug._src} jobid=${chapterFrameDebug.jobid} directTiMuCount=${chapterFrameDebug.directTiMuCount} nestedWorkIframeCount=${chapterFrameDebug.nestedWorkIframeCount}`
+    );
     if (roots.length === 0) {
-      $console.warn('未找到章节测试题目，已跳过。');
+      const innerFrame = nestedWorkIframes[0];
+      const innerDocument = innerFrame?.contentWindow?.document;
+      const innerTiMuCount = innerDocument ? innerDocument.querySelectorAll('.TiMu').length : 0;
+      $console.warn('未找到章节测试题目，已跳过。', {
+        innerFrameExists: !!innerFrame,
+        innerTiMuCount
+      });
+      $console.warn(`章节测试未命中题目详情：innerFrameExists=${String(!!innerFrame)} innerTiMuCount=${innerTiMuCount}`);
       return;
     }
 
