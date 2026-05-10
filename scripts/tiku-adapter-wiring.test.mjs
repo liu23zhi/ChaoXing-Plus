@@ -102,3 +102,14 @@ test('missing-key warning offers a jump action to the configured tiku baseurl', 
   assert.equal(source.includes("window.open(baseurl, '_blank', 'noopener,noreferrer');"), true);
   assert.equal(source.includes('void $modal.alert({'), true);
 });
+
+test('tiku adapter config exposes AI fallback request helpers and standardized error parsing', async () => {
+  const source = await readFile(commonPath, 'utf8');
+  const configSource = await readFile(resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts'), 'utf8');
+
+  assert.equal(source.includes('AI 兜底搜题'), true);
+  assert.equal(source.includes('AI 兜底失败后行为'), true);
+  assert.equal(configSource.includes('createTikuAdapterAIFallbackUrl'), true);
+  assert.equal(configSource.includes('requestTikuAdapterAIFallback'), true);
+  assert.equal(configSource.includes('type TikuAdapterAIFallbackErrorCode ='), true);
+});
