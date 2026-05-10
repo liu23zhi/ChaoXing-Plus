@@ -108,6 +108,7 @@ function showTopCenterNotice(
 
 export type VideoQuizStrategy = 'random' | 'ignore';
 export type StudyMode = 'next' | 'job' | 'manually';
+type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
 
 export type StudyOptions = {
   playbackRate: number;
@@ -148,6 +149,27 @@ export type Job = {
   attachment: Attachment;
   func: (() => Promise<void>) | undefined;
 };
+
+type SearchJobResult = {
+  job?: Job;
+  visibleContentState: VisibleContentState;
+};
+
+function mergeVisibleContentState(current: VisibleContentState, next: VisibleContentState): VisibleContentState {
+  if (next === 'standard-job' || next === 'finished-job') {
+    return next;
+  }
+  if (current === 'standard-job' || current === 'finished-job') {
+    return current;
+  }
+  if (current === 'visible-nonjob' || next === 'visible-nonjob') {
+    return 'visible-nonjob';
+  }
+  if (current === 'visible-unmapped' || next === 'visible-unmapped') {
+    return 'visible-unmapped';
+  }
+  return 'empty';
+}
 
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
@@ -917,6 +939,7 @@ export async function study(opts: StudyOptions) {
   const searchedJobs: Job[] = [];
   let searching = true;
   let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
+  let visibleContentState: VisibleContentState = 'empty';
   const waitTimeout = 3 + attachmentCount * 2;
 
   setTimeout(() => {
@@ -924,7 +947,10 @@ export async function study(opts: StudyOptions) {
   }, Math.min(waitTimeout, 10) * 1000);
 
   const runJobs = async (): Promise<void> => {
-    const job = searchJob(opts, searchedJobs);
+    const result = searchJob(opts, searchedJobs);
+    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
+
+    const job = result.job;
     if (job && job.func) {
       try {
         await job.func();
@@ -1027,6 +1053,14 @@ export async function study(opts: StudyOptions) {
     }
   };
 
+  if (visibleContentState !== 'empty' && visibleContentState !== 'standard-job' && visibleContentState !== 'finished-job') {
+    const msg = '检测到页面存在可处理内容，但当前未识别为标准任务点。';
+    showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+    $message.warn({ content: msg, duration: 0 });
+    $console.warn(msg);
+    return;
+  }
+
   if (opts.mode !== 'manually') {
     const msg = '页面任务点已完成，即将跳转。';
     showTopCenterNotice(msg, { duration: 5000, tone: 'success' });
@@ -1061,7 +1095,7 @@ function searchIFrame(root: Document) {
   return result;
 }
 
-function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
+function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
   const knowCardWin = $gm.unsafeWindow as Window & Record<string, any>;
 
   const searchJobElement = (root: HTMLIFrameElement) => {
@@ -1078,7 +1112,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
     );
   };
 
-  const search = (root: HTMLIFrameElement): Job | undefined => {
+  const search = (root: HTMLIFrameElement): SearchJobResult => {
     const win = root.contentWindow;
     const { videojs, read, chapterTest, hyperlink, pptWithAudio, timereader } = searchJobElement(root);
 
@@ -1089,7 +1123,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
       const frameData = JSON.parse(frameDataStr);
       const targetJobId = frameData.jobid || frameData._jobid;
       if (!targetJobId) {
-        return undefined;
+        return { visibleContentState: 'visible-unmapped' };
       }
 
       const attachment: Attachment | undefined = (knowCardWin.attachments as Attachment[] | undefined)?.find((item) => {
@@ -1100,10 +1134,17 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
         return String(attachmentJobId) === String(targetJobId);
       });
 
-      if (attachment && searchedJobs.find((job) => job.mid === attachment.property.mid) === undefined) {
+      if (!attachment) {
+        return { visibleContentState: 'visible-unmapped' };
+      }
+
+      const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
+      const visibleContentState: VisibleContentState =
+        workType === 'job' ? 'standard-job' : workType === 'finished' ? 'finished-job' : 'visible-nonjob';
+
+      if (searchedJobs.find((job) => job.mid === attachment.property.mid) === undefined) {
         const { name, title, bookname, author } = attachment.property;
         const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
-        const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
 
         let func: (() => Promise<void>) | undefined;
 
@@ -1185,21 +1226,25 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
         };
 
         searchedJobs.push(job);
-        return job;
+        return { job, visibleContentState };
       }
+
+      return { visibleContentState };
     }
 
-    return undefined;
+    return { visibleContentState: 'empty' };
   };
 
+  let visibleContentState: VisibleContentState = 'empty';
   for (const iframe of searchIFrame(knowCardWin.document)) {
-    const job = search(iframe);
-    if (job) {
-      return job;
+    const result = search(iframe);
+    if (result.job) {
+      return result;
     }
+    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
   }
 
-  return undefined;
+  return { visibleContentState };
 }
 
 export function fixedVideoProgress() {
