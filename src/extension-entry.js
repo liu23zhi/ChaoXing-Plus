@@ -13,19 +13,15 @@
     '[id="panel-common-render"]'
   ].join(', ');
 
-  const sharedStoreKeys = [
-    'common.settings.tiku-adapter.baseurl',
-    'common.settings.tiku-adapter.key'
-  ];
+  const sharedStoreKeyPrefix = 'common.settings.';
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
   const sharedStoreHydrateEvent = 'chaoxing-plus:shared-store-hydrate';
 
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 
   const applySharedStoreValues = (values) => {
-    sharedStoreKeys.forEach((key) => {
-      const value = values?.[key];
-      if (typeof value !== 'string') {
+    Object.entries(values ?? {}).forEach(([key, value]) => {
+      if (!key.startsWith(sharedStoreKeyPrefix) || typeof value !== 'string') {
         return;
       }
 
@@ -42,12 +38,13 @@
     }
 
     const nextValues = {};
-    sharedStoreKeys.forEach((key) => {
-      const value = detail[key];
-      if (typeof value === 'string') {
-        nextValues[key] = value;
-        root.setAttribute(getSharedAttributeName(key), value);
+    Object.entries(detail).forEach(([key, value]) => {
+      if (!key.startsWith(sharedStoreKeyPrefix) || typeof value !== 'string') {
+        return;
       }
+
+      nextValues[key] = value;
+      root.setAttribute(getSharedAttributeName(key), value);
     });
 
     if (Object.keys(nextValues).length > 0) {
@@ -60,7 +57,7 @@
   });
 
   if (chrome?.storage?.local?.get) {
-    chrome.storage.local.get(sharedStoreKeys, (result) => {
+    chrome.storage.local.get(null, (result) => {
       applySharedStoreValues(result ?? {});
     });
   }
