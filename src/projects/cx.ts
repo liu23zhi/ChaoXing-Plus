@@ -127,6 +127,8 @@ export type StudyOptions = {
   workOptions: CommonWorkOptions;
 };
 
+type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
+
 export type Attachment = {
   isPassed: boolean | undefined;
   job: boolean | undefined;
@@ -917,6 +919,7 @@ export async function study(opts: StudyOptions) {
   const searchedJobs: Job[] = [];
   let searching = true;
   let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
+  let visibleContentState: VisibleContentState = 'empty';
   const waitTimeout = 3 + attachmentCount * 2;
 
   setTimeout(() => {
@@ -924,7 +927,11 @@ export async function study(opts: StudyOptions) {
   }, Math.min(waitTimeout, 10) * 1000);
 
   const runJobs = async (): Promise<void> => {
-    const job = searchJob(opts, searchedJobs);
+    const result = searchJob(opts, searchedJobs);
+    if (result.visibleContentState !== 'empty') {
+      visibleContentState = result.visibleContentState;
+    }
+    const job = result.job;
     if (job && job.func) {
       try {
         await job.func();
@@ -1028,6 +1035,13 @@ export async function study(opts: StudyOptions) {
   };
 
   if (opts.mode !== 'manually') {
+    if (visibleContentState !== 'empty') {
+      const msg = '检测到页面存在可处理内容，但当前未识别为标准任务点。';
+      showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+      $message.warn({ content: msg, duration: 0 });
+      $console.warn(msg);
+      return;
+    }
     const msg = '页面任务点已完成，即将跳转。';
     showTopCenterNotice(msg, { duration: 5000, tone: 'success' });
     $message.success(msg);
@@ -1061,7 +1075,10 @@ function searchIFrame(root: Document) {
   return result;
 }
 
-function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
+function searchJob(
+  opts: StudyOptions,
+  searchedJobs: Job[]
+): { job?: Job; visibleContentState: VisibleContentState } {
   const knowCardWin = $gm.unsafeWindow as Window & Record<string, any>;
 
   const searchJobElement = (root: HTMLIFrameElement) => {
@@ -1078,7 +1095,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
     );
   };
 
-  const search = (root: HTMLIFrameElement): Job | undefined => {
+  const search = (root: HTMLIFrameElement): { job?: Job; visibleContentState: VisibleContentState } => {
     const win = root.contentWindow;
     const { videojs, read, chapterTest, hyperlink, pptWithAudio, timereader } = searchJobElement(root);
 
@@ -1089,7 +1106,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
       const frameData = JSON.parse(frameDataStr);
       const targetJobId = frameData.jobid || frameData._jobid;
       if (!targetJobId) {
-        return undefined;
+        return { visibleContentState: 'visible-unmapped' };
       }
 
       const attachment: Attachment | undefined = (knowCardWin.attachments as Attachment[] | undefined)?.find((item) => {
@@ -1100,106 +1117,117 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): Job | undefined {
         return String(attachmentJobId) === String(targetJobId);
       });
 
-      if (attachment && searchedJobs.find((job) => job.mid === attachment.property.mid) === undefined) {
-        const { name, title, bookname, author } = attachment.property;
-        const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
-        const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
+      if (!attachment) {
+        return { visibleContentState: 'visible-unmapped' };
+      }
 
-        let func: (() => Promise<void>) | undefined;
+      if (searchedJobs.find((job) => job.mid === attachment.property.mid) !== undefined) {
+        return { visibleContentState: attachment.job ? 'standard-job' : attachment.isPassed ? 'finished-job' : 'visible-nonjob' };
+      }
 
-        if (videojs) {
-          if (!opts.enableMedia) {
-            const msg = `音视频自动学习功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
+      const { name, title, bookname, author } = attachment.property;
+      const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
+      const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
+
+      let func: (() => Promise<void>) | undefined;
+
+      if (videojs) {
+        if (!opts.enableMedia) {
+          const msg = `音视频自动学习功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
+          func = async () => {
+            const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            await JobRunner.media(opts, win.document);
+          };
+        }
+      } else if (chapterTest) {
+        if (!opts.enableAnswer) {
+          const msg = `自动答题总开关已关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (!opts.enableChapterTest) {
+          const msg = `章节测试自动答题功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else {
+          const status = win.document.querySelector<HTMLElement>('.testTit_status');
+          if (status?.classList.contains('testTit_status_complete')) {
+            const msg = `章节测试已完成 : ${jobName}`;
+            $message.success(msg);
+            $console.log(msg);
+          } else if (workType === 'job') {
             func = async () => {
-              const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
+              const msg = `正在处理章节测试 : ${jobName}`;
               $message.info(msg);
               $console.log(msg);
-              await JobRunner.media(opts, win.document);
-            };
-          }
-        } else if (chapterTest) {
-          if (!opts.enableAnswer) {
-            const msg = `自动答题总开关已关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (!opts.enableChapterTest) {
-            const msg = `章节测试自动答题功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else {
-            const status = win.document.querySelector<HTMLElement>('.testTit_status');
-            if (status?.classList.contains('testTit_status_complete')) {
-              const msg = `章节测试已完成 : ${jobName}`;
-              $message.success(msg);
-              $console.log(msg);
-            } else if (workType === 'job') {
-              func = async () => {
-                const msg = `正在处理章节测试 : ${jobName}`;
-                $message.info(msg);
-                $console.log(msg);
-                await JobRunner.chapter(root, opts.workOptions);
-              };
-            }
-          }
-        } else if (read || pptWithAudio || timereader) {
-          if (!opts.enablePPT) {
-            const msg = `PPT/书籍阅读功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (attachment.job) {
-            func = async () => {
-              const msg = `正在学习 : ${jobName}`;
-              $message.info(msg);
-              $console.log(msg);
-              if (read) {
-                await JobRunner.read(win as Window & { finishJob?: () => void }, attachment);
-              } else if (timereader) {
-                await JobRunner.timereader(timereader as HTMLIFrameElement, attachment);
-              } else {
-                await JobRunner.readPPTWithAudio(win as Window & { swiperNext?: () => void }, attachment);
-              }
-            };
-          }
-        } else if (hyperlink) {
-          if (!opts.enableHyperlink) {
-            const msg = `链接任务点已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (attachment.job) {
-            func = async () => {
-              const msg = `正在完成链接阅读任务 : ${jobName}`;
-              $message.info(msg);
-              $console.log(msg);
-              await JobRunner.hyperlink(hyperlink as HTMLElement);
+              await JobRunner.chapter(root, opts.workOptions);
             };
           }
         }
-
-        const job = {
-          mid: attachment.property.mid,
-          attachment,
-          func
-        };
-
-        searchedJobs.push(job);
-        return job;
+      } else if (read || pptWithAudio || timereader) {
+        if (!opts.enablePPT) {
+          const msg = `PPT/书籍阅读功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (attachment.job) {
+          func = async () => {
+            const msg = `正在学习 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            if (read) {
+              await JobRunner.read(win as Window & { finishJob?: () => void }, attachment);
+            } else if (timereader) {
+              await JobRunner.timereader(timereader as HTMLIFrameElement, attachment);
+            } else {
+              await JobRunner.readPPTWithAudio(win as Window & { swiperNext?: () => void }, attachment);
+            }
+          };
+        }
+      } else if (hyperlink) {
+        if (!opts.enableHyperlink) {
+          const msg = `链接任务点已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (attachment.job) {
+          func = async () => {
+            const msg = `正在完成链接阅读任务 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            await JobRunner.hyperlink(hyperlink as HTMLElement);
+          };
+        }
       }
+
+      const job = {
+        mid: attachment.property.mid,
+        attachment,
+        func
+      };
+
+      searchedJobs.push(job);
+      return { job, visibleContentState: attachment.job ? 'standard-job' : attachment.isPassed ? 'finished-job' : 'visible-nonjob' };
     }
 
-    return undefined;
+    return { visibleContentState: 'empty' };
   };
 
+  let bestVisibleContentState: VisibleContentState = 'empty';
+
   for (const iframe of searchIFrame(knowCardWin.document)) {
-    const job = search(iframe);
-    if (job) {
-      return job;
+    const result = search(iframe);
+    if (result.job) {
+      return result;
+    }
+    if (result.visibleContentState !== 'empty' && bestVisibleContentState === 'empty') {
+      bestVisibleContentState = result.visibleContentState;
     }
   }
 
-  return undefined;
+  return { visibleContentState: bestVisibleContentState };
 }
 
 export function fixedVideoProgress() {
