@@ -32,14 +32,17 @@ test('common work options default to submit and expose upload mode toggle in the
 
   assert.equal(source.includes("upload: 'submit'"), true);
   assert.equal(source.includes("upload: getStudySettingValue('upload', 'submit')"), true);
-  assert.equal(source.includes("const uploadModeField = createConfigField(studyScript, 'upload', {"), false);
-  assert.equal(source.includes('uploadModeField.append(uploadModeSelect);'), false);
-  assert.equal(source.includes("const uploadModeField = createElement('label');"), true);
-  assert.equal(source.includes("const uploadModeLabel = createElement('span', { text: '完成后动作' });"), true);
+  assert.equal(source.includes("const uploadModeField = createConfigField(studyScript, 'upload', {"), true);
+  assert.equal(source.includes("label: '完成后动作'"), true);
+  assert.equal(source.includes("['submit', '自动提交']"), true);
+  assert.equal(source.includes("['save', '自动保存']"), true);
+  assert.equal(source.includes("const isCompactChoiceField = key === 'aiFallbackFailureAction' || key === 'upload';"), true);
+  assert.equal(source.includes("optionGrid.style.gridTemplateColumns = '1fr';"), true);
+  assert.equal(source.includes("const uploadModeField = createElement('label');"), false);
+  assert.equal(source.includes("const uploadModeLabel = createElement('span', { text: '完成后动作' });"), false);
   assert.equal(source.includes("const actionModeRow = createElement('div');"), true);
+  assert.equal(source.includes("actionModeRow.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';"), true);
   assert.equal(source.includes("actionModeRow.append(aiFallbackFailureActionField, uploadModeField);"), true);
-  assert.equal(source.includes("option.value = value;"), true);
-  assert.equal(source.includes("option.textContent = value === 'submit' ? '自动提交' : '自动保存';"), true);
 });
 
 test('common moves AI fallback controls from the study settings section into the work results control hero', async () => {
@@ -47,9 +50,14 @@ test('common moves AI fallback controls from the study settings section into the
 
   assert.equal(source.includes("const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {"), true);
   assert.equal(source.includes("const aiAnswerRow = createElement('div');"), true);
+  assert.equal(source.includes("aiAnswerRow.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';"), true);
   assert.equal(source.includes('aiAnswerRow.append(answerToggleField, aiFallbackToggleField);'), true);
   assert.equal(source.includes("const aiFallbackFailureActionField = createConfigField(studyScript, 'aiFallbackFailureAction', {"), true);
   assert.equal(source.includes("label: 'AI 兜底失败后行为'"), true);
+  assert.equal(source.includes("['pause', '停留当前页']"), true);
+  assert.equal(source.includes("['skip', '继续后续流程']"), true);
+  assert.equal(source.includes("const isCompactChoiceField = key === 'aiFallbackFailureAction' || key === 'upload';"), true);
+  assert.equal(source.includes("optionGrid.style.gridTemplateColumns = '1fr';"), true);
   assert.equal(source.includes('hero.append(heroTop, aiAnswerRow, actionModeRow, metricRow, heroActions);'), true);
   assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'enableAIFallbackAnswer'"), false);
   assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'aiFallbackFailureAction'"), false);

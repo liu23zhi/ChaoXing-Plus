@@ -913,6 +913,7 @@ function createConfigField(
 
   const isPlaybackRateField = key === 'playbackRate';
   const isVolumeField = key === 'volume';
+  const isCompactChoiceField = key === 'aiFallbackFailureAction' || key === 'upload';
 
   if (definition.label) {
     const label = createElement('label', { text: definition.label });
@@ -957,6 +958,8 @@ function createConfigField(
       optionGrid.style.alignItems = 'stretch';
 
       optionWrap.append(selectedBadge, wrapHint);
+    } else if (isCompactChoiceField) {
+      optionGrid.style.gridTemplateColumns = '1fr';
     } else {
       optionGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(96px, 1fr))';
     }
@@ -1562,6 +1565,8 @@ function createWorkResultsPanel() {
     namespace: 'cx.new.study',
     cfg: {
       enableAnswer: getStudySettingValue('enableAnswer', true),
+      enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', false),
+      aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', 'pause'),
       upload: getStudySettingValue('upload', 'submit')
     }
   };
@@ -1574,11 +1579,11 @@ function createWorkResultsPanel() {
     },
     defaultValue: true
   });
-  answerToggleField.style.maxWidth = '240px';
+  answerToggleField.style.maxWidth = 'none';
 
   const aiAnswerRow = createElement('div');
   aiAnswerRow.style.display = 'grid';
-  aiAnswerRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(220px, 1fr))';
+  aiAnswerRow.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
   aiAnswerRow.style.gap = '12px';
   aiAnswerRow.style.alignItems = 'start';
 
@@ -1590,55 +1595,40 @@ function createWorkResultsPanel() {
     },
     defaultValue: false
   });
-  aiFallbackToggleField.style.maxWidth = '240px';
+  aiFallbackToggleField.style.maxWidth = 'none';
 
   const aiFallbackFailureActionField = createConfigField(studyScript, 'aiFallbackFailureAction', {
     label: 'AI 兜底失败后行为',
+    attrs: {
+      title: '普通题库与 AI 兜底都失败后，决定停留当前页还是继续后续流程。'
+    },
     options: [
       ['pause', '停留当前页'],
       ['skip', '继续后续流程']
     ],
     defaultValue: 'pause'
   });
-  aiFallbackFailureActionField.style.maxWidth = '240px';
+  aiFallbackFailureActionField.style.maxWidth = 'none';
 
   const actionModeRow = createElement('div');
   actionModeRow.style.display = 'grid';
-  actionModeRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(220px, 1fr))';
+  actionModeRow.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
   actionModeRow.style.gap = '12px';
   actionModeRow.style.alignItems = 'start';
 
-  const uploadModeField = createElement('label');
-  uploadModeField.style.display = 'grid';
-  uploadModeField.style.gap = '8px';
-  uploadModeField.style.maxWidth = '240px';
-
-  const uploadModeLabel = createElement('span', { text: '完成后动作' });
-  uploadModeLabel.style.fontSize = '12px';
-  uploadModeLabel.style.fontWeight = '700';
-  uploadModeLabel.style.color = '#334155';
-
-  const uploadModeSelect = document.createElement('select');
-  uploadModeSelect.title = '选择课程任务答题完成后自动保存或自动提交。';
-  uploadModeSelect.style.width = '100%';
-  uploadModeSelect.style.padding = '10px 12px';
-  uploadModeSelect.style.borderRadius = '12px';
-  uploadModeSelect.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-  uploadModeSelect.style.background = 'rgba(255,255,255,0.98)';
-  uploadModeSelect.style.fontSize = '13px';
-  uploadModeSelect.style.fontWeight = '700';
-  uploadModeSelect.style.color = '#0f172a';
-  ['submit', 'save'].forEach((value) => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = value === 'submit' ? '自动提交' : '自动保存';
-    uploadModeSelect.append(option);
+  const uploadModeField = createConfigField(studyScript, 'upload', {
+    label: '完成后动作',
+    attrs: {
+      title: '选择课程任务答题完成后自动保存或自动提交。'
+    },
+    options: [
+      ['submit', '自动提交'],
+      ['save', '自动保存']
+    ],
+    defaultValue: 'submit'
   });
-  uploadModeSelect.value = studyScript.cfg.upload === 'save' ? 'save' : 'submit';
-  uploadModeSelect.oninput = () => {
-    setStudySettingValue(studyScript, 'upload', uploadModeSelect.value === 'save' ? 'save' : 'submit');
-  };
-  uploadModeField.append(uploadModeLabel, uploadModeSelect);
+  uploadModeField.style.maxWidth = 'none';
+
   aiAnswerRow.append(answerToggleField, aiFallbackToggleField);
   actionModeRow.append(aiFallbackFailureActionField, uploadModeField);
 
