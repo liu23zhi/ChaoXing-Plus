@@ -132,6 +132,15 @@ function triggerSyntheticClick(element: HTMLElement | null | undefined): boolean
   return true;
 }
 
+function isChapterChoiceChecked(option: HTMLElement | null | undefined): boolean {
+  if (!option) {
+    return false;
+  }
+
+  const checkedInput = option.parentElement?.querySelector<HTMLInputElement>('label input');
+  return checkedInput?.checked === true || checkedInput?.getAttribute('checked') === 'checked' || option.parentElement?.getAttribute('aria-checked') === 'true';
+}
+
 export type VideoQuizStrategy = 'random' | 'ignore';
 export type StudyMode = 'next' | 'job' | 'manually';
 type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
@@ -1812,6 +1821,8 @@ const JobRunner = {
       return;
     }
 
+    await mappingRecognize(frameDocument);
+
     const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameDocument);
     const roots = TiMu;
     const nestedWorkIframes = Array.from(frameDocument.querySelectorAll<HTMLIFrameElement>('iframe')).filter((item) => {
@@ -1867,7 +1878,7 @@ const JobRunner = {
         elements: {
           title: '.Zy_TItle .clearfix',
           options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
-          type: questionTypeInputSelector,
+          type: 'input[id^="answertype"],input[name^="answertype"]',
           lineAnswerInput: '.line_answer input[name^=answer]',
           lineSelectBox: '.line_answer_ct .selectBox '
         },
@@ -1882,7 +1893,8 @@ const JobRunner = {
 
           const provider = async () => {
             await sleep((period ?? 3) * 1000);
-            const questionType = resolveAnswerSearchType(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument);
+            const typeInput = elements.type[0] as HTMLInputElement | undefined;
+            const questionType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
             const optionsText =
               ctx.type === 'completion'
                 ? ''
@@ -1908,9 +1920,8 @@ const JobRunner = {
         },
         work: async (ctx) => {
           const { elements, searchInfos } = ctx;
-          const type = resolveQuestionTypeForWork(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument, {
-            elements: { options: elements.options as HTMLElement[] }
-          });
+          const typeInput = elements.type[0] as HTMLInputElement | undefined;
+          const type = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
 
           if (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single') {
             const resolver = createDefaultQuestionResolver(ctx)[type];
@@ -1918,12 +1929,32 @@ const JobRunner = {
 
             const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
               if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
-                const checked =
-                  option.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
-                  option.parentElement?.getAttribute('aria-checked') === 'true';
-                if (!checked) {
-                  triggerSyntheticClick(option);
+                const checkedBeforeClick = isChapterChoiceChecked(option);
+                let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
+                let checkedAfterNativeClick = checkedBeforeClick;
+
+                if (!checkedBeforeClick) {
+                  option.click();
+                  await sleep(100);
+                  checkedAfterNativeClick = isChapterChoiceChecked(option);
+                  if (checkedAfterNativeClick) {
+                    appliedBy = 'native-click';
+                  } else {
+                    triggerSyntheticClick(option);
+                    await sleep(100);
+                    appliedBy = isChapterChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
+                  }
                 }
+
+                logDebug('info', '章节测试选项应用诊断', {
+                  type: questionType,
+                  answer,
+                  checkedBeforeClick,
+                  checkedAfterNativeClick,
+                  checkedAfterFinalAttempt: isChapterChoiceChecked(option),
+                  appliedBy,
+                  optionText: option.innerText?.trim() ?? ''
+                }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
               } else if (questionType === 'completion' && option && answer.trim()) {
                 const text = option.parentElement?.querySelector('textarea');
                 const textareaFrame = option.parentElement?.querySelector('iframe');
@@ -1934,11 +1965,17 @@ const JobRunner = {
                   textareaFrame.contentDocument.body.innerHTML = answer;
                 }
                 const saveButton = option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]');
-                triggerSyntheticClick(saveButton);
+                saveButton?.click();
               }
             };
 
             const result = await resolver(searchInfos, resolvedOptions, handler as any);
+            logDebug('info', '章节测试单题结果诊断', {
+              type,
+              finish: result.finish,
+              optionCount: resolvedOptions.length,
+              requestedAnswerCount: searchInfos.reduce((sum, info) => sum + info.results.length, 0)
+            }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
             return result.finish
               ? result
               : ((await runRandomChoiceFallback(type, resolvedOptions, { enableRandomFallbackAnswer }, handler as any)) ?? {
@@ -2498,11 +2535,24 @@ function getQuestionType(
 }
 
 function getQuestionTypeInput(root: ParentNode): HTMLInputElement | undefined {
+  const prioritizedSelectors = ['input[id^="answertype"]', 'input[name^="answertype"]', 'input[name^="type"]', 'input[id^="type"]'];
+
   if (root instanceof HTMLInputElement && root.matches(questionTypeInputSelector)) {
-    return root;
+    const currentValue = root.value?.trim() ?? '';
+    const isPrioritizedTypeInput = root.matches('input[id^="answertype"],input[name^="answertype"]');
+    if (isPrioritizedTypeInput || currentValue) {
+      return root;
+    }
+
+    const scopedRoot = root.closest('.TiMu, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;
+    for (const selector of prioritizedSelectors) {
+      const prioritizedMatch = scopedRoot.querySelector<HTMLInputElement>(selector);
+      if (prioritizedMatch?.value?.trim()) {
+        return prioritizedMatch;
+      }
+    }
   }
 
-  const prioritizedSelectors = ['input[id^="answertype"]', 'input[name^="answertype"]', 'input[name^="type"]', 'input[id^="type"]'];
   for (const selector of prioritizedSelectors) {
     const match = root.querySelector<HTMLInputElement>(selector);
     if (match) {

@@ -51,6 +51,17 @@ test('cx prefers answertype inputs over generic type inputs when resolving quest
   assert.equal(source.includes('return match;'), true);
 });
 
+
+test('cx falls back from empty generic type inputs to nearby answertype inputs in chapter tests', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes("const currentValue = root.value?.trim() ?? '';"), true);
+  assert.equal(source.includes("const isPrioritizedTypeInput = root.matches('input[id^=\"answertype\"],input[name^=\"answertype\"]');"), true);
+  assert.equal(source.includes("const scopedRoot = root.closest('.TiMu, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;"), true);
+  assert.equal(source.includes('const prioritizedMatch = scopedRoot.querySelector<HTMLInputElement>(selector);'), true);
+  assert.equal(source.includes('if (isPrioritizedTypeInput || currentValue) {'), true);
+});
+
 test('cx waits for video attachment or chapter completion before leaving a media task', async () => {
   const source = await readFile(cxPath, 'utf8');
 
@@ -239,7 +250,15 @@ test('cx uses synthetic click dispatch for answering and next-question switching
   assert.equal(source.includes("element.dispatchEvent(new MouseEvent('mousedown', sharedEventInit));"), true);
   assert.equal(source.includes("element.dispatchEvent(new MouseEvent('mouseup', sharedEventInit));"), true);
   assert.equal(source.includes("element.dispatchEvent(new MouseEvent('click', sharedEventInit));"), true);
-  assert.equal(source.includes('triggerSyntheticClick(option);'), true);
-  assert.equal(source.includes('triggerSyntheticClick(saveButton);'), true);
   assert.equal(source.includes('triggerSyntheticClick(next);'), true);
 });
+
+test('cx chapter answering uses the current question type input directly instead of falling back to the whole frame', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const typeInput = elements.type[0] as HTMLInputElement | undefined;'), true);
+  assert.equal(source.includes('const questionType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
+  assert.equal(source.includes('const type = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
+  assert.equal(source.includes('章节测试单题结果诊断'), true);
+});
+
