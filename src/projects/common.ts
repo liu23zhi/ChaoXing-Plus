@@ -1304,8 +1304,6 @@ function createStudySettingsPanel() {
     'enablePPT',
     'enableChapterTest',
     'enableRandomFallbackAnswer',
-    'enableAIFallbackAnswer',
-    'aiFallbackFailureAction',
     'enableHyperlink',
     'notifyWhenHasFaceRecognition'
   ];
@@ -1578,6 +1576,26 @@ function createWorkResultsPanel() {
   });
   answerToggleField.style.maxWidth = '240px';
 
+  const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {
+    label: 'AI 兜底搜题',
+    attrs: {
+      type: 'checkbox',
+      title: '普通题库失败后，允许调用 tikuAdapter AI fallback。'
+    },
+    defaultValue: false
+  });
+  aiFallbackToggleField.style.maxWidth = '240px';
+
+  const aiFallbackFailureActionField = createConfigField(studyScript, 'aiFallbackFailureAction', {
+    label: 'AI 兜底失败后行为',
+    options: [
+      ['pause', '停留当前页'],
+      ['skip', '继续后续流程']
+    ],
+    defaultValue: 'pause'
+  });
+  aiFallbackFailureActionField.style.maxWidth = '240px';
+
   const uploadModeField = createElement('label');
   uploadModeField.style.display = 'grid';
   uploadModeField.style.gap = '8px';
@@ -1647,7 +1665,7 @@ function createWorkResultsPanel() {
   applyActionButtonStyle(clearButton, 'danger');
   heroActions.append(typeButton, clearButton);
 
-  hero.append(heroTop, answerToggleField, uploadModeField, metricRow, heroActions);
+  hero.append(heroTop, answerToggleField, aiFallbackToggleField, aiFallbackFailureActionField, uploadModeField, metricRow, heroActions);
   container.append(hero);
 
   const resultsSection = createElement('div');

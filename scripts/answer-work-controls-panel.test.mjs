@@ -40,6 +40,17 @@ test('common work options default to submit and expose upload mode toggle in the
   assert.equal(source.includes("option.textContent = value === 'submit' ? '自动提交' : '自动保存';"), true);
 });
 
+test('common moves AI fallback controls from the study settings section into the work results control hero', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {"), true);
+  assert.equal(source.includes("const aiFallbackFailureActionField = createConfigField(studyScript, 'aiFallbackFailureAction', {"), true);
+  assert.equal(source.includes("label: 'AI 兜底失败后行为'"), true);
+  assert.equal(source.includes('hero.append(heroTop, answerToggleField, aiFallbackToggleField, aiFallbackFailureActionField, uploadModeField, metricRow, heroActions);'), true);
+  assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'enableAIFallbackAnswer'"), false);
+  assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'aiFallbackFailureAction'"), false);
+});
+
 test('common study panel exposes random fallback and ai fallback controls', async () => {
   const source = await readFile(commonPath, 'utf8');
 
