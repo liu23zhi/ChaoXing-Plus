@@ -71,6 +71,16 @@ test('cx waits for video attachment or chapter completion before leaving a media
   assert.equal(source.includes('await waitForCurrentChapterFinished(10000);'), true);
 });
 
+test('cx auto-scrolls to the current runnable task before starting it', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('scrollToLearningTask(root);'), true);
+  assert.equal(source.includes('function scrollToLearningTask(taskFrame: HTMLIFrameElement) {'), true);
+  assert.equal(source.includes("const iframe = topWindow.document.querySelector<HTMLIFrameElement>('#iframe');"), true);
+  assert.equal(source.includes("const taskCard = taskFrame.closest<HTMLElement>('.ans-attach-ct');"), true);
+  assert.equal(source.includes("taskCard?.scrollIntoView({ behavior: 'smooth', block: 'center' });"), true);
+});
+
 test('cx clears the sibling-sub-task switching notice once a runnable task is found', async () => {
   const source = await readFile(cxPath, 'utf8');
 

@@ -125,6 +125,17 @@ function showTopCenterNotice(
   }
 }
 
+function scrollToLearningTask(taskFrame: HTMLIFrameElement) {
+  try {
+    const iframe = topWindow.document.querySelector<HTMLIFrameElement>('#iframe');
+    const taskCard = taskFrame.closest<HTMLElement>('.ans-attach-ct');
+    taskCard?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    iframe?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch {
+    taskFrame.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
 function triggerSyntheticClick(element: HTMLElement | null | undefined): boolean {
   if (!element) {
     return false;
@@ -1597,6 +1608,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
           func = async () => {
             clearTopCenterNotice();
+            scrollToLearningTask(root);
             logDebug('info', '动作节点诊断：开始媒体任务', {
               frameSrc,
               targetJobId,
@@ -1628,6 +1640,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           } else if (workType === 'job') {
             func = async () => {
               clearTopCenterNotice();
+              scrollToLearningTask(root);
               logDebug('info', '动作节点诊断：开始章节答题', {
                 frameSrc,
                 targetJobId,
@@ -1644,6 +1657,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
             func = async () => {
               clearTopCenterNotice();
+              scrollToLearningTask(root);
               logDebug('info', '动作节点诊断：开始章节答题', {
                 frameSrc,
                 targetJobId,
@@ -1667,6 +1681,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         } else if (attachment.job) {
           func = async () => {
             clearTopCenterNotice();
+            scrollToLearningTask(root);
             const msg = `正在学习 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
@@ -1687,6 +1702,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         } else if (attachment.job) {
           func = async () => {
             clearTopCenterNotice();
+            scrollToLearningTask(root);
             const msg = `正在完成链接阅读任务 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
