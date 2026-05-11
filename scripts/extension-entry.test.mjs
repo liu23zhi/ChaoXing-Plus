@@ -20,19 +20,34 @@ test('extension entry does not write URL-derived injection markers into dataset 
   assert.equal(source.includes('root.dataset[styleInjectedKey]'), false);
 });
 
-test('extension entry bootstraps and persists shared settings through chrome storage by exact key list', async () => {
+test('extension entry bootstraps and persists shared config through namespace filters', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
 
-  assert.equal(source.includes('const sharedStoreKeys = ['), true);
-  assert.equal(source.includes("'common.settings.tiku-adapter.baseurl'"), true);
-  assert.equal(source.includes("'common.settings.tiku-adapter.key'"), true);
-  assert.equal(source.includes('sharedStoreKeys.forEach((key) => {'), true);
-  assert.equal(source.includes("if (typeof value !== 'string') {"), true);
-  assert.equal(source.includes('chrome.storage.local.get(sharedStoreKeys, (result) => {'), true);
-  assert.equal(source.includes('chaoxing-plus:shared-store-sync'), true);
-  assert.equal(source.includes("const sharedStoreKeyPrefix = 'common.settings.';"), false);
-  assert.equal(source.includes('Object.entries(values ?? {}).forEach(([key, value]) => {'), false);
-  assert.equal(source.includes('chrome.storage.local.get(null, (result) => {'), false);
+  assert.equal(source.includes('const sharedStorePrefixes = ['), true);
+  assert.equal(source.includes("'common.settings.'"), true);
+  assert.equal(source.includes("'cx.new.study.'"), true);
+  assert.equal(source.includes("'cx.new.work.'"), true);
+  assert.equal(source.includes("'cx.new.auto-read.'"), true);
+  assert.equal(source.includes("'cx.new.study-dispatcher.'"), true);
+  assert.equal(source.includes('const sharedStoreExcludedKeys = new Set(['), true);
+  assert.equal(source.includes("'common.work-results.results'"), true);
+  assert.equal(source.includes("'common.apps.question-caches'"), true);
+  assert.equal(source.includes('const shouldShareStoreKey = (key) => ('), true);
+  assert.equal(source.includes('Object.entries(values ?? {}).forEach(([key, value]) => {'), true);
+  assert.equal(source.includes('chrome.storage.local.get(null, (result) => {'), true);
+  assert.equal(source.includes('const sharedStoreKeys = ['), false);
+  assert.equal(source.includes('chrome.storage.local.get(sharedStoreKeys, (result) => {'), false);
+});
+
+test('extension entry hydrates shared config again when chrome storage changes in another page', async () => {
+  const source = await readFile(extensionEntryPath, 'utf8');
+
+  assert.equal(source.includes('chrome.storage.onChanged.addListener((changes, areaName) => {'), true);
+  assert.equal(source.includes("if (areaName !== 'local') {"), true);
+  assert.equal(source.includes('const nextValues = {};'), true);
+  assert.equal(source.includes('Object.entries(changes ?? {}).forEach(([key, change]) => {'), true);
+  assert.equal(source.includes('nextValues[key] = change?.newValue;'), true);
+  assert.equal(source.includes('applySharedStoreValues(nextValues);'), true);
 });
 
 test('extension entry starts the main script without blocking on SweetAlert runtime readiness', async () => {

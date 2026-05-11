@@ -1,26 +1,48 @@
 const memoryStore = new Map<string, unknown>();
 
-const SHARED_RUNTIME_KEYS = new Set([
-  'common.settings.tiku-adapter.baseurl',
-  'common.settings.tiku-adapter.key'
+const SHARED_STORE_PREFIXES = [
+  'common.settings.',
+  'cx.new.study.',
+  'cx.new.work.',
+  'cx.new.auto-read.',
+  'cx.new.study-dispatcher.'
+];
+const SHARED_STORE_EXCLUDED_KEYS = new Set([
+  'common.work-results.results',
+  'common.apps.question-caches'
 ]);
 
 const SHARED_STORE_HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
 const SHARED_STORE_SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
 
+function shouldShareStoreKey(key: string) {
+  return SHARED_STORE_EXCLUDED_KEYS.has(key) === false && SHARED_STORE_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
 function getSharedAttributeName(key: string) {
   return `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 }
 
-function readSharedBootstrapValue(key: string): string | undefined {
-  if (!SHARED_RUNTIME_KEYS.has(key)) {
+function serializeSharedValue(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function readSharedBootstrapValue<T>(key: string): T | undefined {
+  if (!shouldShareStoreKey(key)) {
     return undefined;
   }
 
   try {
     const root = document.documentElement;
     const value = root?.getAttribute(getSharedAttributeName(key));
-    return typeof value === 'string' && value.length > 0 ? value : undefined;
+    if (typeof value !== 'string' || value.length === 0) {
+      return undefined;
+    }
+    return JSON.parse(value) as T;
   } catch {
     return undefined;
   }
@@ -29,10 +51,10 @@ function readSharedBootstrapValue(key: string): string | undefined {
 function readLocal<T>(key: string, fallback: T): T {
   const raw = localStorage.getItem(key);
   if (raw === null) {
-    const bootstrapValue = readSharedBootstrapValue(key);
-    if (typeof bootstrapValue === 'string') {
+    const bootstrapValue = readSharedBootstrapValue<T>(key);
+    if (bootstrapValue !== undefined) {
       localStorage.setItem(key, JSON.stringify(bootstrapValue));
-      return bootstrapValue as T;
+      return bootstrapValue;
     }
     return fallback;
   }
@@ -53,16 +75,20 @@ function hydrateSharedRuntimeValues(detail: unknown) {
     return;
   }
 
-  for (const key of SHARED_RUNTIME_KEYS) {
-    const value = (detail as Record<string, unknown>)[key];
-    if (typeof value !== 'string') {
+  for (const [key, value] of Object.entries(detail as Record<string, unknown>)) {
+    if (!shouldShareStoreKey(key)) {
+      continue;
+    }
+
+    const serialized = serializeSharedValue(value);
+    if (typeof serialized !== 'string') {
       continue;
     }
 
     writeMemory(key, value);
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(key, serialized);
     try {
-      document.documentElement?.setAttribute(getSharedAttributeName(key), value);
+      document.documentElement?.setAttribute(getSharedAttributeName(key), serialized);
     } catch {
       // ignore attribute sync failures
     }
@@ -70,12 +96,17 @@ function hydrateSharedRuntimeValues(detail: unknown) {
 }
 
 function emitSharedRuntimeSync(key: string, value: unknown) {
-  if (!SHARED_RUNTIME_KEYS.has(key) || typeof value !== 'string') {
+  if (!shouldShareStoreKey(key)) {
+    return;
+  }
+
+  const serialized = serializeSharedValue(value);
+  if (typeof serialized !== 'string') {
     return;
   }
 
   try {
-    document.documentElement?.setAttribute(getSharedAttributeName(key), value);
+    document.documentElement?.setAttribute(getSharedAttributeName(key), serialized);
     document.dispatchEvent(
       new CustomEvent(SHARED_STORE_SYNC_EVENT, {
         detail: {

@@ -13,25 +13,50 @@
     '[id="panel-common-render"]'
   ].join(', ');
 
-  const sharedStoreKeys = [
-    'common.settings.tiku-adapter.baseurl',
-    'common.settings.tiku-adapter.key'
+  const sharedStorePrefixes = [
+    'common.settings.',
+    'cx.new.study.',
+    'cx.new.work.',
+    'cx.new.auto-read.',
+    'cx.new.study-dispatcher.'
   ];
+  const sharedStoreExcludedKeys = new Set([
+    'common.work-results.results',
+    'common.apps.question-caches'
+  ]);
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
   const sharedStoreHydrateEvent = 'chaoxing-plus:shared-store-hydrate';
   const swalAliasKey = '__chaoxing_plus_swal__';
 
+  const shouldShareStoreKey = (key) => (
+    typeof key === 'string'
+    && sharedStoreExcludedKeys.has(key) === false
+    && sharedStorePrefixes.some((prefix) => key.startsWith(prefix))
+  );
+
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 
+  const serializeSharedValue = (value) => {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined;
+    }
+  };
+
   const applySharedStoreValues = (values) => {
-    sharedStoreKeys.forEach((key) => {
-      const value = values?.[key];
-      if (typeof value !== 'string') {
+    Object.entries(values ?? {}).forEach(([key, value]) => {
+      if (!shouldShareStoreKey(key)) {
         return;
       }
 
-      root.setAttribute(getSharedAttributeName(key), value);
-      localStorage.setItem(key, JSON.stringify(value));
+      const serialized = serializeSharedValue(value);
+      if (typeof serialized !== 'string') {
+        return;
+      }
+
+      root.setAttribute(getSharedAttributeName(key), serialized);
+      localStorage.setItem(key, serialized);
     });
 
     document.dispatchEvent(new CustomEvent(sharedStoreHydrateEvent, { detail: values }));
@@ -43,12 +68,18 @@
     }
 
     const nextValues = {};
-    sharedStoreKeys.forEach((key) => {
-      const value = detail[key];
-      if (typeof value === 'string') {
-        nextValues[key] = value;
-        root.setAttribute(getSharedAttributeName(key), value);
+    Object.entries(detail).forEach(([key, value]) => {
+      if (!shouldShareStoreKey(key)) {
+        return;
       }
+
+      const serialized = serializeSharedValue(value);
+      if (typeof serialized !== 'string') {
+        return;
+      }
+
+      nextValues[key] = value;
+      root.setAttribute(getSharedAttributeName(key), serialized);
     });
 
     if (Object.keys(nextValues).length > 0) {
@@ -61,8 +92,27 @@
   });
 
   if (chrome?.storage?.local?.get) {
-    chrome.storage.local.get(sharedStoreKeys, (result) => {
+    chrome.storage.local.get(null, (result) => {
       applySharedStoreValues(result ?? {});
+    });
+  }
+
+  if (chrome?.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') {
+        return;
+      }
+
+      const nextValues = {};
+      Object.entries(changes ?? {}).forEach(([key, change]) => {
+        if (!shouldShareStoreKey(key)) {
+          return;
+        }
+
+        nextValues[key] = change?.newValue;
+      });
+
+      applySharedStoreValues(nextValues);
     });
   }
 

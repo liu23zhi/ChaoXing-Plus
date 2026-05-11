@@ -90,15 +90,24 @@ test('cx clears the sibling-sub-task switching notice once a runnable task is fo
   assert.equal(source.includes("const msg = `正在处理章节测试 : ${jobName}`;"), true);
 });
 
-test('cx checks sibling sub task tabs before warning when the chapter remains unfinished', async () => {
+test('cx checks sibling sub task tabs in sequence and persists progress so it can reach later tabs', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes('const chapterSubTaskSwitchState = new Map<string, Set<string>>();'), true);
-  assert.equal(source.includes('trySwitchToNextUnvisitedSubTask() {'), true);
-  assert.equal(source.includes("const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);"), true);
-  assert.equal(source.includes('const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();'), true);
+  assert.equal(source.includes("const CHAPTER_SUBTASK_PROGRESS_PREFIX = 'cx.new.study.subtask-progress.';"), true);
+  assert.equal(source.includes('interface ChapterSubTaskProgress {'), true);
+  assert.equal(source.includes('runtimeStore.get<ChapterSubTaskProgress>('), true);
+  assert.equal(source.includes('for (let offset = 1; offset < tabs.length; offset += 1) {'), true);
+  assert.equal(source.includes('const nextIndex = (activeIndex + offset) % tabs.length;'), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
-  assert.equal(source.includes('if (switchedSubTask) {'), true);
+});
+
+test('cx pauses only after checking all sibling sub tasks three times without finding runnable work', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const maxAttempts = tabs.length * 3;'), true);
+  assert.equal(source.includes('const attempts = progress.lastActiveTabKey === activeTabKey ? progress.attempts : progress.attempts + 1;'), true);
+  assert.equal(source.includes('if (attempts >= maxAttempts) {'), true);
+  assert.equal(source.includes('当前章节的所有子任务已连续检查 3 轮，仍未找到可执行任务，脚本已暂停自动切换。'), true);
 });
 
 test('cx blocks auto-jump when only finished visible jobs are detected but the current chapter is still unfinished', async () => {

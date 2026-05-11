@@ -69,6 +69,9 @@ const WORK_OPTIONS_KEY = 'common.settings.work-options';
 const WORK_RESULTS_KEY = 'common.work-results.results';
 const WORK_RESULTS_VIEW_KEY = 'common.work-results.type';
 const QUESTION_CACHE_KEY = 'common.apps.question-caches';
+const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';
+
+const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';
 
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
@@ -373,6 +376,14 @@ function collectStudyMediaElements() {
   return medias;
 }
 
+function isSharedStudySettingKey(key: string) {
+  return key.startsWith(SHARED_STUDY_SETTINGS_PREFIX);
+}
+
+function syncStudySettingCrossDomain(key: string, value: unknown) {
+  runtimeStore.set(key, value);
+}
+
 function applyStudySettingRuntimeEffect(key: string, value: unknown) {
   if (!['playbackRate', 'volume', 'muteMedia'].includes(key)) {
     return;
@@ -406,20 +417,39 @@ function applyStudySettingRuntimeEffect(key: string, value: unknown) {
   });
 }
 
-function maybeWarnHighPlaybackRate(value: unknown) {
+async function maybeWarnHighPlaybackRate(script: { cfg: Record<string, unknown>; namespace?: string }, value: unknown) {
   const rate = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {
     return;
   }
 
   hasWarnedHighPlaybackRateInCurrentPage = true;
-  void $modal.alert('当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');
+  const confirmed = await $modal.confirm({
+    content: '当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。',
+    confirmButtonText: '继续使用',
+    cancelButtonText: '降到 1 倍',
+    defaultConfirmed: true
+  });
+
+  if (!confirmed) {
+    setStudySettingValueInternal(script, 'playbackRate', 1, { warn: false });
+  }
 }
 
-function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?: string }, key: string, value: unknown) {
+function setStudySettingValueInternal(
+  script: { cfg: Record<string, unknown>; namespace?: string },
+  key: string,
+  value: unknown,
+  options: { warn?: boolean } = {}
+) {
   const setValue = (nextKey: string, nextValue: unknown) => {
     script.cfg[nextKey] = nextValue;
-    runtimeStore.set(`${script.namespace}.${nextKey}`, nextValue);
+    const storageKey = `${script.namespace}.${nextKey}`;
+    if (isSharedStudySettingKey(storageKey)) {
+      syncStudySettingCrossDomain(storageKey, nextValue);
+    } else {
+      runtimeStore.set(storageKey, nextValue);
+    }
     applyStudySettingRuntimeEffect(nextKey, nextValue);
   };
 
@@ -442,10 +472,14 @@ function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?
   }
 
   setValue(key, value);
-  if (key === 'playbackRate') {
-    maybeWarnHighPlaybackRate(value);
+  if (key === 'playbackRate' && options.warn !== false) {
+    void maybeWarnHighPlaybackRate(script, value);
   }
   renderWorkResultsPanel();
+}
+
+function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?: string }, key: string, value: unknown) {
+  setStudySettingValueInternal(script, key, value);
 }
 
 function setWorkResultsView(type: WorkResultsView) {
@@ -2026,6 +2060,29 @@ window.addEventListener('storage', (event) => {
     renderWorkResultsPanel();
   }
 });
+
+document.addEventListener('chaoxing-plus:shared-store-hydrate', () => {
+  renderWorkResultsPanel();
+});
+
+try {
+  const sharedConfigObserver = new MutationObserver((mutations) => {
+    const shouldRefreshPanel = mutations.some(({ attributeName }) => {
+      return Boolean(attributeName?.startsWith(SHARED_STORE_ATTRIBUTE_PREFIX));
+    });
+
+    if (shouldRefreshPanel) {
+      renderWorkResultsPanel();
+    }
+  });
+
+  const root = document.documentElement;
+  if (root) {
+    sharedConfigObserver.observe(root, { attributes: true });
+  }
+} catch {
+  // ignore shared config observer failures
+}
 
 export const CommonProject = Project.create({
   name: '通用',

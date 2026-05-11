@@ -52,16 +52,32 @@ test('common study panel exposes random fallback and ai fallback controls', asyn
   assert.equal(source.includes("label: 'AI 兜底失败后行为'"), true);
 });
 
-test('common only warns high playback rate on user setting changes and only once per page load', async () => {
+test('common watches shared config attributes so the floating panel updates live across pages', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes('let hasWarnedHighPlaybackRateInCurrentPage = false;'), true);
+  assert.equal(source.includes("const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';"), true);
+  assert.equal(source.includes('new MutationObserver((mutations) => {'), true);
+  assert.equal(source.includes('const shouldRefreshPanel = mutations.some(({ attributeName }) => {'), true);
+  assert.equal(source.includes('return Boolean(attributeName?.startsWith(SHARED_STORE_ATTRIBUTE_PREFIX));'), true);
+  assert.equal(source.includes('if (shouldRefreshPanel) {'), true);
+  assert.equal(source.includes('renderWorkResultsPanel();'), true);
+});
+
+test('common shares all study settings across domains and warns for playback rate at or above 2x', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';"), true);
+  assert.equal(source.includes('function isSharedStudySettingKey(key: string) {'), true);
+  assert.equal(source.includes('return key.startsWith(SHARED_STUDY_SETTINGS_PREFIX);'), true);
+  assert.equal(source.includes('function syncStudySettingCrossDomain(key: string, value: unknown) {'), true);
+  assert.equal(source.includes('if (isSharedStudySettingKey(storageKey)) {'), true);
+  assert.equal(source.includes('syncStudySettingCrossDomain(storageKey, nextValue);'), true);
+  assert.equal(source.includes("if (key === 'playbackRate' && options.warn !== false) {\n    void maybeWarnHighPlaybackRate(script, value);\n  }"), true);
   assert.equal(source.includes('if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {'), true);
-  assert.equal(source.includes('hasWarnedHighPlaybackRateInCurrentPage = true;'), true);
-  assert.equal(source.includes('const STUDY_PLAYBACK_RATE_WARNING_ACK_KEY'), false);
-  assert.equal(source.includes('runtimeStore.get(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, 0)'), false);
-  assert.equal(source.includes('runtimeStore.set(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, rate)'), false);
-  assert.equal(source.includes("void $modal.alert('当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');"), true);
-  assert.equal(source.includes("if (key === 'playbackRate') {\n    maybeWarnHighPlaybackRate(value);\n  }"), true);
+  assert.equal(source.includes("const confirmed = await $modal.confirm({"), true);
+  assert.equal(source.includes("content: '当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。'"), true);
+  assert.equal(source.includes("confirmButtonText: '继续使用'"), true);
+  assert.equal(source.includes("cancelButtonText: '降到 1 倍'"), true);
+  assert.equal(source.includes("setStudySettingValueInternal(script, 'playbackRate', 1, { warn: false });"), true);
 });
 

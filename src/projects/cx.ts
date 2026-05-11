@@ -12,7 +12,7 @@ import {
   type SearchInformation,
   type SimplifyWorkResult
 } from '../core/index.js';
-import { Project, $gm } from '../runtime/index.js';
+import { Project, $gm, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
@@ -992,7 +992,13 @@ export const CXProject = Project.create({
 
 const chapterCounter = new Map<string, number>();
 const chapterStayCounter = new Map<string, number>();
-const chapterSubTaskSwitchState = new Map<string, Set<string>>();
+const CHAPTER_SUBTASK_PROGRESS_PREFIX = 'cx.new.study.subtask-progress.';
+
+interface ChapterSubTaskProgress {
+  attempts: number;
+  lastActiveTabKey: string;
+}
+
 let lastChapterStayKey = '';
 
 export const CXAnalyses = {
@@ -1023,50 +1029,80 @@ export const CXAnalyses = {
     const chapter = topWindow.document.querySelector<HTMLElement>('.posCatalog_active');
     return chapter?.getAttribute('id') || topWindow.document.querySelector<HTMLInputElement>('#curChapterId')?.value || '';
   },
+  getChapterSubTaskProgressKey() {
+    const chapterKey = this.getCurrentChapterKey();
+    return chapterKey ? `${CHAPTER_SUBTASK_PROGRESS_PREFIX}${chapterKey}` : '';
+  },
+  getChapterSubTaskProgress(): ChapterSubTaskProgress {
+    const key = this.getChapterSubTaskProgressKey();
+    if (!key) {
+      return { attempts: 0, lastActiveTabKey: '' };
+    }
+    return runtimeStore.get<ChapterSubTaskProgress>(key, { attempts: 0, lastActiveTabKey: '' });
+  },
+  setChapterSubTaskProgress(progress: ChapterSubTaskProgress) {
+    const key = this.getChapterSubTaskProgressKey();
+    if (!key) {
+      return;
+    }
+    runtimeStore.set(key, progress);
+  },
+  clearChapterSubTaskProgress() {
+    const key = this.getChapterSubTaskProgressKey();
+    if (!key) {
+      return;
+    }
+    runtimeStore.remove(key);
+  },
   trySwitchToNextUnvisitedSubTask() {
     const chapterKey = this.getCurrentChapterKey();
     if (!chapterKey) {
-      return false;
+      return { switched: false, paused: false };
     }
 
     const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);
     if (tabs.length <= 1) {
-      return false;
+      return { switched: false, paused: false };
     }
 
-    const visited = chapterSubTaskSwitchState.get(chapterKey) ?? new Set<string>();
     const activeIndex = tabs.findIndex((tab) => tab.classList.contains('active'));
     if (activeIndex === -1) {
-      return false;
+      return { switched: false, paused: false };
     }
 
     const activeTab = tabs[activeIndex];
     const activeTabKey = activeTab.getAttribute('id') || activeTab.getAttribute('cardid') || String(activeIndex + 1);
-    visited.add(activeTabKey);
+    const progress = this.getChapterSubTaskProgress();
+    const attempts = progress.lastActiveTabKey === activeTabKey ? progress.attempts : progress.attempts + 1;
+    const maxAttempts = tabs.length * 3;
 
-    const nextTab = tabs.find((tab, index) => {
-      if (index === activeIndex) {
-        return false;
+    if (attempts >= maxAttempts) {
+      this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: activeTabKey });
+      return { switched: false, paused: true };
+    }
+
+    for (let offset = 1; offset < tabs.length; offset += 1) {
+      const nextIndex = (activeIndex + offset) % tabs.length;
+      const nextTab = tabs[nextIndex];
+      if (!nextTab) {
+        continue;
       }
-      const tabKey = tab.getAttribute('id') || tab.getAttribute('cardid') || String(index + 1);
-      return visited.has(tabKey) === false;
-    });
 
-    if (!nextTab) {
-      chapterSubTaskSwitchState.set(chapterKey, visited);
-      return false;
+      const nextTabKey = nextTab.getAttribute('id') || nextTab.getAttribute('cardid') || String(nextIndex + 1);
+      if (nextTabKey === activeTabKey) {
+        continue;
+      }
+
+      this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: nextTabKey });
+      const switched = triggerSyntheticClick(nextTab);
+      if (!switched) {
+        nextTab.click();
+      }
+
+      return { switched: true, paused: false };
     }
 
-    const nextTabKey = nextTab.getAttribute('id') || nextTab.getAttribute('cardid') || String(tabs.indexOf(nextTab) + 1);
-    visited.add(nextTabKey);
-    chapterSubTaskSwitchState.set(chapterKey, visited);
-
-    const switched = triggerSyntheticClick(nextTab);
-    if (!switched) {
-      nextTab.click();
-    }
-
-    return true;
+    return { switched: false, paused: false };
   },
   trackChapterStayState() {
     const chapterStayKey = this.getCurrentChapterStayKey();
@@ -1270,6 +1306,7 @@ export async function study(opts: StudyOptions) {
 
     const job = result.job;
     if (job && job.func) {
+      CXAnalyses.clearChapterSubTaskProgress();
       try {
         await job.func();
       } catch (e) {
@@ -1397,11 +1434,19 @@ export async function study(opts: StudyOptions) {
 
   if ((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0) {
     const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();
-    if (switchedSubTask) {
+    if (switchedSubTask.switched) {
       const msg = '当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。';
       showTopCenterNotice(msg, { duration: 5000, tone: 'info' });
       $message.info(msg);
       $console.info(msg);
+      return;
+    }
+
+    if (switchedSubTask.paused) {
+      const msg = '当前章节的所有子任务已连续检查 3 轮，仍未找到可执行任务，脚本已暂停自动切换。';
+      showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+      $message.warn({ content: msg, duration: 0 });
+      $console.warn(msg);
       return;
     }
 
