@@ -1576,6 +1576,12 @@ function createWorkResultsPanel() {
   });
   answerToggleField.style.maxWidth = '240px';
 
+  const aiAnswerRow = createElement('div');
+  aiAnswerRow.style.display = 'grid';
+  aiAnswerRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(220px, 1fr))';
+  aiAnswerRow.style.gap = '12px';
+  aiAnswerRow.style.alignItems = 'start';
+
   const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {
     label: 'AI 兜底搜题',
     attrs: {
@@ -1595,6 +1601,12 @@ function createWorkResultsPanel() {
     defaultValue: 'pause'
   });
   aiFallbackFailureActionField.style.maxWidth = '240px';
+
+  const actionModeRow = createElement('div');
+  actionModeRow.style.display = 'grid';
+  actionModeRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(220px, 1fr))';
+  actionModeRow.style.gap = '12px';
+  actionModeRow.style.alignItems = 'start';
 
   const uploadModeField = createElement('label');
   uploadModeField.style.display = 'grid';
@@ -1627,6 +1639,8 @@ function createWorkResultsPanel() {
     setStudySettingValue(studyScript, 'upload', uploadModeSelect.value === 'save' ? 'save' : 'submit');
   };
   uploadModeField.append(uploadModeLabel, uploadModeSelect);
+  aiAnswerRow.append(answerToggleField, aiFallbackToggleField);
+  actionModeRow.append(aiFallbackFailureActionField, uploadModeField);
 
   const heroActions = createElement('div');
   heroActions.style.display = 'flex';
@@ -1665,7 +1679,7 @@ function createWorkResultsPanel() {
   applyActionButtonStyle(clearButton, 'danger');
   heroActions.append(typeButton, clearButton);
 
-  hero.append(heroTop, answerToggleField, aiFallbackToggleField, aiFallbackFailureActionField, uploadModeField, metricRow, heroActions);
+  hero.append(heroTop, aiAnswerRow, actionModeRow, metricRow, heroActions);
   container.append(hero);
 
   const resultsSection = createElement('div');

@@ -4,6 +4,7 @@ const toastEnabled = false;
 const swalAliasKey = '__chaoxing_plus_swal__';
 const swalHostId = 'chaoxing-plus-swal-host';
 const swalTargetId = 'chaoxing-plus-swal-target';
+const swalStyleId = 'chaoxing-plus-swal-style-reset';
 
 type SwalOwnerWindow = Window & Record<string, unknown>;
 type SwalFireOptions = SweetAlertOptions;
@@ -23,6 +24,32 @@ function getSwalRuntime() {
   return { runtimeSwal: Swal, targetDocument: document };
 }
 
+function ensureSwalStyleReset(targetDocument: Document) {
+  try {
+    let style = targetDocument.getElementById(swalStyleId) as HTMLStyleElement | null;
+    if (!style) {
+      style = targetDocument.createElement('style');
+      style.id = swalStyleId;
+      style.textContent = `
+#${swalTargetId} .swal2-container {
+  font-size: 16px !important;
+  line-height: 1.5 !important;
+  --swal2-container-padding: 10px;
+}
+
+#${swalTargetId} .swal2-popup {
+  font-size: 16px !important;
+  line-height: 1.5 !important;
+  --swal2-border-radius: 5px;
+}
+`;
+      (targetDocument.head || targetDocument.documentElement).appendChild(style);
+    }
+  } catch {
+    // ignore style injection failures and fall back to default SweetAlert styling
+  }
+}
+
 function getOrCreateSwalTarget(targetDocument: Document) {
   try {
     let host = targetDocument.getElementById(swalHostId);
@@ -31,6 +58,8 @@ function getOrCreateSwalTarget(targetDocument: Document) {
       host.id = swalHostId;
       (targetDocument.body || targetDocument.documentElement).appendChild(host);
     }
+    host.style.fontSize = '16px';
+    host.style.lineHeight = '1.5';
 
     let target = targetDocument.getElementById(swalTargetId);
     if (!target) {
@@ -38,6 +67,8 @@ function getOrCreateSwalTarget(targetDocument: Document) {
       target.id = swalTargetId;
       host.appendChild(target);
     }
+    target.style.fontSize = '16px';
+    target.style.lineHeight = '1.5';
 
     return target;
   } catch {
@@ -49,6 +80,7 @@ function getOrCreateSwalTarget(targetDocument: Document) {
 
 function fireSwal(options: SwalFireOptions) {
   const { runtimeSwal, targetDocument } = getSwalRuntime();
+  ensureSwalStyleReset(targetDocument);
   return runtimeSwal.fire({
     ...options,
     target: getOrCreateSwalTarget(targetDocument)

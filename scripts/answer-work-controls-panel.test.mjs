@@ -36,6 +36,8 @@ test('common work options default to submit and expose upload mode toggle in the
   assert.equal(source.includes('uploadModeField.append(uploadModeSelect);'), false);
   assert.equal(source.includes("const uploadModeField = createElement('label');"), true);
   assert.equal(source.includes("const uploadModeLabel = createElement('span', { text: '完成后动作' });"), true);
+  assert.equal(source.includes("const actionModeRow = createElement('div');"), true);
+  assert.equal(source.includes("actionModeRow.append(aiFallbackFailureActionField, uploadModeField);"), true);
   assert.equal(source.includes("option.value = value;"), true);
   assert.equal(source.includes("option.textContent = value === 'submit' ? '自动提交' : '自动保存';"), true);
 });
@@ -44,9 +46,11 @@ test('common moves AI fallback controls from the study settings section into the
   const source = await readFile(commonPath, 'utf8');
 
   assert.equal(source.includes("const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {"), true);
+  assert.equal(source.includes("const aiAnswerRow = createElement('div');"), true);
+  assert.equal(source.includes('aiAnswerRow.append(answerToggleField, aiFallbackToggleField);'), true);
   assert.equal(source.includes("const aiFallbackFailureActionField = createConfigField(studyScript, 'aiFallbackFailureAction', {"), true);
   assert.equal(source.includes("label: 'AI 兜底失败后行为'"), true);
-  assert.equal(source.includes('hero.append(heroTop, answerToggleField, aiFallbackToggleField, aiFallbackFailureActionField, uploadModeField, metricRow, heroActions);'), true);
+  assert.equal(source.includes('hero.append(heroTop, aiAnswerRow, actionModeRow, metricRow, heroActions);'), true);
   assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'enableAIFallbackAnswer'"), false);
   assert.equal(source.includes("const taskKeys = [\n    'enableMedia',\n    'enablePPT',\n    'enableChapterTest',\n    'enableRandomFallbackAnswer',\n    'aiFallbackFailureAction'"), false);
 });

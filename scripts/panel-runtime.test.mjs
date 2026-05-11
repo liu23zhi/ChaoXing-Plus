@@ -23,16 +23,15 @@ test('panel root creation appends to body with documentElement fallback', async 
   assert.equal(source.includes('(document.body || document.documentElement).appendChild(root);'), true);
 });
 
-test('modal alerts prefer top-window SweetAlert runtime and keep target in that same document', async () => {
+test('modal alerts inject a SweetAlert style reset so page rem scaling does not distort popup layout', async () => {
   const source = await readFile(modalRuntimePath, 'utf8');
 
-  assert.equal(source.includes("const swalAliasKey = '__chaoxing_plus_swal__';"), true);
-  assert.equal(source.includes('function getSwalRuntime()'), true);
-  assert.equal(source.includes('const topWindow = window.top as SwalOwnerWindow | null;'), true);
-  assert.equal(source.includes('const runtimeSwal = topWindow?.[swalAliasKey];'), true);
-  assert.equal(source.includes("return { runtimeSwal: runtimeSwal as typeof Swal, targetDocument: topDocument }"), true);
-  assert.equal(source.includes('const { runtimeSwal, targetDocument } = getSwalRuntime();'), true);
-  assert.equal(source.includes('target: getOrCreateSwalTarget(targetDocument)'), true);
-  assert.equal(source.includes('return { runtimeSwal: Swal, targetDocument: document };'), true);
-  assert.equal(source.includes('return Swal.fire({'), false);
+  assert.equal(source.includes("const swalStyleId = 'chaoxing-plus-swal-style-reset';"), true);
+  assert.equal(source.includes("host.style.fontSize = '16px';"), true);
+  assert.equal(source.includes("target.style.fontSize = '16px';"), true);
+  assert.equal(source.includes('#${swalTargetId} .swal2-container {'), true);
+  assert.equal(source.includes('#${swalTargetId} .swal2-popup {'), true);
+  assert.equal(source.includes('font-size: 16px !important;'), true);
+  assert.equal(source.includes('--swal2-container-padding: 10px;'), true);
+  assert.equal(source.includes('--swal2-border-radius: 5px;'), true);
 });
