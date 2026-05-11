@@ -292,6 +292,30 @@ test('cx chapter answering uses the current question type input directly instead
   assert.equal(source.includes('章节测试单题结果诊断'), true);
 });
 
+test('cx retries chapter answers with AI fallback when submit popup says the score is below passing', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('function detectChapterRetakePrompt() {'), true);
+  assert.equal(source.includes("const popup = topWindow.document.querySelector<HTMLElement>('#workpop');"), true);
+  assert.equal(source.includes("const popupContent = topWindow.document.querySelector<HTMLElement>('#popcontent')?.textContent?.trim() ?? '';"), true);
+  assert.equal(source.includes("popupContent.includes('未达到及格线')"), true);
+  assert.equal(source.includes("popupContent.includes('请重做')"), true);
+  assert.equal(source.includes('const retakeRequired = detectChapterRetakePrompt();'), true);
+  assert.equal(source.includes('const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });'), true);
+  assert.equal(source.includes('const retryResults = await aiRetryWorker.doWork();'), true);
+  assert.equal(source.includes('正在使用 AI 兜底答案尝试二次改答'), true);
+});
+
+test('cx defers chapter cache writes until submit succeeds without a retake prompt', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('onCacheableResult?: (result: SimplifyWorkResult) => void;'), true);
+  assert.equal(source.includes('const cacheableResults: SimplifyWorkResult[] = [];'), true);
+  assert.equal(source.includes('workerOptions.onCacheableResult?.(currentSimplified);'), true);
+  assert.equal(source.includes('appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);'), true);
+  assert.equal(source.includes('appsMethods().addQuestionCacheFromWorkResult?.(simplified.filter((_, index) => index === res.indexOf(curr)));'), false);
+});
+
 test('cx preserves previously detected question types when later result patches cannot infer them', async () => {
   const source = await readFile(cxPath, 'utf8');
 

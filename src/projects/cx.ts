@@ -392,6 +392,33 @@ async function appendAIFallbackSearchInfos(
   throw new Error(msg);
 }
 
+function detectChapterRetakePrompt() {
+  try {
+    const popup = topWindow.document.querySelector<HTMLElement>('#workpop');
+    if (!popup || popup.style.display === 'none') {
+      return false;
+    }
+
+    const popupContent = topWindow.document.querySelector<HTMLElement>('#popcontent')?.textContent?.trim() ?? '';
+    return popupContent.includes('未达到及格线') && popupContent.includes('请重做');
+  } catch {
+    return false;
+  }
+}
+
+function clearChapterRetakePrompt() {
+  try {
+    const ok = topWindow.document.querySelector<HTMLElement>('#popok');
+    if (ok) {
+      triggerSyntheticClick(ok);
+      ok.click();
+    }
+    (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+  } catch {
+    // ignore retake popup close errors
+  }
+}
+
 async function runRandomChoiceFallback(
   questionType: ReturnType<typeof getQuestionType>,
   options: HTMLElement[],
@@ -1963,7 +1990,14 @@ const JobRunner = {
         .trim();
     };
 
-    const createChapterWorker = (questionRoots: HTMLElement[]) =>
+    const createChapterWorker = (
+      questionRoots: HTMLElement[],
+      workerOptions: {
+        forceAIFallbackOnly?: boolean;
+        skipCache?: boolean;
+        onCacheableResult?: (result: SimplifyWorkResult) => void;
+      } = {}
+    ) =>
       new OCSWorker({
         root: questionRoots,
         elements: {
@@ -1990,14 +2024,16 @@ const JobRunner = {
               ctx.type === 'completion'
                 ? ''
                 : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
-            const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
-              type: questionType,
-              title,
-              options: optionsText
-            });
+            const baseInfos = workerOptions.forceAIFallbackOnly
+              ? []
+              : await defaultAnswerWrapperHandler(answererWrappers, {
+                  type: questionType,
+                  title,
+                  options: optionsText
+                });
             return appendAIFallbackSearchInfos(
               baseInfos,
-              { enableAIFallbackAnswer, aiFallbackFailureAction },
+              { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
               {
                 title,
                 type: questionType ?? 'unknown',
@@ -2007,7 +2043,7 @@ const JobRunner = {
           };
 
           const searchInCaches = appsMethods().searchAnswerInCaches;
-          return searchInCaches ? searchInCaches(title, provider) : provider();
+          return searchInCaches && !workerOptions.skipCache ? searchInCaches(title, provider) : provider();
         },
         work: async (ctx) => {
           const { elements, searchInfos } = ctx;
@@ -2105,6 +2141,7 @@ const JobRunner = {
           const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
             elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
           }) : undefined;
+          const currentSimplified = simplified.filter((_, index) => index === res.indexOf(curr))[0];
           if (currentRoot) {
             const currentResults = workResultsMethods().getResults?.();
             const previousManual = currentResults?.[currentIndex]?.manual ?? false;
@@ -2118,8 +2155,8 @@ const JobRunner = {
             });
           }
 
-          if (curr.result?.finish) {
-            appsMethods().addQuestionCacheFromWorkResult?.(simplified.filter((_, index) => index === res.indexOf(curr)));
+          if (curr.result?.finish && currentSimplified) {
+            workerOptions.onCacheableResult?.(currentSimplified);
           }
         },
         async onElementSearched(elements) {
@@ -2145,7 +2182,12 @@ const JobRunner = {
         }
       });
 
-    const worker = createChapterWorker(roots);
+    const cacheableResults: SimplifyWorkResult[] = [];
+    const worker = createChapterWorker(roots, {
+      onCacheableResult(result) {
+        cacheableResults.push(result);
+      }
+    });
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
 
     workResultsMethods().setRuntimeControls?.({
@@ -2233,7 +2275,38 @@ const JobRunner = {
           (frameWindow as Record<string, any>).btnBlueSubmit?.();
           await sleep(3000);
           (frameWindow as Record<string, any>).submitCheckTimes?.();
-          (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+          const retakeRequired = detectChapterRetakePrompt();
+          if (retakeRequired) {
+            const msg = '章节测试提交后提示未达到及格线，正在使用 AI 兜底答案尝试二次改答。';
+            showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+            $message.warn({ content: msg, duration: 0 });
+            $console.warn(msg);
+            clearChapterRetakePrompt();
+            const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });
+            const retryResults = await aiRetryWorker.doWork();
+            logDebug('info', '动作节点诊断：AI 二次改答完成', {
+              resultCount: retryResults.length,
+              uploadMode: upload,
+              retakeRequired
+            }, undefined, { correlationId: chapterActionCorrelationId });
+            await worker.uploadHandler({
+              type: 'force',
+              results: retryResults,
+              async callback(retryFinishedRate) {
+                const retryUploadMsg = `AI 二次改答完成率 ${retryFinishedRate.toFixed(2)}% : 3秒后将再次尝试提交`;
+                $console.info(retryUploadMsg);
+                $message.success({ content: retryUploadMsg, duration: 3000 });
+                await sleep(3000);
+                (frameWindow as Record<string, any>).btnBlueSubmit?.();
+                await sleep(3000);
+                (frameWindow as Record<string, any>).submitCheckTimes?.();
+                (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+              }
+            });
+          } else {
+            (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+            appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);
+          }
         } else {
           logDebug('info', '动作节点诊断：执行保存', {
             finishedRate,
