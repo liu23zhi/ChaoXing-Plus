@@ -253,14 +253,41 @@ const defaultWorkOptions: CommonWorkOptions = {
 
 const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answertype"],input[name^="type"],input[id^="type"]';
 let debugSequence = 0;
+const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';
+type DebugLogThrottleStoreOwner = Window & Record<string, unknown>;
 
 function nextDebugSequence() {
   debugSequence += 1;
   return String(debugSequence).padStart(4, '0');
 }
 
+function getDebugLogThrottleStore() {
+  const ownerWindow = (window.top ?? window) as DebugLogThrottleStoreOwner;
+  const existingStore = ownerWindow[debugLogThrottleKey];
+  if (existingStore && typeof existingStore === 'object') {
+    return existingStore as Map<string, number>;
+  }
+
+  const nextStore = new Map<string, number>();
+  ownerWindow[debugLogThrottleKey] = nextStore;
+  return nextStore;
+}
+
+function shouldSkipThrottledDebugLog(throttleKey: string, throttleMs = 1500) {
+  const store = getDebugLogThrottleStore();
+  const now = Date.now();
+  const lastTriggeredAt = store.get(throttleKey);
+  if (typeof lastTriggeredAt === 'number' && now - lastTriggeredAt < throttleMs) {
+    return true;
+  }
+  store.set(throttleKey, now);
+  return false;
+}
+
 type DebugMeta = {
   correlationId?: string;
+  throttleKey?: string;
+  throttleMs?: number;
 };
 
 function logDebug(
@@ -270,6 +297,10 @@ function logDebug(
   textDetail?: string,
   meta?: DebugMeta
 ) {
+  if (level === 'info' && meta?.throttleKey && shouldSkipThrottledDebugLog(meta.throttleKey, meta.throttleMs)) {
+    return;
+  }
+
   const prefix = `[Chaoxing Plus][${nextDebugSequence()}] ${label}`;
   const enrichedDetail = meta?.correlationId ? { correlationId: meta.correlationId, ...(detail ?? {}) } : (detail ?? {});
   $console[level](prefix, enrichedDetail);
@@ -1306,7 +1337,10 @@ export async function study(opts: StudyOptions) {
       searching,
       hasJob: Boolean(result.job),
       searchedJobCount: searchedJobs.length
-    }, `课程学习扫描诊断详情：visibleContentState=${visibleContentState} resultVisibleContentState=${result.visibleContentState} scanRound=${scanRound} attachmentCount=${attachmentCount} searching=${String(searching)} hasJob=${String(Boolean(result.job))} searchedJobCount=${searchedJobs.length}`, { correlationId: scanCorrelationId });
+    }, `课程学习扫描诊断详情：visibleContentState=${visibleContentState} resultVisibleContentState=${result.visibleContentState} scanRound=${scanRound} attachmentCount=${attachmentCount} searching=${String(searching)} hasJob=${String(Boolean(result.job))} searchedJobCount=${searchedJobs.length}`, {
+      correlationId: scanCorrelationId,
+      throttleKey: `study-scan:${scanCorrelationId}:${visibleContentState}:${result.visibleContentState}:${String(Boolean(result.job))}:${String(searching)}`
+    });
 
     const job = result.job;
     if (job && job.func) {
@@ -1615,7 +1649,10 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           directChapterTest: !!chapterTest,
           nestedIframeCount: win.document.querySelectorAll('iframe').length
         };
-        logDebug('info', '章节测试候选 iframe 诊断', chapterCandidateDebug, `章节测试候选 iframe 诊断详情：src=${chapterCandidateDebug.src} _src=${chapterCandidateDebug._src} jobid=${chapterCandidateDebug.jobid} frameDataJobid=${String(chapterCandidateDebug.frameDataJobid ?? '')} frameData_jobid=${String(chapterCandidateDebug.frameData_jobid ?? '')} directChapterTest=${String(chapterCandidateDebug.directChapterTest)} nestedIframeCount=${chapterCandidateDebug.nestedIframeCount}`, { correlationId: jobCorrelationId });
+        logDebug('info', '章节测试候选 iframe 诊断', chapterCandidateDebug, `章节测试候选 iframe 诊断详情：src=${chapterCandidateDebug.src} _src=${chapterCandidateDebug._src} jobid=${chapterCandidateDebug.jobid} frameDataJobid=${String(chapterCandidateDebug.frameDataJobid ?? '')} frameData_jobid=${String(chapterCandidateDebug.frameData_jobid ?? '')} directChapterTest=${String(chapterCandidateDebug.directChapterTest)} nestedIframeCount=${chapterCandidateDebug.nestedIframeCount}`, {
+          correlationId: jobCorrelationId,
+          throttleKey: `chapter-candidate:${jobCorrelationId}`
+        });
 
       }
 
@@ -1630,7 +1667,10 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           statusClass: status?.className ?? '',
           directTiMuCount: win.document.querySelectorAll('.TiMu').length
         };
-        logDebug('info', '章节测试状态诊断', chapterStatusDebug, `章节测试状态诊断详情：jobName=${jobName} attachmentJob=${String(chapterStatusDebug.attachmentJob)} attachmentPassed=${String(chapterStatusDebug.attachmentPassed)} workType=${chapterStatusDebug.workType} alreadySearched=${String(chapterStatusDebug.alreadySearched)} chapterStatusComplete=${String(chapterStatusDebug.chapterStatusComplete)} statusClass=${chapterStatusDebug.statusClass} directTiMuCount=${chapterStatusDebug.directTiMuCount}`, { correlationId: jobCorrelationId });
+        logDebug('info', '章节测试状态诊断', chapterStatusDebug, `章节测试状态诊断详情：jobName=${jobName} attachmentJob=${String(chapterStatusDebug.attachmentJob)} attachmentPassed=${String(chapterStatusDebug.attachmentPassed)} workType=${chapterStatusDebug.workType} alreadySearched=${String(chapterStatusDebug.alreadySearched)} chapterStatusComplete=${String(chapterStatusDebug.chapterStatusComplete)} statusClass=${chapterStatusDebug.statusClass} directTiMuCount=${chapterStatusDebug.directTiMuCount}`, {
+          correlationId: jobCorrelationId,
+          throttleKey: `chapter-status:${jobCorrelationId}:${workType}:${String(chapterStatusComplete)}:${String(alreadySearched)}`
+        });
 
       }
 
@@ -1658,7 +1698,10 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         hasPptWithAudio: Boolean(pptWithAudio),
         hasTimereader: Boolean(timereader),
         hasVisibleWorkFrame
-      }, `任务点搜索诊断详情：frameSrc=${frameSrc} targetJobId=${String(targetJobId)} jobName=${jobName} workType=${workType} chapterStatusComplete=${String(chapterStatusComplete)} alreadySearched=${String(alreadySearched)} visibleContentState=${visibleContentState} hasVideojs=${String(Boolean(videojs))} hasChapterTest=${String(Boolean(chapterTest))} hasRead=${String(Boolean(read))} hasHyperlink=${String(Boolean(hyperlink))} hasPptWithAudio=${String(Boolean(pptWithAudio))} hasTimereader=${String(Boolean(timereader))} hasVisibleWorkFrame=${String(hasVisibleWorkFrame)}`, { correlationId: jobCorrelationId });
+      }, `任务点搜索诊断详情：frameSrc=${frameSrc} targetJobId=${String(targetJobId)} jobName=${jobName} workType=${workType} chapterStatusComplete=${String(chapterStatusComplete)} alreadySearched=${String(alreadySearched)} visibleContentState=${visibleContentState} hasVideojs=${String(Boolean(videojs))} hasChapterTest=${String(Boolean(chapterTest))} hasRead=${String(Boolean(read))} hasHyperlink=${String(Boolean(hyperlink))} hasPptWithAudio=${String(Boolean(pptWithAudio))} hasTimereader=${String(Boolean(timereader))} hasVisibleWorkFrame=${String(hasVisibleWorkFrame)}`, {
+        correlationId: jobCorrelationId,
+        throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}`
+      });
 
 
       if (alreadySearched) {
@@ -1669,9 +1712,12 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           visibleContentState,
           hasFunc: false,
           reason: 'already-searched'
-        }, undefined, { correlationId: jobCorrelationId });
+        }, undefined, {
+          correlationId: jobCorrelationId,
+          throttleKey: `job-skip:${jobCorrelationId}:already-searched`
+        });
 
-        return { visibleContentState: chapterStatusComplete || isVisibleQuestionFallbackState(visibleContentState) ? 'finished-job' : visibleContentState };
+        return { visibleContentState: chapterStatusComplete ? 'finished-job' : visibleContentState };
       }
 
       let func: (() => Promise<void>) | undefined;
@@ -1795,7 +1841,10 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           visibleContentState,
           hasFunc: false,
           reason: 'no-runnable-handler'
-        }, undefined, { correlationId: jobCorrelationId });
+        }, undefined, {
+          correlationId: jobCorrelationId,
+          throttleKey: `job-skip:${jobCorrelationId}:no-runnable-handler`
+        });
 
         return { visibleContentState };
       }

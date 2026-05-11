@@ -177,6 +177,33 @@ test('cx attaches correlation ids to diagnostics so scan, chapter, and job logs 
   assert.equal(source.includes('jobName='), true);
 });
 
+test('cx keeps a top-window debug throttle store so repeated cards reloads do not flood diagnostics', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes("const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';"), true);
+  assert.equal(source.includes('type DebugLogThrottleStoreOwner = Window & Record<string, unknown>;'), true);
+  assert.equal(source.includes('function getDebugLogThrottleStore() {'), true);
+  assert.equal(source.includes('const ownerWindow = (window.top ?? window) as DebugLogThrottleStoreOwner;'), true);
+  assert.equal(source.includes('ownerWindow[debugLogThrottleKey] = nextStore;'), true);
+  assert.equal(source.includes('function shouldSkipThrottledDebugLog(throttleKey: string, throttleMs = 1500) {'), true);
+  assert.equal(source.includes('const now = Date.now();'), true);
+  assert.equal(source.includes('if (typeof lastTriggeredAt === \'number\' && now - lastTriggeredAt < throttleMs) {'), true);
+});
+
+test('cx throttles repetitive study and job diagnostics while preserving state-change logs', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('throttleKey?: string;'), true);
+  assert.equal(source.includes('throttleMs?: number;'), true);
+  assert.equal(source.includes("if (level === 'info' && meta?.throttleKey && shouldSkipThrottledDebugLog(meta.throttleKey, meta.throttleMs)) {"), true);
+  assert.equal(source.includes("throttleKey: `study-scan:${scanCorrelationId}:${visibleContentState}:${result.visibleContentState}:${String(Boolean(result.job))}:${String(searching)}`"), true);
+  assert.equal(source.includes("throttleKey: `chapter-candidate:${jobCorrelationId}`"), true);
+  assert.equal(source.includes("throttleKey: `chapter-status:${jobCorrelationId}:${workType}:${String(chapterStatusComplete)}:${String(alreadySearched)}`"), true);
+  assert.equal(source.includes("throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}`"), true);
+  assert.equal(source.includes("throttleKey: `job-skip:${jobCorrelationId}:already-searched`"), true);
+  assert.equal(source.includes("throttleKey: `job-skip:${jobCorrelationId}:no-runnable-handler`"), true);
+});
+
 test('cx logs task-search candidate state before deciding whether a visible frame can run or block jumping', async () => {
   const source = await readFile(cxPath, 'utf8');
 
@@ -213,12 +240,13 @@ test('cx repeated chapter scans preserve completion state and log chapter status
   assert.equal(source.includes('attachmentPassed='), true);
 });
 
-test('cx only treats already processed fallback or completed chapter jobs as finished for auto-jump', async () => {
+test('cx only treats already processed completed chapter jobs as finished for auto-jump', async () => {
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes("if (alreadySearched) {"), true);
   assert.equal(source.includes("reason: 'already-searched'"), true);
-  assert.equal(source.includes("chapterStatusComplete || isVisibleQuestionFallbackState(visibleContentState) ? 'finished-job' : visibleContentState"), true);
+  assert.equal(source.includes("return { visibleContentState: chapterStatusComplete ? 'finished-job' : visibleContentState }"), true);
+  assert.equal(source.includes("chapterStatusComplete || isVisibleQuestionFallbackState(visibleContentState) ? 'finished-job' : visibleContentState"), false);
   assert.equal(source.includes('检测到页面存在可处理内容，但当前未识别为标准任务点。'), true);
 });
 
