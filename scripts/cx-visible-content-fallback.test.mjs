@@ -110,17 +110,20 @@ test('cx pauses only after checking all sibling sub tasks three times without fi
   assert.equal(source.includes('当前章节的所有子任务已连续检查 3 轮，仍未找到可执行任务，脚本已暂停自动切换。'), true);
 });
 
-test('cx blocks auto-jump when only finished visible jobs are detected but the current chapter is still unfinished', async () => {
+test('cx blocks auto-jump when no visible runnable content is detected but the current chapter is still unfinished', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes("if ((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0) {"), true);
+  assert.equal(source.includes("function shouldCheckSiblingSubTasksForState(visibleContentState: VisibleContentState): boolean {"), true);
+  assert.equal(source.includes("return visibleContentState === 'finished-job' || visibleContentState === 'empty';"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !currentChapterFinished && searchedJobs.length === 0 && shouldCheckSiblingSubTasksForState(visibleContentState);"), true);
   assert.equal(source.includes('当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。'), true);
 });
 
 test('cx checks sibling sub tasks before showing the final-chapter unfinished warning', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes("if (CXAnalyses.isInFinalChapter() && !((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0)) {"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !currentChapterFinished && searchedJobs.length === 0 && shouldCheckSiblingSubTasksForState(visibleContentState);"), true);
+  assert.equal(source.includes("if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {"), true);
   assert.equal(source.includes('已经抵达最后一个章节！但仍然有任务点未完成，请手动切换至未完成的章节。'), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
 });

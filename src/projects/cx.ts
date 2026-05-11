@@ -233,6 +233,10 @@ function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState
   return visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped';
 }
 
+function shouldCheckSiblingSubTasksForState(visibleContentState: VisibleContentState): boolean {
+  return visibleContentState === 'finished-job' || visibleContentState === 'empty';
+}
+
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
@@ -1342,7 +1346,7 @@ export async function study(opts: StudyOptions) {
     returnedToSameChapter: chapterStayState.returnedToSameChapter,
     repeatCount: chapterStayState.repeatCount
   }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount}`, { correlationId: chapterCorrelationId });
-
+  const shouldCheckSiblingSubTasks = !currentChapterFinished && searchedJobs.length === 0 && shouldCheckSiblingSubTasksForState(visibleContentState);
 
   const next = async () => {
     resetWorkResults();
@@ -1351,7 +1355,7 @@ export async function study(opts: StudyOptions) {
       return;
     }
 
-    if (CXAnalyses.isInFinalChapter() && !((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0)) {
+    if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {
       let content = '';
 
       if (opts.backToFirstWhenFinish) {
@@ -1432,7 +1436,7 @@ export async function study(opts: StudyOptions) {
     }
   };
 
-  if ((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0) {
+  if (shouldCheckSiblingSubTasks) {
     const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();
     if (switchedSubTask.switched) {
       const msg = '当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。';
