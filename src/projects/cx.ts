@@ -1351,7 +1351,7 @@ export async function study(opts: StudyOptions) {
       return;
     }
 
-    if (CXAnalyses.isInFinalChapter()) {
+    if (CXAnalyses.isInFinalChapter() && !((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0)) {
       let content = '';
 
       if (opts.backToFirstWhenFinish) {
