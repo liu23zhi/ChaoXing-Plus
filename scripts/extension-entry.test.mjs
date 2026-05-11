@@ -6,6 +6,24 @@ import { fileURLToPath } from 'node:url';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const extensionEntryPath = resolve(scriptsDir, '..', 'src', 'extension-entry.js');
+const indexPath = resolve(scriptsDir, '..', 'src', 'index.ts');
+
+test('entry bootstrap does not use a top-window singleton guard that suppresses later frame panels', async () => {
+  const source = await readFile(indexPath, 'utf8');
+
+  assert.equal(source.includes("const runtimeStartedKey = '__chaoxing_plus_runtime_started__';"), false);
+  assert.equal(source.includes('const runtimeOwner = window.top ?? window;'), false);
+  assert.equal(source.includes("runtime already started, skip duplicate bootstrap"), false);
+  assert.equal(source.includes('start(definedProjects()).catch((err) => {'), true);
+});
+
+test('entry bootstrap stays in the page only once even if extension-entry injects repeatedly in nested frames', async () => {
+  const source = await readFile(extensionEntryPath, 'utf8');
+
+  assert.equal(source.includes("const injectedWindowKey = '__chaoxing_plus_injected__';"), true);
+  assert.equal(source.includes('if (root.dataset[injectedMarkerKey] === frameMarker || window[injectedWindowKey] === frameMarker) {'), true);
+  assert.equal(source.includes('window[injectedWindowKey] = frameMarker;'), true);
+});
 
 test('extension entry does not remove work results panel in deep iframes', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');

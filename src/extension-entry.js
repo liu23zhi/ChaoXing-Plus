@@ -123,6 +123,7 @@
   const currentUrl = location.href;
   const frameMarker = btoa(unescape(encodeURIComponent(currentUrl))).replace(/=+$/g, '');
   const injectedMarkerKey = 'cxPlusInjected';
+  const injectedWindowKey = '__chaoxing_plus_injected__';
   const swalHostId = 'chaoxing-plus-swal-host';
   const swalTargetId = 'chaoxing-plus-swal-target';
 
@@ -213,10 +214,11 @@
   };
 
   const inject = async () => {
-    if (root.dataset[injectedMarkerKey] === frameMarker) {
+    if (root.dataset[injectedMarkerKey] === frameMarker || window[injectedWindowKey] === frameMarker) {
       return;
     }
     root.dataset[injectedMarkerKey] = frameMarker;
+    window[injectedWindowKey] = frameMarker;
 
     injectStyle();
     void ensureSwalRuntime();

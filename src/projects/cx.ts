@@ -237,6 +237,36 @@ function shouldCheckSiblingSubTasksForState(visibleContentState: VisibleContentS
   return visibleContentState === 'finished-job' || visibleContentState === 'empty';
 }
 
+function getSiblingSubTaskTabs() {
+  const tabRoot = topWindow.document.querySelector<HTMLElement>('#prev_tab');
+  return Array.from<HTMLElement>(tabRoot?.querySelectorAll('.prev_ul li') || []);
+}
+
+function getSiblingSubTaskDiagnostics() {
+  const tabRoot = topWindow.document.querySelector<HTMLElement>('#prev_tab');
+  const tabs = getSiblingSubTaskTabs();
+  const activeSubTaskIndex = tabs.findIndex((tab) => tab.classList.contains('active'));
+  const activeTab = activeSubTaskIndex >= 0 ? tabs[activeSubTaskIndex] : undefined;
+  return {
+    hasSiblingSubTasks: tabs.length > 1,
+    siblingSubTaskCount: tabs.length,
+    activeSubTaskIndex,
+    activeSubTaskKey: activeTab?.getAttribute('id') || activeTab?.getAttribute('cardid') || '',
+    tabRootExists: Boolean(tabRoot)
+  };
+}
+
+function getCurrentChapterCompletionDiagnostics() {
+  const job = topWindow.document.querySelector<HTMLElement>('.posCatalog_active');
+  const completedIcon = job?.querySelector('.icon_Completed');
+  return {
+    currentChapterFinished: Boolean(job && completedIcon !== null),
+    activeChapterId: job?.getAttribute('id') ?? '',
+    activeChapterClassName: job?.className ?? '',
+    completedIconExists: completedIcon !== null
+  };
+}
+
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
@@ -254,6 +284,7 @@ const defaultWorkOptions: CommonWorkOptions = {
 const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answertype"],input[name^="type"],input[id^="type"]';
 let debugSequence = 0;
 const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';
+const rateHackPluginGuardKey = '__chaoxing_plus_rate_hack_plugin__';
 type DebugLogThrottleStoreOwner = Window & Record<string, unknown>;
 
 function nextDebugSequence() {
@@ -1089,13 +1120,17 @@ export const CXAnalyses = {
     }
     runtimeStore.remove(key);
   },
+  hasSiblingSubTasks() {
+    const tabs = getSiblingSubTaskTabs();
+    return tabs.length > 1;
+  },
   trySwitchToNextUnvisitedSubTask() {
     const chapterKey = this.getCurrentChapterKey();
     if (!chapterKey) {
       return { switched: false, paused: false };
     }
 
-    const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);
+    const tabs = getSiblingSubTaskTabs();
     if (tabs.length <= 1) {
       return { switched: false, paused: false };
     }
@@ -1218,8 +1253,7 @@ export const CXAnalyses = {
     }) as HTMLElement[];
   },
   isCurrentChapterFinished() {
-    const job = topWindow.document.querySelector('.posCatalog_active');
-    return Boolean(job && job.querySelector('.icon_Completed') !== null);
+    return getCurrentChapterCompletionDiagnostics().currentChapterFinished;
   }
 };
 
@@ -1240,7 +1274,9 @@ function rateHack() {
 
     try {
       const origin = videojs.getPlugin?.('seekBarControl');
-      if (origin && videojs.extend && videojs.registerPlugin) {
+      const pluginOwner = topWindow as Window & Record<string, unknown>;
+      if (!pluginOwner[rateHackPluginGuardKey] && origin && videojs.extend && videojs.registerPlugin) {
+        pluginOwner[rateHackPluginGuardKey] = true;
         const plugin = videojs.extend(videojs.getPlugin('plugin'), {
           constructor: function (videoExt: any, data: any) {
             const sendLog = data.sendLog;
@@ -1310,6 +1346,11 @@ function rateHack() {
   }
 }
 
+function hasPendingCurrentPageJobAttachments() {
+  const attachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
+  return attachments.some((attachment) => attachment.job === true);
+}
+
 export async function study(opts: StudyOptions) {
   await sleep(3000);
 
@@ -1327,7 +1368,7 @@ export async function study(opts: StudyOptions) {
   const runJobs = async (): Promise<void> => {
     scanRound += 1;
     const result = searchJob(opts, searchedJobs);
-    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
+    visibleContentState = result.visibleContentState;
     const scanCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey());
     logDebug('info', '课程学习扫描诊断', {
       scanRound,
@@ -1353,6 +1394,9 @@ export async function study(opts: StudyOptions) {
 
       await sleep(1000);
       await runJobs();
+    } else if (visibleContentState === 'finished-job' && !hasPendingCurrentPageJobAttachments()) {
+      attachmentCount = 0;
+      searching = false;
     } else if (attachmentCount > 0) {
       attachmentCount--;
       await sleep(1000);
@@ -1371,16 +1415,34 @@ export async function study(opts: StudyOptions) {
     workResultsMethods().setResults?.([]);
   };
 
-  const currentChapterFinished = CXAnalyses.isCurrentChapterFinished();
+  const chapterCompletionDiagnostics = getCurrentChapterCompletionDiagnostics();
+  const currentChapterFinished = chapterCompletionDiagnostics.currentChapterFinished;
   const chapterStayState = CXAnalyses.getChapterStayState();
   const chapterCorrelationId = buildChapterCorrelationId(chapterStayState.chapterStayKey);
   logDebug('info', '学习页面状态诊断', {
     visibleContentState,
     currentChapterFinished,
     returnedToSameChapter: chapterStayState.returnedToSameChapter,
-    repeatCount: chapterStayState.repeatCount
-  }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount}`, { correlationId: chapterCorrelationId });
-  const shouldCheckSiblingSubTasks = !currentChapterFinished && searchedJobs.length === 0 && shouldCheckSiblingSubTasksForState(visibleContentState);
+    repeatCount: chapterStayState.repeatCount,
+    activeChapterId: chapterCompletionDiagnostics.activeChapterId,
+    activeChapterClassName: chapterCompletionDiagnostics.activeChapterClassName,
+    completedIconExists: chapterCompletionDiagnostics.completedIconExists
+  }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount} activeChapterId=${chapterCompletionDiagnostics.activeChapterId} activeChapterClassName=${chapterCompletionDiagnostics.activeChapterClassName} completedIconExists=${String(chapterCompletionDiagnostics.completedIconExists)}`, { correlationId: chapterCorrelationId });
+  const siblingSubTaskDiagnostics = getSiblingSubTaskDiagnostics();
+  const hasPendingJobAttachments = hasPendingCurrentPageJobAttachments();
+  const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;
+  const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
+  logDebug('info', '同章节子任务诊断', {
+    visibleContentState,
+    currentChapterFinished,
+    searchedJobCount: searchedJobs.length,
+    shouldCheckSiblingSubTasks,
+    canCheckSiblingSubTasksAfterProcessedJobs,
+    hasPendingJobAttachments,
+    attachmentCount,
+    searching,
+    ...siblingSubTaskDiagnostics
+  }, `同章节子任务诊断详情：hasSiblingSubTasks=${String(siblingSubTaskDiagnostics.hasSiblingSubTasks)} siblingSubTaskCount=${siblingSubTaskDiagnostics.siblingSubTaskCount} activeSubTaskIndex=${siblingSubTaskDiagnostics.activeSubTaskIndex} activeSubTaskKey=${siblingSubTaskDiagnostics.activeSubTaskKey} tabRootExists=${String(siblingSubTaskDiagnostics.tabRootExists)} shouldCheckSiblingSubTasks=${String(shouldCheckSiblingSubTasks)} canCheckSiblingSubTasksAfterProcessedJobs=${String(canCheckSiblingSubTasksAfterProcessedJobs)} hasPendingJobAttachments=${String(hasPendingJobAttachments)} attachmentCount=${attachmentCount} searching=${String(searching)} currentChapterFinished=${String(currentChapterFinished)} visibleContentState=${visibleContentState} searchedJobCount=${searchedJobs.length}`, { correlationId: chapterCorrelationId });
 
   const next = async () => {
     resetWorkResults();
@@ -1489,6 +1551,14 @@ export async function study(opts: StudyOptions) {
     }
 
     const msg = '当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。';
+    logDebug('warn', '同章节子任务未切换诊断', {
+      visibleContentState,
+      currentChapterFinished,
+      searchedJobCount: searchedJobs.length,
+      ...siblingSubTaskDiagnostics,
+      switched: switchedSubTask.switched,
+      paused: switchedSubTask.paused
+    }, undefined, { correlationId: chapterCorrelationId });
     showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
     $message.warn({ content: msg, duration: 0 });
     $console.warn(msg);
@@ -1497,6 +1567,15 @@ export async function study(opts: StudyOptions) {
 
   if (visibleContentState !== 'empty' && visibleContentState !== 'finished-job' && !currentChapterFinished) {
     const msg = '检测到页面存在可处理内容，但当前未识别为标准任务点。';
+    logDebug('warn', '未识别标准任务点诊断', {
+      visibleContentState,
+      currentChapterFinished,
+      searchedJobCount: searchedJobs.length,
+      shouldCheckSiblingSubTasks,
+      ...siblingSubTaskDiagnostics,
+      activeChapterId: chapterCompletionDiagnostics.activeChapterId,
+      completedIconExists: chapterCompletionDiagnostics.completedIconExists
+    }, undefined, { correlationId: chapterCorrelationId });
     showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
     $message.warn({ content: msg, duration: 0 });
     $console.warn(msg);
@@ -1630,6 +1709,8 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
       const status = chapterTest ? win.document.querySelector<HTMLElement>('.testTit_status') : undefined;
       const chapterStatusComplete = status?.classList.contains('testTit_status_complete') === true;
       const alreadySearched = searchedJobs.find((job) => job.mid === attachment.property.mid) !== undefined;
+      const isMediaLikeJob = Boolean(videojs || read || hyperlink || pptWithAudio || timereader);
+      const alreadyProcessedMediaJob = alreadySearched && workType === 'job' && isMediaLikeJob && !chapterTest;
       const { name, title, bookname, author } = attachment.property;
       const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
       const frameSrc = root.getAttribute('src') || root.getAttribute('_src') || '';
@@ -1675,7 +1756,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
       }
 
       const visibleContentState: VisibleContentState =
-        chapterStatusComplete
+        chapterStatusComplete || alreadyProcessedMediaJob
           ? 'finished-job'
           : workType === 'job'
             ? 'standard-job'
@@ -1717,7 +1798,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           throttleKey: `job-skip:${jobCorrelationId}:already-searched`
         });
 
-        return { visibleContentState: chapterStatusComplete ? 'finished-job' : visibleContentState };
+        return { visibleContentState };
       }
 
       let func: (() => Promise<void>) | undefined;
