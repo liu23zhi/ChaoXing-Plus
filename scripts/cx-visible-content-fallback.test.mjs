@@ -71,6 +71,26 @@ test('cx waits for video attachment or chapter completion before leaving a media
   assert.equal(source.includes('await waitForCurrentChapterFinished(10000);'), true);
 });
 
+test('cx clears the sibling-sub-task switching notice once a runnable task is found', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('function clearTopCenterNotice() {'), true);
+  assert.equal(source.includes('clearTopCenterNotice();'), true);
+  assert.equal(source.includes("const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;"), true);
+  assert.equal(source.includes("const msg = `正在处理章节测试 : ${jobName}`;"), true);
+});
+
+test('cx checks sibling sub task tabs before warning when the chapter remains unfinished', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const chapterSubTaskSwitchState = new Map<string, Set<string>>();'), true);
+  assert.equal(source.includes('trySwitchToNextUnvisitedSubTask() {'), true);
+  assert.equal(source.includes("const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);"), true);
+  assert.equal(source.includes('const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();'), true);
+  assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
+  assert.equal(source.includes('if (switchedSubTask) {'), true);
+});
+
 test('cx blocks auto-jump when only finished visible jobs are detected but the current chapter is still unfinished', async () => {
   const source = await readFile(cxPath, 'utf8');
 

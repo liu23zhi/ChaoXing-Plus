@@ -57,6 +57,17 @@ const state = {
 
 const TOP_CENTER_NOTICE_ID = 'cx-plus-top-center-notice';
 
+function clearTopCenterNotice() {
+  let targetDocument = document;
+  try {
+    targetDocument = (window.top ?? window).document;
+  } catch {
+    targetDocument = topWindow?.document ?? document;
+  }
+
+  targetDocument.getElementById(TOP_CENTER_NOTICE_ID)?.remove();
+}
+
 function showTopCenterNotice(
   content: string,
   options: { duration?: number; tone?: 'info' | 'success' | 'warning' | 'error' } = {}
@@ -71,7 +82,7 @@ function showTopCenterNotice(
     targetDocument = topWindow?.document ?? document;
   }
 
-  targetDocument.getElementById(TOP_CENTER_NOTICE_ID)?.remove();
+  clearTopCenterNotice();
 
   const overlay = targetDocument.createElement('div');
   overlay.id = TOP_CENTER_NOTICE_ID;
@@ -943,6 +954,7 @@ export const CXProject = Project.create({
 
 const chapterCounter = new Map<string, number>();
 const chapterStayCounter = new Map<string, number>();
+const chapterSubTaskSwitchState = new Map<string, Set<string>>();
 let lastChapterStayKey = '';
 
 export const CXAnalyses = {
@@ -968,6 +980,55 @@ export const CXAnalyses = {
     const chapterId = chapter?.getAttribute('id') || '';
     const frameCard = topWindow.document.querySelector<HTMLInputElement>('#iframe')?.value || location.href;
     return `${chapterId}::${frameCard}`;
+  },
+  getCurrentChapterKey() {
+    const chapter = topWindow.document.querySelector<HTMLElement>('.posCatalog_active');
+    return chapter?.getAttribute('id') || topWindow.document.querySelector<HTMLInputElement>('#curChapterId')?.value || '';
+  },
+  trySwitchToNextUnvisitedSubTask() {
+    const chapterKey = this.getCurrentChapterKey();
+    if (!chapterKey) {
+      return false;
+    }
+
+    const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);
+    if (tabs.length <= 1) {
+      return false;
+    }
+
+    const visited = chapterSubTaskSwitchState.get(chapterKey) ?? new Set<string>();
+    const activeIndex = tabs.findIndex((tab) => tab.classList.contains('active'));
+    if (activeIndex === -1) {
+      return false;
+    }
+
+    const activeTab = tabs[activeIndex];
+    const activeTabKey = activeTab.getAttribute('id') || activeTab.getAttribute('cardid') || String(activeIndex + 1);
+    visited.add(activeTabKey);
+
+    const nextTab = tabs.find((tab, index) => {
+      if (index === activeIndex) {
+        return false;
+      }
+      const tabKey = tab.getAttribute('id') || tab.getAttribute('cardid') || String(index + 1);
+      return visited.has(tabKey) === false;
+    });
+
+    if (!nextTab) {
+      chapterSubTaskSwitchState.set(chapterKey, visited);
+      return false;
+    }
+
+    const nextTabKey = nextTab.getAttribute('id') || nextTab.getAttribute('cardid') || String(tabs.indexOf(nextTab) + 1);
+    visited.add(nextTabKey);
+    chapterSubTaskSwitchState.set(chapterKey, visited);
+
+    const switched = triggerSyntheticClick(nextTab);
+    if (!switched) {
+      nextTab.click();
+    }
+
+    return true;
   },
   trackChapterStayState() {
     const chapterStayKey = this.getCurrentChapterStayKey();
@@ -1297,6 +1358,15 @@ export async function study(opts: StudyOptions) {
   };
 
   if ((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0) {
+    const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();
+    if (switchedSubTask) {
+      const msg = '当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。';
+      showTopCenterNotice(msg, { duration: 5000, tone: 'info' });
+      $message.info(msg);
+      $console.info(msg);
+      return;
+    }
+
     const msg = '当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。';
     showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
     $message.warn({ content: msg, duration: 0 });
@@ -1526,6 +1596,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           $console.warn(msg);
         } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
           func = async () => {
+            clearTopCenterNotice();
             logDebug('info', '动作节点诊断：开始媒体任务', {
               frameSrc,
               targetJobId,
@@ -1556,6 +1627,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
             return { visibleContentState: 'finished-job' };
           } else if (workType === 'job') {
             func = async () => {
+              clearTopCenterNotice();
               logDebug('info', '动作节点诊断：开始章节答题', {
                 frameSrc,
                 targetJobId,
@@ -1571,6 +1643,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
             };
           } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
             func = async () => {
+              clearTopCenterNotice();
               logDebug('info', '动作节点诊断：开始章节答题', {
                 frameSrc,
                 targetJobId,
@@ -1593,6 +1666,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           $console.warn(msg);
         } else if (attachment.job) {
           func = async () => {
+            clearTopCenterNotice();
             const msg = `正在学习 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
@@ -1612,6 +1686,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
           $console.warn(msg);
         } else if (attachment.job) {
           func = async () => {
+            clearTopCenterNotice();
             const msg = `正在完成链接阅读任务 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
