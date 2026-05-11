@@ -112,4 +112,7 @@ test('tiku adapter config exposes AI fallback request helpers and standardized e
   assert.equal(configSource.includes('createTikuAdapterAIFallbackUrl'), true);
   assert.equal(configSource.includes('requestTikuAdapterAIFallback'), true);
   assert.equal(configSource.includes('type TikuAdapterAIFallbackErrorCode ='), true);
+  assert.equal(configSource.includes("name: 'Zelly的题库'"), true);
+  assert.equal(configSource.includes("name: 'tikuAdapter'"), false);
+  assert.equal(configSource.includes("name: 'Zelly的题库 AI Fallback'"), true);
 });

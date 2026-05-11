@@ -2,50 +2,56 @@ import Swal, { type SweetAlertOptions } from 'sweetalert2';
 
 const toastEnabled = false;
 const swalAliasKey = '__chaoxing_plus_swal__';
+const swalHostId = 'chaoxing-plus-swal-host';
 const swalTargetId = 'chaoxing-plus-swal-target';
 
 type SwalOwnerWindow = Window & Record<string, unknown>;
-
 type SwalFireOptions = SweetAlertOptions;
 
-function getTopWindowSwal() {
-  const selfWindow = window as unknown as SwalOwnerWindow;
-  if (window.self === window.top) {
-    selfWindow[swalAliasKey] = selfWindow[swalAliasKey] || Swal;
-    return selfWindow[swalAliasKey] as typeof Swal;
-  }
-
+function getSwalRuntime() {
   try {
-    const ownerWindow = window.top as unknown as SwalOwnerWindow;
-    ownerWindow[swalAliasKey] = ownerWindow[swalAliasKey] || Swal;
-    return ownerWindow[swalAliasKey] as typeof Swal;
-  } catch {
-    // ignore cross-frame access errors and fall back to local Swal
-  }
-
-  return Swal;
-}
-
-function resolveSwalTarget() {
-  try {
-    const topDocument = window.top?.document;
-    const host = topDocument?.getElementById('chaoxing-plus-swal-host');
-    const target = host?.shadowRoot?.getElementById(swalTargetId);
-    if (target) {
-      return target;
+    const topWindow = window.top as SwalOwnerWindow | null;
+    const topDocument = topWindow?.document;
+    const runtimeSwal = topWindow?.[swalAliasKey];
+    if (runtimeSwal && typeof runtimeSwal === 'object' && 'fire' in runtimeSwal && topDocument?.documentElement) {
+      return { runtimeSwal: runtimeSwal as typeof Swal, targetDocument: topDocument };
     }
   } catch {
-    // ignore cross-frame access errors and fall back to default target
+    // ignore cross-frame access errors and fall back to local Swal runtime
+  }
+
+  return { runtimeSwal: Swal, targetDocument: document };
+}
+
+function getOrCreateSwalTarget(targetDocument: Document) {
+  try {
+    let host = targetDocument.getElementById(swalHostId);
+    if (!host) {
+      host = targetDocument.createElement('div');
+      host.id = swalHostId;
+      (targetDocument.body || targetDocument.documentElement).appendChild(host);
+    }
+
+    let target = targetDocument.getElementById(swalTargetId);
+    if (!target) {
+      target = targetDocument.createElement('div');
+      target.id = swalTargetId;
+      host.appendChild(target);
+    }
+
+    return target;
+  } catch {
+    // ignore DOM access failures and fall back to default target
   }
 
   return undefined;
 }
 
 function fireSwal(options: SwalFireOptions) {
-  const runtimeSwal = getTopWindowSwal();
+  const { runtimeSwal, targetDocument } = getSwalRuntime();
   return runtimeSwal.fire({
     ...options,
-    target: resolveSwalTarget()
+    target: getOrCreateSwalTarget(targetDocument)
   });
 }
 
@@ -113,16 +119,33 @@ export const $modal = {
       allowEscapeKey: true
     });
   },
-  async confirm(args: { content: string } | string): Promise<boolean> {
+  async confirm(args: {
+    content: string;
+    confirmButtonText?: string;
+    cancelButtonText?: string;
+    timer?: number;
+    timerProgressBar?: boolean;
+    defaultConfirmed?: boolean;
+  } | string): Promise<boolean> {
     const content = typeof args === 'string' ? args : args.content;
+    const confirmButtonText = typeof args === 'string' ? '确认' : args.confirmButtonText ?? '确认';
+    const cancelButtonText = typeof args === 'string' ? '取消' : args.cancelButtonText ?? '取消';
+    const timer = typeof args === 'string' ? undefined : args.timer;
+    const timerProgressBar = typeof args === 'string' ? false : args.timerProgressBar ?? false;
+    const defaultConfirmed = typeof args === 'string' ? false : args.defaultConfirmed ?? false;
     const result = await fireSwal({
       icon: 'question',
       text: content,
       showCancelButton: true,
-      confirmButtonText: '确认',
-      cancelButtonText: '取消'
+      confirmButtonText,
+      cancelButtonText,
+      timer,
+      timerProgressBar
     });
-    return result.isConfirmed;
+    return result.isConfirmed || (defaultConfirmed && result.dismiss === Swal.DismissReason.timer);
   }
 };
+
+
+
 

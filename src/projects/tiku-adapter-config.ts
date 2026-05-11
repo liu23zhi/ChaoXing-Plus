@@ -1,10 +1,30 @@
 /// <reference path="../types.d.ts" />
+import { request, type SearchInformation } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
+
+export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER';
+
+export type TikuAdapterAIFallbackResult = {
+  success: boolean;
+  result?: {
+    question?: string;
+    answer?: string;
+  };
+  error?: {
+    code?: TikuAdapterAIFallbackErrorCode;
+    message?: string;
+  };
+};
+
+export type TikuAdapterAIFallbackResponse = SearchInformation & {
+  error?: string;
+  response?: TikuAdapterAIFallbackResult;
+};
 
 export type TikuAdapterConfig = {
   baseurl: string;
@@ -47,8 +67,67 @@ export function createTikuAdapterSearchUrl(baseurl: string): string {
   return normalized ? `${normalized}/adapter-service/search` : '';
 }
 
+export function createTikuAdapterAIFallbackUrl(baseurl: string): string {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl);
+  return normalized ? `${normalized}/adapter-service/ai-fallback` : '';
+}
+
 export function createTikuAdapterAuthorizationHeader(key: string): string {
   return `Bearer ${String(key ?? '').trim()}`;
+}
+
+export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, payload: {
+  title: string;
+  type?: string;
+  options?: string;
+}): Promise<TikuAdapterAIFallbackResponse[]> {
+  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
+  const key = String(config.key ?? '').trim();
+  const problem = getTikuAdapterConfigProblem({ baseurl, key });
+
+  if (problem) {
+    throw new Error(problem);
+  }
+
+  const response = (await request(createTikuAdapterAIFallbackUrl(baseurl), {
+    method: 'post',
+    responseType: 'json',
+    headers: {
+      Authorization: createTikuAdapterAuthorizationHeader(key)
+    },
+    data: {
+      question: String(payload.title ?? '').trim(),
+      type: resolveTikuAdapterQuestionType(payload.type),
+      options: String(payload.options ?? '')
+        .split(/\n+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    }
+  })) as TikuAdapterAIFallbackResult;
+
+  const question = String(response?.result?.question ?? payload.title ?? '').trim();
+  const answer = String(response?.result?.answer ?? '').trim();
+  const errorCode = response?.error?.code;
+  const errorMessage = String(response?.error?.message ?? '').trim();
+
+  return [
+    {
+      name: 'Zelly的题库 AI Fallback',
+      homepage: baseurl,
+      results: response?.success && answer
+        ? [
+            {
+              question,
+              answer,
+              extra_data: { ai: true }
+            }
+          ]
+        : [],
+      response,
+      data: payload,
+      error: response?.success ? undefined : `${errorCode || 'UPSTREAM_ERROR'}${errorMessage ? `: ${errorMessage}` : ''}`
+    }
+  ];
 }
 
 export function resolveTikuAdapterQuestionType(type: string | undefined): number {
@@ -100,7 +179,7 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
 
   return {
     url: createTikuAdapterSearchUrl(baseurl),
-    name: 'tikuAdapter',
+    name: 'Zelly的题库',
     homepage: baseurl,
     method: 'post',
     contentType: 'json',

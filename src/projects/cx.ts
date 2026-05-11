@@ -3,14 +3,17 @@ import Typr from 'typr.js';
 import {
   createDefaultQuestionResolver,
   defaultAnswerWrapperHandler,
+  defaultWorkTypeResolver,
   domSearch,
+  domSearchAll,
   OCSWorker,
   request,
+  type QuestionTypes,
   type SearchInformation,
   type SimplifyWorkResult
 } from '../core/index.js';
 import { Project, $gm } from '../runtime/index.js';
-import { $message } from '../runtime/message.js';
+import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
 import { playbackRate, volume } from '../utils/configs.js';
@@ -23,7 +26,12 @@ import {
   splitAnswer
 } from '../utils/work.js';
 import { $console } from './background.js';
-import { CommonProject, type CommonWorkOptions } from './common.js';
+import { requestTikuAdapterAIFallback } from './tiku-adapter-config.js';
+import {
+  CommonProject,
+  getStoredTikuAdapterConfig,
+  type CommonWorkOptions
+} from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 
@@ -106,6 +114,24 @@ function showTopCenterNotice(
   }
 }
 
+function triggerSyntheticClick(element: HTMLElement | null | undefined): boolean {
+  if (!element) {
+    return false;
+  }
+
+  const sharedEventInit = {
+    bubbles: true,
+    cancelable: true,
+    view: element.ownerDocument?.defaultView ?? window
+  };
+
+  element.dispatchEvent(new MouseEvent('mousedown', sharedEventInit));
+  element.dispatchEvent(new MouseEvent('mouseup', sharedEventInit));
+  element.dispatchEvent(new MouseEvent('click', sharedEventInit));
+  element.click();
+  return true;
+}
+
 export type VideoQuizStrategy = 'random' | 'ignore';
 export type StudyMode = 'next' | 'job' | 'manually';
 type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
@@ -179,13 +205,51 @@ function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
-  upload: 'save',
+  upload: 'submit',
   answererWrappers: [],
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
   answerSeparators: '#,|,;,；',
-  answerMatchMode: 'includes'
+  answerMatchMode: 'includes',
+  enableRandomFallbackAnswer: false,
+  enableAIFallbackAnswer: false,
+  aiFallbackFailureAction: 'pause'
 };
+
+const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answertype"],input[name^="type"],input[id^="type"]';
+let debugSequence = 0;
+
+function nextDebugSequence() {
+  debugSequence += 1;
+  return String(debugSequence).padStart(4, '0');
+}
+
+type DebugMeta = {
+  correlationId?: string;
+};
+
+function logDebug(
+  level: 'info' | 'warn' | 'error',
+  label: string,
+  detail?: Record<string, unknown>,
+  textDetail?: string,
+  meta?: DebugMeta
+) {
+  const prefix = `[Chaoxing Plus][${nextDebugSequence()}] ${label}`;
+  const enrichedDetail = meta?.correlationId ? { correlationId: meta.correlationId, ...(detail ?? {}) } : (detail ?? {});
+  $console[level](prefix, enrichedDetail);
+  if (textDetail) {
+    const withCorrelation = meta?.correlationId ? `${textDetail} correlationId=${meta.correlationId}` : textDetail;
+    $console[level](`[Chaoxing Plus][${nextDebugSequence()}] ${withCorrelation}`);
+  }
+}
+
+function buildChapterCorrelationId(chapterStayKey: string, extra?: Record<string, string | undefined>) {
+  const normalizedChapterStayKey = chapterStayKey || 'unknown-chapter';
+  const targetJobId = extra?.targetJobId || 'unknown-job';
+  const jobName = extra?.jobName || 'unknown-name';
+  return `chapterStayKey=${normalizedChapterStayKey}|targetJobId=${targetJobId}|jobName=${jobName}`;
+}
 
 function settingsMethods() {
   return (CommonProject.scripts.settings.methods?.call({} as any) ?? {}) as {
@@ -232,6 +296,94 @@ function workResultsMethods() {
 
 function getWorkOptions(): CommonWorkOptions {
   return settingsMethods().getWorkOptions?.() ?? defaultWorkOptions;
+}
+
+function hasAnyResolvedSearchResults(searchInfos: SearchInformation[]) {
+  return searchInfos.some((info) => info.results.length > 0);
+}
+
+async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
+  const result = await $modal.confirm({
+    content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
+    confirmButtonText: '立即自动答题',
+    cancelButtonText: '手动答题',
+    timer: 5000,
+    timerProgressBar: true,
+    defaultConfirmed: true
+  });
+
+  if (!result) {
+    worker.emit('stop');
+    $message.warn({ content: '已暂停自动答题，请手动作答。', duration: 0 });
+  }
+
+  return result;
+}
+
+async function appendAIFallbackSearchInfos(
+  searchInfos: SearchInformation[],
+  workOptions: Pick<CommonWorkOptions, 'enableAIFallbackAnswer' | 'aiFallbackFailureAction'>,
+  payload: {
+    title: string;
+    type: string;
+    optionsText: string;
+  }
+) {
+  if (!workOptions.enableAIFallbackAnswer || hasAnyResolvedSearchResults(searchInfos)) {
+    return searchInfos;
+  }
+
+  const fallbackInfos = await requestTikuAdapterAIFallback(getStoredTikuAdapterConfig(), {
+    title: payload.title,
+    type: payload.type,
+    options: payload.optionsText
+  });
+  const fallbackError = fallbackInfos[0]?.response?.error;
+
+  if (fallbackError?.code === 'AI_UNAVAILABLE') {
+    $console.warn('AI 兜底未配置，已跳过 AI 搜题');
+    return searchInfos.concat(fallbackInfos);
+  }
+
+  if (hasAnyResolvedSearchResults(fallbackInfos)) {
+    return searchInfos.concat(fallbackInfos);
+  }
+
+  const msg = '检测到题目但当前无法安全自动作答，请手动处理。';
+  showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+  $message.warn({ content: msg, duration: 0 });
+  $console.warn(msg);
+
+  if (workOptions.aiFallbackFailureAction === 'skip') {
+    return searchInfos.concat(fallbackInfos);
+  }
+
+  throw new Error(msg);
+}
+
+async function runRandomChoiceFallback(
+  questionType: ReturnType<typeof getQuestionType>,
+  options: HTMLElement[],
+  workOptions: Pick<CommonWorkOptions, 'enableRandomFallbackAnswer'>,
+  handler: (questionType: 'judgement' | 'single' | 'multiple', answer: string, option: HTMLElement | undefined) => Promise<void>
+) {
+  if (!workOptions.enableRandomFallbackAnswer) {
+    return undefined;
+  }
+
+  if (questionType !== 'single' && questionType !== 'multiple' && questionType !== 'judgement') {
+    return undefined;
+  }
+
+  if (options.length === 0) {
+    return undefined;
+  }
+
+  const randomIndex = Math.floor(Math.random() * options.length);
+  const option = options[randomIndex];
+  await handler(questionType, option.innerText, option);
+  $console.warn('未命中可用答案，已随机作答。');
+  return { finish: true, randomFallback: true, randomIndex };
 }
 
 function toNumber(value: unknown, fallback: number): number {
@@ -781,6 +933,8 @@ export const CXProject = Project.create({
 });
 
 const chapterCounter = new Map<string, number>();
+const chapterStayCounter = new Map<string, number>();
+let lastChapterStayKey = '';
 
 export const CXAnalyses = {
   isInSpecialMode() {
@@ -799,6 +953,39 @@ export const CXAnalyses = {
       }
     }
     return false;
+  },
+  getCurrentChapterStayKey() {
+    const chapter = topWindow.document.querySelector<HTMLElement>('.posCatalog_active');
+    const chapterId = chapter?.getAttribute('id') || '';
+    const frameCard = topWindow.document.querySelector<HTMLInputElement>('#iframe')?.value || location.href;
+    return `${chapterId}::${frameCard}`;
+  },
+  trackChapterStayState() {
+    const chapterStayKey = this.getCurrentChapterStayKey();
+
+    const returnedToSameChapter = Boolean(chapterStayKey && chapterStayKey === lastChapterStayKey);
+    const repeatCount = returnedToSameChapter ? (chapterStayCounter.get(chapterStayKey) ?? 1) + 1 : 1;
+
+    chapterStayCounter.clear();
+    if (chapterStayKey) {
+      chapterStayCounter.set(chapterStayKey, repeatCount);
+      lastChapterStayKey = chapterStayKey;
+    } else {
+      lastChapterStayKey = '';
+    }
+
+    return {
+      chapterStayKey,
+      returnedToSameChapter,
+      repeatCount
+    };
+  },
+  getChapterStayState() {
+    const chapterStayState = this.trackChapterStayState();
+    return {
+      ...chapterStayState,
+      shouldWarn: chapterStayState.returnedToSameChapter && chapterStayState.repeatCount >= 3
+    };
   },
   isInFinalTab() {
     const tabs = Array.from<HTMLElement>(topWindow.document.querySelectorAll('.prev_ul li') || []);
@@ -951,6 +1138,7 @@ export async function study(opts: StudyOptions) {
   let searching = true;
   let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
   let visibleContentState: VisibleContentState = 'empty';
+  let scanRound = 0;
   const waitTimeout = 3 + attachmentCount * 2;
 
   setTimeout(() => {
@@ -958,8 +1146,19 @@ export async function study(opts: StudyOptions) {
   }, Math.min(waitTimeout, 10) * 1000);
 
   const runJobs = async (): Promise<void> => {
+    scanRound += 1;
     const result = searchJob(opts, searchedJobs);
     visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);
+    const scanCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey());
+    logDebug('info', '课程学习扫描诊断', {
+      scanRound,
+      visibleContentState,
+      resultVisibleContentState: result.visibleContentState,
+      attachmentCount,
+      searching,
+      hasJob: Boolean(result.job),
+      searchedJobCount: searchedJobs.length
+    }, `课程学习扫描诊断详情：visibleContentState=${visibleContentState} resultVisibleContentState=${result.visibleContentState} scanRound=${scanRound} attachmentCount=${attachmentCount} searching=${String(searching)} hasJob=${String(Boolean(result.job))} searchedJobCount=${searchedJobs.length}`, { correlationId: scanCorrelationId });
 
     const job = result.job;
     if (job && job.func) {
@@ -984,7 +1183,24 @@ export async function study(opts: StudyOptions) {
   await runJobs();
   (topWindow as Record<string, any>)._preChapterId = '';
 
+  const resetWorkResults = () => {
+    workResultsMethods().clearRuntimeControls?.();
+    workResultsMethods().setResults?.([]);
+  };
+
+  const currentChapterFinished = CXAnalyses.isCurrentChapterFinished();
+  const chapterStayState = CXAnalyses.getChapterStayState();
+  const chapterCorrelationId = buildChapterCorrelationId(chapterStayState.chapterStayKey);
+  logDebug('info', '学习页面状态诊断', {
+    visibleContentState,
+    currentChapterFinished,
+    returnedToSameChapter: chapterStayState.returnedToSameChapter,
+    repeatCount: chapterStayState.repeatCount
+  }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount}`, { correlationId: chapterCorrelationId });
+
+
   const next = async () => {
+    resetWorkResults();
     if (CXAnalyses.isInFinalTab() && (await CXAnalyses.isStuckInBreakingMode())) {
       $message.warn('检测到当前课程可能处于闯关模式且重复进入多次，请先手动完成未完成的章节测试。');
       return;
@@ -1052,6 +1268,13 @@ export async function study(opts: StudyOptions) {
         await sleep(200);
         const nextFn = (topWindow as Record<string, any>).PCount?.next;
         if (typeof nextFn === 'function') {
+          logDebug('info', '动作节点诊断：执行下一章跳转', {
+            mode: opts.mode,
+            count: count.length,
+            curChapterId: curChapterId.value,
+            curCourseId: curCourseId.value,
+            curClazzId: curClazzId.value
+          }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
           nextFn(count.length.toString(), curChapterId.value, curCourseId.value, curClazzId.value, '');
         } else {
           $console.warn('参数错误，无法跳转下一章，请尝试手动切换。');
@@ -1064,7 +1287,15 @@ export async function study(opts: StudyOptions) {
     }
   };
 
-  if (visibleContentState !== 'empty' && visibleContentState !== 'standard-job' && visibleContentState !== 'finished-job') {
+  if ((visibleContentState as VisibleContentState) === 'finished-job' && !currentChapterFinished && searchedJobs.length === 0) {
+    const msg = '当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。';
+    showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+    $message.warn({ content: msg, duration: 0 });
+    $console.warn(msg);
+    return;
+  }
+
+  if (visibleContentState !== 'empty' && visibleContentState !== 'finished-job' && !currentChapterFinished) {
     const msg = '检测到页面存在可处理内容，但当前未识别为标准任务点。';
     showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
     $message.warn({ content: msg, duration: 0 });
@@ -1072,12 +1303,52 @@ export async function study(opts: StudyOptions) {
     return;
   }
 
+  if (chapterStayState.returnedToSameChapter && chapterStayState.repeatCount >= 3) {
+    await $modal.notice({
+      content: '连续 3 次跳转后仍停留在同一页面，自动跳转可能失效，请手动检查课程目录或任务点状态。',
+      duration: 0,
+      icon: 'warning'
+    });
+    return;
+  }
+
   if (opts.mode !== 'manually') {
     const msg = '页面任务点已完成，即将跳转。';
+    const jumpGuardKey = CXAnalyses.getCurrentChapterStayKey();
+    const jumpCorrelationId = buildChapterCorrelationId(jumpGuardKey || chapterStayState.chapterStayKey);
+    logDebug('info', '自动跳转守卫诊断', {
+      jumpGuardKey,
+      visibleContentState,
+      currentChapterFinished,
+      mode: opts.mode,
+      returnedToSameChapter: chapterStayState.returnedToSameChapter,
+      repeatCount: chapterStayState.repeatCount
+    }, undefined, { correlationId: jumpCorrelationId });
+    logDebug('info', '动作节点诊断：准备自动跳转', {
+      jumpGuardKey,
+      visibleContentState,
+      currentChapterFinished,
+      mode: opts.mode
+    }, undefined, { correlationId: jumpCorrelationId });
+
     showTopCenterNotice(msg, { duration: 5000, tone: 'success' });
     $message.success(msg);
     $console.info(msg);
     await sleep(5000);
+    if (jumpGuardKey && CXAnalyses.getCurrentChapterStayKey() !== jumpGuardKey) {
+      const cancelMsg = '检测到你已手动切换任务点，本次自动跳转已取消。';
+      logDebug('warn', '自动跳转取消诊断', {
+        jumpGuardKey,
+        latestChapterStayKey: CXAnalyses.getCurrentChapterStayKey(),
+        visibleContentState,
+        currentChapterFinished
+      }, undefined, { correlationId: jumpCorrelationId });
+
+      showTopCenterNotice(cancelMsg, { duration: 5000, tone: 'warning' });
+      $message.warn(cancelMsg);
+      $console.warn(cancelMsg);
+      return;
+    }
     await next();
   } else {
     const msg = '页面任务点已完成，自动跳转已关闭，请手动跳转。';
@@ -1126,13 +1397,19 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
   const search = (root: HTMLIFrameElement): SearchJobResult => {
     const win = root.contentWindow;
     const { videojs, read, chapterTest, hyperlink, pptWithAudio, timereader } = searchJobElement(root);
+    const workIframeSrc = root.getAttribute('src') || root.getAttribute('_src') || '';
+    const hasVisibleWorkFrame =
+      workIframeSrc.includes('/ananas/modules/work/index.html') ||
+      workIframeSrc.includes('/mooc-ans/api/work') ||
+      Boolean(root.getAttribute('jobid') || root.getAttribute('_jobid'));
 
-    if (win && (videojs || read || chapterTest || hyperlink || pptWithAudio || timereader)) {
+    if (win && (videojs || read || chapterTest || hyperlink || pptWithAudio || timereader || hasVisibleWorkFrame)) {
       const frameDataStr =
         win.frameElement?.getAttribute('data') ||
-        ((win.frameElement as HTMLIFrameElement | null)?.contentWindow?.parent.frameElement?.getAttribute('data') ?? '{}');
+        (win.frameElement as HTMLIFrameElement | null)?.contentWindow?.parent.frameElement?.getAttribute('data') ||
+        '{}';
       const frameData = JSON.parse(frameDataStr);
-      const targetJobId = frameData.jobid || frameData._jobid;
+      const targetJobId = frameData.jobid || frameData._jobid || root.getAttribute('jobid') || root.getAttribute('_jobid');
       if (!targetJobId) {
         return { visibleContentState: 'visible-unmapped' };
       }
@@ -1150,104 +1427,221 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
       }
 
       const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
+      const status = chapterTest ? win.document.querySelector<HTMLElement>('.testTit_status') : undefined;
+      const chapterStatusComplete = status?.classList.contains('testTit_status_complete') === true;
+      const alreadySearched = searchedJobs.find((job) => job.mid === attachment.property.mid) !== undefined;
+      const { name, title, bookname, author } = attachment.property;
+      const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
+      const frameSrc = root.getAttribute('src') || root.getAttribute('_src') || '';
+      const chapterStayKey = CXAnalyses.getCurrentChapterStayKey();
+      const jobCorrelationId = buildChapterCorrelationId(chapterStayKey, {
+        targetJobId: String(targetJobId),
+        jobName
+      });
+
+      if (chapterTest) {
+        const chapterCandidateDebug = {
+          src: root.getAttribute('src') ?? '',
+          _src: root.getAttribute('_src') ?? '',
+          jobid: root.getAttribute('jobid') ?? '',
+          frameDataJobid: frameData.jobid,
+          frameData_jobid: frameData._jobid,
+          directChapterTest: !!chapterTest,
+          nestedIframeCount: win.document.querySelectorAll('iframe').length
+        };
+        logDebug('info', '章节测试候选 iframe 诊断', chapterCandidateDebug, `章节测试候选 iframe 诊断详情：src=${chapterCandidateDebug.src} _src=${chapterCandidateDebug._src} jobid=${chapterCandidateDebug.jobid} frameDataJobid=${String(chapterCandidateDebug.frameDataJobid ?? '')} frameData_jobid=${String(chapterCandidateDebug.frameData_jobid ?? '')} directChapterTest=${String(chapterCandidateDebug.directChapterTest)} nestedIframeCount=${chapterCandidateDebug.nestedIframeCount}`, { correlationId: jobCorrelationId });
+
+      }
+
+      if (chapterTest) {
+        const chapterStatusDebug = {
+          jobName,
+          attachmentJob: attachment.job,
+          attachmentPassed: attachment.isPassed,
+          workType,
+          alreadySearched,
+          chapterStatusComplete,
+          statusClass: status?.className ?? '',
+          directTiMuCount: win.document.querySelectorAll('.TiMu').length
+        };
+        logDebug('info', '章节测试状态诊断', chapterStatusDebug, `章节测试状态诊断详情：jobName=${jobName} attachmentJob=${String(chapterStatusDebug.attachmentJob)} attachmentPassed=${String(chapterStatusDebug.attachmentPassed)} workType=${chapterStatusDebug.workType} alreadySearched=${String(chapterStatusDebug.alreadySearched)} chapterStatusComplete=${String(chapterStatusDebug.chapterStatusComplete)} statusClass=${chapterStatusDebug.statusClass} directTiMuCount=${chapterStatusDebug.directTiMuCount}`, { correlationId: jobCorrelationId });
+
+      }
+
       const visibleContentState: VisibleContentState =
-        workType === 'job' ? 'standard-job' : workType === 'finished' ? 'finished-job' : 'visible-nonjob';
+        chapterStatusComplete
+          ? 'finished-job'
+          : workType === 'job'
+            ? 'standard-job'
+            : workType === 'finished'
+              ? 'finished-job'
+              : 'visible-nonjob';
 
-      if (searchedJobs.find((job) => job.mid === attachment.property.mid) === undefined) {
-        const { name, title, bookname, author } = attachment.property;
-        const jobName = name || title || (bookname ? `${bookname}${author ?? ''}` : undefined) || '未知任务';
+      logDebug('info', '任务点搜索诊断', {
+        frameSrc,
+        targetJobId,
+        jobName,
+        workType,
+        chapterStatusComplete,
+        alreadySearched,
+        visibleContentState,
+        hasVideojs: Boolean(videojs),
+        hasChapterTest: Boolean(chapterTest),
+        hasRead: Boolean(read),
+        hasHyperlink: Boolean(hyperlink),
+        hasPptWithAudio: Boolean(pptWithAudio),
+        hasTimereader: Boolean(timereader),
+        hasVisibleWorkFrame
+      }, `任务点搜索诊断详情：frameSrc=${frameSrc} targetJobId=${String(targetJobId)} jobName=${jobName} workType=${workType} chapterStatusComplete=${String(chapterStatusComplete)} alreadySearched=${String(alreadySearched)} visibleContentState=${visibleContentState} hasVideojs=${String(Boolean(videojs))} hasChapterTest=${String(Boolean(chapterTest))} hasRead=${String(Boolean(read))} hasHyperlink=${String(Boolean(hyperlink))} hasPptWithAudio=${String(Boolean(pptWithAudio))} hasTimereader=${String(Boolean(timereader))} hasVisibleWorkFrame=${String(hasVisibleWorkFrame)}`, { correlationId: jobCorrelationId });
 
-        let func: (() => Promise<void>) | undefined;
 
-        if (videojs) {
-          if (!opts.enableMedia) {
-            const msg = `音视频自动学习功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
+      if (alreadySearched) {
+        logDebug('info', '任务点已处理跳过诊断', {
+          frameSrc,
+          targetJobId,
+          jobName,
+          visibleContentState,
+          hasFunc: false,
+          reason: 'already-searched'
+        }, undefined, { correlationId: jobCorrelationId });
+
+        return { visibleContentState: chapterStatusComplete || isVisibleQuestionFallbackState(visibleContentState) ? 'finished-job' : visibleContentState };
+      }
+
+      let func: (() => Promise<void>) | undefined;
+
+      if (videojs) {
+        if (!opts.enableMedia) {
+          const msg = `音视频自动学习功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (workType === 'job' || (workType === 'finished' && opts.restudy) || (workType === 'not-job' && opts.forceLearn)) {
+          func = async () => {
+            logDebug('info', '动作节点诊断：开始媒体任务', {
+              frameSrc,
+              targetJobId,
+              jobName,
+              workType,
+              visibleContentState
+            }, undefined, { correlationId: jobCorrelationId });
+            const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            await JobRunner.media(opts, win.document, attachment);
+          };
+        }
+      } else if (chapterTest) {
+        if (!opts.enableAnswer) {
+          const msg = `自动答题总开关已关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (!opts.enableChapterTest) {
+          const msg = `章节测试自动答题功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else {
+          if (chapterStatusComplete) {
+            const msg = `章节测试已完成 : ${jobName}`;
+            $message.success(msg);
+            $console.log(msg);
+            return { visibleContentState: 'finished-job' };
+          } else if (workType === 'job') {
             func = async () => {
-              const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
+              logDebug('info', '动作节点诊断：开始章节答题', {
+                frameSrc,
+                targetJobId,
+                jobName,
+                workType,
+                visibleContentState,
+                fallback: false
+              }, undefined, { correlationId: jobCorrelationId });
+              const msg = `正在处理章节测试 : ${jobName}`;
               $message.info(msg);
               $console.log(msg);
-              await JobRunner.media(opts, win.document);
+              await JobRunner.chapter(root, opts.workOptions);
             };
-          }
-        } else if (chapterTest) {
-          if (!opts.enableAnswer) {
-            const msg = `自动答题总开关已关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (!opts.enableChapterTest) {
-            const msg = `章节测试自动答题功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else {
-            const status = win.document.querySelector<HTMLElement>('.testTit_status');
-            if (status?.classList.contains('testTit_status_complete')) {
-              const msg = `章节测试已完成 : ${jobName}`;
-              $message.success(msg);
-              $console.log(msg);
-            } else if (workType === 'job') {
-              func = async () => {
-                const msg = `正在处理章节测试 : ${jobName}`;
-                $message.info(msg);
-                $console.log(msg);
-                await JobRunner.chapter(root, opts.workOptions);
-              };
-            } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
-              func = async () => {
-                const msg = '正在尝试兜底处理当前可见题目';
-                $message.info(msg);
-                $console.log(msg);
-                await JobRunner.chapter(root, opts.workOptions);
-              };
-            }
-          }
-        } else if (read || pptWithAudio || timereader) {
-          if (!opts.enablePPT) {
-            const msg = `PPT/书籍阅读功能已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (attachment.job) {
+          } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
             func = async () => {
-              const msg = `正在学习 : ${jobName}`;
+              logDebug('info', '动作节点诊断：开始章节答题', {
+                frameSrc,
+                targetJobId,
+                jobName,
+                workType,
+                visibleContentState,
+                fallback: true
+              }, undefined, { correlationId: jobCorrelationId });
+              const msg = '正在尝试兜底处理当前可见题目';
               $message.info(msg);
               $console.log(msg);
-              if (read) {
-                await JobRunner.read(win as Window & { finishJob?: () => void }, attachment);
-              } else if (timereader) {
-                await JobRunner.timereader(timereader as HTMLIFrameElement, attachment);
-              } else {
-                await JobRunner.readPPTWithAudio(win as Window & { swiperNext?: () => void }, attachment);
-              }
-            };
-          }
-        } else if (hyperlink) {
-          if (!opts.enableHyperlink) {
-            const msg = `链接任务点已被关闭。${jobName} 即将跳过`;
-            $message.warn({ content: msg, duration: 10000 });
-            $console.warn(msg);
-          } else if (attachment.job) {
-            func = async () => {
-              const msg = `正在完成链接阅读任务 : ${jobName}`;
-              $message.info(msg);
-              $console.log(msg);
-              await JobRunner.hyperlink(hyperlink as HTMLElement);
+              await JobRunner.chapter(root, opts.workOptions);
             };
           }
         }
-
-        const job = {
-          mid: attachment.property.mid,
-          attachment,
-          func
-        };
-
-        searchedJobs.push(job);
-        return { job, visibleContentState };
+      } else if (read || pptWithAudio || timereader) {
+        if (!opts.enablePPT) {
+          const msg = `PPT/书籍阅读功能已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (attachment.job) {
+          func = async () => {
+            const msg = `正在学习 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            if (read) {
+              await JobRunner.read(win as Window & { finishJob?: () => void }, attachment);
+            } else if (timereader) {
+              await JobRunner.timereader(timereader as HTMLIFrameElement, attachment);
+            } else {
+              await JobRunner.readPPTWithAudio(win as Window & { swiperNext?: () => void }, attachment);
+            }
+          };
+        }
+      } else if (hyperlink) {
+        if (!opts.enableHyperlink) {
+          const msg = `链接任务点已被关闭。${jobName} 即将跳过`;
+          $message.warn({ content: msg, duration: 10000 });
+          $console.warn(msg);
+        } else if (attachment.job) {
+          func = async () => {
+            const msg = `正在完成链接阅读任务 : ${jobName}`;
+            $message.info(msg);
+            $console.log(msg);
+            await JobRunner.hyperlink(hyperlink as HTMLElement);
+          };
+        }
       }
 
-      return { visibleContentState };
+      if (!func) {
+        logDebug('info', '任务点已处理跳过诊断', {
+          frameSrc,
+          targetJobId,
+          jobName,
+          visibleContentState,
+          hasFunc: false,
+          reason: 'no-runnable-handler'
+        }, undefined, { correlationId: jobCorrelationId });
+
+        return { visibleContentState };
+      }
+
+      const job = {
+        mid: attachment.property.mid,
+        attachment,
+        func
+      };
+
+      logDebug('info', '任务点已处理跳过诊断', {
+        frameSrc,
+        targetJobId,
+        jobName,
+        visibleContentState,
+        hasFunc: true,
+        reason: 'job-enqueued'
+      }, undefined, { correlationId: jobCorrelationId });
+
+
+      searchedJobs.push(job);
+      return { job, visibleContentState };
     }
 
     return { visibleContentState: 'empty' };
@@ -1273,7 +1667,7 @@ export function fixedVideoProgress() {
 }
 
 const JobRunner = {
-  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document) {
+  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment) {
     const { playbackRate = 1, volume = 0, muteMedia = true } = setting;
     const media = await waitForMedia({ root: doc });
     const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
@@ -1337,10 +1731,14 @@ const JobRunner = {
       };
 
       media.addEventListener('pause', onPause);
-      media.addEventListener('ended', () => {
+      media.addEventListener('ended', async () => {
         media.removeEventListener('pause', onPause);
         $console.log('视频播放完毕');
         clearInterval(reloadInterval);
+        const finished = await waitForAttachmentComplete(attachment, 15000);
+        if (!finished) {
+          await waitForCurrentChapterFinished(10000);
+        }
         resolve();
       });
 
@@ -1396,7 +1794,10 @@ const JobRunner = {
       stopSecondWhenFinish,
       redundanceWordsText,
       answerSeparators,
-      answerMatchMode
+      answerMatchMode,
+      enableRandomFallbackAnswer,
+      enableAIFallbackAnswer,
+      aiFallbackFailureAction
     } = options;
 
     if (answererWrappers === undefined || answererWrappers.length === 0) {
@@ -1411,10 +1812,32 @@ const JobRunner = {
       return;
     }
 
-    const { TiMu } = domSearch({ TiMu: '.TiMu' }, frameDocument);
-    const roots = Array.isArray(TiMu) ? (TiMu as HTMLElement[]) : [];
+    const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameDocument);
+    const roots = TiMu;
+    const nestedWorkIframes = Array.from(frameDocument.querySelectorAll<HTMLIFrameElement>('iframe')).filter((item) => {
+      const name = item.getAttribute('name') ?? '';
+      const id = item.getAttribute('id') ?? '';
+      const src = item.getAttribute('src') ?? item.getAttribute('_src') ?? '';
+      return name === 'frame_content' || id === 'frame_content' || /work/i.test(src);
+    });
+    const chapterFrameDebug = {
+      src: frame.getAttribute('src') ?? '',
+      _src: frame.getAttribute('_src') ?? '',
+      jobid: frame.getAttribute('jobid') ?? '',
+      directTiMuCount: roots.length,
+      nestedWorkIframeCount: nestedWorkIframes.length
+    };
+    logDebug('info', '章节测试框架诊断', chapterFrameDebug, `章节测试框架诊断详情：src=${chapterFrameDebug.src} _src=${chapterFrameDebug._src} jobid=${chapterFrameDebug.jobid} directTiMuCount=${chapterFrameDebug.directTiMuCount} nestedWorkIframeCount=${chapterFrameDebug.nestedWorkIframeCount}`, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
+
     if (roots.length === 0) {
-      $console.warn('未找到章节测试题目，已跳过。');
+      const innerFrame = nestedWorkIframes[0];
+      const innerDocument = innerFrame?.contentWindow?.document;
+      const innerTiMuCount = innerDocument ? innerDocument.querySelectorAll('.TiMu').length : 0;
+      $console.warn('未找到章节测试题目，已跳过。', {
+        innerFrameExists: !!innerFrame,
+        innerTiMuCount
+      });
+      $console.warn(`章节测试未命中题目详情：innerFrameExists=${String(!!innerFrame)} innerTiMuCount=${innerTiMuCount}`);
       return;
     }
 
@@ -1444,7 +1867,7 @@ const JobRunner = {
         elements: {
           title: '.Zy_TItle .clearfix',
           options: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
-          type: 'input[id^="answertype"]',
+          type: questionTypeInputSelector,
           lineAnswerInput: '.line_answer input[name^=answer]',
           lineSelectBox: '.line_answer_ct .selectBox '
         },
@@ -1457,17 +1880,27 @@ const JobRunner = {
             throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
           }
 
-          const typeInput = elements.type[0] as HTMLInputElement | undefined;
           const provider = async () => {
             await sleep((period ?? 3) * 1000);
-            return defaultAnswerWrapperHandler(answererWrappers, {
-              type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
+            const questionType = resolveAnswerSearchType(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument);
+            const optionsText =
+              ctx.type === 'completion'
+                ? ''
+                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
+            const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
+              type: questionType,
               title,
-              options:
-                ctx.type === 'completion'
-                  ? ''
-                  : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
+              options: optionsText
             });
+            return appendAIFallbackSearchInfos(
+              baseInfos,
+              { enableAIFallbackAnswer, aiFallbackFailureAction },
+              {
+                title,
+                type: questionType ?? 'unknown',
+                optionsText
+              }
+            );
           };
 
           const searchInCaches = appsMethods().searchAnswerInCaches;
@@ -1475,11 +1908,13 @@ const JobRunner = {
         },
         work: async (ctx) => {
           const { elements, searchInfos } = ctx;
-          const typeInput = elements.type[0] as HTMLInputElement | undefined;
-          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+          const type = resolveQuestionTypeForWork(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument, {
+            elements: { options: elements.options as HTMLElement[] }
+          });
 
-          if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
+          if (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single') {
             const resolver = createDefaultQuestionResolver(ctx)[type];
+            const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
 
             const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
               if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
@@ -1487,7 +1922,7 @@ const JobRunner = {
                   option.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
                   option.parentElement?.getAttribute('aria-checked') === 'true';
                 if (!checked) {
-                  option.click();
+                  triggerSyntheticClick(option);
                 }
               } else if (questionType === 'completion' && option && answer.trim()) {
                 const text = option.parentElement?.querySelector('textarea');
@@ -1498,11 +1933,17 @@ const JobRunner = {
                 if (textareaFrame?.contentDocument) {
                   textareaFrame.contentDocument.body.innerHTML = answer;
                 }
-                option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
+                const saveButton = option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]');
+                triggerSyntheticClick(saveButton);
               }
             };
 
-            return resolver(searchInfos, elements.options.map((option) => optimizationElementWithImage(option)), handler as any);
+            const result = await resolver(searchInfos, resolvedOptions, handler as any);
+            return result.finish
+              ? result
+              : ((await runRandomChoiceFallback(type, resolvedOptions, { enableRandomFallbackAnswer }, handler as any)) ?? {
+                  finish: false
+                });
           } else if (type === 'line') {
             for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
               let ans = answers;
@@ -1532,11 +1973,14 @@ const JobRunner = {
           workResultsMethods().updateWorkStateByResults?.(res);
 
           const currentRoot = questionRoots[currentIndex];
-          const typeInput = currentRoot?.querySelector<HTMLInputElement>('input[id^="answertype"]');
-          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+          const type = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
+          const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
+            elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
+          }) : undefined;
           if (currentRoot) {
             const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
             workResultsMethods().patchResult?.(currentIndex, {
+              type: inferredType ?? undefined,
               manual: detectManualAnswer(currentRoot, type, {
                 previousManual,
                 result: curr
@@ -1549,8 +1993,7 @@ const JobRunner = {
           }
         },
         async onElementSearched(elements) {
-          const typeInput = elements.type[0] as HTMLInputElement | undefined;
-          const type = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+          const type = resolveQuestionType(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument);
           if (type === 'judgement') {
             elements.options.forEach((option) => {
               const opt = option?.textContent?.trim() || '';
@@ -1587,8 +2030,23 @@ const JobRunner = {
           return undefined;
         }
 
+        const chapterRetryCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+          targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
+          jobName: `chapter-retry-${index + 1}`
+        });
+        logDebug('info', '动作节点诊断：开始单题重答', {
+          index,
+          total: roots.length,
+          mode: 'chapter'
+        }, undefined, { correlationId: chapterRetryCorrelationId });
         const retryWorker = createChapterWorker([root]);
         const retriedResults = await retryWorker.doWork();
+        logDebug('info', '动作节点诊断：单题重答完成', {
+          index,
+          total: roots.length,
+          resultCount: retriedResults.length,
+          mode: 'chapter'
+        }, undefined, { correlationId: chapterRetryCorrelationId });
         return {
           ...simplifyWorkResult(retriedResults, chapterTestTaskQuestionTitleTransform)[0],
           manual: false,
@@ -1600,27 +2058,59 @@ const JobRunner = {
     worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
 
+    const confirmed = await confirmBeforeAutoAnswer(worker);
+    if (!confirmed) {
+      return;
+    }
+
+    const chapterActionCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+      targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
+      jobName: 'chapter-test'
+    });
     const results = await worker.doWork();
+    logDebug('info', '动作节点诊断：答题结果已生成', {
+      resultCount: results.length,
+      uploadMode: upload,
+      stopSecondWhenFinish
+    }, undefined, { correlationId: chapterActionCorrelationId });
     const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
     $console.info(msg);
     $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
     await sleep(stopSecondWhenFinish * 1000);
 
+    logDebug('info', '动作节点诊断：准备提交或保存', {
+      resultCount: results.length,
+      uploadMode: upload,
+      stopSecondWhenFinish
+    }, undefined, { correlationId: chapterActionCorrelationId });
     await worker.uploadHandler({
       type: upload === 'submit' ? 100 : upload,
       results,
       async callback(finishedRate, uploadable) {
-        const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : ${uploadable ? '3秒后将自动提交' : '3秒后将自动保存'}`;
+        const shouldSubmit = upload === 'submit' && uploadable;
+        const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
         $console.info(uploadMsg);
         $message.success({ content: uploadMsg, duration: 3000 });
         await sleep(3000);
 
-        if (uploadable) {
+        if (shouldSubmit) {
+          logDebug('info', '动作节点诊断：执行提交', {
+            finishedRate,
+            uploadMode: upload,
+            shouldSubmit,
+            uploadable
+          }, undefined, { correlationId: chapterActionCorrelationId });
           (frameWindow as Record<string, any>).btnBlueSubmit?.();
           await sleep(3000);
           (frameWindow as Record<string, any>).submitCheckTimes?.();
           (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
         } else {
+          logDebug('info', '动作节点诊断：执行保存', {
+            finishedRate,
+            uploadMode: upload,
+            shouldSubmit,
+            uploadable
+          }, undefined, { correlationId: chapterActionCorrelationId });
           (frameWindow as Record<string, any>).alert = () => {};
           (frameWindow as Record<string, any>).noSubmit?.();
         }
@@ -1667,11 +2157,18 @@ function workOrExam(
     redundanceWordsText,
     answerSeparators,
     answerMatchMode,
+    enableRandomFallbackAnswer,
+    enableAIFallbackAnswer,
+    aiFallbackFailureAction,
     preview_mode
   }: CommonWorkOptions & {
     preview_mode: boolean;
   }
 ) {
+  const workExamCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+    targetJobId: type,
+    jobName: preview_mode ? `${type}-preview` : `${type}-step-by-step`
+  });
   $message.info(`开始${type === 'work' ? '作业' : '考试'}`);
 
   if (preview_mode) {
@@ -1709,7 +2206,7 @@ function workOrExam(
       elements: {
         title: [(root) => root.querySelector('h3') as HTMLElement],
         options: '.answerBg .answer_p, .textDIV, .eidtDiv',
-        type: type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]',
+        type: questionTypeInputSelector,
         lineAnswerInput: '.line_answer input[name^=answer]',
         lineSelectBox: '.line_answer_ct .selectBox ',
         reading: '.reading_answer',
@@ -1727,17 +2224,27 @@ function workOrExam(
           throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
         }
 
-        const typeInput = elements.type[0] as HTMLInputElement | undefined;
         const provider = async () => {
           await sleep((period ?? 3) * 1000);
-          return defaultAnswerWrapperHandler(answererWrappers, {
-            type: (typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined) || 'unknown',
+          const questionType = resolveAnswerSearchType(elements.type[0] ?? elements.options[0]?.closest('.questionLi') ?? document);
+          const optionsText =
+            ctx.type === 'completion'
+              ? ''
+              : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
+          const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
+            type: questionType,
             title,
-            options:
-              ctx.type === 'completion'
-                ? ''
-                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n')
+            options: optionsText
           });
+          return appendAIFallbackSearchInfos(
+            baseInfos,
+            { enableAIFallbackAnswer, aiFallbackFailureAction },
+            {
+              title,
+              type: questionType ?? 'unknown',
+              optionsText
+            }
+          );
         };
 
         const searchInCaches = appsMethods().searchAnswerInCaches;
@@ -1745,34 +2252,46 @@ function workOrExam(
       },
       work: async (ctx) => {
         const { elements, searchInfos } = ctx;
-        const typeInput = elements.type[0] as HTMLInputElement | undefined;
-        const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+        const questionType = resolveQuestionTypeForWork(elements.type[0] ?? elements.options[0]?.closest('.questionLi') ?? document, {
+          elements: { options: elements.options as HTMLElement[] }
+        });
 
-        if (questionType && ['completion', 'multiple', 'judgement', 'single'].includes(questionType)) {
-          const resolver = createDefaultQuestionResolver(ctx)[questionType as 'completion' | 'multiple' | 'judgement' | 'single'];
-          return resolver(
-            searchInfos,
-            elements.options.map((option) => optimizationElementWithImage(option)),
-            async (resolvedType, answer, option) => {
-              if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
-                if (option.parentElement && option.parentElement.querySelectorAll('[class*="check_answer"]').length === 0) {
-                  option.click();
-                  await sleep(500);
-                }
-              } else if (resolvedType === 'completion' && option && answer.trim()) {
-                const text = option.querySelector('textarea');
-                const textareaFrame = option.querySelector('iframe');
-                if (text) {
-                  text.value = answer;
-                }
-                if (textareaFrame?.contentDocument) {
-                  textareaFrame.contentDocument.body.innerHTML = answer;
-                }
-                option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
+        if (
+          questionType === 'completion' ||
+          questionType === 'multiple' ||
+          questionType === 'judgement' ||
+          questionType === 'single'
+        ) {
+          const resolver = createDefaultQuestionResolver(ctx)[questionType];
+          const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
+          const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {
+            if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
+              if (option.parentElement && option.parentElement.querySelectorAll('[class*="check_answer"]').length === 0) {
+                triggerSyntheticClick(option);
                 await sleep(500);
               }
+            } else if (resolvedType === 'completion' && option && answer.trim()) {
+              const text = option.querySelector('textarea');
+              const textareaFrame = option.querySelector('iframe');
+              if (text) {
+                text.value = answer;
+              }
+              if (textareaFrame?.contentDocument) {
+                textareaFrame.contentDocument.body.innerHTML = answer;
+              }
+              const saveButton = option.parentElement?.parentElement?.querySelector('[onclick*=saveQuestion]');
+              if (saveButton instanceof HTMLElement) {
+                triggerSyntheticClick(saveButton);
+              }
+              await sleep(500);
             }
-          );
+          };
+          const result = await resolver(searchInfos, resolvedOptions, handler);
+          return result.finish
+            ? result
+            : ((await runRandomChoiceFallback(questionType, resolvedOptions, { enableRandomFallbackAnswer }, handler)) ?? {
+                finish: false
+              });
         }
 
         if (questionType === 'line') {
@@ -1820,11 +2339,14 @@ function workOrExam(
         workResultsMethods().updateWorkStateByResults?.(res);
 
         const currentRoot = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))[currentIndex];
-        const typeInput = currentRoot?.querySelector<HTMLInputElement>(type === 'exam' ? 'input[name^="type"]' : 'input[id^="answertype"]');
-        const questionType = typeInput ? getQuestionType(parseInt(typeInput.value)) : undefined;
+        const questionType = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
+        const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
+          elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('.Py-mian1 .clearfix > div')) }
+        }) : undefined;
         if (currentRoot) {
           const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
           workResultsMethods().patchResult?.(currentIndex, {
+            type: inferredType ?? undefined,
             manual: detectManualAnswer(currentRoot, questionType, {
               previousManual,
               result: current
@@ -1856,8 +2378,19 @@ function workOrExam(
           return undefined;
         }
 
+        logDebug('info', '动作节点诊断：开始单题重答', {
+          index,
+          total: liveRoots().length,
+          mode: type
+        }, undefined, { correlationId: workExamCorrelationId });
         const retryWorker = createWorkOrExamWorker([root]);
         const retriedResults = await retryWorker.doWork();
+        logDebug('info', '动作节点诊断：单题重答完成', {
+          index,
+          total: liveRoots().length,
+          resultCount: retriedResults.length,
+          mode: type
+        }, undefined, { correlationId: workExamCorrelationId });
         return {
           ...simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0],
           manual: false,
@@ -1868,26 +2401,53 @@ function workOrExam(
 
     worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
-    void worker
-      .doWork()
-      .then(() => {
-        $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
-        worker.emit('done');
-      })
-      .catch((err) => {
-        console.error(err);
-        $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
-      });
+    void (async () => {
+      const confirmed = await confirmBeforeAutoAnswer(worker);
+      if (!confirmed) {
+        return;
+      }
+
+      logDebug('info', '动作节点诊断：开始作业/考试答题', {
+        type,
+        preview_mode,
+        questionCount: liveRoots().length
+      }, undefined, { correlationId: workExamCorrelationId });
+      await worker
+        .doWork()
+        .then(() => {
+          logDebug('info', '动作节点诊断：作业/考试答题完成', {
+            type,
+            preview_mode,
+            questionCount: liveRoots().length
+          }, undefined, { correlationId: workExamCorrelationId });
+          $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
+          worker.emit('done');
+        })
+        .catch((err) => {
+          console.error(err);
+          $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
+        });
+    })();
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
     let next = getNextBtn();
 
     void (async () => {
+      logDebug('info', '动作节点诊断：开始逐题切换答题', {
+        type,
+        preview_mode,
+        questionCount: Array.from(document.querySelectorAll<HTMLElement>('.questionLi')).length
+      }, undefined, { correlationId: workExamCorrelationId });
       while (next && worker.isClose === false) {
         await worker.doWork({ enable_debug: false });
         await sleep(1000);
         next = getNextBtn();
-        next?.click();
+        logDebug('info', '动作节点诊断：执行下一题切换', {
+          type,
+          preview_mode,
+          hasNext: Boolean(next)
+        }, undefined, { correlationId: workExamCorrelationId });
+        triggerSyntheticClick(next);
         await sleep(1000);
       }
 
@@ -1935,6 +2495,78 @@ function getQuestionType(
               : val === 15
                 ? 'reader'
                 : undefined;
+}
+
+function getQuestionTypeInput(root: ParentNode): HTMLInputElement | undefined {
+  if (root instanceof HTMLInputElement && root.matches(questionTypeInputSelector)) {
+    return root;
+  }
+
+  const prioritizedSelectors = ['input[id^="answertype"]', 'input[name^="answertype"]', 'input[name^="type"]', 'input[id^="type"]'];
+  for (const selector of prioritizedSelectors) {
+    const match = root.querySelector<HTMLInputElement>(selector);
+    if (match) {
+      return match;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveQuestionType(root: ParentNode): ReturnType<typeof getQuestionType> | 'unknown' {
+  const typeInput = getQuestionTypeInput(root);
+  const rawValue = typeInput?.value?.trim() ?? '';
+  const parsedValue = rawValue === '' ? Number.NaN : parseInt(rawValue, 10);
+  const questionType = Number.isFinite(parsedValue) ? getQuestionType(parsedValue) : undefined;
+
+  if (!questionType) {
+    logDebug('warn', '题目类型诊断', {
+      selector: questionTypeInputSelector,
+      rawValue,
+      parsedValue: Number.isFinite(parsedValue) ? parsedValue : 'NaN',
+      inputName: typeInput?.name ?? '',
+      inputId: typeInput?.id ?? '',
+      resolvedType: 'unknown'
+    }, `题目类型诊断详情：selector=${questionTypeInputSelector} rawValue=${rawValue} parsedValue=${String(Number.isFinite(parsedValue) ? parsedValue : 'NaN')} inputName=${typeInput?.name ?? ''} inputId=${typeInput?.id ?? ''} resolvedType=unknown`, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
+
+    return 'unknown';
+  }
+
+  logDebug('info', '题目类型诊断', {
+    selector: questionTypeInputSelector,
+    rawValue,
+    parsedValue,
+    inputName: typeInput?.name ?? '',
+    inputId: typeInput?.id ?? '',
+    resolvedType: questionType
+  }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
+
+  return questionType;
+}
+
+function resolveAnswerSearchType(root: ParentNode): ReturnType<typeof getQuestionType> | undefined {
+  const type = resolveQuestionType(root);
+  return type === 'unknown' ? undefined : type;
+}
+
+function resolveQuestionTypeForWork(root: ParentNode, ctx?: { elements?: { options?: HTMLElement[] } }): QuestionTypes {
+  const directType = resolveAnswerSearchType(root);
+  if (directType === 'single' || directType === 'multiple' || directType === 'judgement' || directType === 'completion') {
+    return directType;
+  }
+
+  if (ctx?.elements?.options?.length) {
+    return defaultWorkTypeResolver({
+      elements: { options: ctx.elements.options },
+      root: root as HTMLElement,
+      searchInfos: [],
+      type: undefined,
+      answerSeparators: [],
+      answerMatchMode: 'similar'
+    } as any);
+  }
+
+  return undefined;
 }
 
 async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[]) {

@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const extensionEntryPath = resolve(process.cwd(), 'src', 'extension-entry.js');
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const extensionEntryPath = resolve(scriptsDir, '..', 'src', 'extension-entry.js');
 
 test('extension entry does not remove work results panel in deep iframes', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
@@ -18,26 +20,35 @@ test('extension entry does not write URL-derived injection markers into dataset 
   assert.equal(source.includes('root.dataset[styleInjectedKey]'), false);
 });
 
-test('extension entry bootstraps and persists shared tiku config through chrome storage', async () => {
+test('extension entry bootstraps and persists shared settings through chrome storage by exact key list', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
 
-  assert.equal(source.includes('common.settings.tiku-adapter.baseurl'), true);
-  assert.equal(source.includes('common.settings.tiku-adapter.key'), true);
-  assert.equal(source.includes('chrome.storage.local.get'), true);
+  assert.equal(source.includes('const sharedStoreKeys = ['), true);
+  assert.equal(source.includes("'common.settings.tiku-adapter.baseurl'"), true);
+  assert.equal(source.includes("'common.settings.tiku-adapter.key'"), true);
+  assert.equal(source.includes('sharedStoreKeys.forEach((key) => {'), true);
+  assert.equal(source.includes("if (typeof value !== 'string') {"), true);
+  assert.equal(source.includes('chrome.storage.local.get(sharedStoreKeys, (result) => {'), true);
   assert.equal(source.includes('chaoxing-plus:shared-store-sync'), true);
+  assert.equal(source.includes("const sharedStoreKeyPrefix = 'common.settings.';"), false);
+  assert.equal(source.includes('Object.entries(values ?? {}).forEach(([key, value]) => {'), false);
+  assert.equal(source.includes('chrome.storage.local.get(null, (result) => {'), false);
 });
 
-test('extension entry prepares an isolated SweetAlert2 shadow host in the top document', async () => {
+test('extension entry starts the main script without blocking on SweetAlert runtime readiness', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
 
-  assert.equal(source.includes('function getSwalStyleDocument()'), true);
-  assert.equal(source.includes("const swalHostId = 'chaoxing-plus-swal-host';"), true);
-  assert.equal(source.includes("const swalTargetId = 'chaoxing-plus-swal-target';"), true);
-  assert.equal(source.includes("const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });"), true);
-  assert.equal(source.includes("link.dataset.source = 'chaoxing-plus-extension-swal-style';"), true);
-  assert.equal(source.includes("style.dataset.source = 'chaoxing-plus-extension-swal-reset';"), true);
-  assert.equal(source.includes("style.textContent = ':host{all:initial;}.swal2-popup{font-size:16px!important;}';"), true);
-  assert.equal(source.includes('mount.id = swalTargetId;'), true);
-  assert.equal(source.includes('(targetDocument.body || targetDocument.documentElement).appendChild(host);'), true);
-  assert.equal(source.includes('(targetDocument.head || targetRoot).appendChild(link);'), false);
+  assert.equal(source.includes('async function ensureSwalRuntime()'), true);
+  assert.equal(source.includes('void ensureSwalRuntime();'), true);
+  assert.equal(source.includes('await ensureSwalRuntime();'), false);
+  assert.equal(source.includes("script.src = chrome.runtime.getURL('chaoxing-plus.js');"), true);
+});
+
+test('runtime logger stringifies object payloads as readable JSON', async () => {
+  const loggerPath = resolve(scriptsDir, '..', 'src', 'runtime', 'logger.ts');
+  const source = await readFile(loggerPath, 'utf8');
+
+  assert.equal(source.includes('const normalizedArgs = args.map((arg) => {'), true);
+  assert.equal(source.includes('JSON.stringify(arg, null, 2)'), true);
+  assert.equal(source.includes("return '[unserializable]';"), true);
 });

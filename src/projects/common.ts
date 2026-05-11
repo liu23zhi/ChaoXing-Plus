@@ -32,6 +32,9 @@ export interface CommonWorkOptions {
   redundanceWordsText: string;
   answerSeparators: string;
   answerMatchMode: 'exact' | 'includes' | 'similar';
+  enableRandomFallbackAnswer: boolean;
+  enableAIFallbackAnswer: boolean;
+  aiFallbackFailureAction: 'pause' | 'skip';
 }
 
 type WorkResultsRuntimeControls = {
@@ -60,7 +63,6 @@ interface QuestionCache {
 }
 
 const WORK_RESULTS_PANEL_POSITION_KEY = 'common.work-results.panel-position';
-const STUDY_PLAYBACK_RATE_WARNING_ACK_KEY = 'cx.new.study.playback-rate-warning-ack';
 
 const WORK_OPTIONS_KEY = 'common.settings.work-options';
 const WORK_RESULTS_KEY = 'common.work-results.results';
@@ -70,15 +72,19 @@ const QUESTION_CACHE_KEY = 'common.apps.question-caches';
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
-  upload: 'save',
+  upload: 'submit',
   answererWrappers: [],
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
   answerSeparators: '#,|,;,；',
-  answerMatchMode: 'includes'
+  answerMatchMode: 'includes',
+  enableRandomFallbackAnswer: false,
+  enableAIFallbackAnswer: false,
+  aiFallbackFailureAction: 'pause'
 };
 
 const answerCache = new Map<string, SearchInformation[]>();
+let hasWarnedHighPlaybackRateInCurrentPage = false;
 
 function canShowFloatingPanel() {
   try {
@@ -135,7 +141,7 @@ const questionPositionSyncHandlers: Record<QuestionPositionSyncHandlerType, (ind
   }
 };
 
-function getStoredTikuAdapterConfig() {
+export function getStoredTikuAdapterConfig() {
   const baseurl = runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, DEFAULT_TIKU_BASE_URL);
   const key = runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '');
 
@@ -163,6 +169,13 @@ function getWorkOptions(): CommonWorkOptions {
 
   return {
     ...stored,
+    upload: getStudySettingValue('upload', 'submit'),
+    enableRandomFallbackAnswer: getStudySettingValue(
+      'enableRandomFallbackAnswer',
+      stored.enableRandomFallbackAnswer ?? false
+    ),
+    enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
+    aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
   };
 }
@@ -393,17 +406,12 @@ function applyStudySettingRuntimeEffect(key: string, value: unknown) {
 
 function maybeWarnHighPlaybackRate(value: unknown) {
   const rate = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(rate) || rate <= 2) {
+  if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {
     return;
   }
 
-  const warnedRate = runtimeStore.get(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, 0);
-  if (typeof warnedRate === 'number' && warnedRate === rate) {
-    return;
-  }
-
-  runtimeStore.set(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, rate);
-  void $modal.alert('当前倍速已超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');
+  hasWarnedHighPlaybackRateInCurrentPage = true;
+  void $modal.alert('当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');
 }
 
 function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?: string }, key: string, value: unknown) {
@@ -1188,6 +1196,24 @@ function createStudySettingsPanel() {
       attrs: { type: 'checkbox', title: '开启后自动搜索并填写章节测试答案。' },
       defaultValue: true
     },
+    enableRandomFallbackAnswer: {
+      label: '无答案时随机作答',
+      attrs: { type: 'checkbox', title: '题库和 AI 都没有返回可用答案时，允许对选择题随机作答。' },
+      defaultValue: false
+    },
+    enableAIFallbackAnswer: {
+      label: 'AI 兜底搜题',
+      attrs: { type: 'checkbox', title: '普通题库失败后，允许调用 tikuAdapter AI fallback。' },
+      defaultValue: false
+    },
+    aiFallbackFailureAction: {
+      label: 'AI 兜底失败后行为',
+      options: [
+        ['pause', '停留当前页'],
+        ['skip', '继续后续流程']
+      ],
+      defaultValue: 'pause'
+    },
     enableHyperlink: {
       label: '链接任务自动完成',
       attrs: { type: 'checkbox', title: '开启后自动完成链接型任务点。' },
@@ -1237,7 +1263,16 @@ function createStudySettingsPanel() {
 
   const mediaKeys = ['playbackRate', 'volume', 'muteMedia', 'videoQuizStrategy'];
   const progressKeys = ['mode', 'restudy', 'forceLearn', 'backToFirstWhenFinish'];
-  const taskKeys = ['enableMedia', 'enablePPT', 'enableChapterTest', 'enableHyperlink', 'notifyWhenHasFaceRecognition'];
+  const taskKeys = [
+    'enableMedia',
+    'enablePPT',
+    'enableChapterTest',
+    'enableRandomFallbackAnswer',
+    'enableAIFallbackAnswer',
+    'aiFallbackFailureAction',
+    'enableHyperlink',
+    'notifyWhenHasFaceRecognition'
+  ];
 
   const createSettingsGroup = (
     groupTitle: string,
@@ -1492,7 +1527,8 @@ function createWorkResultsPanel() {
   const studyScript = {
     namespace: 'cx.new.study',
     cfg: {
-      enableAnswer: getStudySettingValue('enableAnswer', true)
+      enableAnswer: getStudySettingValue('enableAnswer', true),
+      upload: getStudySettingValue('upload', 'submit')
     }
   };
 
@@ -1505,6 +1541,38 @@ function createWorkResultsPanel() {
     defaultValue: true
   });
   answerToggleField.style.maxWidth = '240px';
+
+  const uploadModeField = createElement('label');
+  uploadModeField.style.display = 'grid';
+  uploadModeField.style.gap = '8px';
+  uploadModeField.style.maxWidth = '240px';
+
+  const uploadModeLabel = createElement('span', { text: '完成后动作' });
+  uploadModeLabel.style.fontSize = '12px';
+  uploadModeLabel.style.fontWeight = '700';
+  uploadModeLabel.style.color = '#334155';
+
+  const uploadModeSelect = document.createElement('select');
+  uploadModeSelect.title = '选择课程任务答题完成后自动保存或自动提交。';
+  uploadModeSelect.style.width = '100%';
+  uploadModeSelect.style.padding = '10px 12px';
+  uploadModeSelect.style.borderRadius = '12px';
+  uploadModeSelect.style.border = '1px solid rgba(226, 232, 240, 0.95)';
+  uploadModeSelect.style.background = 'rgba(255,255,255,0.98)';
+  uploadModeSelect.style.fontSize = '13px';
+  uploadModeSelect.style.fontWeight = '700';
+  uploadModeSelect.style.color = '#0f172a';
+  ['submit', 'save'].forEach((value) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value === 'submit' ? '自动提交' : '自动保存';
+    uploadModeSelect.append(option);
+  });
+  uploadModeSelect.value = studyScript.cfg.upload === 'save' ? 'save' : 'submit';
+  uploadModeSelect.oninput = () => {
+    setStudySettingValue(studyScript, 'upload', uploadModeSelect.value === 'save' ? 'save' : 'submit');
+  };
+  uploadModeField.append(uploadModeLabel, uploadModeSelect);
 
   const heroActions = createElement('div');
   heroActions.style.display = 'flex';
@@ -1543,7 +1611,7 @@ function createWorkResultsPanel() {
   applyActionButtonStyle(clearButton, 'danger');
   heroActions.append(typeButton, clearButton);
 
-  hero.append(heroTop, answerToggleField, metricRow, heroActions);
+  hero.append(heroTop, answerToggleField, uploadModeField, metricRow, heroActions);
   container.append(hero);
 
   const resultsSection = createElement('div');

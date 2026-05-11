@@ -19,6 +19,7 @@
   ];
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
   const sharedStoreHydrateEvent = 'chaoxing-plus:shared-store-hydrate';
+  const swalAliasKey = '__chaoxing_plus_swal__';
 
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 
@@ -75,7 +76,7 @@
   const swalHostId = 'chaoxing-plus-swal-host';
   const swalTargetId = 'chaoxing-plus-swal-target';
 
-  function getSwalStyleDocument() {
+  function getSwalScriptDocument() {
     try {
       const topDocument = window.top?.document;
       if (topDocument?.documentElement) {
@@ -86,6 +87,47 @@
     }
 
     return document;
+  }
+
+  async function ensureSwalRuntime() {
+    const targetDocument = getSwalScriptDocument();
+    const targetWindow = targetDocument.defaultView;
+    if (!targetWindow) {
+      return;
+    }
+
+    if (targetWindow[swalAliasKey] && typeof targetWindow[swalAliasKey].fire === 'function') {
+      return;
+    }
+
+    const existingScript = targetDocument.querySelector('script[data-source="chaoxing-plus-extension-swal-runtime"]');
+    if (existingScript) {
+      await new Promise((resolve) => {
+        if (targetWindow[swalAliasKey] && typeof targetWindow[swalAliasKey].fire === 'function') {
+          resolve(undefined);
+          return;
+        }
+        existingScript.addEventListener('load', () => resolve(undefined), { once: true });
+        existingScript.addEventListener('error', () => resolve(undefined), { once: true });
+      });
+      return;
+    }
+
+    await new Promise((resolve) => {
+      const script = targetDocument.createElement('script');
+      script.src = chrome.runtime.getURL('vendor/sweetalert2.all.min.js');
+      script.dataset.source = 'chaoxing-plus-extension-swal-runtime';
+      script.onload = () => {
+        targetWindow[swalAliasKey] = targetWindow.Swal;
+        resolve(undefined);
+      };
+      script.onerror = () => resolve(undefined);
+      (targetDocument.head || targetDocument.documentElement).appendChild(script);
+    });
+  }
+
+  function getSwalStyleDocument() {
+    return getSwalScriptDocument();
   }
 
   const injectStyle = () => {
@@ -103,40 +145,31 @@
       (targetDocument.body || targetDocument.documentElement).appendChild(host);
     }
 
-    const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
-
-    let link = shadowRoot.querySelector('link[data-source="chaoxing-plus-extension-swal-style"]');
+    let link = targetDocument.querySelector('link[data-source="chaoxing-plus-extension-swal-style"]');
     if (!link) {
       link = targetDocument.createElement('link');
       link.rel = 'stylesheet';
       link.href = chrome.runtime.getURL('vendor/sweetalert2.min.css');
       link.dataset.source = 'chaoxing-plus-extension-swal-style';
-      shadowRoot.appendChild(link);
+      (targetDocument.head || targetRoot).appendChild(link);
     }
 
-    let style = shadowRoot.querySelector('style[data-source="chaoxing-plus-extension-swal-reset"]');
-    if (!style) {
-      style = targetDocument.createElement('style');
-      style.dataset.source = 'chaoxing-plus-extension-swal-reset';
-      style.textContent = ':host{all:initial;}.swal2-popup{font-size:16px!important;}';
-      shadowRoot.appendChild(style);
-    }
-
-    let mount = shadowRoot.getElementById(swalTargetId);
+    let mount = targetDocument.getElementById(swalTargetId);
     if (!mount) {
       mount = targetDocument.createElement('div');
       mount.id = swalTargetId;
-      shadowRoot.appendChild(mount);
+      host.appendChild(mount);
     }
   };
 
-  const inject = () => {
+  const inject = async () => {
     if (root.dataset[injectedMarkerKey] === frameMarker) {
       return;
     }
     root.dataset[injectedMarkerKey] = frameMarker;
 
     injectStyle();
+    void ensureSwalRuntime();
 
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('chaoxing-plus.js');
@@ -152,8 +185,12 @@
   };
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', inject, { once: true });
+    document.addEventListener('DOMContentLoaded', () => {
+      void inject();
+    }, { once: true });
   } else {
-    inject();
+    void inject();
   }
 })();
+
+
