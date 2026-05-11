@@ -2015,9 +2015,11 @@ const JobRunner = {
             elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
           }) : undefined;
           if (currentRoot) {
-            const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
+            const currentResults = workResultsMethods().getResults?.();
+            const previousManual = currentResults?.[currentIndex]?.manual ?? false;
+            const previousType = currentResults?.[currentIndex]?.type;
             workResultsMethods().patchResult?.(currentIndex, {
-              type: inferredType ?? undefined,
+              type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(type) ?? curr.ctx?.type ?? previousType ?? undefined,
               manual: detectManualAnswer(currentRoot, type, {
                 previousManual,
                 result: curr
@@ -2381,9 +2383,11 @@ function workOrExam(
           elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('.Py-mian1 .clearfix > div')) }
         }) : undefined;
         if (currentRoot) {
-          const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;
+          const currentResults = workResultsMethods().getResults?.();
+          const previousManual = currentResults?.[currentIndex]?.manual ?? false;
+          const previousType = currentResults?.[currentIndex]?.type;
           workResultsMethods().patchResult?.(currentIndex, {
-            type: inferredType ?? undefined,
+            type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(questionType) ?? current.ctx?.type ?? previousType ?? undefined,
             manual: detectManualAnswer(currentRoot, questionType, {
               previousManual,
               result: current
@@ -2532,6 +2536,10 @@ function getQuestionType(
               : val === 15
                 ? 'reader'
                 : undefined;
+}
+
+function normalizeResultQuestionType(type: ReturnType<typeof getQuestionType> | QuestionTypes): QuestionTypes {
+  return type === 'single' || type === 'multiple' || type === 'judgement' || type === 'completion' ? type : undefined;
 }
 
 function getQuestionTypeInput(root: ParentNode): HTMLInputElement | undefined {

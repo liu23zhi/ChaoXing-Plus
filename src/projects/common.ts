@@ -10,6 +10,7 @@ import {
 } from './study-panel-state.js';
 import { shouldShowFloatingPanel } from './panel-visibility.js';
 import {
+  formatQuestionTypeLabel,
   formatWorkResultStatus,
   resolveWorkResultTone
 } from './work-results-status.js';
@@ -183,6 +184,7 @@ function getWorkOptions(): CommonWorkOptions {
 function mergeIncomingWorkResults(results: SimplifyWorkResult[]) {
   return results.map((item, index) => ({
     ...item,
+    type: item.type ?? state.workResults.results[index]?.type,
     manual: item.manual ?? state.workResults.results[index]?.manual ?? false,
     retrying: item.retrying ?? false
   }));
@@ -716,7 +718,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   metaRow.style.flexWrap = 'wrap';
 
   const typeMeta = createElement('div', {
-    text: result.type ? `题型：${result.type}` : '题型：未识别'
+    text: result.type ? `题型：${formatQuestionTypeLabel(result.type)}` : '题型：未识别'
   });
   typeMeta.style.fontSize = '12px';
   typeMeta.style.color = '#64748b';

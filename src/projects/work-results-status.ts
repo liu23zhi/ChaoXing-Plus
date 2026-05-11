@@ -1,10 +1,26 @@
 import type { SimplifyWorkResult } from '../core/index.js';
+import type { QuestionTypes } from '../core/index.js';
 
 export type WorkResultStatusSource = 'idle' | 'answered' | 'unresolved' | 'manual';
 export type WorkResultTone = 'selected' | 'manual' | 'success' | 'danger' | 'idle';
 
+const QUESTION_TYPE_LABELS: Record<Exclude<QuestionTypes, undefined>, string> = {
+  single: '单选',
+  multiple: '多选',
+  judgement: '判断',
+  completion: '填空'
+};
+
 function hasAnswerResults(result: SimplifyWorkResult) {
   return result.searchInfos.some((info) => info.results.length > 0);
+}
+
+export function formatQuestionTypeLabel(type: QuestionTypes | undefined): string {
+  if (!type) {
+    return '未识别';
+  }
+
+  return QUESTION_TYPE_LABELS[type] ?? type;
 }
 
 export function resolveWorkResultStatusSource(result: SimplifyWorkResult): WorkResultStatusSource {

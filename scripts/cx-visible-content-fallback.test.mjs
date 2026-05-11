@@ -176,7 +176,7 @@ test('cx patches result panel with inferred work type when answer search type is
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {'), true);
-  assert.equal(source.includes('type: inferredType ?? undefined,'), true);
+  assert.equal(source.includes('type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(type) ?? curr.ctx?.type ?? previousType ?? undefined,'), true);
   assert.equal(source.includes('manual: detectManualAnswer(currentRoot, type, {'), true);
 });
 
@@ -260,5 +260,32 @@ test('cx chapter answering uses the current question type input directly instead
   assert.equal(source.includes('const questionType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
   assert.equal(source.includes('const type = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
   assert.equal(source.includes('章节测试单题结果诊断'), true);
+});
+
+test('cx preserves previously detected question types when later result patches cannot infer them', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const currentResults = workResultsMethods().getResults?.();'), true);
+  assert.equal(source.includes('const previousType = currentResults?.[currentIndex]?.type;'), true);
+  assert.equal(source.includes('type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(type) ?? curr.ctx?.type ?? previousType ?? undefined,'), true);
+  assert.equal(source.includes('type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(questionType) ?? current.ctx?.type ?? previousType ?? undefined,'), true);
+});
+
+test('common preserves previously detected question types when incoming simplified results omit type', async () => {
+  const commonSource = await readFile(resolve(scriptsDir, '..', 'src', 'projects', 'common.ts'), 'utf8');
+
+  assert.equal(commonSource.includes('type: item.type ?? state.workResults.results[index]?.type,'), true);
+});
+
+test('common formats question types with Chinese labels in the result panel', async () => {
+  const commonSource = await readFile(resolve(scriptsDir, '..', 'src', 'projects', 'common.ts'), 'utf8');
+  const statusSource = await readFile(resolve(scriptsDir, '..', 'src', 'projects', 'work-results-status.ts'), 'utf8');
+
+  assert.equal(statusSource.includes("single: '单选'"), true);
+  assert.equal(statusSource.includes("multiple: '多选'"), true);
+  assert.equal(statusSource.includes("judgement: '判断'"), true);
+  assert.equal(statusSource.includes("completion: '填空'"), true);
+  assert.equal(commonSource.includes('formatQuestionTypeLabel(result.type)'), true);
+  assert.equal(commonSource.includes("text: result.type ? `题型：${formatQuestionTypeLabel(result.type)}` : '题型：未识别'"), true);
 });
 
