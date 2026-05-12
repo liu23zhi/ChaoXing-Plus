@@ -632,26 +632,7 @@ async function waitForCurrentChapterFinished(timeoutMs = 15000, intervalMs = 100
 export const CXProject = Project.create({
   name: '超星学习通',
   domains: [
-    'chaoxing.com',
-    'edu.cn',
-    'org.cn',
-    'xueyinonline.com',
-    'hnsyu.net',
-    'qutjxjy.cn',
-    'ynny.cn',
-    'hnvist.cn',
-    'fjlecb.cn',
-    'gdhkmooc.com',
-    'cugbonline.cn',
-    'zjelib.cn',
-    'cqrspx.cn',
-    'neauce.com',
-    'zhihui-yun.com',
-    'cqie.cn',
-    'ccqmxx.com',
-    'jxgmxy.com',
-    'jnzyjsxy.cn',
-    'sslibrary.com'
+    'chaoxing.com'
   ],
   scripts: {
     env: {
