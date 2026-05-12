@@ -15,24 +15,7 @@ function copyStaticFiles() {
   mkdirSync('dist', { recursive: true });
 
   const chaoxingHosts = [
-    '*://*.chaoxing.com/*',
-    '*://*.xueyinonline.com/*',
-    '*://*.hnsyu.net/*',
-    '*://*.qutjxjy.cn/*',
-    '*://*.ynny.cn/*',
-    '*://*.hnvist.cn/*',
-    '*://*.fjlecb.cn/*',
-    '*://*.gdhkmooc.com/*',
-    '*://*.cugbonline.cn/*',
-    '*://*.zjelib.cn/*',
-    '*://*.cqrspx.cn/*',
-    '*://*.neauce.com/*',
-    '*://*.zhihui-yun.com/*',
-    '*://*.cqie.cn/*',
-    '*://*.ccqmxx.com/*',
-    '*://*.jxgmxy.com/*',
-    '*://*.jnzyjsxy.cn/*',
-    '*://*.sslibrary.com/*'
+    '*://*.chaoxing.com/*'
   ];
 
   const manifest = {
