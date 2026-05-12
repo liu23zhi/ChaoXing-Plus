@@ -182,8 +182,18 @@ test('cx checks sibling sub tasks before showing the final-chapter unfinished wa
 
   assert.equal(source.includes("const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);"), true);
   assert.equal(source.includes("if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {"), true);
-  assert.equal(source.includes('已经抵达最后一个章节！但仍然有任务点未完成，请手动切换至未完成的章节。'), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
+});
+
+test('cx jumps back to an earlier unfinished chapter instead of warning when the last chapter is finished', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const firstUnfinishedChapter = elements.find((el) => !el.classList.contains(\'posCatalog_active\'));'), true);
+  assert.equal(source.includes('} else if (!CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {'), true);
+  assert.equal(source.includes('content = \'当前章节已完成，正在返回前面的未完成章节继续学习。\';'), true);
+  assert.equal(source.includes('showTopCenterNotice(content, { duration: 5000, tone: \'info\' });'), true);
+  assert.equal(source.includes('firstUnfinishedChapter?.querySelector<HTMLElement>(\'.posCatalog_name\')?.click();'), true);
+  assert.equal(source.includes('已经抵达最后一个章节！但仍然有任务点未完成，请手动切换至未完成的章节。'), true);
 });
 
 test('cx detects repeated invalid chapter jumps and warns after returning to the same page 3 times', async () => {

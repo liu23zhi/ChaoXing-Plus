@@ -1453,6 +1453,10 @@ export async function study(opts: StudyOptions) {
 
     if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {
       let content = '';
+      const elements = CXAnalyses.getChapterInfos()
+        .filter((el) => el.unFinishCount > 0 || el.element.parentElement?.classList.contains('posCatalog_active'))
+        .map((el) => el.element.parentElement as HTMLElement);
+      const firstUnfinishedChapter = elements.find((el) => !el.classList.contains('posCatalog_active'));
 
       if (opts.backToFirstWhenFinish) {
         content = '已经抵达最后一个章节，10秒后返回第一个章节重新开始。';
@@ -1461,6 +1465,16 @@ export async function study(opts: StudyOptions) {
           topWindow.document.querySelector<HTMLElement>('.posCatalog_name')?.click();
         }, 10 * 1000);
         $message.info({ content, duration: 30000 });
+      } else if (!CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {
+        content = '当前章节已完成，正在返回前面的未完成章节继续学习。';
+        showTopCenterNotice(content, { duration: 5000, tone: 'info' });
+        $message.info(content);
+        settingsMethods().notificationBySetting?.(content);
+        CXAnalyses.scrollToActiveChapter();
+        setTimeout(() => {
+          firstUnfinishedChapter?.querySelector<HTMLElement>('.posCatalog_name')?.click();
+        }, 1000);
+        return;
       } else {
         content = CXAnalyses.isFinishedAllChapters()
           ? '全部任务点已完成！'
