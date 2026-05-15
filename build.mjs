@@ -22,7 +22,7 @@ function copyStaticFiles() {
     manifest_version: 3,
     default_locale: 'zh_CN',
     name: '超星学习助手',
-    version: '2.0.0',
+    version: '4.0.0',
     description: '给超星网站使用的自动学习与自动搜题扩展。',
     icons: {
       '512': 'icon_512X512.png'
