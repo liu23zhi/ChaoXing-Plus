@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const buildScriptPath = resolve(process.cwd(), 'build.mjs');
+const packageJsonPath = resolve(process.cwd(), 'package.json');
+const packageLockPath = resolve(process.cwd(), 'package-lock.json');
 const popupHtmlPath = resolve(process.cwd(), 'src', 'popup.html');
 const popupJsPath = resolve(process.cwd(), 'src', 'popup.js');
 
@@ -16,6 +18,18 @@ test('build script declares extension icons, popup, and updated description', as
   assert.equal(source.includes("description: '给超星网站使用的自动学习与自动搜题扩展。'"), true);
   assert.equal(source.includes("default_popup: 'popup.html'"), true);
   assert.equal(source.includes("'512': 'icon_512X512.png'"), true);
+});
+
+test('package versions follow the extension manifest version from build script', async () => {
+  const source = await readFile(buildScriptPath, 'utf8');
+  const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'));
+  const packageLock = JSON.parse(await readFile(packageLockPath, 'utf8'));
+  const manifestVersion = source.match(/version: '([^']+)'/)?.[1];
+
+  assert.equal(typeof manifestVersion, 'string');
+  assert.equal(packageJson.version, manifestVersion);
+  assert.equal(packageLock.version, manifestVersion);
+  assert.equal(packageLock.packages[''].version, manifestVersion);
 });
 
 test('popup page introduces the extension for Chaoxing users', async () => {

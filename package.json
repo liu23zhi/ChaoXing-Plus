@@ -1,7 +1,7 @@
 {
   "name": "chaoxing-plus",
-  "version": "2.0.1",
-  "description": "单平台版 ocsjs 风格超星脚本工程",
+  "version": "4.0.1",
+  "description": "a tool",
   "private": true,
   "type": "module",
   "scripts": {
