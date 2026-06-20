@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .tmp-tests/
+.tmp-tests-*/
 *.log
 .DS_Store
 /.history

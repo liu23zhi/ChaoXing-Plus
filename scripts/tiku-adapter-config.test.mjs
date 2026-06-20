@@ -1,16 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
-const helperModulePath = resolve(process.cwd(), '.tmp-tests', 'projects', 'tiku-adapter-config.js');
+const execFileAsync = promisify(execFile);
+const outDir = resolve(process.cwd(), '.tmp-tests-tiku-cjs');
+const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
+const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts');
+const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+
+async function compileHelperModule() {
+  await mkdir(outDir, { recursive: true });
+  await writeFile(resolve(outDir, 'package.json'), '{"type":"commonjs"}\n');
+  await execFileAsync(process.execPath, [
+    tscCliPath,
+    helperSourcePath,
+    '--outDir',
+    outDir,
+    '--module',
+    'commonjs',
+    '--target',
+    'es2022',
+    '--moduleResolution',
+    'node',
+    '--skipLibCheck'
+  ]);
+}
 
 async function loadHelperModule() {
-  try {
-    return await import(pathToFileURL(helperModulePath).href);
-  } catch {
-    return {};
-  }
+  await compileHelperModule();
+  const require = createRequire(import.meta.url);
+  delete require.cache[helperModulePath];
+  return require(helperModulePath);
 }
 
 test('normalizes baseurl by trimming whitespace and trailing slashes', async () => {
@@ -78,4 +102,27 @@ test('creates a post fetch wrapper with bearer auth and adapter search url', asy
   assert.deepEqual(wrapper.headers, {
     Authorization: 'Bearer demo-key'
   });
+});
+
+test('tiku adapter wrapper prefers computed choice keys for objective choice answers', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(typeof mod.createTikuAdapterAnswererWrapper, 'function');
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key'
+  });
+  const handler = Function(wrapper.handler)();
+  const result = handler({
+    question: '多选题',
+    type: 1,
+    answer: {
+      answerIndex: [0, 2],
+      answerKeyText: 'AC',
+      answerText: '答案一#答案二',
+      bestAnswer: ['答案一', '答案二']
+    }
+  });
+
+  assert.deepEqual(result, ['多选题', 'AC', { source: 'tikuAdapter' }]);
 });

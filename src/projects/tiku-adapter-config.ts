@@ -215,6 +215,19 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     },
     handler: `return (res) => {
       const question = typeof res?.question === 'string' ? res.question : '';
+      const isChoiceType = res?.type === 0 || res?.type === 1;
+      const answerKeyText = typeof res?.answer?.answerKeyText === 'string' ? res.answer.answerKeyText.trim() : '';
+      if (isChoiceType && answerKeyText) {
+        return [question, answerKeyText, { source: 'tikuAdapter' }];
+      }
+
+      const answerIndex = Array.isArray(res?.answer?.answerIndex)
+        ? res.answer.answerIndex.filter((item) => Number.isInteger(item) && item >= 0)
+        : [];
+      if (isChoiceType && answerIndex.length > 0) {
+        return [question, answerIndex.map((index) => String.fromCharCode(index + 65)).join(''), { source: 'tikuAdapter' }];
+      }
+
       const answerText = typeof res?.answer?.answerText === 'string' ? res.answer.answerText.trim() : '';
       if (answerText) {
         return [question, answerText, { source: 'tikuAdapter' }];

@@ -79,6 +79,60 @@ export function createDefaultQuestionResolver<E>(
       const exact_list: HTMLElement[][] = [];
       const results = infos.map((info) => info.results).flat();
 
+      function limitSimilarResultToAnswerCount(result: SimilarResult, answerCount: number): SimilarResult {
+        if (answerCount <= 0 || result.options.length <= answerCount) {
+          return result;
+        }
+
+        const ranked = result.options
+          .map((option, index) => ({
+            option,
+            answer: result.answers[index],
+            rating: result.ratings[index],
+            index
+          }))
+          .sort((a, b) => b.rating - a.rating || a.index - b.index);
+
+        const selectedIndexes = new Set<number>();
+        const selectedAnswerKeys = new Set<string>();
+        for (const item of ranked) {
+          const answerKey = clearString(removeRedundant(item.answer));
+          if (answerKey && selectedAnswerKeys.has(answerKey)) {
+            continue;
+          }
+          selectedIndexes.add(item.index);
+          if (answerKey) {
+            selectedAnswerKeys.add(answerKey);
+          }
+          if (selectedIndexes.size === answerCount) {
+            break;
+          }
+        }
+
+        for (const item of ranked) {
+          if (selectedIndexes.size === answerCount) {
+            break;
+          }
+          selectedIndexes.add(item.index);
+        }
+
+        const selected = [...selectedIndexes]
+          .sort((a, b) => a - b)
+          .map((index) => ({
+            option: result.options[index],
+            answer: result.answers[index],
+            rating: result.ratings[index]
+          }));
+
+        return {
+          options: selected.map((item) => item.option),
+          answers: selected.map((item) => item.answer),
+          ratings: selected.map((item) => item.rating),
+          similarSum: selected.reduce((sum, item) => sum + item.rating, 0),
+          similarCount: selected.length
+        };
+      }
+
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
         const answers = splitAnswer(result.answer.trim(), ctx.answerSeparators);
@@ -114,10 +168,12 @@ export function createDefaultQuestionResolver<E>(
             }
           }
 
-          if (matchResult.similarSum > ratingResult.similarSum) {
-            similar_list[i] = matchResult;
+          const cappedMatchResult = limitSimilarResultToAnswerCount(matchResult, answers.length);
+          const cappedRatingResult = limitSimilarResultToAnswerCount(ratingResult, answers.length);
+          if (cappedMatchResult.similarSum > cappedRatingResult.similarSum) {
+            similar_list[i] = cappedMatchResult;
           } else {
-            similar_list[i] = ratingResult;
+            similar_list[i] = cappedRatingResult;
           }
         } else if (ctx.answerMatchMode === 'exact') {
           exact_list[i] = answerExactMatch(
