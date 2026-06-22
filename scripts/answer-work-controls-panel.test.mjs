@@ -27,6 +27,19 @@ test('common work results panel uses the shared tone helper for number and quest
   assert.equal(source.includes('formatWorkResultStatus(result)'), true);
 });
 
+test('common preserves work result scroll and retrying state across result refreshes', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes("retrying: item.retrying ?? state.workResults.results[index]?.retrying ?? false"), true);
+  assert.equal(source.includes('retrying: item.retrying ?? false'), false);
+  assert.equal(source.includes("list.dataset.workResultsList = 'true';"), true);
+  assert.equal(source.includes("const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list=\"true\"]')?.scrollTop ?? 0;"), true);
+  assert.equal(source.includes('panel.body.replaceChildren(createWorkResultsPanel());'), true);
+  assert.equal(source.includes('panel.root.scrollTop = rootScrollTop;'), true);
+  assert.equal(source.includes('panel.body.scrollTop = bodyScrollTop;'), true);
+  assert.equal(source.includes('nextWorkResultsList.scrollTop = workResultsListScrollTop;'), true);
+});
+
 test('common work options default to submit and expose upload mode toggle in the study panel', async () => {
   const source = await readFile(commonPath, 'utf8');
 
@@ -95,7 +108,7 @@ test('common shares all study settings across domains and warns for playback rat
   assert.equal(source.includes('function syncStudySettingCrossDomain(key: string, value: unknown) {'), true);
   assert.equal(source.includes('if (isSharedStudySettingKey(storageKey)) {'), true);
   assert.equal(source.includes('syncStudySettingCrossDomain(storageKey, nextValue);'), true);
-  assert.equal(source.includes("if (key === 'playbackRate' && options.warn !== false) {\n    void maybeWarnHighPlaybackRate(script, value);\n  }"), true);
+  assert.match(source, /if \(key === 'playbackRate' && options\.warn !== false\) \{\s+void maybeWarnHighPlaybackRate\(script, value\);\s+\}/);
   assert.equal(source.includes('if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {'), true);
   assert.equal(source.includes("const confirmed = await $modal.confirm({"), true);
   assert.equal(source.includes("content: '当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。'"), true);

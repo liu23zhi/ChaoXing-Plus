@@ -37,7 +37,7 @@ test('cx study merges visible-content states instead of keeping the first non-em
 test('cx study uses the latest scan state instead of keeping a stale standard-job status after runnable media finish', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes('const result = searchJob(opts, searchedJobs);\n    visibleContentState = result.visibleContentState;'), true);
+  assert.match(source, /const result = searchJob\(opts, searchedJobs\);\s+visibleContentState = result\.visibleContentState;/);
   assert.equal(source.includes('const result = searchJob(opts, searchedJobs);\n    visibleContentState = mergeVisibleContentState(visibleContentState, result.visibleContentState);'), false);
   assert.equal(source.includes("resultVisibleContentState: result.visibleContentState"), true);
   assert.equal(source.includes('检测到页面存在可处理内容，但当前未识别为标准任务点。'), true);
@@ -122,6 +122,18 @@ test('cx detects sibling sub tasks from prev_tab and switches them in sequence',
   assert.equal(source.includes('for (let offset = 1; offset < tabs.length; offset += 1) {'), true);
   assert.equal(source.includes('const nextIndex = (activeIndex + offset) % tabs.length;'), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
+});
+
+test('cx waits 10 seconds before checking sibling sub tasks to avoid stale refreshed data', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('const siblingSubTaskRefreshDelayMs = 10000;'), true);
+  assert.equal(source.includes('const shouldWaitBeforeSiblingSubTaskCheck ='), true);
+  assert.equal(source.includes('getSiblingSubTaskTabs().length > 1'), true);
+  assert.equal(source.includes('const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;'), true);
+  assert.equal(source.includes('shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs'), true);
+  assert.equal(source.includes('await sleep(siblingSubTaskRefreshDelayMs);'), true);
+  assert.match(source, /if \(shouldWaitBeforeSiblingSubTaskCheck\) \{\s+await sleep\(siblingSubTaskRefreshDelayMs\);\s+\}\s+const chapterCompletionDiagnostics = getCurrentChapterCompletionDiagnostics\(\);/);
 });
 
 test('cx pauses only after checking all sibling sub tasks three times without finding runnable work', async () => {

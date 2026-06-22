@@ -163,6 +163,21 @@ function isChapterChoiceChecked(option: HTMLElement | null | undefined): boolean
   return checkedInput?.checked === true || checkedInput?.getAttribute('checked') === 'checked' || option.parentElement?.getAttribute('aria-checked') === 'true';
 }
 
+function isWorkOrExamChoiceChecked(option: HTMLElement | null | undefined): boolean {
+  if (!option) {
+    return false;
+  }
+
+  const root = option.parentElement;
+  const checkedInput = root?.querySelector<HTMLInputElement>('input[type="radio"]:checked,input[type="checkbox"]:checked,label input:checked');
+  return Boolean(
+    checkedInput ||
+      root?.querySelector('[class*="check_answer"]') ||
+      root?.querySelector('.check_answer,.check_answer_dx') ||
+      root?.getAttribute('aria-checked') === 'true'
+  );
+}
+
 export type VideoQuizStrategy = 'random' | 'ignore';
 export type StudyMode = 'next' | 'job' | 'manually';
 type VisibleContentState = 'standard-job' | 'finished-job' | 'visible-nonjob' | 'visible-unmapped' | 'empty';
@@ -282,6 +297,7 @@ const defaultWorkOptions: CommonWorkOptions = {
 };
 
 const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answertype"],input[name^="type"],input[id^="type"]';
+const siblingSubTaskRefreshDelayMs = 10000;
 let debugSequence = 0;
 const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';
 const rateHackPluginGuardKey = '__chaoxing_plus_rate_hack_plugin__';
@@ -1396,6 +1412,15 @@ export async function study(opts: StudyOptions) {
     workResultsMethods().setResults?.([]);
   };
 
+  const hasPendingJobAttachments = hasPendingCurrentPageJobAttachments();
+  const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;
+  const shouldWaitBeforeSiblingSubTaskCheck =
+    getSiblingSubTaskTabs().length > 1 &&
+    (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
+  if (shouldWaitBeforeSiblingSubTaskCheck) {
+    await sleep(siblingSubTaskRefreshDelayMs);
+  }
+
   const chapterCompletionDiagnostics = getCurrentChapterCompletionDiagnostics();
   const currentChapterFinished = chapterCompletionDiagnostics.currentChapterFinished;
   const chapterStayState = CXAnalyses.getChapterStayState();
@@ -1410,8 +1435,6 @@ export async function study(opts: StudyOptions) {
     completedIconExists: chapterCompletionDiagnostics.completedIconExists
   }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount} activeChapterId=${chapterCompletionDiagnostics.activeChapterId} activeChapterClassName=${chapterCompletionDiagnostics.activeChapterClassName} completedIconExists=${String(chapterCompletionDiagnostics.completedIconExists)}`, { correlationId: chapterCorrelationId });
   const siblingSubTaskDiagnostics = getSiblingSubTaskDiagnostics();
-  const hasPendingJobAttachments = hasPendingCurrentPageJobAttachments();
-  const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;
   const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
   logDebug('info', '同章节子任务诊断', {
     visibleContentState,
@@ -2170,6 +2193,7 @@ const JobRunner = {
         forceAIFallbackOnly?: boolean;
         skipCache?: boolean;
         onCacheableResult?: (result: SimplifyWorkResult) => void;
+        suppressWorkResultsPanelUpdate?: boolean;
       } = {}
     ) =>
       new OCSWorker({
@@ -2307,26 +2331,29 @@ const JobRunner = {
         },
         async onResultsUpdate(curr, currentIndex, res) {
           const simplified = simplifyWorkResult(res, chapterTestTaskQuestionTitleTransform);
-          workResultsMethods().setResults?.(simplified);
-          workResultsMethods().updateWorkStateByResults?.(res);
-
-          const currentRoot = questionRoots[currentIndex];
-          const type = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
-          const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
-            elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
-          }) : undefined;
           const currentSimplified = simplified.filter((_, index) => index === res.indexOf(curr))[0];
-          if (currentRoot) {
-            const currentResults = workResultsMethods().getResults?.();
-            const previousManual = currentResults?.[currentIndex]?.manual ?? false;
-            const previousType = currentResults?.[currentIndex]?.type;
-            workResultsMethods().patchResult?.(currentIndex, {
-              type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(type) ?? curr.ctx?.type ?? previousType ?? undefined,
-              manual: detectManualAnswer(currentRoot, type, {
-                previousManual,
-                result: curr
-              })
-            });
+          const currentRoot = questionRoots[currentIndex];
+
+          if (!workerOptions.suppressWorkResultsPanelUpdate) {
+            workResultsMethods().setResults?.(simplified);
+            workResultsMethods().updateWorkStateByResults?.(res);
+
+            const type = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
+            const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
+              elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
+            }) : undefined;
+            if (currentRoot) {
+              const currentResults = workResultsMethods().getResults?.();
+              const previousManual = currentResults?.[currentIndex]?.manual ?? false;
+              const previousType = currentResults?.[currentIndex]?.type;
+              workResultsMethods().patchResult?.(currentIndex, {
+                type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(type) ?? curr.ctx?.type ?? previousType ?? undefined,
+                manual: detectManualAnswer(currentRoot, type, {
+                  previousManual,
+                  result: curr
+                })
+              });
+            }
           }
 
           if (curr.result?.finish && currentSimplified) {
@@ -2385,7 +2412,7 @@ const JobRunner = {
           total: roots.length,
           mode: 'chapter'
         }, undefined, { correlationId: chapterRetryCorrelationId });
-        const retryWorker = createChapterWorker([root]);
+        const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true });
         const retriedResults = await retryWorker.doWork();
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
@@ -2552,36 +2579,51 @@ function workOrExam(
     workResultsMethods().init?.();
   }
 
+  const workOrExamTitleSelector = !preview_mode
+    ? ['.splitS-left .mark_name', '.line_wid_half.fl,.line_wid_half.fr'].join(',')
+    : [
+        ':scope > h3',
+        ':scope > div:not(.stem_answer)',
+        ':scope > p',
+        '.line_wid_half.fl,.line_wid_half.fr'
+      ].join(',');
+
   const workOrExamQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) => {
+    const isMultipleQuestion = titles.length > 1;
     const optimizationTitle = titles
-      .map((titleElement) => {
+      .map((titleElement, index) => {
         if (titleElement) {
           const titleCloneEl = titleElement.cloneNode(true) as HTMLElement;
-          while (titleCloneEl.childNodes.length > 0 && titleCloneEl.childNodes[0]) {
-            titleCloneEl.childNodes[0].remove();
-            break;
-          }
-          while (titleCloneEl.childNodes.length > 0 && titleCloneEl.childNodes[0]) {
-            titleCloneEl.childNodes[0].remove();
-            break;
+          if (index === 0) {
+            titleCloneEl.childNodes[0]?.remove();
+            titleCloneEl.childNodes[0]?.remove();
           }
           return optimizationElementWithImage(titleCloneEl, true).innerText;
         }
         return '';
       })
-      .join(',');
+      .join('\n');
 
     return removeRedundantWords(
-      optimizationTitle.replace(/\s+/g, ' ').replace(/\s+/g, '').trim(),
+      optimizationTitle.replace(/\n/g, isMultipleQuestion ? '\n' : ' ').replace(/ +/g, ' ').trim(),
       redundanceWordsText.split('\n')
     );
   };
 
-  const createWorkOrExamWorker = (questionRoots: string | HTMLElement[]) =>
+  function resolveWorkOrExamQuestionTypeRoot(elements: { type: HTMLElement[]; options: HTMLElement[] }) {
+    return elements.type.find((element) => element.getAttribute('name')?.match(/type\d+/)) ?? elements.type[0];
+  }
+
+  const createWorkOrExamWorker = (
+    questionRoots: string | HTMLElement[],
+    workerOptions: {
+      suppressWorkResultsPanelUpdate?: boolean;
+    } = {}
+  ) =>
     new OCSWorker({
       root: questionRoots,
       elements: {
-        title: [(root) => root.querySelector('h3') as HTMLElement],
+        title: (root) => Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector)).filter((element) => Boolean(element.textContent?.trim())),
         options: '.answerBg .answer_p, .textDIV, .eidtDiv',
         type: questionTypeInputSelector,
         lineAnswerInput: '.line_answer input[name^=answer]',
@@ -2603,7 +2645,7 @@ function workOrExam(
 
         const provider = async () => {
           await sleep((period ?? 3) * 1000);
-          const questionType = resolveAnswerSearchType(elements.type[0] ?? elements.options[0]?.closest('.questionLi') ?? document);
+          const questionType = resolveAnswerSearchType(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.questionLi') ?? document);
           const optionsText =
             ctx.type === 'completion'
               ? ''
@@ -2629,7 +2671,7 @@ function workOrExam(
       },
       work: async (ctx) => {
         const { elements, searchInfos } = ctx;
-        const questionType = resolveQuestionTypeForWork(elements.type[0] ?? elements.options[0]?.closest('.questionLi') ?? document, {
+        const questionType = resolveQuestionTypeForWork(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.questionLi') ?? document, {
           elements: { options: elements.options as HTMLElement[] }
         });
 
@@ -2643,10 +2685,32 @@ function workOrExam(
           const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
           const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {
             if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
-              if (option.parentElement && option.parentElement.querySelectorAll('[class*="check_answer"]').length === 0) {
-                triggerSyntheticClick(option);
-                await sleep(500);
+              const checkedBeforeClick = isWorkOrExamChoiceChecked(option);
+              let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
+              let checkedAfterNativeClick = checkedBeforeClick;
+
+              if (!checkedBeforeClick) {
+                option.click();
+                await sleep(100);
+                checkedAfterNativeClick = isWorkOrExamChoiceChecked(option);
+                if (checkedAfterNativeClick) {
+                  appliedBy = 'native-click';
+                } else {
+                  triggerSyntheticClick(option);
+                  await sleep(400);
+                  appliedBy = isWorkOrExamChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
+                }
               }
+
+              logDebug('info', '作业/考试选项应用诊断', {
+                type: resolvedType,
+                answer,
+                checkedBeforeClick,
+                checkedAfterNativeClick,
+                checkedAfterFinalAttempt: isWorkOrExamChoiceChecked(option),
+                appliedBy,
+                optionText: option.innerText?.trim() ?? ''
+              }, undefined, { correlationId: workExamCorrelationId });
             } else if (resolvedType === 'completion' && option && answer.trim()) {
               const text = option.querySelector('textarea');
               const textareaFrame = option.querySelector('iframe');
@@ -2706,31 +2770,35 @@ function workOrExam(
 
         if (!preview_mode) {
           if (current.result?.finish) {
-            workResultsMethods().appendResults?.(simplified);
+            if (!workerOptions.suppressWorkResultsPanelUpdate) {
+              workResultsMethods().appendResults?.(simplified);
+            }
             appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
           }
           return;
         }
 
-        workResultsMethods().setResults?.(simplified);
-        workResultsMethods().updateWorkStateByResults?.(res);
+        if (!workerOptions.suppressWorkResultsPanelUpdate) {
+          workResultsMethods().setResults?.(simplified);
+          workResultsMethods().updateWorkStateByResults?.(res);
 
-        const currentRoot = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))[currentIndex];
-        const questionType = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
-        const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
-          elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('.Py-mian1 .clearfix > div')) }
-        }) : undefined;
-        if (currentRoot) {
-          const currentResults = workResultsMethods().getResults?.();
-          const previousManual = currentResults?.[currentIndex]?.manual ?? false;
-          const previousType = currentResults?.[currentIndex]?.type;
-          workResultsMethods().patchResult?.(currentIndex, {
-            type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(questionType) ?? current.ctx?.type ?? previousType ?? undefined,
-            manual: detectManualAnswer(currentRoot, questionType, {
-              previousManual,
-              result: current
-            })
-          });
+          const currentRoot = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))[currentIndex];
+          const questionType = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
+          const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
+            elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('.Py-mian1 .clearfix > div')) }
+          }) : undefined;
+          if (currentRoot) {
+            const currentResults = workResultsMethods().getResults?.();
+            const previousManual = currentResults?.[currentIndex]?.manual ?? false;
+            const previousType = currentResults?.[currentIndex]?.type;
+            workResultsMethods().patchResult?.(currentIndex, {
+              type: normalizeResultQuestionType(inferredType) ?? normalizeResultQuestionType(questionType) ?? current.ctx?.type ?? previousType ?? undefined,
+              manual: detectManualAnswer(currentRoot, questionType, {
+                previousManual,
+                result: current
+              })
+            });
+          }
         }
 
         if (current.result?.finish) {
@@ -2762,7 +2830,7 @@ function workOrExam(
           total: liveRoots().length,
           mode: type
         }, undefined, { correlationId: workExamCorrelationId });
-        const retryWorker = createWorkOrExamWorker([root]);
+        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
         const retriedResults = await retryWorker.doWork();
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,

@@ -19,13 +19,23 @@ test('cx registers runtime stop continue and retry controls with the common work
   assert.equal(source.includes("worker.on('close', clearRuntimeControls);"), true);
 });
 
+test('cx isolates single question retry workers from the main result panel refresh callbacks', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('suppressWorkResultsPanelUpdate?: boolean;'), true);
+  assert.equal(source.includes('if (!workerOptions.suppressWorkResultsPanelUpdate) {'), true);
+  assert.equal(source.includes('const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true });'), true);
+  assert.equal(source.includes('const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });'), true);
+});
+
 test('cx syncs manual-answer state back into the common result entries', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 
   assert.equal(source.includes("import { resolveManualAnswerState } from './cx-manual-state.js';"), true);
   assert.equal(source.includes('function detectManualAnswer('), true);
   assert.equal(source.includes('return resolveManualAnswerState({ root, type, ...options });'), true);
-  assert.equal(source.includes('const previousManual = workResultsMethods().getResults?.()[currentIndex]?.manual ?? false;'), true);
+  assert.equal(source.includes('const currentResults = workResultsMethods().getResults?.();'), true);
+  assert.equal(source.includes('const previousManual = currentResults?.[currentIndex]?.manual ?? false;'), true);
   assert.equal(source.includes('manual: detectManualAnswer(currentRoot, type, {'), true);
   assert.equal(source.includes('manual: detectManualAnswer(currentRoot, questionType, {'), true);
   assert.equal(source.includes('result: curr'), true);

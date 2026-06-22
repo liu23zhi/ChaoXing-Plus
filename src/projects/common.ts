@@ -189,7 +189,7 @@ function mergeIncomingWorkResults(results: SimplifyWorkResult[]) {
     ...item,
     type: item.type ?? state.workResults.results[index]?.type,
     manual: item.manual ?? state.workResults.results[index]?.manual ?? false,
-    retrying: item.retrying ?? false
+    retrying: item.retrying ?? state.workResults.results[index]?.retrying ?? false
   }));
 }
 
@@ -1713,6 +1713,7 @@ function createWorkResultsPanel() {
     resultsSection.append(empty);
   } else {
     const list = createElement('div');
+    list.dataset.workResultsList = 'true';
     list.style.display = 'grid';
     list.style.gap = '10px';
     list.style.maxHeight = '260px';
@@ -1922,7 +1923,17 @@ function createWorkResultsPanel() {
 function renderWorkResultsPanel() {
   const panel = state.panels.workResults;
   if (!panel) return;
+  const rootScrollTop = panel.root.scrollTop;
+  const bodyScrollTop = panel.body.scrollTop;
+  const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]')?.scrollTop ?? 0;
   panel.body.replaceChildren(createWorkResultsPanel());
+  panel.root.scrollTop = rootScrollTop;
+  panel.body.scrollTop = bodyScrollTop;
+
+  const nextWorkResultsList = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]');
+  if (nextWorkResultsList) {
+    nextWorkResultsList.scrollTop = workResultsListScrollTop;
+  }
 }
 
 function createAppsPanel() {
