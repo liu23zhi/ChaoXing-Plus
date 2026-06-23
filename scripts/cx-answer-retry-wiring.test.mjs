@@ -28,6 +28,18 @@ test('cx isolates single question retry workers from the main result panel refre
   assert.equal(source.includes('const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });'), true);
 });
 
+test('cx retries unfinished question roots before uploading instead of refreshing the whole page', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('async function retryUnfinishedChapterQuestions('), true);
+  assert.equal(source.includes('async function retryUnfinishedWorkOrExamQuestions('), true);
+  assert.equal(source.includes('const retryableResults = await retryUnfinishedChapterQuestions(results);'), true);
+  assert.equal(source.includes('const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);'), true);
+  assert.equal(source.includes('if (retried?.result?.finish) {'), true);
+  assert.equal(source.includes("logDebug('info', '动作节点诊断：未完成单题自动重试'"), true);
+  assert.equal(source.includes('location.reload()'), false);
+});
+
 test('cx syncs manual-answer state back into the common result entries', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 

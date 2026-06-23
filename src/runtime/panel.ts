@@ -37,10 +37,11 @@ export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel
     root.style.width = '360px';
     root.style.maxHeight = '80vh';
     root.style.overflow = 'auto';
-    root.style.background = '#fff';
-    root.style.border = '1px solid #ddd';
-    root.style.boxShadow = '0 8px 24px rgba(0,0,0,0.12)';
-    root.style.borderRadius = '12px';
+    root.dataset.chaoxingPlusTheme = 'pink';
+    root.style.background = 'linear-gradient(145deg, rgba(255, 240, 247, 0.98) 0%, rgba(255, 250, 253, 0.96) 48%, rgba(255, 236, 244, 0.98) 100%)';
+    root.style.border = '1px solid rgba(244, 114, 182, 0.30)';
+    root.style.boxShadow = '0 24px 70px rgba(190, 24, 93, 0.20), 0 8px 24px rgba(251, 113, 133, 0.14)';
+    root.style.borderRadius = '24px';
     root.style.padding = '12px';
     if (!claimTopWindowPanelOwnership()) {
       root.style.display = 'none';

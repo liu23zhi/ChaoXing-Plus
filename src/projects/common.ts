@@ -28,6 +28,9 @@ export interface CommonWorkOptions {
   period: number;
   thread: number;
   upload: WorkUploadType | 'submit';
+  enableExamAutoSubmit: boolean;
+  enableDebugLogPanel: boolean;
+  enableLocalQuestionCache: boolean;
   answererWrappers: AnswererWrapper[];
   stopSecondWhenFinish: number;
   redundanceWordsText: string;
@@ -73,10 +76,32 @@ const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';
 
 const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';
 
+const panelPinkTheme = {
+  primary: '#db2777',
+  primaryDeep: '#be185d',
+  primarySoft: 'rgba(244, 114, 182, 0.14)',
+  primaryGradient: 'linear-gradient(135deg, #db2777 0%, #f472b6 55%, #fb7185 100%)',
+  shellGradient: 'linear-gradient(145deg, rgba(255, 240, 247, 0.98) 0%, rgba(255, 250, 253, 0.96) 48%, rgba(255, 236, 244, 0.98) 100%)',
+  heroGradient: 'radial-gradient(circle at 18% 0%, rgba(251, 207, 232, 0.82) 0%, transparent 32%), linear-gradient(135deg, rgba(255, 241, 248, 0.98) 0%, rgba(255, 247, 252, 0.98) 54%, rgba(255, 228, 235, 0.96) 100%)',
+  sectionGradient: 'linear-gradient(180deg, rgba(255,255,255,0.78) 0%, rgba(255, 241, 248, 0.82) 100%)',
+  surface: 'rgba(255, 250, 253, 0.92)',
+  surfaceStrong: 'rgba(255,255,255,0.96)',
+  border: 'rgba(244, 114, 182, 0.24)',
+  borderStrong: 'rgba(219, 39, 119, 0.34)',
+  text: '#831843',
+  muted: '#9d174d',
+  shadow: '0 18px 48px rgba(190, 24, 93, 0.12)',
+  heroShadow: '0 20px 54px rgba(190, 24, 93, 0.16), inset 0 1px 0 rgba(255,255,255,0.72)',
+  shellShadow: '0 24px 70px rgba(190, 24, 93, 0.20), 0 8px 24px rgba(251, 113, 133, 0.14)'
+};
+
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
   upload: 'submit',
+  enableExamAutoSubmit: false,
+  enableDebugLogPanel: false,
+  enableLocalQuestionCache: true,
   answererWrappers: [],
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
@@ -174,6 +199,9 @@ function getWorkOptions(): CommonWorkOptions {
   return {
     ...stored,
     upload: getStudySettingValue('upload', 'submit'),
+    enableExamAutoSubmit: getStudySettingValue('enableExamAutoSubmit', stored.enableExamAutoSubmit ?? false),
+    enableDebugLogPanel: getStudySettingValue('enableDebugLogPanel', stored.enableDebugLogPanel ?? false),
+    enableLocalQuestionCache: getStudySettingValue('enableLocalQuestionCache', stored.enableLocalQuestionCache ?? true),
     enableRandomFallbackAnswer: getStudySettingValue(
       'enableRandomFallbackAnswer',
       stored.enableRandomFallbackAnswer ?? false
@@ -244,28 +272,28 @@ function bindPanelDrag(panel: ScriptPanel, kind: 'workResults' | 'apps') {
   handle.style.userSelect = 'none';
   handle.style.touchAction = 'none';
   handle.style.padding = '14px 14px 12px';
-  handle.style.borderBottom = '1px solid rgba(15, 23, 42, 0.08)';
+  handle.style.borderBottom = `1px solid ${panelPinkTheme.border}`;
   handle.style.position = 'sticky';
   handle.style.top = '-14px';
   handle.style.zIndex = '3';
-  handle.style.background = 'rgba(255,255,255,0.96)';
+  handle.style.background = 'rgba(255, 245, 250, 0.96)';
   handle.style.backdropFilter = 'blur(12px)';
-  handle.style.boxShadow = '0 10px 24px rgba(15, 23, 42, 0.04)';
+  handle.style.boxShadow = '0 10px 24px rgba(190, 24, 93, 0.08)';
 
   const rootWithHeaderState = root as HTMLElement & {
     __cxHeaderHandle?: HTMLElement;
     __cxHeaderHint?: HTMLDivElement;
   };
 
-  const title = createElement('div', { text: 'ChaoXing Plus Tools' });
+  const title = createElement('div', { text: 'ChaoXing Plus Pink Console' });
   title.style.fontSize = '13px';
-  title.style.fontWeight = '700';
-  title.style.color = '#0f172a';
+  title.style.fontWeight = '800';
+  title.style.color = panelPinkTheme.text;
   title.style.letterSpacing = '0.02em';
 
   const hint = createElement('div', { text: '点击折叠 · 可拖动' });
   hint.style.fontSize = '12px';
-  hint.style.color = '#64748b';
+  hint.style.color = panelPinkTheme.muted;
 
   rootWithHeaderState.__cxHeaderHandle = handle;
   rootWithHeaderState.__cxHeaderHint = hint;
@@ -521,6 +549,10 @@ function saveQuestionCaches() {
   runtimeStore.set(QUESTION_CACHE_KEY, state.apps.localQuestionCaches);
 }
 
+function isLocalQuestionCacheEnabled() {
+  return getStudySettingValue('enableLocalQuestionCache', true);
+}
+
 function addQuestionCaches(...items: QuestionCache[]) {
   for (const item of items) {
     if (!item.title.trim() || !item.answer.trim()) {
@@ -612,8 +644,8 @@ function applySectionCardStyle(
 ) {
   element.style.padding = options.padding ?? '14px';
   element.style.borderRadius = '16px';
-  element.style.background = options.background ?? 'rgba(248, 250, 252, 0.86)';
-  element.style.border = options.border ?? '1px solid rgba(148, 163, 184, 0.18)';
+  element.style.background = options.background ?? panelPinkTheme.surface;
+  element.style.border = options.border ?? `1px solid ${panelPinkTheme.border}`;
   element.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.75)';
 }
 
@@ -626,10 +658,10 @@ function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'pr
   button.style.transition = 'all 0.2s ease';
 
   if (tone === 'primary') {
-    button.style.border = '1px solid rgba(37, 99, 235, 0.24)';
-    button.style.background = 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)';
+    button.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
+    button.style.background = panelPinkTheme.primaryGradient;
     button.style.color = '#fff';
-    button.style.boxShadow = '0 8px 20px rgba(37, 99, 235, 0.22)';
+    button.style.boxShadow = '0 10px 24px rgba(219, 39, 119, 0.24)';
     return;
   }
 
@@ -641,10 +673,10 @@ function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'pr
     return;
   }
 
-  button.style.border = '1px solid rgba(148, 163, 184, 0.22)';
-  button.style.background = 'rgba(255,255,255,0.96)';
-  button.style.color = '#1e293b';
-  button.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.06)';
+  button.style.border = `1px solid ${panelPinkTheme.border}`;
+  button.style.background = panelPinkTheme.surfaceStrong;
+  button.style.color = panelPinkTheme.text;
+  button.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.08)';
 }
 
 function createMetricChip(label: string, value: string) {
@@ -654,18 +686,18 @@ function createMetricChip(label: string, value: string) {
   chip.style.minWidth = '112px';
   chip.style.padding = '10px 12px';
   chip.style.borderRadius = '14px';
-  chip.style.background = 'rgba(255,255,255,0.82)';
-  chip.style.border = '1px solid rgba(148, 163, 184, 0.18)';
-  chip.style.boxShadow = '0 8px 22px rgba(15, 23, 42, 0.06)';
+  chip.style.background = panelPinkTheme.surfaceStrong;
+  chip.style.border = `1px solid ${panelPinkTheme.border}`;
+  chip.style.boxShadow = '0 8px 22px rgba(190, 24, 93, 0.08)';
 
   const title = createElement('div', { text: label });
   title.style.fontSize = '11px';
-  title.style.color = '#64748b';
+  title.style.color = panelPinkTheme.muted;
 
   const number = createElement('div', { text: value });
   number.style.fontSize = '15px';
   number.style.fontWeight = '700';
-  number.style.color = '#0f172a';
+  number.style.color = panelPinkTheme.text;
 
   chip.append(title, number);
   return chip;
@@ -700,8 +732,8 @@ function createStatusBadge(result: SimplifyWorkResult) {
     return badge;
   }
 
-  badge.style.background = 'rgba(148, 163, 184, 0.12)';
-  badge.style.color = '#64748b';
+  badge.style.background = panelPinkTheme.primarySoft;
+  badge.style.color = panelPinkTheme.muted;
   return badge;
 }
 
@@ -721,15 +753,15 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   const container = createElement('div');
   applySectionCardStyle(container, {
     padding: '14px',
-    background: 'rgba(255,255,255,0.9)',
-    border: '1px solid rgba(148, 163, 184, 0.18)'
+    background: panelPinkTheme.surface,
+    border: `1px solid ${panelPinkTheme.border}`
   });
   container.style.display = 'grid';
   container.style.gap = '10px';
 
   if (!result) {
     const empty = createElement('div', { text: '暂无搜索结果。' });
-    empty.style.color = '#64748b';
+    empty.style.color = panelPinkTheme.muted;
     container.append(empty);
     return container;
   }
@@ -741,7 +773,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   const title = createElement('div', { text: result.question || '未识别题目' });
   title.style.fontWeight = '700';
   title.style.lineHeight = '1.6';
-  title.style.color = '#0f172a';
+  title.style.color = panelPinkTheme.text;
   applyQuestionTextWrapStyle(title);
 
   const metaRow = createElement('div');
@@ -755,7 +787,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     text: result.type ? `题型：${formatQuestionTypeLabel(result.type)}` : '题型：未识别'
   });
   typeMeta.style.fontSize = '12px';
-  typeMeta.style.color = '#64748b';
+  typeMeta.style.color = panelPinkTheme.muted;
 
   metaRow.append(typeMeta, createStatusBadge(result));
   titleWrap.append(title, metaRow);
@@ -826,8 +858,8 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     const block = createElement('div');
     applySectionCardStyle(block, {
       padding: '12px',
-      background: 'rgba(248, 250, 252, 0.92)',
-      border: '1px solid rgba(226, 232, 240, 0.95)'
+      background: panelPinkTheme.sectionGradient,
+      border: `1px solid ${panelPinkTheme.border}`
     });
     block.style.display = 'grid';
     block.style.gap = '8px';
@@ -841,13 +873,13 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
 
     const header = createElement('div', { text: info.name || '未知题库' });
     header.style.fontWeight = '700';
-    header.style.color = '#0f172a';
+    header.style.color = panelPinkTheme.text;
 
     const sub = createElement('div', {
       text: info.error ? `错误：${info.error}` : `结果数：${info.results.length}`
     });
     sub.style.fontSize = '12px';
-    sub.style.color = info.error ? '#c0392b' : '#64748b';
+    sub.style.color = info.error ? '#c0392b' : panelPinkTheme.muted;
     applyQuestionTextWrapStyle(sub);
 
     headerRow.append(header, sub);
@@ -861,7 +893,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
       link.textContent = info.homepage;
       link.style.display = 'block';
       link.style.fontSize = '12px';
-      link.style.color = '#2563eb';
+      link.style.color = panelPinkTheme.primary;
       link.style.wordBreak = 'break-all';
       block.append(link);
     }
@@ -873,19 +905,19 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
 
       for (const entry of info.results) {
         const item = createElement('div');
-        item.style.background = 'rgba(255,255,255,0.96)';
+        item.style.background = panelPinkTheme.surfaceStrong;
         item.style.borderRadius = '12px';
         item.style.padding = '10px 12px';
-        item.style.border = '1px solid rgba(226, 232, 240, 0.9)';
+        item.style.border = `1px solid ${panelPinkTheme.border}`;
 
         const answer = createElement('div', { text: entry[1] || '空答案' });
         answer.style.fontWeight = '700';
         answer.style.wordBreak = 'break-word';
-        answer.style.color = '#0f172a';
+        answer.style.color = panelPinkTheme.text;
 
         const question = createElement('div', { text: entry[0] || '' });
         question.style.fontSize = '12px';
-        question.style.color = '#64748b';
+        question.style.color = panelPinkTheme.muted;
         question.style.marginTop = '6px';
         applyQuestionTextWrapStyle(question);
 
@@ -919,7 +951,7 @@ function createConfigField(
     const label = createElement('label', { text: definition.label });
     label.style.fontSize = '12px';
     label.style.fontWeight = '700';
-    label.style.color = '#334155';
+    label.style.color = panelPinkTheme.text;
     wrap.append(label);
   }
 
@@ -944,14 +976,14 @@ function createConfigField(
       selectedBadge.style.width = 'fit-content';
       selectedBadge.style.padding = '6px 10px';
       selectedBadge.style.borderRadius = '999px';
-      selectedBadge.style.background = 'rgba(37, 99, 235, 0.10)';
-      selectedBadge.style.color = '#1d4ed8';
+      selectedBadge.style.background = panelPinkTheme.primarySoft;
+      selectedBadge.style.color = panelPinkTheme.primaryDeep;
       selectedBadge.style.fontSize = '12px';
       selectedBadge.style.fontWeight = '700';
 
       const wrapHint = createElement('div', { text: '倍率选项会根据可用宽度自动换行显示。' });
       wrapHint.style.fontSize = '12px';
-      wrapHint.style.color = '#64748b';
+      wrapHint.style.color = panelPinkTheme.muted;
       wrapHint.style.lineHeight = '1.5';
 
       optionGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(72px, 1fr))';
@@ -972,11 +1004,11 @@ function createConfigField(
       option.style.padding = '10px 12px';
       option.style.minHeight = '48px';
       option.style.borderRadius = '12px';
-      option.style.border = selected ? '1px solid rgba(37, 99, 235, 0.26)' : '1px solid rgba(226, 232, 240, 0.95)';
+      option.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
       option.style.background = selected
-        ? 'linear-gradient(135deg, rgba(219, 234, 254, 0.95) 0%, rgba(239, 246, 255, 0.98) 100%)'
-        : 'rgba(255,255,255,0.98)';
-      option.style.color = selected ? '#1d4ed8' : '#334155';
+        ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
+        : panelPinkTheme.surfaceStrong;
+      option.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
       option.style.fontSize = '12px';
       option.style.fontWeight = selected ? '700' : '600';
       option.style.cursor = 'pointer';
@@ -1008,22 +1040,22 @@ function createConfigField(
     toggle.style.cursor = 'pointer';
     toggle.style.textAlign = 'left';
     toggle.style.transition = 'all 0.2s ease';
-    toggle.style.border = checked ? '1px solid rgba(34, 197, 94, 0.24)' : '1px solid rgba(226, 232, 240, 0.95)';
+    toggle.style.border = checked ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
     toggle.style.background = checked
-      ? 'linear-gradient(135deg, rgba(220, 252, 231, 0.9) 0%, rgba(240, 253, 244, 0.98) 100%)'
-      : 'linear-gradient(135deg, rgba(248, 250, 252, 0.96) 0%, rgba(255,255,255,0.98) 100%)';
-    toggle.style.boxShadow = checked ? '0 10px 24px rgba(34, 197, 94, 0.10)' : '0 6px 18px rgba(15, 23, 42, 0.04)';
+      ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.96) 0%, rgba(255, 241, 248, 0.98) 100%)'
+      : 'linear-gradient(135deg, rgba(255, 250, 253, 0.96) 0%, rgba(255,255,255,0.98) 100%)';
+    toggle.style.boxShadow = checked ? '0 10px 24px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
 
     const stateText = createElement('div', { text: checked ? '已开启' : '已关闭' });
     stateText.style.fontSize = '13px';
     stateText.style.fontWeight = '700';
-    stateText.style.color = checked ? '#15803d' : '#64748b';
+    stateText.style.color = checked ? panelPinkTheme.primaryDeep : panelPinkTheme.muted;
 
     const stateDesc = createElement('div', {
       text: checked ? '点击关闭此项设置' : '点击开启此项设置'
     });
     stateDesc.style.fontSize = '12px';
-    stateDesc.style.color = checked ? '#166534' : '#94a3b8';
+    stateDesc.style.color = checked ? panelPinkTheme.muted : 'rgba(157, 23, 77, 0.62)';
     stateDesc.style.lineHeight = '1.5';
 
     toggle.append(stateText, stateDesc);
@@ -1042,9 +1074,9 @@ function createConfigField(
     inputWrap.style.gap = '8px';
     inputWrap.style.padding = '10px 12px';
     inputWrap.style.borderRadius = '12px';
-    inputWrap.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-    inputWrap.style.background = 'rgba(255,255,255,0.98)';
-    inputWrap.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.04)';
+    inputWrap.style.border = `1px solid ${panelPinkTheme.border}`;
+    inputWrap.style.background = panelPinkTheme.surfaceStrong;
+    inputWrap.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
 
     const input = document.createElement('input');
     input.type = isVolumeField ? 'number' : inputType === 'range' ? 'range' : 'text';
@@ -1055,7 +1087,7 @@ function createConfigField(
     input.style.background = 'transparent';
     input.style.fontSize = '13px';
     input.style.fontWeight = '700';
-    input.style.color = '#0f172a';
+    input.style.color = panelPinkTheme.text;
 
     if (isVolumeField) {
       input.min = '0';
@@ -1089,7 +1121,7 @@ function createConfigField(
       const suffix = createElement('div', { text: '%' });
       suffix.style.fontSize = '12px';
       suffix.style.fontWeight = '700';
-      suffix.style.color = '#64748b';
+      suffix.style.color = panelPinkTheme.muted;
       inputWrap.append(suffix);
     }
 
@@ -1109,14 +1141,14 @@ function createConfigField(
       currentVolumeBadge.style.width = 'fit-content';
       currentVolumeBadge.style.padding = '6px 10px';
       currentVolumeBadge.style.borderRadius = '999px';
-      currentVolumeBadge.style.background = 'rgba(37, 99, 235, 0.10)';
-      currentVolumeBadge.style.color = '#1d4ed8';
+      currentVolumeBadge.style.background = panelPinkTheme.primarySoft;
+      currentVolumeBadge.style.color = panelPinkTheme.primaryDeep;
       currentVolumeBadge.style.fontSize = '12px';
       currentVolumeBadge.style.fontWeight = '700';
 
       const quickHint = createElement('div', { text: '可直接输入，也可使用下方快捷音量按钮。' });
       quickHint.style.fontSize = '12px';
-      quickHint.style.color = '#64748b';
+      quickHint.style.color = panelPinkTheme.muted;
       quickHint.style.lineHeight = '1.5';
 
       quickMeta.append(currentVolumeBadge, quickHint);
@@ -1133,15 +1165,15 @@ function createConfigField(
         quickButton.type = 'button';
         quickButton.style.padding = '8px 10px';
         quickButton.style.borderRadius = '10px';
-        quickButton.style.border = selected ? '1px solid rgba(37, 99, 235, 0.26)' : '1px solid rgba(226, 232, 240, 0.95)';
+        quickButton.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
         quickButton.style.background = selected
-          ? 'linear-gradient(135deg, rgba(219, 234, 254, 0.95) 0%, rgba(239, 246, 255, 0.98) 100%)'
-          : 'rgba(255,255,255,0.98)';
-        quickButton.style.color = selected ? '#1d4ed8' : '#475569';
+          ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
+          : panelPinkTheme.surfaceStrong;
+        quickButton.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
         quickButton.style.fontSize = '12px';
         quickButton.style.fontWeight = selected ? '700' : '600';
         quickButton.style.cursor = 'pointer';
-        quickButton.style.boxShadow = selected ? '0 10px 22px rgba(59, 130, 246, 0.12)' : '0 6px 18px rgba(15, 23, 42, 0.04)';
+        quickButton.style.boxShadow = selected ? '0 10px 22px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
         quickButton.onclick = () => {
           setStudySettingValue(script, key, percent / 100);
         };
@@ -1253,6 +1285,21 @@ function createStudySettingsPanel() {
       ],
       defaultValue: 'pause'
     },
+    enableExamAutoSubmit: {
+      label: '考试自动交卷',
+      attrs: { type: 'checkbox', title: '开启后，考试答题完成且完成率满足提交条件时才会自动交卷。默认关闭。' },
+      defaultValue: false
+    },
+    enableDebugLogPanel: {
+      label: '日志窗口',
+      attrs: { type: 'checkbox', title: '开启后在页面右下角显示调试日志窗口。默认关闭。' },
+      defaultValue: false
+    },
+    enableLocalQuestionCache: {
+      label: '本地题库缓存',
+      attrs: { type: 'checkbox', title: '开启后优先使用本地已缓存题目答案。默认开启。' },
+      defaultValue: true
+    },
     enableHyperlink: {
       label: '链接任务自动完成',
       attrs: { type: 'checkbox', title: '开启后自动完成链接型任务点。' },
@@ -1275,8 +1322,8 @@ function createStudySettingsPanel() {
   const container = createElement('div');
   applySectionCardStyle(container, {
     padding: '14px',
-    background: 'rgba(248, 250, 252, 0.86)',
-    border: '1px solid rgba(148, 163, 184, 0.18)'
+    background: panelPinkTheme.sectionGradient,
+    border: `1px solid ${panelPinkTheme.border}`
   });
   container.style.display = 'grid';
   container.style.gap = '12px';
@@ -1288,13 +1335,13 @@ function createStudySettingsPanel() {
   const title = createElement('div', { text: '学习设置' });
   title.style.fontSize = '15px';
   title.style.fontWeight = '800';
-  title.style.color = '#0f172a';
+  title.style.color = panelPinkTheme.text;
 
   const description = createElement('div', {
     text: '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
-  description.style.color = '#64748b';
+  description.style.color = panelPinkTheme.muted;
   description.style.lineHeight = '1.7';
 
   header.append(title, description);
@@ -1310,6 +1357,8 @@ function createStudySettingsPanel() {
     'enableHyperlink',
     'notifyWhenHasFaceRecognition'
   ];
+  const examAndDebugKeys = ['enableExamAutoSubmit', 'enableDebugLogPanel'];
+  const cacheKeys = ['enableLocalQuestionCache'];
 
   const createSettingsGroup = (
     groupTitle: string,
@@ -1322,15 +1371,15 @@ function createStudySettingsPanel() {
     section.style.gap = '10px';
     section.style.padding = '12px';
     section.style.borderRadius = '16px';
-    section.style.background = 'linear-gradient(180deg, rgba(255,255,255,0.76) 0%, rgba(248,250,252,0.78) 100%)';
-    section.style.border = '1px solid rgba(226, 232, 240, 0.9)';
+    section.style.background = panelPinkTheme.sectionGradient;
+    section.style.border = `1px solid ${panelPinkTheme.border}`;
     section.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.7)';
 
     const sectionHeader = createElement('div');
     sectionHeader.style.display = 'grid';
     sectionHeader.style.gap = '6px';
     sectionHeader.style.paddingBottom = '8px';
-    sectionHeader.style.borderBottom = '1px solid rgba(226, 232, 240, 0.9)';
+    sectionHeader.style.borderBottom = `1px solid ${panelPinkTheme.border}`;
 
     const titleRow = createElement('div');
     titleRow.style.display = 'flex';
@@ -1342,19 +1391,19 @@ function createStudySettingsPanel() {
     const sectionTitle = createElement('div', { text: groupTitle });
     sectionTitle.style.fontSize = '13px';
     sectionTitle.style.fontWeight = '800';
-    sectionTitle.style.color = '#0f172a';
+    sectionTitle.style.color = panelPinkTheme.text;
 
     const sectionPill = createElement('div', { text: summaryText });
     sectionPill.style.padding = '5px 9px';
     sectionPill.style.borderRadius = '999px';
-    sectionPill.style.background = 'rgba(148, 163, 184, 0.12)';
-    sectionPill.style.color = '#475569';
+    sectionPill.style.background = panelPinkTheme.primarySoft;
+    sectionPill.style.color = panelPinkTheme.primaryDeep;
     sectionPill.style.fontSize = '11px';
     sectionPill.style.fontWeight = '700';
 
     const sectionDesc = createElement('div', { text: groupDescription });
     sectionDesc.style.fontSize = '12px';
-    sectionDesc.style.color = '#64748b';
+    sectionDesc.style.color = panelPinkTheme.muted;
     sectionDesc.style.lineHeight = '1.6';
 
     titleRow.append(sectionTitle, sectionPill);
@@ -1371,9 +1420,9 @@ function createStudySettingsPanel() {
       const field = createConfigField(script, key, definition);
       field.style.padding = '10px 12px';
       field.style.borderRadius = '14px';
-      field.style.background = 'rgba(255,255,255,0.96)';
-      field.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-      field.style.boxShadow = '0 8px 20px rgba(15, 23, 42, 0.04)';
+      field.style.background = panelPinkTheme.surfaceStrong;
+      field.style.border = `1px solid ${panelPinkTheme.border}`;
+      field.style.boxShadow = '0 8px 20px rgba(190, 24, 93, 0.05)';
       if (key === 'playbackRate' || key === 'volume' || key === 'mode') {
         field.style.gridColumn = '1 / -1';
       }
@@ -1392,7 +1441,10 @@ function createStudySettingsPanel() {
       '控制视频、文档、章节测试和提醒等自动化能力。',
       taskKeys,
       formatEnabledStudyTaskCapabilitySummary(script.cfg, taskKeys)
-    )
+    ),
+    createSettingsGroup('考试与诊断', '控制考试自动交卷权限和页面日志窗口。', examAndDebugKeys)
+    ,
+    createSettingsGroup('题库缓存', '控制是否优先使用本地缓存命中题目答案。', cacheKeys)
   );
   return container;
 }
@@ -1403,8 +1455,8 @@ function createTikuAdapterConfigSection() {
   const container = createElement('div');
   applySectionCardStyle(container, {
     padding: '14px',
-    background: 'rgba(248, 250, 252, 0.86)',
-    border: '1px solid rgba(148, 163, 184, 0.18)'
+    background: panelPinkTheme.sectionGradient,
+    border: `1px solid ${panelPinkTheme.border}`
   });
   container.style.display = 'grid';
   container.style.gap = '12px';
@@ -1416,13 +1468,13 @@ function createTikuAdapterConfigSection() {
   const title = createElement('div', { text: '题库配置' });
   title.style.fontSize = '15px';
   title.style.fontWeight = '800';
-  title.style.color = '#0f172a';
+  title.style.color = panelPinkTheme.text;
 
   const description = createElement('div', {
     text: '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
-  description.style.color = '#64748b';
+  description.style.color = panelPinkTheme.muted;
   description.style.lineHeight = '1.7';
 
   header.append(title, description);
@@ -1434,7 +1486,7 @@ function createTikuAdapterConfigSection() {
   const baseurlLabel = createElement('label', { text: '题库地址' });
   baseurlLabel.style.fontSize = '12px';
   baseurlLabel.style.fontWeight = '700';
-  baseurlLabel.style.color = '#334155';
+  baseurlLabel.style.color = panelPinkTheme.text;
 
   const baseurlRow = createElement('div');
   baseurlRow.style.display = 'flex';
@@ -1449,8 +1501,8 @@ function createTikuAdapterConfigSection() {
   baseurlInput.style.minWidth = '220px';
   baseurlInput.style.padding = '10px 12px';
   baseurlInput.style.borderRadius = '12px';
-  baseurlInput.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-  baseurlInput.style.background = 'rgba(255,255,255,0.98)';
+  baseurlInput.style.border = `1px solid ${panelPinkTheme.border}`;
+  baseurlInput.style.background = panelPinkTheme.surfaceStrong;
 
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
@@ -1482,7 +1534,7 @@ function createTikuAdapterConfigSection() {
   const keyLabel = createElement('label', { text: '令牌' });
   keyLabel.style.fontSize = '12px';
   keyLabel.style.fontWeight = '700';
-  keyLabel.style.color = '#334155';
+  keyLabel.style.color = panelPinkTheme.text;
 
   const keyInput = document.createElement('input');
   keyInput.type = 'password';
@@ -1490,8 +1542,8 @@ function createTikuAdapterConfigSection() {
   keyInput.placeholder = '请输入访问令牌';
   keyInput.style.padding = '10px 12px';
   keyInput.style.borderRadius = '12px';
-  keyInput.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-  keyInput.style.background = 'rgba(255,255,255,0.98)';
+  keyInput.style.border = `1px solid ${panelPinkTheme.border}`;
+  keyInput.style.background = panelPinkTheme.surfaceStrong;
   keyInput.oninput = () => {
     runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value);
   };
@@ -1517,9 +1569,9 @@ function createWorkResultsPanel() {
   const hero = createElement('div');
   hero.style.padding = '16px';
   hero.style.borderRadius = '18px';
-  hero.style.background = 'linear-gradient(135deg, rgba(239, 246, 255, 0.98) 0%, rgba(248, 250, 252, 0.98) 58%, rgba(255, 255, 255, 0.98) 100%)';
-  hero.style.border = '1px solid rgba(59, 130, 246, 0.12)';
-  hero.style.boxShadow = '0 16px 40px rgba(59, 130, 246, 0.08)';
+  hero.style.background = panelPinkTheme.heroGradient;
+  hero.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
+  hero.style.boxShadow = panelPinkTheme.heroShadow;
   hero.style.display = 'grid';
   hero.style.gap = '12px';
 
@@ -1537,15 +1589,15 @@ function createWorkResultsPanel() {
   const heroTitle = createElement('div', { text: '答题结果与学习控制' });
   heroTitle.style.fontSize = '17px';
   heroTitle.style.fontWeight = '800';
-  heroTitle.style.color = '#0f172a';
+  heroTitle.style.color = panelPinkTheme.text;
 
   titleGroup.append(heroTitle);
 
   const badge = createElement('div', { text: state.workResults.results.length === 0 ? '空闲中' : '运行中' });
   badge.style.padding = '7px 12px';
   badge.style.borderRadius = '999px';
-  badge.style.background = state.workResults.results.length === 0 ? 'rgba(148, 163, 184, 0.12)' : 'rgba(37, 99, 235, 0.12)';
-  badge.style.color = state.workResults.results.length === 0 ? '#64748b' : '#1d4ed8';
+  badge.style.background = state.workResults.results.length === 0 ? 'rgba(244, 114, 182, 0.10)' : panelPinkTheme.primarySoft;
+  badge.style.color = state.workResults.results.length === 0 ? panelPinkTheme.muted : panelPinkTheme.primaryDeep;
   badge.style.fontSize = '12px';
   badge.style.fontWeight = '700';
 
@@ -1567,6 +1619,9 @@ function createWorkResultsPanel() {
       enableAnswer: getStudySettingValue('enableAnswer', true),
       enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', false),
       aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', 'pause'),
+      enableExamAutoSubmit: getStudySettingValue('enableExamAutoSubmit', false),
+      enableDebugLogPanel: getStudySettingValue('enableDebugLogPanel', false),
+      enableLocalQuestionCache: getStudySettingValue('enableLocalQuestionCache', true),
       upload: getStudySettingValue('upload', 'submit')
     }
   };
@@ -1629,8 +1684,45 @@ function createWorkResultsPanel() {
   });
   uploadModeField.style.maxWidth = 'none';
 
+  const examAndDebugRow = createElement('div');
+  examAndDebugRow.style.display = 'grid';
+  examAndDebugRow.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
+  examAndDebugRow.style.gap = '12px';
+  examAndDebugRow.style.alignItems = 'start';
+
+  const examAutoSubmitToggleField = createConfigField(studyScript, 'enableExamAutoSubmit', {
+    label: '考试自动交卷',
+    attrs: {
+      type: 'checkbox',
+      title: '开启后，考试答题完成且完成率满足提交条件时才会自动交卷。默认关闭。'
+    },
+    defaultValue: false
+  });
+  examAutoSubmitToggleField.style.maxWidth = 'none';
+
+  const debugLogPanelToggleField = createConfigField(studyScript, 'enableDebugLogPanel', {
+    label: '日志窗口',
+    attrs: {
+      type: 'checkbox',
+      title: '开启后在页面右下角显示调试日志窗口。默认关闭。'
+    },
+    defaultValue: false
+  });
+  debugLogPanelToggleField.style.maxWidth = 'none';
+
+  const localQuestionCacheToggleField = createConfigField(studyScript, 'enableLocalQuestionCache', {
+    label: '本地题库缓存',
+    attrs: {
+      type: 'checkbox',
+      title: '开启后优先使用本地已缓存题目答案。默认开启。'
+    },
+    defaultValue: true
+  });
+  localQuestionCacheToggleField.style.maxWidth = 'none';
+
   aiAnswerRow.append(answerToggleField, aiFallbackToggleField);
   actionModeRow.append(aiFallbackFailureActionField, uploadModeField);
+  examAndDebugRow.append(examAutoSubmitToggleField, debugLogPanelToggleField, localQuestionCacheToggleField);
 
   const heroActions = createElement('div');
   heroActions.style.display = 'flex';
@@ -1669,14 +1761,14 @@ function createWorkResultsPanel() {
   applyActionButtonStyle(clearButton, 'danger');
   heroActions.append(typeButton, clearButton);
 
-  hero.append(heroTop, aiAnswerRow, actionModeRow, metricRow, heroActions);
+  hero.append(heroTop, aiAnswerRow, actionModeRow, examAndDebugRow, metricRow, heroActions);
   container.append(hero);
 
   const resultsSection = createElement('div');
   applySectionCardStyle(resultsSection, {
     padding: '14px',
-    background: 'rgba(248, 250, 252, 0.86)',
-    border: '1px solid rgba(148, 163, 184, 0.18)'
+    background: panelPinkTheme.sectionGradient,
+    border: `1px solid ${panelPinkTheme.border}`
   });
   resultsSection.style.display = 'grid';
   resultsSection.style.gap = '12px';
@@ -1691,13 +1783,13 @@ function createWorkResultsPanel() {
   const resultsTitle = createElement('div', { text: '答题结果' });
   resultsTitle.style.fontSize = '14px';
   resultsTitle.style.fontWeight = '700';
-  resultsTitle.style.color = '#0f172a';
+  resultsTitle.style.color = panelPinkTheme.text;
 
   const summary = createElement('div', {
     text: `当前共 ${stats.totalQuestionCount} 题，已完成 ${stats.resolvedCount} 题。`
   });
   summary.style.fontSize = '12px';
-  summary.style.color = '#64748b';
+  summary.style.color = panelPinkTheme.muted;
 
   resultsHeader.append(resultsTitle, summary);
   resultsSection.append(resultsHeader);
@@ -1708,8 +1800,8 @@ function createWorkResultsPanel() {
     empty.style.textAlign = 'center';
     empty.style.padding = '20px 12px';
     empty.style.borderRadius = '14px';
-    empty.style.background = 'rgba(255,255,255,0.85)';
-    empty.style.border = '1px dashed rgba(148, 163, 184, 0.3)';
+    empty.style.background = panelPinkTheme.surface;
+    empty.style.border = `1px dashed ${panelPinkTheme.borderStrong}`;
     resultsSection.append(empty);
   } else {
     const list = createElement('div');
@@ -1741,14 +1833,14 @@ function createWorkResultsPanel() {
         button.style.minWidth = '38px';
         button.style.height = '38px';
         button.style.borderRadius = '12px';
-        button.style.border = '1px solid rgba(148, 163, 184, 0.2)';
+        button.style.border = `1px solid ${panelPinkTheme.border}`;
         button.style.cursor = 'pointer';
         button.style.fontWeight = '700';
-        button.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.05)';
+        button.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.06)';
 
         if (tone === 'selected') {
-          button.style.background = 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)';
-          button.style.borderColor = '#2563eb';
+          button.style.background = panelPinkTheme.primaryGradient;
+          button.style.borderColor = panelPinkTheme.primary;
           button.style.color = '#fff';
         } else if (tone === 'manual') {
           button.style.background = 'rgba(254, 249, 195, 0.96)';
@@ -1763,8 +1855,8 @@ function createWorkResultsPanel() {
           button.style.borderColor = '#f87171';
           button.style.color = '#b91c1c';
         } else {
-          button.style.background = 'rgba(255,255,255,0.96)';
-          button.style.color = '#334155';
+          button.style.background = panelPinkTheme.surfaceStrong;
+          button.style.color = panelPinkTheme.text;
         }
 
         button.onclick = () => selectResult(index);
@@ -1780,12 +1872,12 @@ function createWorkResultsPanel() {
         item.style.padding = '12px';
         item.style.borderRadius = '14px';
         item.style.cursor = 'pointer';
-        item.style.boxShadow = '0 8px 22px rgba(15, 23, 42, 0.05)';
-        item.style.borderLeft = index === state.workResults.currentResultIndex ? '4px solid #2563eb' : '4px solid transparent';
+        item.style.boxShadow = '0 8px 22px rgba(190, 24, 93, 0.06)';
+        item.style.borderLeft = index === state.workResults.currentResultIndex ? `4px solid ${panelPinkTheme.primary}` : '4px solid transparent';
 
         if (tone === 'selected') {
-          item.style.border = '1px solid rgba(37, 99, 235, 0.24)';
-          item.style.background = 'rgba(239, 246, 255, 0.98)';
+          item.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
+          item.style.background = 'rgba(252, 231, 243, 0.98)';
         } else if (tone === 'manual') {
           item.style.border = '1px solid rgba(250, 204, 21, 0.45)';
           item.style.background = 'rgba(254, 252, 232, 0.96)';
@@ -1796,19 +1888,19 @@ function createWorkResultsPanel() {
           item.style.border = '1px solid rgba(248, 113, 113, 0.4)';
           item.style.background = 'rgba(254, 242, 242, 0.96)';
         } else {
-          item.style.border = '1px solid rgba(226, 232, 240, 0.95)';
-          item.style.background = 'rgba(255,255,255,0.96)';
+          item.style.border = `1px solid ${panelPinkTheme.border}`;
+          item.style.background = panelPinkTheme.surfaceStrong;
         }
 
         const title = createElement('div', { text: `${index + 1}. ${result.question || '未识别题目'}` });
         title.style.fontWeight = '700';
         title.style.wordBreak = 'break-word';
-        title.style.color = '#0f172a';
+        title.style.color = panelPinkTheme.text;
         title.style.lineHeight = '1.6';
 
         const status = createElement('div', { text: formatWorkResultStatus(result) });
         status.style.fontSize = '12px';
-        status.style.color = '#64748b';
+        status.style.color = panelPinkTheme.muted;
         status.style.marginTop = '6px';
 
         item.append(title, status);
@@ -1826,8 +1918,8 @@ function createWorkResultsPanel() {
   const cacheSection = createElement('div');
   applySectionCardStyle(cacheSection, {
     padding: '14px',
-    background: 'rgba(248, 250, 252, 0.86)',
-    border: '1px solid rgba(148, 163, 184, 0.18)'
+    background: panelPinkTheme.sectionGradient,
+    border: `1px solid ${panelPinkTheme.border}`
   });
   cacheSection.style.display = 'grid';
   cacheSection.style.gap = '12px';
@@ -1846,11 +1938,11 @@ function createWorkResultsPanel() {
   const cacheTitle = createElement('div', { text: `题库缓存 · ${state.apps.localQuestionCaches.length}` });
   cacheTitle.style.fontSize = '14px';
   cacheTitle.style.fontWeight = '700';
-  cacheTitle.style.color = '#0f172a';
+  cacheTitle.style.color = panelPinkTheme.text;
 
   const cacheDesc = createElement('div', { text: '答题成功后会自动写入本地缓存，方便后续题目直接命中。' });
   cacheDesc.style.fontSize = '12px';
-  cacheDesc.style.color = '#64748b';
+  cacheDesc.style.color = panelPinkTheme.muted;
 
   cacheTitleWrap.append(cacheTitle, cacheDesc);
 
@@ -1872,8 +1964,8 @@ function createWorkResultsPanel() {
     emptyCache.style.textAlign = 'center';
     emptyCache.style.padding = '18px 12px';
     emptyCache.style.borderRadius = '14px';
-    emptyCache.style.background = 'rgba(255,255,255,0.85)';
-    emptyCache.style.border = '1px dashed rgba(148, 163, 184, 0.3)';
+    emptyCache.style.background = panelPinkTheme.surface;
+    emptyCache.style.border = `1px dashed ${panelPinkTheme.borderStrong}`;
     cacheSection.append(emptyCache);
   } else {
     const cacheList = createElement('div');
@@ -1885,26 +1977,26 @@ function createWorkResultsPanel() {
 
     state.apps.localQuestionCaches.slice(0, 20).forEach((cache) => {
       const item = createElement('div');
-      item.style.border = '1px solid rgba(226, 232, 240, 0.95)';
+      item.style.border = `1px solid ${panelPinkTheme.border}`;
       item.style.borderRadius = '12px';
       item.style.padding = '10px 12px';
-      item.style.background = 'rgba(255,255,255,0.96)';
-      item.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.04)';
+      item.style.background = panelPinkTheme.surfaceStrong;
+      item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
 
       const title = createElement('div', { text: cache.title || '未识别题目' });
       title.style.fontWeight = '700';
       title.style.wordBreak = 'break-word';
-      title.style.color = '#0f172a';
+      title.style.color = panelPinkTheme.text;
       title.style.lineHeight = '1.6';
 
       const answer = createElement('div', { text: cache.answer || '空答案' });
       answer.style.marginTop = '6px';
       answer.style.wordBreak = 'break-word';
-      answer.style.color = '#334155';
+      answer.style.color = panelPinkTheme.text;
 
       const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });
       meta.style.fontSize = '12px';
-      meta.style.color = '#64748b';
+      meta.style.color = panelPinkTheme.muted;
       meta.style.marginTop = '6px';
       applyQuestionTextWrapStyle(meta);
 
@@ -1950,13 +2042,14 @@ function createAppsPanel() {
 
   const count = createElement('div', { text: `当前缓存：${state.apps.localQuestionCaches.length}` });
   count.style.fontSize = '12px';
-  count.style.color = '#666';
+  count.style.color = panelPinkTheme.muted;
 
   const clearButton = createElement('button', { text: '清空缓存' });
   clearButton.style.padding = '4px 8px';
-  clearButton.style.border = '1px solid #d9d9d9';
+  clearButton.style.border = `1px solid ${panelPinkTheme.border}`;
   clearButton.style.borderRadius = '6px';
-  clearButton.style.background = '#fff';
+  clearButton.style.background = panelPinkTheme.surfaceStrong;
+  clearButton.style.color = panelPinkTheme.text;
   clearButton.style.cursor = 'pointer';
   clearButton.onclick = () => {
     state.apps.localQuestionCaches = [];
@@ -1970,7 +2063,7 @@ function createAppsPanel() {
 
   if (state.apps.localQuestionCaches.length === 0) {
     const empty = createElement('div', { text: '暂无题库缓存。答题成功后会自动写入这里。' });
-    empty.style.color = '#999';
+    empty.style.color = 'rgba(157, 23, 77, 0.62)';
     empty.style.textAlign = 'center';
     empty.style.padding = '12px 0';
     container.append(empty);
@@ -1985,22 +2078,25 @@ function createAppsPanel() {
 
   state.apps.localQuestionCaches.slice(0, 100).forEach((cache) => {
     const item = createElement('div');
-    item.style.border = '1px solid #eee';
+    item.style.border = `1px solid ${panelPinkTheme.border}`;
     item.style.borderRadius = '8px';
     item.style.padding = '10px';
-    item.style.background = '#fafafa';
+    item.style.background = panelPinkTheme.surfaceStrong;
+    item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
 
     const title = createElement('div', { text: cache.title || '未识别题目' });
     title.style.fontWeight = '600';
     title.style.wordBreak = 'break-word';
+    title.style.color = panelPinkTheme.text;
 
     const answer = createElement('div', { text: cache.answer || '空答案' });
     answer.style.marginTop = '6px';
     answer.style.wordBreak = 'break-word';
+    answer.style.color = panelPinkTheme.text;
 
     const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });
     meta.style.fontSize = '12px';
-    meta.style.color = '#666';
+    meta.style.color = panelPinkTheme.muted;
     meta.style.marginTop = '6px';
     applyQuestionTextWrapStyle(meta);
 
@@ -2015,6 +2111,7 @@ function createAppsPanel() {
       link.style.display = 'block';
       link.style.fontSize = '12px';
       link.style.marginTop = '4px';
+      link.style.color = panelPinkTheme.primary;
       applyQuestionTextWrapStyle(link);
       item.append(link);
     }
@@ -2050,12 +2147,12 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
   panel.root.style.overflow = 'auto';
   panel.root.style.overscrollBehavior = 'contain';
   panel.root.style.scrollbarGutter = 'stable';
-  panel.root.style.background = 'rgba(255,255,255,0.98)';
+  panel.root.dataset.chaoxingPlusTheme = 'pink';
+  panel.root.style.background = panelPinkTheme.shellGradient;
   panel.root.style.backdropFilter = 'blur(14px)';
-  panel.root.style.border = '1px solid rgba(148, 163, 184, 0.22)';
-  panel.root.style.boxShadow =
-    kind === 'workResults' ? '0 22px 60px rgba(15, 23, 42, 0.18)' : '0 8px 24px rgba(0,0,0,0.12)';
-  panel.root.style.borderRadius = kind === 'workResults' ? '18px' : '12px';
+  panel.root.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
+  panel.root.style.boxShadow = panelPinkTheme.shellShadow;
+  panel.root.style.borderRadius = kind === 'workResults' ? '24px' : '18px';
   panel.root.style.padding = kind === 'workResults' ? '14px' : '12px';
   panel.configsContainer.style.display = '';
   panel.body.style.display = '';
@@ -2212,6 +2309,15 @@ export const CommonProject = Project.create({
       methods() {
         return {
           searchAnswerInCaches<T>(title: string, provider: () => Promise<T>) {
+            if (!isLocalQuestionCacheEnabled()) {
+              return provider().then((result) => {
+                if (Array.isArray(result)) {
+                  answerCache.set(title, result as SearchInformation[]);
+                }
+                return result;
+              });
+            }
+
             if (answerCache.has(title)) {
               return Promise.resolve(answerCache.get(title) as T);
             }

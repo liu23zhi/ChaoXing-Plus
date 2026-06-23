@@ -75,7 +75,7 @@ test('marks manual results as yellow before success or failure tones', async () 
   assert.equal(mod.resolveWorkResultTone(result, false), 'manual');
 });
 
-test('selected tone overrides every other status with blue', async () => {
+test('selected tone overrides every other status', async () => {
   const mod = await loadHelperModule();
   const result = createResult({
     requested: true,

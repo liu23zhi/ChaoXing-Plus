@@ -102,6 +102,8 @@ test('creates a post fetch wrapper with bearer auth and adapter search url', asy
   assert.deepEqual(wrapper.headers, {
     Authorization: 'Bearer demo-key'
   });
+  assert.ok(wrapper.timeoutSeconds >= 180);
+  assert.ok(wrapper.retry?.maxAttempts >= 2);
 });
 
 test('tiku adapter wrapper prefers computed choice keys for objective choice answers', async () => {
@@ -125,4 +127,112 @@ test('tiku adapter wrapper prefers computed choice keys for objective choice ans
   });
 
   assert.deepEqual(result, ['多选题', 'AC', { source: 'tikuAdapter' }]);
+});
+
+test('tiku adapter config exposes long AI fallback timeouts and status helpers', async () => {
+  const mod = await loadHelperModule();
+
+  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_REQUEST_TIMEOUT_MS >= 180000);
+  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS >= 300000);
+  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS >= 600);
+  assert.equal(typeof mod.createTikuAdapterAIFallbackTaskUrl, 'function');
+  assert.equal(typeof mod.createTikuAdapterAIFallbackStatusUrl, 'function');
+  assert.equal(
+    mod.createTikuAdapterAIFallbackTaskUrl('https://adapter.local/'),
+    'https://adapter.local/adapter-service/ai-fallback/tasks'
+  );
+  assert.equal(
+    mod.createTikuAdapterAIFallbackStatusUrl('https://adapter.local/', 'task-1'),
+    'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-1'
+  );
+});
+
+test('AI fallback retries transient failures before returning an answer', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+      return new Response('not found', { status: 404 });
+    }
+    if (String(url).endsWith('/adapter-service/ai-fallback') && calls.filter((item) => String(item.url).endsWith('/adapter-service/ai-fallback')).length === 1) {
+      return new Response('bad gateway', { status: 502 });
+    }
+    return Response.json({
+      success: true,
+      result: {
+        question: '1+1=?',
+        answer: '2'
+      }
+    });
+  };
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '1+1=?', type: 'single', options: '1\n2' },
+      { requestTimeoutMs: 1000, retryAttempts: 2, retryDelayMs: 1, preferAsyncTask: true }
+    );
+
+    assert.equal(calls.length, 3);
+    assert.equal(result[0].results[0].answer, '2');
+    assert.equal(result[0].error, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI fallback polls task status until the adapter reports a final answer', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+  let statusCalls = 0;
+
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+      return Response.json({
+        success: false,
+        status: 'running',
+        taskId: 'task-1'
+      });
+    }
+    if (String(url).includes('/adapter-service/ai-fallback/status')) {
+      statusCalls++;
+      if (statusCalls === 1) {
+        return Response.json({
+          success: false,
+          status: 'running',
+          taskId: 'task-1'
+        });
+      }
+      return Response.json({
+        success: true,
+        status: 'succeeded',
+        taskId: 'task-1',
+        result: {
+          question: '题目',
+          answer: '答案'
+        }
+      });
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '题目', type: 'completion', options: '' },
+      { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 1, retryAttempts: 1, preferAsyncTask: true }
+    );
+
+    assert.equal(urls.some((url) => url.includes('/adapter-service/ai-fallback/status?taskId=task-1')), true);
+    assert.equal(statusCalls, 2);
+    assert.equal(result[0].results[0].answer, '答案');
+    assert.equal(result[0].response.status, 'succeeded');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

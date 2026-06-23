@@ -2,6 +2,7 @@ import md5 from 'md5';
 import Typr from 'typr.js';
 import {
   createDefaultQuestionResolver,
+  AnswerWrapperHandlerConfig,
   defaultAnswerWrapperHandler,
   defaultWorkTypeResolver,
   domSearch,
@@ -26,7 +27,7 @@ import {
   splitAnswer
 } from '../utils/work.js';
 import { $console } from './background.js';
-import { requestTikuAdapterAIFallback } from './tiku-adapter-config.js';
+import { requestTikuAdapterAIFallback, TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS } from './tiku-adapter-config.js';
 import {
   CommonProject,
   getStoredTikuAdapterConfig,
@@ -56,6 +57,10 @@ const state = {
 };
 
 const TOP_CENTER_NOTICE_ID = 'cx-plus-top-center-notice';
+AnswerWrapperHandlerConfig.timeout_seconds = Math.max(
+  AnswerWrapperHandlerConfig.timeout_seconds ?? 60,
+  TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
+);
 
 function clearTopCenterNotice() {
   let targetDocument = document;
@@ -223,6 +228,12 @@ export type Job = {
   func: (() => Promise<void>) | undefined;
 };
 
+type ChapterTaskResult = {
+  finished: boolean;
+  finishedRate?: number;
+  uploadable?: boolean;
+};
+
 type SearchJobResult = {
   job?: Job;
   visibleContentState: VisibleContentState;
@@ -286,6 +297,9 @@ const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
   thread: 1,
   upload: 'submit',
+  enableExamAutoSubmit: false,
+  enableDebugLogPanel: false,
+  enableLocalQuestionCache: true,
   answererWrappers: [],
   stopSecondWhenFinish: 3,
   redundanceWordsText: '',
@@ -300,6 +314,20 @@ const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answerty
 const siblingSubTaskRefreshDelayMs = 10000;
 let debugSequence = 0;
 const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';
+type DebugLogLevel = 'debug' | 'info' | 'warn' | 'error';
+const debugLogPanelSettingKey = 'cx.new.study.enableDebugLogPanel';
+const sharedDebugLogPanelAttribute = getSharedRuntimeStoreAttributeName(debugLogPanelSettingKey);
+const debugLogPanelDefaultEnabled = false;
+const debugLogPanelLevel: DebugLogLevel = 'debug';
+const debugLogPanelMaxEntries = 200;
+const debugLogPanelId = 'chaoxing-plus-debug-log-panel';
+const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3
+};
+type DebugConsoleLogLevel = Exclude<DebugLogLevel, 'debug'>;
 const rateHackPluginGuardKey = '__chaoxing_plus_rate_hack_plugin__';
 type DebugLogThrottleStoreOwner = Window & Record<string, unknown>;
 
@@ -331,6 +359,307 @@ function shouldSkipThrottledDebugLog(throttleKey: string, throttleMs = 1500) {
   return false;
 }
 
+function getDebugLogPanelDocument() {
+  try {
+    return (window.top ?? window).document;
+  } catch {
+    return topWindow?.document ?? document;
+  }
+}
+
+function getDebugLogPanelSyncDocuments() {
+  const documents: Document[] = [];
+  const pushDocument = (targetDocument: Document | null | undefined) => {
+    if (targetDocument && !documents.includes(targetDocument)) {
+      documents.push(targetDocument);
+    }
+  };
+
+  pushDocument(document);
+
+  try {
+    pushDocument((window.top ?? window).document);
+  } catch {
+    pushDocument(topWindow?.document);
+  }
+
+  return documents;
+}
+
+function getSharedRuntimeStoreAttributeName(key: string) {
+  return `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
+}
+
+function isDebugLogPanelEnabled() {
+  return runtimeStore.get(debugLogPanelSettingKey, debugLogPanelDefaultEnabled);
+}
+
+function removeDebugLogPanel() {
+  try {
+    getDebugLogPanelDocument().getElementById(debugLogPanelId)?.remove();
+  } catch {
+    // Debug UI must never break the automation flow.
+  }
+}
+
+function syncDebugLogPanelVisibility() {
+  if (isDebugLogPanelEnabled()) {
+    ensureDebugLogPanel();
+  } else {
+    removeDebugLogPanel();
+  }
+}
+
+try {
+  const debugLogPanelObserver = new MutationObserver((mutations) => {
+    const shouldSyncDebugLogPanel = mutations.some(({ attributeName }) => {
+      return attributeName === sharedDebugLogPanelAttribute;
+    });
+
+    if (shouldSyncDebugLogPanel) {
+      syncDebugLogPanelVisibility();
+    }
+  });
+
+  for (const syncDocument of getDebugLogPanelSyncDocuments()) {
+    if (syncDocument.documentElement) {
+      debugLogPanelObserver.observe(syncDocument.documentElement, { attributes: true });
+    }
+    syncDocument.addEventListener('chaoxing-plus:shared-store-sync', syncDebugLogPanelVisibility);
+    syncDocument.addEventListener('chaoxing-plus:shared-store-hydrate', syncDebugLogPanelVisibility);
+  }
+
+  window.addEventListener('storage', (event) => {
+    if (event.key === debugLogPanelSettingKey) {
+      syncDebugLogPanelVisibility();
+    }
+  });
+} catch {
+  // ignore debug log panel observer failures
+}
+
+function shouldAppendDebugLogPanelEntry(level: DebugLogLevel) {
+  return isDebugLogPanelEnabled() && debugLogPanelLevelRank[level] >= debugLogPanelLevelRank[debugLogPanelLevel];
+}
+
+function formatDebugLogPanelValue(value: unknown) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function collectDebugLogPanelText(debugLogPanelBody: HTMLElement) {
+  return Array.from(debugLogPanelBody.children)
+    .reverse()
+    .map((entry) => entry.textContent?.trim() ?? '')
+    .filter((line) => Boolean(line))
+    .join('\n\n');
+}
+
+async function copyDebugLogPanelText(text: string, targetDocument: Document) {
+  if (!text) {
+    return false;
+  }
+
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const textarea = targetDocument.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    (targetDocument.body || targetDocument.documentElement).appendChild(textarea);
+    textarea.select();
+
+    try {
+      return targetDocument.execCommand('copy');
+    } finally {
+      textarea.remove();
+    }
+  }
+}
+
+function ensureDebugLogPanel() {
+  if (!isDebugLogPanelEnabled()) {
+    removeDebugLogPanel();
+    return undefined;
+  }
+
+  const targetDocument = getDebugLogPanelDocument();
+  const existingPanel = targetDocument.getElementById(debugLogPanelId);
+  const existingBody = existingPanel?.querySelector<HTMLElement>('[data-cx-debug-log-panel-body="true"]');
+  if (existingBody) {
+    return existingBody;
+  }
+
+  const panel = targetDocument.createElement('div');
+  panel.id = debugLogPanelId;
+  panel.style.position = 'fixed';
+  panel.style.right = '16px';
+  panel.style.bottom = '16px';
+  panel.style.width = 'min(560px, calc(100vw - 32px))';
+  panel.style.maxHeight = '48vh';
+  panel.style.zIndex = '2147483647';
+  panel.style.display = 'flex';
+  panel.style.flexDirection = 'column';
+  panel.style.borderRadius = '12px';
+  panel.style.overflow = 'hidden';
+  panel.style.background = 'rgba(13, 17, 23, 0.96)';
+  panel.style.color = '#e6edf3';
+  panel.style.boxShadow = '0 18px 48px rgba(0,0,0,0.32)';
+  panel.style.border = '1px solid rgba(255,255,255,0.16)';
+  panel.style.fontFamily = 'Consolas, "SFMono-Regular", Menlo, monospace';
+  panel.style.fontSize = '12px';
+  panel.style.lineHeight = '1.45';
+
+  const header = targetDocument.createElement('div');
+  header.style.display = 'flex';
+  header.style.alignItems = 'center';
+  header.style.justifyContent = 'space-between';
+  header.style.gap = '8px';
+  header.style.padding = '8px 10px';
+  header.style.background = 'rgba(33, 38, 45, 0.98)';
+  header.style.borderBottom = '1px solid rgba(255,255,255,0.12)';
+
+  const title = targetDocument.createElement('div');
+  title.textContent = `Chaoxing Plus ${debugLogPanelLevel.toUpperCase()} Log`;
+  title.style.fontWeight = '700';
+  title.style.letterSpacing = '0.02em';
+
+  const controls = targetDocument.createElement('div');
+  controls.style.display = 'flex';
+  controls.style.gap = '6px';
+
+  const clearButton = targetDocument.createElement('button');
+  clearButton.type = 'button';
+  clearButton.textContent = '清空';
+  clearButton.style.border = '1px solid rgba(255,255,255,0.22)';
+  clearButton.style.borderRadius = '6px';
+  clearButton.style.background = 'rgba(255,255,255,0.08)';
+  clearButton.style.color = '#e6edf3';
+  clearButton.style.cursor = 'pointer';
+  clearButton.style.padding = '2px 8px';
+
+  const copyButton = targetDocument.createElement('button');
+  copyButton.type = 'button';
+  copyButton.textContent = '复制';
+  copyButton.style.border = clearButton.style.border;
+  copyButton.style.borderRadius = clearButton.style.borderRadius;
+  copyButton.style.background = clearButton.style.background;
+  copyButton.style.color = clearButton.style.color;
+  copyButton.style.cursor = clearButton.style.cursor;
+  copyButton.style.padding = clearButton.style.padding;
+
+  const hideButton = targetDocument.createElement('button');
+  hideButton.type = 'button';
+  hideButton.textContent = '隐藏';
+  hideButton.style.border = clearButton.style.border;
+  hideButton.style.borderRadius = clearButton.style.borderRadius;
+  hideButton.style.background = clearButton.style.background;
+  hideButton.style.color = clearButton.style.color;
+  hideButton.style.cursor = clearButton.style.cursor;
+  hideButton.style.padding = clearButton.style.padding;
+
+  const debugLogPanelBody = targetDocument.createElement('div');
+  debugLogPanelBody.dataset.cxDebugLogPanelBody = 'true';
+  debugLogPanelBody.style.overflowY = 'auto';
+  debugLogPanelBody.style.padding = '8px 10px';
+  debugLogPanelBody.style.display = 'flex';
+  debugLogPanelBody.style.flexDirection = 'column';
+  debugLogPanelBody.style.gap = '8px';
+
+  clearButton.addEventListener('click', () => {
+    debugLogPanelBody.replaceChildren();
+  });
+  copyButton.addEventListener('click', async () => {
+    const copied = await copyDebugLogPanelText(collectDebugLogPanelText(debugLogPanelBody), targetDocument);
+    copyButton.textContent = copied ? '已复制' : '无日志';
+    window.setTimeout(() => {
+      copyButton.textContent = '复制';
+    }, 1500);
+  });
+  hideButton.addEventListener('click', () => {
+    panel.style.display = 'none';
+  });
+
+  controls.append(copyButton, clearButton, hideButton);
+  header.append(title, controls);
+  panel.append(header, debugLogPanelBody);
+  (targetDocument.body || targetDocument.documentElement).appendChild(panel);
+
+  return debugLogPanelBody;
+}
+
+function appendDebugLogPanelEntry(
+  level: DebugLogLevel,
+  prefix: string,
+  detail?: Record<string, unknown>,
+  textDetail?: string,
+  meta?: DebugMeta
+) {
+  if (!shouldAppendDebugLogPanelEntry(level)) {
+    return;
+  }
+
+  try {
+    const body = ensureDebugLogPanel();
+    if (!body) {
+      return;
+    }
+
+    const targetDocument = body.ownerDocument;
+    const row = targetDocument.createElement('div');
+    row.style.borderLeft = `3px solid ${level === 'error' ? '#ff7b72' : level === 'warn' ? '#d29922' : level === 'info' ? '#58a6ff' : '#8b949e'}`;
+    row.style.padding = '6px 8px';
+    row.style.background = 'rgba(255,255,255,0.05)';
+    row.style.borderRadius = '8px';
+    row.style.wordBreak = 'break-word';
+
+    const title = targetDocument.createElement('div');
+    title.textContent = `${new Date().toLocaleTimeString()} ${prefix}`;
+    title.style.color = level === 'error' ? '#ffb4ad' : level === 'warn' ? '#f2cc60' : '#c9d1d9';
+    title.style.fontWeight = '700';
+    row.append(title);
+
+    const lines = [
+      textDetail,
+      formatDebugLogPanelValue(detail),
+      meta?.correlationId ? `correlationId=${meta.correlationId}` : ''
+    ].filter((line) => Boolean(line));
+
+    if (lines.length > 0) {
+      const content = targetDocument.createElement('pre');
+      content.textContent = lines.join('\n');
+      content.style.margin = '4px 0 0';
+      content.style.whiteSpace = 'pre-wrap';
+      content.style.color = '#adbac7';
+      content.style.fontFamily = 'inherit';
+      content.style.fontSize = '11px';
+      row.append(content);
+    }
+
+    body.prepend(row);
+    while (body.children.length > debugLogPanelMaxEntries) {
+      body.lastElementChild?.remove();
+    }
+  } catch {
+    // Debug UI must never break the automation flow.
+  }
+}
+
 type DebugMeta = {
   correlationId?: string;
   throttleKey?: string;
@@ -338,7 +667,7 @@ type DebugMeta = {
 };
 
 function logDebug(
-  level: 'info' | 'warn' | 'error',
+  level: DebugConsoleLogLevel,
   label: string,
   detail?: Record<string, unknown>,
   textDetail?: string,
@@ -351,6 +680,7 @@ function logDebug(
   const prefix = `[Chaoxing Plus][${nextDebugSequence()}] ${label}`;
   const enrichedDetail = meta?.correlationId ? { correlationId: meta.correlationId, ...(detail ?? {}) } : (detail ?? {});
   $console[level](prefix, enrichedDetail);
+  appendDebugLogPanelEntry(level, prefix, enrichedDetail, textDetail, meta);
   if (textDetail) {
     const withCorrelation = meta?.correlationId ? `${textDetail} correlationId=${meta.correlationId}` : textDetail;
     $console[level](`[Chaoxing Plus][${nextDebugSequence()}] ${withCorrelation}`);
@@ -405,6 +735,11 @@ function workResultsMethods() {
     clearRuntimeControls?: () => void;
     createWorkResultsPanel?: () => HTMLElement;
   };
+}
+
+function clearWorkResultsOnPageLoad() {
+  workResultsMethods().clearRuntimeControls?.();
+  workResultsMethods().setResults?.([]);
 }
 
 function getWorkOptions(): CommonWorkOptions {
@@ -842,6 +1177,7 @@ export const CXProject = Project.create({
         }
       },
       oncomplete() {
+        clearWorkResultsOnPageLoad();
         const isExam = /\/exam\/preview/.test(location.href);
         commonWork(
           this,
@@ -1349,6 +1685,7 @@ function hasPendingCurrentPageJobAttachments() {
 }
 
 export async function study(opts: StudyOptions) {
+  clearWorkResultsOnPageLoad();
   await sleep(3000);
 
   const searchedJobs: Job[] = [];
@@ -1819,6 +2156,13 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         return { visibleContentState };
       }
 
+      function releaseSearchedJob(job: Job) {
+        const searchedIndex = searchedJobs.findIndex((searchedJob) => searchedJob.mid === job.mid);
+        if (searchedIndex !== -1) {
+          searchedJobs.splice(searchedIndex, 1);
+        }
+      }
+
       let func: (() => Promise<void>) | undefined;
 
       if (videojs) {
@@ -1873,7 +2217,17 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               const msg = `正在处理章节测试 : ${jobName}`;
               $message.info(msg);
               $console.log(msg);
-              await JobRunner.chapter(root, opts.workOptions);
+              const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
+                releaseSearchedJob(job);
+                logDebug('warn', '章节测试未完成重试诊断', {
+                  frameSrc,
+                  targetJobId,
+                  jobName,
+                  finishedRate: chapterResult.finishedRate,
+                  uploadable: chapterResult.uploadable
+                }, undefined, { correlationId: jobCorrelationId });
+              }
             };
           } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
             func = async () => {
@@ -1890,7 +2244,17 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               const msg = '正在尝试兜底处理当前可见题目';
               $message.info(msg);
               $console.log(msg);
-              await JobRunner.chapter(root, opts.workOptions);
+              const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
+                releaseSearchedJob(job);
+                logDebug('warn', '章节测试未完成重试诊断', {
+                  frameSrc,
+                  targetJobId,
+                  jobName,
+                  finishedRate: chapterResult.finishedRate,
+                  uploadable: chapterResult.uploadable
+                }, undefined, { correlationId: jobCorrelationId });
+              }
             };
           }
         }
@@ -2109,7 +2473,7 @@ const JobRunner = {
     $message.success('长时阅读任务完成！');
     await sleep(5000);
   },
-  async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions) {
+  async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions): Promise<ChapterTaskResult> {
     const {
       answererWrappers,
       period,
@@ -2125,7 +2489,8 @@ const JobRunner = {
     } = options;
 
     if (answererWrappers === undefined || answererWrappers.length === 0) {
-      return answerWrapperEmptyWarning(0);
+      answerWrapperEmptyWarning(0);
+      return { finished: false };
     }
 
     $console.info('开始章节测试');
@@ -2133,7 +2498,7 @@ const JobRunner = {
     const frameDocument = frameWindow?.document;
     if (!frameWindow || !frameDocument) {
       $console.warn('章节测试窗口不可访问，已跳过。');
-      return;
+      return { finished: false };
     }
 
     await mappingRecognize(frameDocument);
@@ -2164,8 +2529,16 @@ const JobRunner = {
         innerTiMuCount
       });
       $console.warn(`章节测试未命中题目详情：innerFrameExists=${String(!!innerFrame)} innerTiMuCount=${innerTiMuCount}`);
-      return;
+      return { finished: false };
     }
+
+    const chapterActionCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+      targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
+      jobName: 'chapter-test'
+    });
+    await waitForChapterQuestionTypeReadiness(roots, {
+      correlationId: chapterActionCorrelationId
+    });
 
     renderMethods().normal?.();
     workResultsMethods().init?.({ questionPositionSyncHandlerType: 'cx' });
@@ -2216,10 +2589,9 @@ const JobRunner = {
 
           const provider = async () => {
             await sleep((period ?? 3) * 1000);
-            const typeInput = elements.type[0] as HTMLInputElement | undefined;
-            const questionType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
+            const questionType = resolveChapterQuestionType(ctx.root, elements);
             const optionsText =
-              ctx.type === 'completion'
+              questionType === 'completion'
                 ? ''
                 : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
             const baseInfos = workerOptions.forceAIFallbackOnly
@@ -2245,8 +2617,7 @@ const JobRunner = {
         },
         work: async (ctx) => {
           const { elements, searchInfos } = ctx;
-          const typeInput = elements.type[0] as HTMLInputElement | undefined;
-          const type = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
+          const type = resolveChapterQuestionType(ctx.root, elements);
 
           if (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single') {
             const resolver = createDefaultQuestionResolver(ctx)[type];
@@ -2340,7 +2711,7 @@ const JobRunner = {
 
             const type = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
             const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
-              elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)')) }
+              elements: { options: getChapterQuestionOptions(currentRoot) }
             }) : undefined;
             if (currentRoot) {
               const currentResults = workResultsMethods().getResults?.();
@@ -2428,21 +2799,67 @@ const JobRunner = {
       }
     });
 
+    async function retryUnfinishedChapterQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+      const retryableResults = results.slice();
+      for (let index = 0; index < retryableResults.length; index++) {
+        const result = retryableResults[index];
+        if (result.result?.finish) {
+          continue;
+        }
+
+        const root = roots[index];
+        if (!root) {
+          continue;
+        }
+
+        logDebug('info', '动作节点诊断：未完成单题自动重试', {
+          index,
+          total: roots.length,
+          mode: 'chapter',
+          error: result.error ?? ''
+        }, undefined, { correlationId: chapterActionCorrelationId });
+        workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
+
+        try {
+          const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
+          const retriedResults = await retryWorker.doWork();
+          const retried = retriedResults[0];
+          if (retried?.result?.finish) {
+            retryableResults[index] = retried;
+            const simplified = simplifyWorkResult([retried], chapterTestTaskQuestionTitleTransform)[0];
+            if (simplified) {
+              cacheableResults.push(simplified);
+              workResultsMethods().patchResult?.(index, {
+                ...simplified,
+                retrying: false,
+                manual: false
+              });
+            }
+          } else {
+            workResultsMethods().patchResult?.(index, { retrying: false });
+          }
+        } catch (err) {
+          workResultsMethods().patchResult?.(index, {
+            retrying: false,
+            error: (err as Error).message || String(err)
+          });
+        }
+      }
+      return retryableResults;
+    }
+
     worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
 
     const confirmed = await confirmBeforeAutoAnswer(worker);
     if (!confirmed) {
-      return;
+      return { finished: false };
     }
 
-    const chapterActionCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
-      targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
-      jobName: 'chapter-test'
-    });
     const results = await worker.doWork();
+    const retryableResults = await retryUnfinishedChapterQuestions(results);
     logDebug('info', '动作节点诊断：答题结果已生成', {
-      resultCount: results.length,
+      resultCount: retryableResults.length,
       uploadMode: upload,
       stopSecondWhenFinish
     }, undefined, { correlationId: chapterActionCorrelationId });
@@ -2452,14 +2869,19 @@ const JobRunner = {
     await sleep(stopSecondWhenFinish * 1000);
 
     logDebug('info', '动作节点诊断：准备提交或保存', {
-      resultCount: results.length,
+      resultCount: retryableResults.length,
       uploadMode: upload,
       stopSecondWhenFinish
     }, undefined, { correlationId: chapterActionCorrelationId });
+    let chapterFinished = false;
+    let latestFinishedRate: number | undefined;
+    let latestUploadable: boolean | undefined;
     await worker.uploadHandler({
       type: upload === 'submit' ? 100 : upload,
-      results,
+      results: retryableResults,
       async callback(finishedRate, uploadable) {
+        latestFinishedRate = finishedRate;
+        latestUploadable = uploadable;
         const shouldSubmit = upload === 'submit' && uploadable;
         const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
         $console.info(uploadMsg);
@@ -2502,10 +2924,12 @@ const JobRunner = {
                 await sleep(3000);
                 (frameWindow as Record<string, any>).submitCheckTimes?.();
                 (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+                chapterFinished = true;
               }
             });
           } else {
             (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+            chapterFinished = true;
             appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);
           }
         } else {
@@ -2517,11 +2941,17 @@ const JobRunner = {
           }, undefined, { correlationId: chapterActionCorrelationId });
           (frameWindow as Record<string, any>).alert = () => {};
           (frameWindow as Record<string, any>).noSubmit?.();
+          chapterFinished = false;
         }
       }
     });
 
     worker.emit('done');
+    return {
+      finished: chapterFinished,
+      finishedRate: latestFinishedRate,
+      uploadable: latestUploadable
+    };
   },
   async readPPTWithAudio(win: Window & { swiperNext?: () => void }, attachment?: Attachment) {
     win.document.querySelectorAll('audio').forEach((audio) => {
@@ -2558,6 +2988,9 @@ function workOrExam(
     answererWrappers,
     period,
     thread,
+    upload,
+    enableExamAutoSubmit,
+    stopSecondWhenFinish,
     redundanceWordsText,
     answerSeparators,
     answerMatchMode,
@@ -2612,6 +3045,354 @@ function workOrExam(
 
   function resolveWorkOrExamQuestionTypeRoot(elements: { type: HTMLElement[]; options: HTMLElement[] }) {
     return elements.type.find((element) => element.getAttribute('name')?.match(/type\d+/)) ?? elements.type[0];
+  }
+
+  function getWorkOrExamRuntimeWindow() {
+    return (($gm.unsafeWindow ?? window) as Window & Record<string, any>);
+  }
+
+  type WorkOrExamRuntimeWindowCandidate = {
+    window: Window & Record<string, any>;
+    source: string;
+  };
+
+  function candidateWindowHasFunction(candidateWindow: Window & Record<string, any>, name: string) {
+    return typeof candidateWindow[name] === 'function';
+  }
+
+  function pushWorkOrExamRuntimeWindowCandidate(
+    candidates: WorkOrExamRuntimeWindowCandidate[],
+    seen: Set<Window>,
+    candidateWindow: Window | null | undefined,
+    source: string
+  ) {
+    if (!candidateWindow || seen.has(candidateWindow)) {
+      return;
+    }
+
+    seen.add(candidateWindow);
+    candidates.push({
+      window: candidateWindow as Window & Record<string, any>,
+      source
+    });
+  }
+
+  function getWorkOrExamRuntimeWindowCandidates() {
+    const candidates: WorkOrExamRuntimeWindowCandidate[] = [];
+    const seen = new Set<Window>();
+
+    pushWorkOrExamRuntimeWindowCandidate(candidates, seen, $gm.unsafeWindow, 'unsafeWindow');
+    pushWorkOrExamRuntimeWindowCandidate(candidates, seen, window, 'window');
+    pushWorkOrExamRuntimeWindowCandidate(candidates, seen, document.defaultView, 'document.defaultView');
+    pushWorkOrExamRuntimeWindowCandidate(candidates, seen, topWindow, 'topWindow');
+
+    try {
+      pushWorkOrExamRuntimeWindowCandidate(candidates, seen, window.parent, 'window.parent');
+    } catch {
+      // ignore cross-origin parent access
+    }
+
+    try {
+      pushWorkOrExamRuntimeWindowCandidate(candidates, seen, window.top, 'window.top');
+    } catch {
+      // ignore cross-origin top access
+    }
+
+    for (let index = 0; index < candidates.length && index < 50; index++) {
+      const candidate = candidates[index];
+
+      try {
+        pushWorkOrExamRuntimeWindowCandidate(candidates, seen, candidate.window.parent, `${candidate.source}.parent`);
+      } catch {
+        // ignore cross-origin parent access
+      }
+
+      try {
+        pushWorkOrExamRuntimeWindowCandidate(candidates, seen, candidate.window.top, `${candidate.source}.top`);
+      } catch {
+        // ignore cross-origin top access
+      }
+
+      try {
+        for (let frameIndex = 0; frameIndex < candidate.window.frames.length; frameIndex++) {
+          pushWorkOrExamRuntimeWindowCandidate(
+            candidates,
+            seen,
+            candidate.window.frames[frameIndex],
+            `${candidate.source}.frames[${frameIndex}]`
+          );
+        }
+      } catch {
+        // ignore cross-origin frame access
+      }
+
+      try {
+        const frames = Array.from(candidate.window.document.querySelectorAll<HTMLIFrameElement | HTMLFrameElement>('iframe,frame'));
+        frames.forEach((frame, frameIndex) => {
+          pushWorkOrExamRuntimeWindowCandidate(
+            candidates,
+            seen,
+            frame.contentWindow,
+            `${candidate.source}.documentFrame[${frameIndex}]`
+          );
+        });
+      } catch {
+        // ignore cross-origin document access
+      }
+    }
+
+    return candidates;
+  }
+
+  function findWorkOrExamRuntimeWindow(functionNames: string[]) {
+    const candidates = getWorkOrExamRuntimeWindowCandidates();
+    return candidates.find((candidate) => functionNames.every((name) => candidateWindowHasFunction(candidate.window, name)))
+      ?? candidates.find((candidate) => functionNames.some((name) => candidateWindowHasFunction(candidate.window, name)))
+      ?? {
+        window: getWorkOrExamRuntimeWindow(),
+        source: 'unsafeWindow'
+      };
+  }
+
+  function getWorkOrExamActionDocuments() {
+    const documents: Document[] = [document];
+    try {
+      if (topWindow.document && topWindow.document !== document) {
+        documents.push(topWindow.document);
+      }
+    } catch {
+      // ignore cross-origin top-window access
+    }
+    return documents;
+  }
+
+  function isElementVisible(element: HTMLElement) {
+    let current: HTMLElement | null = element;
+    const view = element.ownerDocument.defaultView;
+
+    while (current) {
+      const style = view?.getComputedStyle(current);
+      if (current.hidden || style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse' || style?.opacity === '0') {
+        return false;
+      }
+      current = current.parentElement;
+    }
+
+    return true;
+  }
+
+  const workOrExamClickableSelector = 'button,a,input[type="button"],input[type="submit"],[role="button"],[onclick]';
+
+  function isWorkOrExamClickableElement(element: HTMLElement) {
+    return isElementVisible(element) && element.matches(workOrExamClickableSelector) && !element.matches(':disabled,[disabled],[aria-disabled="true"]');
+  }
+
+  function describeWorkOrExamClickTarget(element: HTMLElement, source: string) {
+    return {
+      source,
+      tagName: element.tagName.toLowerCase(),
+      id: element.id || undefined,
+      className: typeof element.className === 'string' ? element.className : undefined,
+      text: `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.replace(/\s+/g, ' ').trim().slice(0, 120) || undefined,
+      onclick: element.getAttribute('onclick') || undefined
+    };
+  }
+
+  function isWorkOrExamConfirmRejectElement(element: HTMLElement) {
+    const text = `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.replace(/\s+/g, ' ').trim();
+    const onclick = element.getAttribute('onclick') || '';
+    const className = typeof element.className === 'string' ? element.className : '';
+    const id = element.id || '';
+
+    return /(取消|关闭|返回|稍后|暂不)/.test(text)
+      || /fullFadeOut|hide|close|cancel/i.test(onclick)
+      || /close|cancel/i.test(className)
+      || /close|cancel/i.test(id);
+  }
+
+  type WorkOrExamClickResult = {
+    clicked: boolean;
+    target?: ReturnType<typeof describeWorkOrExamClickTarget>;
+  };
+
+  function clickWorkOrExamElement(element: HTMLElement, source: string): WorkOrExamClickResult {
+    triggerSyntheticClick(element);
+    return {
+      clicked: true,
+      target: describeWorkOrExamClickTarget(element, source)
+    };
+  }
+
+  function clickWorkOrExamSubmitConfirmButton() {
+    const confirmTextMatcher = /(确定|确认|确认提交|提交|交卷)/;
+    const popupSelectors = [
+      '#submitConfirmPop',
+      '#workpop',
+      '.layui-layer',
+      '.ui-dialog',
+      '.el-dialog',
+      '.ant-modal',
+      '[role="dialog"]'
+    ];
+
+    for (const doc of getWorkOrExamActionDocuments()) {
+      const popOk = doc.querySelector<HTMLElement>('#popok');
+      if (popOk && isWorkOrExamClickableElement(popOk)) {
+        return clickWorkOrExamElement(popOk, '#popok');
+      }
+
+      const workPop = doc.querySelector<HTMLElement>('#workpop');
+      const popupRoots = [
+        workPop,
+        ...popupSelectors
+        .flatMap((selector) => Array.from(doc.querySelectorAll<HTMLElement>(selector)))
+      ]
+        .filter((element): element is HTMLElement => Boolean(element))
+        .filter((element) => isElementVisible(element));
+
+      for (const popupRoot of popupRoots) {
+        const buttons = Array.from(
+          popupRoot.querySelectorAll<HTMLElement>(workOrExamClickableSelector)
+        );
+        const matched = buttons.find((element) => {
+          const text = `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.trim();
+          const onclick = element.getAttribute('onclick') || '';
+          return isWorkOrExamClickableElement(element)
+            && !isWorkOrExamConfirmRejectElement(element)
+            && (confirmTextMatcher.test(text) || /submitCheckTimes|finalSubmit|submit/i.test(onclick));
+        });
+
+        if (matched) {
+          return clickWorkOrExamElement(matched, 'confirm-popup');
+        }
+      }
+    }
+
+    return { clicked: false };
+  }
+
+  function clickWorkOrExamActionButton(action: 'submit' | 'save') {
+    const selectors = action === 'submit'
+      ? [
+          '[onclick*="btnBlueSubmit"]',
+          '[onclick*="submitCheckTimes"]',
+          '[onclick*="submit"]',
+          '[id*="submit" i]',
+          '[class*="submit" i]',
+          '[id*="commit" i]',
+          '[class*="commit" i]'
+        ]
+      : [
+          '[onclick*="noSubmit"]',
+          '[onclick*="saveQuestion"]',
+          '[onclick*="save"]',
+          '[id*="save" i]',
+          '[class*="save" i]'
+        ];
+    const textMatcher = action === 'submit' ? /(交卷|提交|提交试卷|提交考试|提交作业|确认提交)/ : /(保存|暂存|暂时保存)/;
+    const excludedTextMatcher = action === 'submit' ? /(下一题|上一题|保存|暂存)/ : /(下一题|上一题|提交|交卷)/;
+
+    for (const doc of getWorkOrExamActionDocuments()) {
+      for (const selector of selectors) {
+        const matched = Array.from(doc.querySelectorAll<HTMLElement>(selector)).find((element) => {
+          const text = `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.trim();
+          return isWorkOrExamClickableElement(element) && !excludedTextMatcher.test(text);
+        });
+        if (matched) {
+          return clickWorkOrExamElement(matched, selector);
+        }
+      }
+
+      const candidates = Array.from(doc.querySelectorAll<HTMLElement>(workOrExamClickableSelector));
+      const matched = candidates.find((element) => {
+        const text = `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.trim();
+        return isWorkOrExamClickableElement(element) && textMatcher.test(text) && !excludedTextMatcher.test(text);
+      });
+      if (matched) {
+        return clickWorkOrExamElement(matched, 'text-match');
+      }
+    }
+
+    return { clicked: false };
+  }
+
+  async function submitWorkOrExamPage(pageType: typeof type) {
+    const runtimeCandidate = findWorkOrExamRuntimeWindow(['btnBlueSubmit', 'submitCheckTimes']);
+    const runtimeWindow = runtimeCandidate.window;
+    const runtimeWindowSource = runtimeCandidate.source;
+    const hasBtnBlueSubmit = typeof runtimeWindow.btnBlueSubmit === 'function';
+    const hasSubmitCheckTimes = typeof runtimeWindow.submitCheckTimes === 'function';
+    let invoked = false;
+    let directSubmitInvoked = false;
+    let confirmSubmitInvoked = false;
+    let fallbackSubmitClicked = false;
+    let fallbackConfirmClicked = false;
+    let firstFallbackSubmitTarget: WorkOrExamClickResult['target'];
+    let confirmationFallbackTarget: WorkOrExamClickResult['target'];
+
+    if (hasBtnBlueSubmit) {
+      runtimeWindow.btnBlueSubmit();
+      directSubmitInvoked = true;
+      invoked = true;
+    } else {
+      const firstFallbackSubmit = clickWorkOrExamActionButton('submit');
+      fallbackSubmitClicked = firstFallbackSubmit.clicked;
+      firstFallbackSubmitTarget = firstFallbackSubmit.target;
+      invoked = fallbackSubmitClicked;
+    }
+
+    await sleep(3000);
+
+    if (hasSubmitCheckTimes) {
+      runtimeWindow.submitCheckTimes();
+      confirmSubmitInvoked = true;
+      invoked = true;
+    } else {
+      const confirmationFallback = clickWorkOrExamSubmitConfirmButton();
+      const confirmationFallbackSubmit = confirmationFallback.clicked ? confirmationFallback : clickWorkOrExamActionButton('submit');
+      fallbackConfirmClicked = confirmationFallbackSubmit.clicked;
+      confirmationFallbackTarget = confirmationFallbackSubmit.target;
+      fallbackSubmitClicked = confirmationFallbackSubmit.clicked || fallbackSubmitClicked;
+      invoked = confirmationFallbackSubmit.clicked || invoked;
+    }
+
+    (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+    logDebug('info', '作业/考试提交函数诊断', {
+      type: pageType,
+      invoked,
+      hasBtnBlueSubmit,
+      hasSubmitCheckTimes,
+      directSubmitInvoked,
+      confirmSubmitInvoked,
+      fallbackSubmitClicked,
+      fallbackConfirmClicked,
+      firstFallbackSubmitTarget,
+      confirmationFallbackTarget,
+      runtimeWindowSource
+    }, undefined, { correlationId: workExamCorrelationId });
+  }
+
+  async function saveWorkOrExamPage(pageType: typeof type) {
+    const runtimeCandidate = findWorkOrExamRuntimeWindow(['noSubmit']);
+    const runtimeWindow = runtimeCandidate.window;
+    const runtimeWindowSource = runtimeCandidate.source;
+    runtimeWindow.alert = () => {};
+    let invoked = false;
+    const hasNoSubmit = typeof runtimeWindow.noSubmit === 'function';
+
+    if (hasNoSubmit) {
+      runtimeWindow.noSubmit();
+      invoked = true;
+    } else {
+      invoked = clickWorkOrExamActionButton('save').clicked;
+    }
+
+    logDebug('info', '动作节点诊断：作业/考试执行保存', {
+      type: pageType,
+      invoked,
+      hasNoSubmit,
+      runtimeWindowSource
+    }, undefined, { correlationId: workExamCorrelationId });
   }
 
   const createWorkOrExamWorker = (
@@ -2809,6 +3590,105 @@ function workOrExam(
 
   const worker = createWorkOrExamWorker('.questionLi');
 
+  async function retryUnfinishedWorkOrExamQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+    const liveRoots = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
+    const retryableResults = results.slice();
+    for (let index = 0; index < retryableResults.length; index++) {
+      const result = retryableResults[index];
+      if (result.result?.finish) {
+        continue;
+      }
+
+      const root = liveRoots[index];
+      if (!root) {
+        continue;
+      }
+
+      logDebug('info', '动作节点诊断：未完成单题自动重试', {
+        index,
+        total: liveRoots.length,
+        mode: type,
+        error: result.error ?? ''
+      }, undefined, { correlationId: workExamCorrelationId });
+      workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
+
+      try {
+        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
+        const retriedResults = await retryWorker.doWork();
+        const retried = retriedResults[0];
+        if (retried?.result?.finish) {
+          retryableResults[index] = retried;
+          const simplified = simplifyWorkResult([retried], workOrExamQuestionTitleTransform)[0];
+          if (simplified) {
+            workResultsMethods().patchResult?.(index, {
+              ...simplified,
+              retrying: false,
+              manual: false
+            });
+          }
+        } else {
+          workResultsMethods().patchResult?.(index, { retrying: false });
+        }
+      } catch (err) {
+        workResultsMethods().patchResult?.(index, {
+          retrying: false,
+          error: (err as Error).message || String(err)
+        });
+      }
+    }
+    return retryableResults;
+  }
+
+  async function uploadWorkOrExamResults(results: Awaited<ReturnType<typeof worker.doWork>>) {
+    const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);
+    const uploadHandlerType = shouldAllowSubmitForPage ? 100 : upload === 'submit' ? 'save' : upload;
+    const examAutoSubmitBlocked = upload === 'submit' && type === 'exam' && !enableExamAutoSubmit;
+    const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
+    $console.info(msg);
+    $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
+    await sleep(stopSecondWhenFinish * 1000);
+
+    logDebug('info', '动作节点诊断：作业/考试准备提交或保存', {
+      type,
+      preview_mode,
+      resultCount: results.length,
+      uploadMode: upload,
+      uploadHandlerType,
+      enableExamAutoSubmit,
+      examAutoSubmitBlocked,
+      stopSecondWhenFinish
+    }, undefined, { correlationId: workExamCorrelationId });
+
+    await worker.uploadHandler({
+      type: uploadHandlerType,
+      results,
+      async callback(finishedRate, uploadable) {
+        const shouldSubmit = shouldAllowSubmitForPage && uploadable;
+        const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
+        $console.info(uploadMsg);
+        $message.success({ content: uploadMsg, duration: 3000 });
+        logDebug('info', '作业/考试提交判定诊断', {
+          type,
+          preview_mode,
+          uploadMode: upload,
+          uploadHandlerType,
+          enableExamAutoSubmit,
+          examAutoSubmitBlocked,
+          finishedRate,
+          uploadable,
+          shouldSubmit
+        }, undefined, { correlationId: workExamCorrelationId });
+        await sleep(3000);
+
+        if (shouldSubmit) {
+          await submitWorkOrExamPage(type);
+        } else {
+          await saveWorkOrExamPage(type);
+        }
+      }
+    });
+  }
+
   if (preview_mode) {
     const liveRoots = () => Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
@@ -2859,34 +3739,35 @@ function workOrExam(
         preview_mode,
         questionCount: liveRoots().length
       }, undefined, { correlationId: workExamCorrelationId });
-      await worker
-        .doWork()
-        .then(() => {
-          logDebug('info', '动作节点诊断：作业/考试答题完成', {
-            type,
-            preview_mode,
-            questionCount: liveRoots().length
-          }, undefined, { correlationId: workExamCorrelationId });
-          $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
-          worker.emit('done');
-        })
-        .catch((err) => {
-          console.error(err);
-          $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
-        });
+      try {
+        const results = await worker.doWork();
+        const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);
+        logDebug('info', '动作节点诊断：作业/考试答题完成', {
+          type,
+          preview_mode,
+          questionCount: liveRoots().length
+        }, undefined, { correlationId: workExamCorrelationId });
+        await uploadWorkOrExamResults(retryableResults);
+        worker.emit('done');
+      } catch (err) {
+        console.error(err);
+        $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
+      }
     })();
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
     let next = getNextBtn();
 
     void (async () => {
+      const accumulatedResults = [];
       logDebug('info', '动作节点诊断：开始逐题切换答题', {
         type,
         preview_mode,
         questionCount: Array.from(document.querySelectorAll<HTMLElement>('.questionLi')).length
       }, undefined, { correlationId: workExamCorrelationId });
       while (next && worker.isClose === false) {
-        await worker.doWork({ enable_debug: false });
+        const results = await worker.doWork({ enable_debug: false });
+        accumulatedResults.push(...results);
         await sleep(1000);
         next = getNextBtn();
         logDebug('info', '动作节点诊断：执行下一题切换', {
@@ -2898,7 +3779,7 @@ function workOrExam(
         await sleep(1000);
       }
 
-      $message.success({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
+      await uploadWorkOrExamResults(accumulatedResults);
       worker.emit('done');
     })();
   }
@@ -3031,6 +3912,57 @@ function resolveQuestionTypeForWork(root: ParentNode, ctx?: { elements?: { optio
   }
 
   return undefined;
+}
+
+function getChapterQuestionOptions(root: ParentNode) {
+  return Array.from(root.querySelectorAll<HTMLElement>('ul li .after,ul li textarea,ul textarea,ul li label:not(.before)'));
+}
+
+function isChapterQuestionTypeReady(root: HTMLElement) {
+  return Boolean(resolveQuestionTypeForWork(root, {
+    elements: { options: getChapterQuestionOptions(root) }
+  }));
+}
+
+function resolveChapterQuestionType(
+  root: HTMLElement,
+  elements: { type?: HTMLElement[]; options?: HTMLElement[] }
+): QuestionTypes {
+  const typeInput = elements.type?.[0] as HTMLInputElement | undefined;
+  const inputType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
+  return normalizeResultQuestionType(inputType) ?? resolveQuestionTypeForWork(root, {
+    elements: { options: elements.options ?? getChapterQuestionOptions(root) }
+  });
+}
+
+async function waitForChapterQuestionTypeReadiness(
+  roots: HTMLElement[],
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    correlationId?: string;
+  } = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 45000;
+  const intervalMs = options.intervalMs ?? 1000;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (roots.every((root) => isChapterQuestionTypeReady(root))) {
+      return true;
+    }
+    await sleep(intervalMs);
+  }
+
+  const readyQuestionCount = roots.filter((root) => isChapterQuestionTypeReady(root)).length;
+  logDebug('info', '章节测试题型等待诊断', {
+    totalQuestionCount: roots.length,
+    readyQuestionCount,
+    timeoutMs,
+    intervalMs
+  }, undefined, { correlationId: options.correlationId ?? buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
+
+  return roots.every((root) => isChapterQuestionTypeReady(root));
 }
 
 async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[]) {

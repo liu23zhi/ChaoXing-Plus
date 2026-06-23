@@ -22,16 +22,18 @@ export async function defaultAnswerWrapperHandler(
   }
   await Promise.all(
     temp.map(async (wrapper) => {
-      const {
-        name = '未知题库',
-        homepage = '#',
-        method = 'get',
-        type = 'fetch',
-        contentType = 'json',
-        headers = {},
-        data: wrapperData = {},
-        handler = 'return (res)=> [JSON.stringify(res), undefined]'
-      } = wrapper;
+        const {
+          name = '未知题库',
+          homepage = '#',
+          method = 'get',
+          type = 'fetch',
+          contentType = 'json',
+          headers = {},
+          data: wrapperData = {},
+          timeoutSeconds = AnswerWrapperHandlerConfig.timeout_seconds ?? 60,
+          retry,
+          handler = 'return (res)=> [JSON.stringify(res), undefined]'
+        } = wrapper;
       try {
         let results: Result[] = [];
         let requestData;
@@ -69,9 +71,11 @@ export async function defaultAnswerWrapperHandler(
             responseType: contentType,
             data: requestData,
             type,
-            headers: JSON.parse(JSON.stringify(headers || {}))
+            headers: JSON.parse(JSON.stringify(headers || {})),
+            timeoutMs: Math.max(1, timeoutSeconds) * 1000,
+            retry
           }),
-          sleep((AnswerWrapperHandlerConfig.timeout_seconds ?? 60) * 1000)
+          sleep(Math.max(1, timeoutSeconds) * 1000)
         ]);
         if (responseData === undefined) {
           throw new Error('题库请求超时，可能是题库问题，或者请检查网络或者重试。');

@@ -41,6 +41,15 @@ export interface AnswererWrapper {
 	type: 'fetch' | 'GM_xmlhttpRequest';
 	/** 附带请求头 */
 	headers: Record<string, string>;
+	/** 单次题库请求超时时间，秒 */
+	timeoutSeconds?: number;
+	/** 题库请求失败重试配置 */
+	retry?: {
+		/** 最大尝试次数，包含首次请求 */
+		maxAttempts?: number;
+		/** 每次重试前等待毫秒数 */
+		delayMs?: number;
+	};
 	/**
 	 * 此选项是个字符串， 使用 [Function(string)](https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Function) 构造方法进行解析生成方法
 	 *

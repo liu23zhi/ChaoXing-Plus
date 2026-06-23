@@ -414,10 +414,31 @@ test('cx uses synthetic click dispatch for answering and next-question switching
 test('cx chapter answering uses the current question type input directly instead of falling back to the whole frame', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes('const typeInput = elements.type[0] as HTMLInputElement | undefined;'), true);
-  assert.equal(source.includes('const questionType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
-  assert.equal(source.includes('const type = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;'), true);
+  assert.equal(source.includes('function resolveChapterQuestionType('), true);
+  assert.equal(source.includes('const typeInput = elements.type?.[0] as HTMLInputElement | undefined;'), true);
+  assert.equal(source.includes('return normalizeResultQuestionType(inputType) ?? resolveQuestionTypeForWork(root, {'), true);
+  assert.equal(source.includes('const questionType = resolveChapterQuestionType(ctx.root, elements);'), true);
+  assert.equal(source.includes('const type = resolveChapterQuestionType(ctx.root, elements);'), true);
   assert.equal(source.includes('章节测试单题结果诊断'), true);
+});
+
+test('cx waits for delayed chapter question type readiness before answering', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('async function waitForChapterQuestionTypeReadiness('), true);
+  assert.equal(source.includes('await waitForChapterQuestionTypeReadiness(roots, {'), true);
+  assert.equal(source.includes("logDebug('info', '章节测试题型等待诊断'"), true);
+  assert.equal(source.includes('const readyQuestionCount = roots.filter((root) => isChapterQuestionTypeReady(root)).length;'), true);
+});
+
+test('cx releases searched chapter jobs when the chapter test remains unfinished after save', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes('releaseSearchedJob(job);'), true);
+  assert.equal(source.includes('function releaseSearchedJob(job: Job) {'), true);
+  assert.equal(source.includes('const searchedIndex = searchedJobs.findIndex((searchedJob) => searchedJob.mid === job.mid);'), true);
+  assert.equal(source.includes('searchedJobs.splice(searchedIndex, 1);'), true);
+  assert.equal(source.includes("logDebug('warn', '章节测试未完成重试诊断'"), true);
 });
 
 test('cx retries chapter answers with AI fallback when submit popup says the score is below passing', async () => {
