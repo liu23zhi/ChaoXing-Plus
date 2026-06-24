@@ -40,6 +40,19 @@ test('cx retries unfinished question roots before uploading instead of refreshin
   assert.equal(source.includes('location.reload()'), false);
 });
 
+test('cx retries each unfinished automatic answer up to three attempts', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('const unfinishedQuestionRetryAttempts = 3;'), true);
+  assert.equal(source.includes('async function retryUnfinishedChapterQuestionAtIndex('), true);
+  assert.equal(source.includes('async function retryUnfinishedWorkOrExamQuestionAtIndex('), true);
+  assert.equal(source.includes('for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {'), true);
+  assert.equal(source.includes('attempt,'), true);
+  assert.equal(source.includes('maxAttempts: unfinishedQuestionRetryAttempts'), true);
+  assert.equal(source.includes('if (retried?.result?.finish) {'), true);
+  assert.equal(source.includes('break;'), true);
+});
+
 test('cx syncs manual-answer state back into the common result entries', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 

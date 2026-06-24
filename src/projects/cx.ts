@@ -321,6 +321,7 @@ const debugLogPanelDefaultEnabled = false;
 const debugLogPanelLevel: DebugLogLevel = 'debug';
 const debugLogPanelMaxEntries = 200;
 const debugLogPanelId = 'chaoxing-plus-debug-log-panel';
+const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,
   info: 1,
@@ -492,6 +493,46 @@ async function copyDebugLogPanelText(text: string, targetDocument: Document) {
   }
 }
 
+function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDocument: Document) {
+  if ((panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound) {
+    return;
+  }
+
+  (panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound = true;
+  header.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || (event.target as HTMLElement | null)?.closest('button')) {
+      return;
+    }
+
+    const rect = panel.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = rect.left;
+    const startTop = rect.top;
+    const viewport = targetDocument.defaultView ?? window;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const maxLeft = Math.max(viewport.innerWidth - rect.width - 8, 8);
+      const maxTop = Math.max(viewport.innerHeight - rect.height - 8, 8);
+      const nextLeft = Math.min(Math.max(startLeft + moveEvent.clientX - startX, 8), maxLeft);
+      const nextTop = Math.min(Math.max(startTop + moveEvent.clientY - startY, 8), maxTop);
+      panel.style.left = `${nextLeft}px`;
+      panel.style.top = `${nextTop}px`;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    };
+
+    const onUp = () => {
+      viewport.removeEventListener('pointermove', onMove);
+      viewport.removeEventListener('pointerup', onUp);
+    };
+
+    header.setPointerCapture?.(event.pointerId);
+    viewport.addEventListener('pointermove', onMove);
+    viewport.addEventListener('pointerup', onUp);
+  });
+}
+
 function ensureDebugLogPanel() {
   if (!isDebugLogPanelEnabled()) {
     removeDebugLogPanel();
@@ -533,6 +574,10 @@ function ensureDebugLogPanel() {
   header.style.padding = '8px 10px';
   header.style.background = 'rgba(33, 38, 45, 0.98)';
   header.style.borderBottom = '1px solid rgba(255,255,255,0.12)';
+  header.style.cursor = 'move';
+  header.style.userSelect = 'none';
+  header.style.touchAction = 'none';
+  header.dataset.cxDebugLogPanelDragHandle = 'true';
 
   const title = targetDocument.createElement('div');
   title.textContent = `Chaoxing Plus ${debugLogPanelLevel.toUpperCase()} Log`;
@@ -597,6 +642,7 @@ function ensureDebugLogPanel() {
 
   controls.append(copyButton, clearButton, hideButton);
   header.append(title, controls);
+  bindDebugLogPanelDrag(panel, header, targetDocument);
   panel.append(header, debugLogPanelBody);
   (targetDocument.body || targetDocument.documentElement).appendChild(panel);
 
@@ -2799,24 +2845,24 @@ const JobRunner = {
       }
     });
 
-    async function retryUnfinishedChapterQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
-      const retryableResults = results.slice();
-      for (let index = 0; index < retryableResults.length; index++) {
-        const result = retryableResults[index];
-        if (result.result?.finish) {
-          continue;
-        }
+    async function retryUnfinishedChapterQuestionAtIndex(
+      index: number,
+      initialResult: Awaited<ReturnType<typeof worker.doWork>>[number]
+    ) {
+      const root = roots[index];
+      if (!root) {
+        return initialResult;
+      }
 
-        const root = roots[index];
-        if (!root) {
-          continue;
-        }
-
+      let latestResult = initialResult;
+      for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
           index,
           total: roots.length,
           mode: 'chapter',
-          error: result.error ?? ''
+          attempt,
+          maxAttempts: unfinishedQuestionRetryAttempts,
+          error: latestResult.error ?? ''
         }, undefined, { correlationId: chapterActionCorrelationId });
         workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
 
@@ -2824,8 +2870,11 @@ const JobRunner = {
           const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
           const retriedResults = await retryWorker.doWork();
           const retried = retriedResults[0];
+          if (retried) {
+            latestResult = retried;
+          }
+
           if (retried?.result?.finish) {
-            retryableResults[index] = retried;
             const simplified = simplifyWorkResult([retried], chapterTestTaskQuestionTitleTransform)[0];
             if (simplified) {
               cacheableResults.push(simplified);
@@ -2835,15 +2884,29 @@ const JobRunner = {
                 manual: false
               });
             }
-          } else {
-            workResultsMethods().patchResult?.(index, { retrying: false });
+            break;
           }
         } catch (err) {
-          workResultsMethods().patchResult?.(index, {
-            retrying: false,
-            error: (err as Error).message || String(err)
-          });
+          latestResult.error = (err as Error).message || String(err);
         }
+      }
+
+      workResultsMethods().patchResult?.(index, {
+        retrying: false,
+        error: latestResult.result?.finish ? undefined : latestResult.error
+      });
+      return latestResult;
+    }
+
+    async function retryUnfinishedChapterQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+      const retryableResults = results.slice();
+      for (let index = 0; index < retryableResults.length; index++) {
+        const result = retryableResults[index];
+        if (result.result?.finish) {
+          continue;
+        }
+
+        retryableResults[index] = await retryUnfinishedChapterQuestionAtIndex(index, result);
       }
       return retryableResults;
     }
@@ -3590,6 +3653,55 @@ function workOrExam(
 
   const worker = createWorkOrExamWorker('.questionLi');
 
+  async function retryUnfinishedWorkOrExamQuestionAtIndex(
+    index: number,
+    root: HTMLElement,
+    total: number,
+    initialResult: Awaited<ReturnType<typeof worker.doWork>>[number]
+  ) {
+    let latestResult = initialResult;
+    for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+      logDebug('info', '动作节点诊断：未完成单题自动重试', {
+        index,
+        total,
+        mode: type,
+        attempt,
+        maxAttempts: unfinishedQuestionRetryAttempts,
+        error: latestResult.error ?? ''
+      }, undefined, { correlationId: workExamCorrelationId });
+      workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
+
+      try {
+        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
+        const retriedResults = await retryWorker.doWork();
+        const retried = retriedResults[0];
+        if (retried) {
+          latestResult = retried;
+        }
+
+        if (retried?.result?.finish) {
+          const simplified = simplifyWorkResult([retried], workOrExamQuestionTitleTransform)[0];
+          if (simplified) {
+            workResultsMethods().patchResult?.(index, {
+              ...simplified,
+              retrying: false,
+              manual: false
+            });
+          }
+          break;
+        }
+      } catch (err) {
+        latestResult.error = (err as Error).message || String(err);
+      }
+    }
+
+    workResultsMethods().patchResult?.(index, {
+      retrying: false,
+      error: latestResult.result?.finish ? undefined : latestResult.error
+    });
+    return latestResult;
+  }
+
   async function retryUnfinishedWorkOrExamQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
     const liveRoots = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
     const retryableResults = results.slice();
@@ -3604,37 +3716,7 @@ function workOrExam(
         continue;
       }
 
-      logDebug('info', '动作节点诊断：未完成单题自动重试', {
-        index,
-        total: liveRoots.length,
-        mode: type,
-        error: result.error ?? ''
-      }, undefined, { correlationId: workExamCorrelationId });
-      workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
-
-      try {
-        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
-        const retriedResults = await retryWorker.doWork();
-        const retried = retriedResults[0];
-        if (retried?.result?.finish) {
-          retryableResults[index] = retried;
-          const simplified = simplifyWorkResult([retried], workOrExamQuestionTitleTransform)[0];
-          if (simplified) {
-            workResultsMethods().patchResult?.(index, {
-              ...simplified,
-              retrying: false,
-              manual: false
-            });
-          }
-        } else {
-          workResultsMethods().patchResult?.(index, { retrying: false });
-        }
-      } catch (err) {
-        workResultsMethods().patchResult?.(index, {
-          retrying: false,
-          error: (err as Error).message || String(err)
-        });
-      }
+      retryableResults[index] = await retryUnfinishedWorkOrExamQuestionAtIndex(index, root, liveRoots.length, result);
     }
     return retryableResults;
   }

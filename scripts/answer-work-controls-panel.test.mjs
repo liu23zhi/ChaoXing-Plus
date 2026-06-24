@@ -30,7 +30,7 @@ test('common work results panel uses the shared tone helper for number and quest
 test('common preserves work result scroll and retrying state across result refreshes', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes("retrying: item.retrying ?? state.workResults.results[index]?.retrying ?? false"), true);
+  assert.equal(source.includes("retrying: item.retrying ?? existing?.retrying ?? false"), true);
   assert.equal(source.includes('retrying: item.retrying ?? false'), false);
   assert.equal(source.includes("list.dataset.workResultsList = 'true';"), true);
   assert.equal(source.includes("const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list=\"true\"]')?.scrollTop ?? 0;"), true);
@@ -38,6 +38,19 @@ test('common preserves work result scroll and retrying state across result refre
   assert.equal(source.includes('panel.root.scrollTop = rootScrollTop;'), true);
   assert.equal(source.includes('panel.body.scrollTop = bodyScrollTop;'), true);
   assert.equal(source.includes('nextWorkResultsList.scrollTop = workResultsListScrollTop;'), true);
+});
+
+test('common preserves newer finished retry answers when stale result refreshes arrive', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes('function hasUsableWorkResultAnswer(result: SimplifyWorkResult | undefined)'), true);
+  assert.equal(source.includes('function shouldPreserveExistingWorkResult(existing: SimplifyWorkResult | undefined, incoming: SimplifyWorkResult)'), true);
+  assert.equal(source.includes('if (existing && shouldPreserveExistingWorkResult(existing, item)) {'), true);
+  assert.equal(source.includes('return {'), true);
+  assert.equal(source.includes('...existing,'), true);
+  assert.equal(source.includes('retrying: item.retrying ?? existing.retrying ?? false'), true);
+  assert.equal(source.includes('manual: item.manual ?? existing.manual ?? false'), true);
+  assert.equal(source.includes('const existing = state.workResults.results[index];'), true);
 });
 
 test('common work options default to submit and expose upload mode toggle in the study panel', async () => {

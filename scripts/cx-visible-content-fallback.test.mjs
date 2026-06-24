@@ -477,7 +477,7 @@ test('cx preserves previously detected question types when later result patches 
 test('common preserves previously detected question types when incoming simplified results omit type', async () => {
   const commonSource = await readFile(resolve(scriptsDir, '..', 'src', 'projects', 'common.ts'), 'utf8');
 
-  assert.equal(commonSource.includes('type: item.type ?? state.workResults.results[index]?.type,'), true);
+  assert.equal(commonSource.includes('type: item.type ?? existing?.type,'), true);
 });
 
 test('common formats question types with Chinese labels in the result panel', async () => {

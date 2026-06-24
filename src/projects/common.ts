@@ -212,13 +212,41 @@ function getWorkOptions(): CommonWorkOptions {
   };
 }
 
+function hasUsableWorkResultAnswer(result: SimplifyWorkResult | undefined) {
+  return Boolean(
+    result?.searchInfos.some((info) =>
+      info.results.some((entry) => String(entry[1] ?? '').trim().length > 0)
+    )
+  );
+}
+
+function shouldPreserveExistingWorkResult(existing: SimplifyWorkResult | undefined, incoming: SimplifyWorkResult) {
+  return Boolean(
+    existing?.finish &&
+      hasUsableWorkResultAnswer(existing) &&
+      !(incoming.finish && hasUsableWorkResultAnswer(incoming))
+  );
+}
+
 function mergeIncomingWorkResults(results: SimplifyWorkResult[]) {
-  return results.map((item, index) => ({
-    ...item,
-    type: item.type ?? state.workResults.results[index]?.type,
-    manual: item.manual ?? state.workResults.results[index]?.manual ?? false,
-    retrying: item.retrying ?? state.workResults.results[index]?.retrying ?? false
-  }));
+  return results.map((item, index) => {
+    const existing = state.workResults.results[index];
+    if (existing && shouldPreserveExistingWorkResult(existing, item)) {
+      return {
+        ...existing,
+        type: item.type ?? existing.type,
+        retrying: item.retrying ?? existing.retrying ?? false,
+        manual: item.manual ?? existing.manual ?? false
+      };
+    }
+
+    return {
+      ...item,
+      type: item.type ?? existing?.type,
+      manual: item.manual ?? existing?.manual ?? false,
+      retrying: item.retrying ?? existing?.retrying ?? false
+    };
+  });
 }
 
 function patchWorkResult(index: number, patch: Partial<SimplifyWorkResult>) {

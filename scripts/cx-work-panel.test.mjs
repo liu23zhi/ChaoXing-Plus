@@ -161,3 +161,17 @@ test('workOrExam exposes an on-page debug log panel for submit diagnostics', asy
   assert.equal(source.includes('作业/考试提交判定诊断'), true);
   assert.equal(source.includes('作业/考试提交函数诊断'), true);
 });
+
+test('workOrExam debug log panel can be dragged from its header', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('function bindDebugLogPanelDrag('), true);
+  assert.equal(source.includes("header.dataset.cxDebugLogPanelDragHandle = 'true';"), true);
+  assert.equal(source.includes("header.style.cursor = 'move';"), true);
+  assert.equal(source.includes("header.style.touchAction = 'none';"), true);
+  assert.equal(source.includes("header.addEventListener('pointerdown', (event) => {"), true);
+  assert.equal(source.includes("panel.style.left = `${nextLeft}px`;"), true);
+  assert.equal(source.includes("panel.style.right = 'auto';"), true);
+  assert.equal(source.includes("panel.style.bottom = 'auto';"), true);
+  assert.equal(source.includes('bindDebugLogPanelDrag(panel, header, targetDocument);'), true);
+});
