@@ -12,7 +12,8 @@ import { shouldShowFloatingPanel } from './panel-visibility.js';
 import {
   formatQuestionTypeLabel,
   formatWorkResultStatus,
-  resolveWorkResultTone
+  resolveWorkResultTone,
+  summarizeSearchInfoError
 } from './work-results-status.js';
 import {
   DEFAULT_TIKU_BASE_URL,
@@ -715,6 +716,58 @@ function applyQuestionTextWrapStyle(element: HTMLElement) {
   element.style.wordBreak = 'break-word';
 }
 
+function createErrorSummaryBlock(errorText: string, extraDetails: string[] = []) {
+  const summary = summarizeSearchInfoError(errorText);
+  const container = createElement('div');
+  container.style.display = 'grid';
+  container.style.gap = '8px';
+  container.style.padding = '10px 12px';
+  container.style.borderRadius = '12px';
+  container.style.background = 'rgba(254, 242, 242, 0.95)';
+  container.style.border = '1px solid rgba(248, 113, 113, 0.2)';
+
+  const title = createElement('div', { text: `摘要：${summary.title}` });
+  title.style.fontWeight = '700';
+  title.style.color = '#b91c1c';
+  applyQuestionTextWrapStyle(title);
+  container.append(title);
+
+  const details = Array.from(new Set([...summary.details, ...extraDetails]));
+  for (const text of details) {
+    const detail = createElement('div', { text });
+    detail.style.fontSize = '12px';
+    detail.style.color = '#991b1b';
+    applyQuestionTextWrapStyle(detail);
+    container.append(detail);
+  }
+
+  const original = createElement('details');
+  original.open = true;
+
+  const originalTitle = createElement('summary', { text: '原文' });
+  originalTitle.style.cursor = 'pointer';
+  originalTitle.style.fontSize = '12px';
+  originalTitle.style.fontWeight = '600';
+  originalTitle.style.color = '#b91c1c';
+
+  const originalText = createElement('pre', { text: errorText });
+  originalText.style.margin = '8px 0 0';
+  originalText.style.padding = '8px 10px';
+  originalText.style.borderRadius = '10px';
+  originalText.style.background = 'rgba(255,255,255,0.86)';
+  originalText.style.color = '#7f1d1d';
+  originalText.style.fontSize = '11px';
+  originalText.style.lineHeight = '1.5';
+  originalText.style.maxHeight = '220px';
+  originalText.style.overflow = 'auto';
+  originalText.style.whiteSpace = 'pre-wrap';
+  originalText.style.overflowWrap = 'anywhere';
+
+  original.append(originalTitle, originalText);
+  container.append(original);
+  return container;
+}
+
 function applySectionCardStyle(
   element: HTMLElement,
   options: {
@@ -917,14 +970,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   container.append(detailActions);
 
   if (result.error) {
-    const error = createElement('div', { text: result.error });
-    error.style.color = '#c0392b';
-    error.style.padding = '10px 12px';
-    error.style.borderRadius = '12px';
-    error.style.background = 'rgba(254, 242, 242, 0.95)';
-    error.style.border = '1px solid rgba(248, 113, 113, 0.2)';
-    applyQuestionTextWrapStyle(error);
-    container.append(error);
+    container.append(createErrorSummaryBlock(result.error));
   }
 
   if (result.searchInfos.length === 0) {
@@ -957,7 +1003,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     header.style.color = panelPinkTheme.text;
 
     const sub = createElement('div', {
-      text: info.error ? `错误：${info.error}` : `结果数：${info.results.length}`
+      text: info.error ? '错误' : `结果数：${info.results.length}`
     });
     sub.style.fontSize = '12px';
     sub.style.color = info.error ? '#c0392b' : panelPinkTheme.muted;
@@ -965,6 +1011,10 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
 
     headerRow.append(header, sub);
     block.append(headerRow);
+
+    if (info.error) {
+      block.append(createErrorSummaryBlock(info.error));
+    }
 
     if (info.homepage) {
       const link = document.createElement('a');

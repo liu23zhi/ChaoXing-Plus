@@ -4,8 +4,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const helperModulePaths = [
-  resolve(process.cwd(), '.tmp-tests', 'work-results-status.js'),
-  resolve(process.cwd(), '.tmp-tests', 'projects', 'work-results-status.js')
+  resolve(process.cwd(), '.tmp-tests', 'projects', 'work-results-status.js'),
+  resolve(process.cwd(), '.tmp-tests', 'work-results-status.js')
 ];
 
 async function loadHelperModule() {
@@ -98,4 +98,32 @@ test('formats manual and retrying labels explicitly', async () => {
     mod.formatWorkResultStatus(createResult({ requested: true, searchInfos: [] })),
     '未搜索到答案'
   );
+});
+
+test('summarizes structured tiku errors while preserving a plain-text fallback', async () => {
+  const mod = await loadHelperModule();
+  const raw = JSON.stringify({
+    errCode: 401,
+    message: '访问令牌鉴权失败',
+    detail: '访问令牌不存在',
+    request: {
+      method: 'POST',
+      path: '/adapter-service/search',
+      authorization: 'Bearer tk_2...ec71'
+    }
+  });
+
+  assert.equal(typeof mod.summarizeSearchInfoError, 'function');
+  assert.deepEqual(mod.summarizeSearchInfoError(raw), {
+    title: '访问令牌鉴权失败',
+    details: [
+      '状态码：401',
+      '请求：POST /adapter-service/search',
+      '详情：访问令牌不存在'
+    ]
+  });
+  assert.deepEqual(mod.summarizeSearchInfoError('network failed\nmore detail'), {
+    title: 'network failed',
+    details: []
+  });
 });

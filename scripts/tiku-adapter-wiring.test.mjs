@@ -55,18 +55,22 @@ test('common panel applies the shared wrap style to work-result and tiku questio
   assert.equal(source.includes('applyQuestionTextWrapStyle(question);'), true);
 });
 
-test('common panel applies the shared wrap style to long tiku error text', async () => {
+test('common panel shows a tiku error summary while preserving the original error text', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes('text: info.error ? `错误：${info.error}` : `结果数：${info.results.length}`'), true);
+  assert.equal(source.includes('text: info.error ? \'错误\' : `结果数：${info.results.length}`'), true);
+  assert.equal(source.includes('block.append(createErrorSummaryBlock(info.error));'), true);
+  assert.equal(source.includes('function createErrorSummaryBlock(errorText: string, extraDetails: string[] = [])'), true);
+  assert.equal(source.includes("text: `摘要：${summary.title}`"), true);
+  assert.equal(source.includes("createElement('summary', { text: '原文' })"), true);
+  assert.equal(source.includes("createElement('pre', { text: errorText })"), true);
   assert.equal(source.includes('applyQuestionTextWrapStyle(sub);'), true);
 });
 
-test('common panel applies the shared wrap style to top-level work-result errors and app cache links', async () => {
+test('common panel uses the error summary block for top-level errors and wraps app cache links', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes("const error = createElement('div', { text: result.error });"), true);
-  assert.equal(source.includes('applyQuestionTextWrapStyle(error);'), true);
+  assert.equal(source.includes('container.append(createErrorSummaryBlock(result.error));'), true);
   assert.equal(source.includes('link.textContent = cache.homepage;'), true);
   assert.equal(source.includes('applyQuestionTextWrapStyle(link);'), true);
 });
