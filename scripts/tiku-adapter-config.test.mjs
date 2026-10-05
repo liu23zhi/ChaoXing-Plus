@@ -184,18 +184,37 @@ test('AI fallback retries transient failures before returning an answer', async 
   }
 });
 
-test('AI fallback calls the direct endpoint by default instead of probing the unsupported task route', async () => {
+test('AI fallback uses the async task endpoint by default', async () => {
   const mod = await loadHelperModule();
   const originalFetch = globalThis.fetch;
   const urls = [];
 
   globalThis.fetch = async (url) => {
     urls.push(String(url));
+    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+      return Response.json({
+        success: false,
+        status: 'running',
+        taskId: 'task-1',
+        statusUrl: '/adapter-service/ai-fallback/status?taskId=task-1'
+      });
+    }
+    if (String(url).includes('/adapter-service/ai-fallback/status')) {
+      return Response.json({
+        success: true,
+        status: 'succeeded',
+        taskId: 'task-1',
+        result: {
+          question: '1+1=?',
+          answer: '2'
+        }
+      });
+    }
     return Response.json({
-      success: true,
-      result: {
-        question: '1+1=?',
-        answer: '2'
+      success: false,
+      error: {
+        code: 'UPSTREAM_ERROR',
+        message: 'unexpected endpoint'
       }
     });
   };
@@ -207,7 +226,10 @@ test('AI fallback calls the direct endpoint by default instead of probing the un
       { requestTimeoutMs: 1000, retryAttempts: 1, retryDelayMs: 1 }
     );
 
-    assert.deepEqual(urls, ['https://adapter.local/adapter-service/ai-fallback']);
+    assert.deepEqual(urls, [
+      'https://adapter.local/adapter-service/ai-fallback/tasks',
+      'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-1'
+    ]);
     assert.equal(result[0].results[0].answer, '2');
   } finally {
     globalThis.fetch = originalFetch;

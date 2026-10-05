@@ -174,7 +174,7 @@ function normalizeAIFallbackRequestOptions(options: TikuAdapterAIFallbackRequest
     pollIntervalMs: normalizePositiveInteger(options.pollIntervalMs, TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS),
     retryAttempts: normalizePositiveInteger(options.retryAttempts, TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS),
     retryDelayMs: Math.max(0, Math.floor(options.retryDelayMs ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS)),
-    preferAsyncTask: options.preferAsyncTask ?? false
+    preferAsyncTask: options.preferAsyncTask ?? true
   };
 }
 
