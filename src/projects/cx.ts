@@ -580,7 +580,7 @@ function ensureDebugLogPanel() {
   header.dataset.cxDebugLogPanelDragHandle = 'true';
 
   const title = targetDocument.createElement('div');
-  title.textContent = `Chaoxing Plus ${debugLogPanelLevel.toUpperCase()} Log`;
+  title.textContent = '超星学习助手';
   title.style.fontWeight = '700';
   title.style.letterSpacing = '0.02em';
 

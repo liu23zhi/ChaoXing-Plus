@@ -129,6 +129,8 @@ test('workOrExam fallback submit logs visible enabled click targets', async () =
 test('workOrExam exposes an on-page debug log panel for submit diagnostics', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 
+  assert.equal(source.includes("title.textContent = '超星学习助手';"), true);
+  assert.equal(source.includes('Chaoxing Plus ${debugLogPanelLevel.toUpperCase()} Log'), false);
   assert.equal(source.includes("const debugLogPanelSettingKey = 'cx.new.study.enableDebugLogPanel';"), true);
   assert.equal(source.includes('const debugLogPanelDefaultEnabled = false;'), true);
   assert.equal(source.includes('function isDebugLogPanelEnabled('), true);

@@ -150,11 +150,31 @@ test('common watches shared config attributes so the floating panel updates live
   const source = await readFile(commonPath, 'utf8');
 
   assert.equal(source.includes("const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';"), true);
+  assert.equal(source.includes('const lastSharedAttributeValues = new Map<string, string | null>();'), true);
+  assert.equal(source.includes('function getSharedStoreAttributeName(key: string)'), true);
   assert.equal(source.includes('new MutationObserver((mutations) => {'), true);
-  assert.equal(source.includes('const shouldRefreshPanel = mutations.some(({ attributeName }) => {'), true);
-  assert.equal(source.includes('return Boolean(attributeName?.startsWith(SHARED_STORE_ATTRIBUTE_PREFIX));'), true);
+  assert.equal(source.includes('for (const { attributeName, target } of mutations) {'), true);
+  assert.equal(source.includes('target instanceof Element ? target.getAttribute(attributeName) : null;'), true);
+  assert.equal(source.includes('if (lastSharedAttributeValues.get(attributeName) === currentValue) {'), true);
+  assert.equal(source.includes('lastSharedAttributeValues.set(attributeName, currentValue);'), true);
   assert.equal(source.includes('if (shouldRefreshPanel) {'), true);
   assert.equal(source.includes('renderWorkResultsPanel();'), true);
+});
+
+test('common ignores panel-authored shared config mutations so focused inputs are not rebuilt', async () => {
+  const source = await readFile(commonPath, 'utf8');
+
+  assert.equal(source.includes('function setRuntimeStoreValueFromPanel<T>(key: string, value: T)'), true);
+  assert.equal(source.includes('function serializeSharedStoreValue(value: unknown): string | undefined'), true);
+  assert.equal(source.includes('function shouldRefreshPanelForSharedValues(values: Record<string, unknown>)'), true);
+  assert.equal(source.includes('lastSharedAttributeValues.set(getSharedStoreAttributeName(key), serialized);'), true);
+  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());'), true);
+  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());'), true);
+  assert.equal(source.includes('keyInput.oninput'), false);
+  assert.equal(source.includes("keyInput.addEventListener('input'"), false);
+  assert.equal(source.includes('setStudySettingValue(script, key, value, { render: false });'), true);
+  assert.equal(source.includes('syncVolumeUi?.(Math.round(Number(value) * 100));'), true);
+  assert.equal(source.includes('if (!detail || shouldRefreshPanelForSharedValues(detail)) {'), true);
 });
 
 test('common shares all study settings across domains and warns for playback rate at or above 2x', async () => {

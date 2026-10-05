@@ -1,4 +1,4 @@
-# Chaoxing Plus — 单平台超星脚本工程
+# 超星学习助手 — 单平台超星脚本工程
 
 > 基于 [ocsjs](https://github.com/ocsjs/ocsjs/) 的超星模块思路重构，只保留超星学习通相关能力，产出单脚本构建结果。
 

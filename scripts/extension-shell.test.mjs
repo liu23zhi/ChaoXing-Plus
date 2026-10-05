@@ -36,6 +36,8 @@ test('package versions follow the extension manifest version from build script',
 test('popup page introduces the extension for Chaoxing users', async () => {
   const source = await readFile(popupHtmlPath, 'utf8');
 
+  assert.equal(source.includes('<title>超星学习助手</title>'), true);
+  assert.equal(source.includes('<div class="title">超星学习助手</div>'), true);
   assert.equal(source.includes('给 chaoxing.com 官方站点使用的自动学习 / 自动搜题扩展'), true);
   assert.equal(source.includes('打开 chaoxing.com 官网'), true);
 });

@@ -32,6 +32,8 @@ test('common panel style helpers expose a cohesive pink theme palette', async ()
 test('work results panel hero, cards, toggles, and selected items use the pink theme', async () => {
   const source = await readFile(commonPath, 'utf8');
 
+  assert.equal(source.includes("const title = createElement('div', { text: '超星学习助手' });"), true);
+  assert.equal(source.includes('ChaoXing Plus Pink Console'), false);
   assert.equal(source.includes('hero.style.background = panelPinkTheme.heroGradient;'), true);
   assert.equal(source.includes('hero.style.border = `1px solid ${panelPinkTheme.borderStrong}`;'), true);
   assert.equal(source.includes('hero.style.boxShadow = panelPinkTheme.heroShadow;'), true);

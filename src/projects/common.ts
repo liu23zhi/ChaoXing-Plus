@@ -75,6 +75,48 @@ const QUESTION_CACHE_KEY = 'common.apps.question-caches';
 const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';
 
 const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';
+const lastSharedAttributeValues = new Map<string, string | null>();
+
+function getSharedStoreAttributeName(key: string) {
+  return `${SHARED_STORE_ATTRIBUTE_PREFIX}${key.replace(/[^a-z0-9_-]/gi, '-')}`;
+}
+
+function serializeSharedStoreValue(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function setRuntimeStoreValueFromPanel<T>(key: string, value: T) {
+  const serialized = serializeSharedStoreValue(value);
+  if (typeof serialized === 'string') {
+    lastSharedAttributeValues.set(getSharedStoreAttributeName(key), serialized);
+  }
+  runtimeStore.set(key, value);
+}
+
+function shouldRefreshPanelForSharedValues(values: Record<string, unknown>) {
+  let shouldRefreshPanel = false;
+
+  for (const [key, value] of Object.entries(values)) {
+    const serialized = serializeSharedStoreValue(value);
+    if (typeof serialized !== 'string') {
+      continue;
+    }
+
+    const attributeName = getSharedStoreAttributeName(key);
+    if (lastSharedAttributeValues.get(attributeName) === serialized) {
+      continue;
+    }
+
+    lastSharedAttributeValues.set(attributeName, serialized);
+    shouldRefreshPanel = true;
+  }
+
+  return shouldRefreshPanel;
+}
 
 const panelPinkTheme = {
   primary: '#db2777',
@@ -313,7 +355,7 @@ function bindPanelDrag(panel: ScriptPanel, kind: 'workResults' | 'apps') {
     __cxHeaderHint?: HTMLDivElement;
   };
 
-  const title = createElement('div', { text: 'ChaoXing Plus Pink Console' });
+  const title = createElement('div', { text: '超星学习助手' });
   title.style.fontSize = '13px';
   title.style.fontWeight = '800';
   title.style.color = panelPinkTheme.text;
@@ -437,7 +479,7 @@ function isSharedStudySettingKey(key: string) {
 }
 
 function syncStudySettingCrossDomain(key: string, value: unknown) {
-  runtimeStore.set(key, value);
+  setRuntimeStoreValueFromPanel(key, value);
 }
 
 function applyStudySettingRuntimeEffect(key: string, value: unknown) {
@@ -496,7 +538,7 @@ function setStudySettingValueInternal(
   script: { cfg: Record<string, unknown>; namespace?: string },
   key: string,
   value: unknown,
-  options: { warn?: boolean } = {}
+  options: { warn?: boolean; render?: boolean } = {}
 ) {
   const setValue = (nextKey: string, nextValue: unknown) => {
     script.cfg[nextKey] = nextValue;
@@ -504,7 +546,7 @@ function setStudySettingValueInternal(
     if (isSharedStudySettingKey(storageKey)) {
       syncStudySettingCrossDomain(storageKey, nextValue);
     } else {
-      runtimeStore.set(storageKey, nextValue);
+      setRuntimeStoreValueFromPanel(storageKey, nextValue);
     }
     applyStudySettingRuntimeEffect(nextKey, nextValue);
   };
@@ -513,7 +555,9 @@ function setStudySettingValueInternal(
     const normalizedVolume = Math.min(1, Math.max(0, typeof value === 'number' ? value : Number(value)));
     setValue('volume', normalizedVolume);
     setValue('muteMedia', normalizedVolume <= 0);
-    renderWorkResultsPanel();
+    if (options.render !== false) {
+      renderWorkResultsPanel();
+    }
     return;
   }
 
@@ -523,7 +567,9 @@ function setStudySettingValueInternal(
     if (muted) {
       setValue('volume', 0);
     }
-    renderWorkResultsPanel();
+    if (options.render !== false) {
+      renderWorkResultsPanel();
+    }
     return;
   }
 
@@ -531,11 +577,18 @@ function setStudySettingValueInternal(
   if (key === 'playbackRate' && options.warn !== false) {
     void maybeWarnHighPlaybackRate(script, value);
   }
-  renderWorkResultsPanel();
+  if (options.render !== false) {
+    renderWorkResultsPanel();
+  }
 }
 
-function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?: string }, key: string, value: unknown) {
-  setStudySettingValueInternal(script, key, value);
+function setStudySettingValue(
+  script: { cfg: Record<string, unknown>; namespace?: string },
+  key: string,
+  value: unknown,
+  options: { render?: boolean } = {}
+) {
+  setStudySettingValueInternal(script, key, value, options);
 }
 
 function setWorkResultsView(type: WorkResultsView) {
@@ -1134,13 +1187,17 @@ function createConfigField(
       input.title = String(attrs.title);
     }
 
+    let syncVolumeUi: ((percent: number) => void) | undefined;
     input.oninput = () => {
       const value = isVolumeField
         ? Math.min(100, Math.max(0, Number(input.value || '0'))) / 100
         : input.type === 'range'
           ? Number(input.value)
           : input.value;
-      setStudySettingValue(script, key, value);
+      setStudySettingValue(script, key, value, { render: false });
+      if (isVolumeField) {
+        syncVolumeUi?.(Math.round(Number(value) * 100));
+      }
     };
 
     inputWrap.append(input);
@@ -1187,26 +1244,39 @@ function createConfigField(
       quickRow.style.flexWrap = 'wrap';
       quickRow.style.gap = '8px';
 
+      const quickButtons: Array<{ button: HTMLButtonElement; percent: number }> = [];
+      const applyQuickButtonStyle = (button: HTMLButtonElement, selected: boolean) => {
+        button.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
+        button.style.background = selected
+          ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
+          : panelPinkTheme.surfaceStrong;
+        button.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
+        button.style.fontWeight = selected ? '700' : '600';
+        button.style.boxShadow = selected ? '0 10px 22px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
+      };
+
       [0, 25, 50, 75, 100].forEach((percent) => {
         const selected = Number(input.value || '0') === percent;
         const quickButton = createElement('button', { text: `${percent}%` });
         quickButton.type = 'button';
         quickButton.style.padding = '8px 10px';
         quickButton.style.borderRadius = '10px';
-        quickButton.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
-        quickButton.style.background = selected
-          ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
-          : panelPinkTheme.surfaceStrong;
-        quickButton.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
         quickButton.style.fontSize = '12px';
-        quickButton.style.fontWeight = selected ? '700' : '600';
         quickButton.style.cursor = 'pointer';
-        quickButton.style.boxShadow = selected ? '0 10px 22px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
+        applyQuickButtonStyle(quickButton, selected);
         quickButton.onclick = () => {
           setStudySettingValue(script, key, percent / 100);
         };
+        quickButtons.push({ button: quickButton, percent });
         quickRow.append(quickButton);
       });
+
+      syncVolumeUi = (percent) => {
+        currentVolumeBadge.textContent = `当前音量：${percent}%`;
+        quickButtons.forEach(({ button, percent: buttonPercent }) => {
+          applyQuickButtonStyle(button, buttonPercent === percent);
+        });
+      };
 
       inputGroup.append(quickRow);
     }
@@ -1535,8 +1605,8 @@ function createTikuAdapterConfigSection() {
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
   saveButton.onclick = async () => {
-    runtimeStore.set(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
-    runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
+    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
+    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
     await $modal.alert('题库配置已保存。');
   };
 
@@ -1572,9 +1642,6 @@ function createTikuAdapterConfigSection() {
   keyInput.style.borderRadius = '12px';
   keyInput.style.border = `1px solid ${panelPinkTheme.border}`;
   keyInput.style.background = panelPinkTheme.surfaceStrong;
-  keyInput.oninput = () => {
-    runtimeStore.set(TIKU_ADAPTER_KEY_KEY, keyInput.value);
-  };
 
   const actionsRow = createElement('div');
   actionsRow.style.display = 'flex';
@@ -2219,15 +2286,33 @@ window.addEventListener('storage', (event) => {
   }
 });
 
-document.addEventListener('chaoxing-plus:shared-store-hydrate', () => {
-  renderWorkResultsPanel();
+document.addEventListener('chaoxing-plus:shared-store-hydrate', (event) => {
+  const detail = typeof event === 'object' && event && 'detail' in event
+    ? (event as CustomEvent<Record<string, unknown>>).detail
+    : undefined;
+
+  if (!detail || shouldRefreshPanelForSharedValues(detail)) {
+    renderWorkResultsPanel();
+  }
 });
 
 try {
   const sharedConfigObserver = new MutationObserver((mutations) => {
-    const shouldRefreshPanel = mutations.some(({ attributeName }) => {
-      return Boolean(attributeName?.startsWith(SHARED_STORE_ATTRIBUTE_PREFIX));
-    });
+    let shouldRefreshPanel = false;
+
+    for (const { attributeName, target } of mutations) {
+      if (!attributeName?.startsWith(SHARED_STORE_ATTRIBUTE_PREFIX)) {
+        continue;
+      }
+
+      const currentValue = target instanceof Element ? target.getAttribute(attributeName) : null;
+      if (lastSharedAttributeValues.get(attributeName) === currentValue) {
+        continue;
+      }
+
+      lastSharedAttributeValues.set(attributeName, currentValue);
+      shouldRefreshPanel = true;
+    }
 
     if (shouldRefreshPanel) {
       renderWorkResultsPanel();
