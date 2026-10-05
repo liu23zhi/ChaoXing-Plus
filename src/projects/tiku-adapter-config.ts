@@ -443,7 +443,10 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
         }`
       },
       courseName: '',
-      extra: ''
+      extra: '',
+      skipCache: {
+        handler: `return (env) => typeof env.skipCache === 'boolean' ? env.skipCache : undefined`
+      }
     },
     handler: `return (res) => {
       const question = typeof res?.question === 'string' ? res.question : '';

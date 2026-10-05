@@ -129,6 +129,20 @@ test('tiku adapter wrapper prefers computed choice keys for objective choice ans
   assert.deepEqual(result, ['多选题', 'AC', { source: 'tikuAdapter' }]);
 });
 
+test('tiku adapter wrapper forwards per-request cache bypass flag', async () => {
+  const mod = await loadHelperModule();
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key'
+  });
+
+  assert.ok(wrapper.data.skipCache);
+  const resolveSkipCache = Function(wrapper.data.skipCache.handler)();
+  assert.equal(resolveSkipCache({ skipCache: true }), true);
+  assert.equal(resolveSkipCache({ skipCache: false }), false);
+  assert.equal(resolveSkipCache({}), undefined);
+});
+
 test('tiku adapter config exposes long AI fallback timeouts and status helpers', async () => {
   const mod = await loadHelperModule();
 

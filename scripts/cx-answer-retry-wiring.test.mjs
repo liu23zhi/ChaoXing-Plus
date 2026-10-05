@@ -24,8 +24,8 @@ test('cx isolates single question retry workers from the main result panel refre
 
   assert.equal(source.includes('suppressWorkResultsPanelUpdate?: boolean;'), true);
   assert.equal(source.includes('if (!workerOptions.suppressWorkResultsPanelUpdate) {'), true);
-  assert.equal(source.includes('const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true });'), true);
-  assert.equal(source.includes('const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });'), true);
+  assert.equal(source.includes('const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });'), true);
+  assert.equal(source.includes('const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });'), true);
 });
 
 test('cx retries unfinished question roots before uploading instead of refreshing the whole page', async () => {
@@ -51,6 +51,17 @@ test('cx retries each unfinished automatic answer up to three attempts', async (
   assert.equal(source.includes('maxAttempts: unfinishedQuestionRetryAttempts'), true);
   assert.equal(source.includes('if (retried?.result?.finish) {'), true);
   assert.equal(source.includes('break;'), true);
+});
+
+test('cx only bypasses cache for answer-mismatch and manual retries', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('shouldSkipCacheForAutomaticRetry'), true);
+  assert.equal(source.includes('skipCache: shouldSkipCacheForAutomaticRetry(latestResult)'), true);
+  assert.equal(source.includes('const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });'), true);
+  assert.equal(source.includes('const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });'), true);
+  assert.equal(source.includes('skipCache: Boolean(workerOptions.skipCache)'), true);
+  assert.equal(source.includes("return searchInCaches && !workerOptions.skipCache ? searchInCaches(title, provider) : provider();"), true);
 });
 
 test('cx syncs manual-answer state back into the common result entries', async () => {

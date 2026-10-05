@@ -35,6 +35,7 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
+import { shouldSkipCacheForAutomaticRetry } from './cx-retry-cache.js';
 
 let topWindow: Window = window.top ?? window;
 
@@ -2645,7 +2646,8 @@ const JobRunner = {
               : await defaultAnswerWrapperHandler(answererWrappers, {
                   type: questionType,
                   title,
-                  options: optionsText
+                  options: optionsText,
+                  skipCache: Boolean(workerOptions.skipCache)
                 });
             return appendAIFallbackSearchInfos(
               baseInfos,
@@ -2829,7 +2831,7 @@ const JobRunner = {
           total: roots.length,
           mode: 'chapter'
         }, undefined, { correlationId: chapterRetryCorrelationId });
-        const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true });
+        const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
         const retriedResults = await retryWorker.doWork();
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
@@ -2867,7 +2869,10 @@ const JobRunner = {
         workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
 
         try {
-          const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
+          const retryWorker = createChapterWorker([root], {
+            suppressWorkResultsPanelUpdate: true,
+            skipCache: shouldSkipCacheForAutomaticRetry(latestResult)
+          });
           const retriedResults = await retryWorker.doWork();
           const retried = retriedResults[0];
           if (retried) {
@@ -3461,6 +3466,7 @@ function workOrExam(
   const createWorkOrExamWorker = (
     questionRoots: string | HTMLElement[],
     workerOptions: {
+      skipCache?: boolean;
       suppressWorkResultsPanelUpdate?: boolean;
     } = {}
   ) =>
@@ -3497,7 +3503,8 @@ function workOrExam(
           const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
             type: questionType,
             title,
-            options: optionsText
+            options: optionsText,
+            skipCache: Boolean(workerOptions.skipCache)
           });
           return appendAIFallbackSearchInfos(
             baseInfos,
@@ -3511,7 +3518,7 @@ function workOrExam(
         };
 
         const searchInCaches = appsMethods().searchAnswerInCaches;
-        return searchInCaches ? searchInCaches(title, provider) : provider();
+        return searchInCaches && !workerOptions.skipCache ? searchInCaches(title, provider) : provider();
       },
       work: async (ctx) => {
         const { elements, searchInfos } = ctx;
@@ -3672,7 +3679,10 @@ function workOrExam(
       workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
 
       try {
-        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
+        const retryWorker = createWorkOrExamWorker([root], {
+          suppressWorkResultsPanelUpdate: true,
+          skipCache: shouldSkipCacheForAutomaticRetry(latestResult)
+        });
         const retriedResults = await retryWorker.doWork();
         const retried = retriedResults[0];
         if (retried) {
@@ -3792,7 +3802,7 @@ function workOrExam(
           total: liveRoots().length,
           mode: type
         }, undefined, { correlationId: workExamCorrelationId });
-        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true });
+        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
         const retriedResults = await retryWorker.doWork();
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
