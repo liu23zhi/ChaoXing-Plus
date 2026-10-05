@@ -27,9 +27,10 @@ test('package versions follow the extension manifest version from build script',
   const manifestVersion = source.match(/version: '([^']+)'/)?.[1];
 
   assert.equal(typeof manifestVersion, 'string');
-  assert.equal(packageJson.version, manifestVersion);
-  assert.equal(packageLock.version, manifestVersion);
-  assert.equal(packageLock.packages[''].version, manifestVersion);
+  const expectedPackageVersion = manifestVersion.split('.').concat(['0', '0']).slice(0, 3).join('.');
+  assert.equal(packageJson.version, expectedPackageVersion);
+  assert.equal(packageLock.version, expectedPackageVersion);
+  assert.equal(packageLock.packages[''].version, expectedPackageVersion);
 });
 
 test('popup page introduces the extension for Chaoxing users', async () => {

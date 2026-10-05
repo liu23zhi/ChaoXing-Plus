@@ -68,8 +68,11 @@ echo "    扩展清单：     $MANIFEST_FILE"
 echo "    输出目录：     $DIST_DIR"
 echo "    产物统计：     $FILE_COUNT 个文件，共 $TOTAL_SIZE"
 
-if command -v wslpath >/dev/null 2>&1; then
-  echo "    Windows 路径： $(wslpath -w "$DIST_DIR")"
+if [[ "$DIST_DIR" == /mnt/[A-Za-z]/* ]] && command -v wslpath >/dev/null 2>&1; then
+  WINDOWS_DIST_DIR="$(wslpath -w "$DIST_DIR" 2>/dev/null || true)"
+  if [[ "$WINDOWS_DIST_DIR" == [A-Za-z]:\\* ]]; then
+    echo "    Windows 路径： $WINDOWS_DIST_DIR"
+  fi
 fi
 
 echo ">>> 请在浏览器中加载该目录作为“已解压的扩展程序”："
