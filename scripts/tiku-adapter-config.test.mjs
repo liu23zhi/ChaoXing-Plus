@@ -184,6 +184,36 @@ test('AI fallback retries transient failures before returning an answer', async 
   }
 });
 
+test('AI fallback calls the direct endpoint by default instead of probing the unsupported task route', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    return Response.json({
+      success: true,
+      result: {
+        question: '1+1=?',
+        answer: '2'
+      }
+    });
+  };
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '1+1=?', type: 'single', options: '1\n2' },
+      { requestTimeoutMs: 1000, retryAttempts: 1, retryDelayMs: 1 }
+    );
+
+    assert.deepEqual(urls, ['https://adapter.local/adapter-service/ai-fallback']);
+    assert.equal(result[0].results[0].answer, '2');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('AI fallback polls task status until the adapter reports a final answer', async () => {
   const mod = await loadHelperModule();
   const originalFetch = globalThis.fetch;
