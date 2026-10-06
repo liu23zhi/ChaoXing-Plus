@@ -120,6 +120,15 @@ test('video route recovery selects an enabled alternate route and stops when non
   assert.equal(mod.isVideoLoadFailure({ innerText: '正常播放中' }), false);
 });
 
+test('video route recovery keeps waiting briefly after a successful route switch', async () => {
+  const mod = await loadHelperModule();
+  const switchedAt = 1000;
+
+  assert.equal(mod.shouldWaitAfterVideoRouteSwitch(switchedAt, 9000), true);
+  assert.equal(mod.shouldWaitAfterVideoRouteSwitch(switchedAt, 11000), false);
+  assert.equal(mod.shouldWaitAfterVideoRouteSwitch(undefined, 11000), false);
+});
+
 test('cx wires recovery into the study scanner and media runner', async () => {
   const source = await (await import('node:fs/promises')).readFile(resolve(process.cwd(), 'src', 'projects', 'cx.ts'), 'utf8');
 
@@ -132,6 +141,8 @@ test('cx wires recovery into the study scanner and media runner', async () => {
   assert.equal(source.includes('CXAnalyses.getCurrentChapterKey() || CXAnalyses.getCurrentChapterStayKey()'), false);
   assert.equal(source.includes('handleVisibleContentRecovery'), true);
   assert.equal(source.includes('trySwitchVideoRoute'), true);
+  assert.equal(source.includes('shouldWaitAfterVideoRouteSwitch'), true);
+  assert.equal(source.includes('视频线路切换等待诊断'), true);
   assert.equal(source.includes("logDebug('warn', '视频线路切换诊断'"), true);
   assert.equal(source.includes("logDebug('error', '视频线路切换失败诊断'"), true);
   assert.equal(source.includes('attemptedVideoRoutes.size'), true);

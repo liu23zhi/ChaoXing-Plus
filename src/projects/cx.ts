@@ -40,8 +40,10 @@ import {
   handleVisibleContentRecovery,
   isVideoLoadFailure,
   resumeVisibleContentRecovery,
+  shouldWaitAfterVideoRouteSwitch,
   trySwitchVideoRoute,
-  VISIBLE_CONTENT_RECOVERY_STORAGE_KEY
+  VISIBLE_CONTENT_RECOVERY_STORAGE_KEY,
+  VIDEO_ROUTE_SWITCH_GRACE_MS
 } from './cx-recovery.js';
 
 let topWindow: Window = window.top ?? window;
@@ -2531,12 +2533,14 @@ const JobRunner = {
 
     return new Promise<void>((resolve) => {
       const attemptedVideoRoutes = new Set<unknown>();
+      let lastVideoRouteSwitchAt: number | undefined;
       const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
         targetJobId: attachment?.jobid || attachment?.property?._jobid,
         jobName: attachment?.property?.name || attachment?.property?.title
       });
       const reloadInterval = setInterval(() => {
         if (trySwitchVideoRoute(doc, attemptedVideoRoutes)) {
+          lastVideoRouteSwitchAt = Date.now();
           logDebug('warn', '视频线路切换诊断', {
             attemptedRouteCount: attemptedVideoRoutes.size,
             jobName: attachment?.property?.name || attachment?.property?.title || '',
@@ -2548,6 +2552,16 @@ const JobRunner = {
         }
 
         if (isVideoLoadFailure(doc)) {
+          if (shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
+            logDebug('info', '视频线路切换等待诊断', {
+              attemptedRouteCount: attemptedVideoRoutes.size,
+              graceMs: VIDEO_ROUTE_SWITCH_GRACE_MS,
+              jobName: attachment?.property?.name || attachment?.property?.title || '',
+              targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
+            }, '备用线路已切换，等待播放器完成线路加载。', { correlationId: mediaCorrelationId });
+            return;
+          }
+
           logDebug('error', '视频线路切换失败诊断', {
             attemptedRouteCount: attemptedVideoRoutes.size,
             jobName: attachment?.property?.name || attachment?.property?.title || '',
@@ -2558,6 +2572,8 @@ const JobRunner = {
           clearInterval(reloadInterval);
           setTimeout(resolve, 3000);
         }
+
+        lastVideoRouteSwitchAt = undefined;
       }, 3000);
 
       const playFunction = async () => {

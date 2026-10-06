@@ -1,6 +1,7 @@
 export const VISIBLE_CONTENT_RECOVERY_STORAGE_KEY = '__chaoxing_plus_visible_content_recovery__';
 export const VISIBLE_CONTENT_RECOVERY_MAX_RELOADS = 3;
 export const VISIBLE_CONTENT_RECOVERY_DELAY_MS = 3000;
+export const VIDEO_ROUTE_SWITCH_GRACE_MS = 10000;
 
 export type RecoveryStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -136,6 +137,14 @@ type VideoRouteRoot = {
 };
 
 const videoFailureMessages = ['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载'];
+
+export function shouldWaitAfterVideoRouteSwitch(
+  switchedAt: number | undefined,
+  now = Date.now(),
+  graceMs = VIDEO_ROUTE_SWITCH_GRACE_MS
+): boolean {
+  return typeof switchedAt === 'number' && Number.isFinite(switchedAt) && now >= switchedAt && now - switchedAt < graceMs;
+}
 
 export function isVideoLoadFailure(root: VideoRouteRoot | null | undefined): boolean {
   if (!root) {
