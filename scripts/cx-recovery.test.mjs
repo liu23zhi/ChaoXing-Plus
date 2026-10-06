@@ -128,7 +128,12 @@ test('cx wires recovery into the study scanner and media runner', async () => {
   assert.equal(source.includes('async function waitForTopWindowLoad()'), true);
   assert.equal(source.includes('await waitForTopWindowLoad();'), true);
   assert.equal(source.includes('function buildVisibleContentRecoverySignature()'), true);
+  assert.equal(source.includes("const chapterKey = CXAnalyses.getCurrentChapterKey() || 'unknown-chapter';"), true);
+  assert.equal(source.includes('CXAnalyses.getCurrentChapterKey() || CXAnalyses.getCurrentChapterStayKey()'), false);
   assert.equal(source.includes('handleVisibleContentRecovery'), true);
   assert.equal(source.includes('trySwitchVideoRoute'), true);
+  assert.equal(source.includes("logDebug('warn', '视频线路切换诊断'"), true);
+  assert.equal(source.includes("logDebug('error', '视频线路切换失败诊断'"), true);
+  assert.equal(source.includes('attemptedVideoRoutes.size'), true);
   assert.equal(source.includes("topWindow.location['reload']()"), true);
 });

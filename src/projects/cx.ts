@@ -1555,7 +1555,8 @@ export const CXAnalyses = {
     const activeTab = tabs[activeIndex];
     const activeTabKey = activeTab.getAttribute('id') || activeTab.getAttribute('cardid') || String(activeIndex + 1);
     const progress = this.getChapterSubTaskProgress();
-    const attempts = progress.lastActiveTabKey === activeTabKey ? progress.attempts : progress.attempts + 1;
+    // Count every inspection so a refresh that restores an earlier tab cannot reset the sibling loop.
+    const attempts = progress.attempts + 1;
     const maxAttempts = tabs.length * 3;
 
     if (attempts >= maxAttempts) {
@@ -1764,7 +1765,7 @@ function hasPendingCurrentPageJobAttachments() {
 }
 
 function buildVisibleContentRecoverySignature() {
-  const chapterKey = CXAnalyses.getCurrentChapterKey() || CXAnalyses.getCurrentChapterStayKey() || 'unknown-chapter';
+  const chapterKey = CXAnalyses.getCurrentChapterKey() || 'unknown-chapter';
   return `${chapterKey}::url=${topWindow.location.href}`;
 }
 
@@ -1877,18 +1878,20 @@ export async function study(opts: StudyOptions) {
     completedIconExists: chapterCompletionDiagnostics.completedIconExists
   }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount} activeChapterId=${chapterCompletionDiagnostics.activeChapterId} activeChapterClassName=${chapterCompletionDiagnostics.activeChapterClassName} completedIconExists=${String(chapterCompletionDiagnostics.completedIconExists)}`, { correlationId: chapterCorrelationId });
   const siblingSubTaskDiagnostics = getSiblingSubTaskDiagnostics();
-  const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
+  const siblingSubTaskProgress = CXAnalyses.getChapterSubTaskProgress();
+  const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));
   logDebug('info', '同章节子任务诊断', {
     visibleContentState,
     currentChapterFinished,
     searchedJobCount: searchedJobs.length,
+    siblingSubTaskAttempts: siblingSubTaskProgress.attempts,
     shouldCheckSiblingSubTasks,
     canCheckSiblingSubTasksAfterProcessedJobs,
     hasPendingJobAttachments,
     attachmentCount,
     searching,
     ...siblingSubTaskDiagnostics
-  }, `同章节子任务诊断详情：hasSiblingSubTasks=${String(siblingSubTaskDiagnostics.hasSiblingSubTasks)} siblingSubTaskCount=${siblingSubTaskDiagnostics.siblingSubTaskCount} activeSubTaskIndex=${siblingSubTaskDiagnostics.activeSubTaskIndex} activeSubTaskKey=${siblingSubTaskDiagnostics.activeSubTaskKey} tabRootExists=${String(siblingSubTaskDiagnostics.tabRootExists)} shouldCheckSiblingSubTasks=${String(shouldCheckSiblingSubTasks)} canCheckSiblingSubTasksAfterProcessedJobs=${String(canCheckSiblingSubTasksAfterProcessedJobs)} hasPendingJobAttachments=${String(hasPendingJobAttachments)} attachmentCount=${attachmentCount} searching=${String(searching)} currentChapterFinished=${String(currentChapterFinished)} visibleContentState=${visibleContentState} searchedJobCount=${searchedJobs.length}`, { correlationId: chapterCorrelationId });
+  }, `同章节子任务诊断详情：hasSiblingSubTasks=${String(siblingSubTaskDiagnostics.hasSiblingSubTasks)} siblingSubTaskCount=${siblingSubTaskDiagnostics.siblingSubTaskCount} activeSubTaskIndex=${siblingSubTaskDiagnostics.activeSubTaskIndex} activeSubTaskKey=${siblingSubTaskDiagnostics.activeSubTaskKey} siblingSubTaskAttempts=${siblingSubTaskProgress.attempts} tabRootExists=${String(siblingSubTaskDiagnostics.tabRootExists)} shouldCheckSiblingSubTasks=${String(shouldCheckSiblingSubTasks)} canCheckSiblingSubTasksAfterProcessedJobs=${String(canCheckSiblingSubTasksAfterProcessedJobs)} hasPendingJobAttachments=${String(hasPendingJobAttachments)} attachmentCount=${attachmentCount} searching=${String(searching)} currentChapterFinished=${String(currentChapterFinished)} visibleContentState=${visibleContentState} searchedJobCount=${searchedJobs.length}`, { correlationId: chapterCorrelationId });
 
   const next = async () => {
     resetWorkResults();
@@ -2528,14 +2531,28 @@ const JobRunner = {
 
     return new Promise<void>((resolve) => {
       const attemptedVideoRoutes = new Set<unknown>();
+      const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+        targetJobId: attachment?.jobid || attachment?.property?._jobid,
+        jobName: attachment?.property?.name || attachment?.property?.title
+      });
       const reloadInterval = setInterval(() => {
         if (trySwitchVideoRoute(doc, attemptedVideoRoutes)) {
+          logDebug('warn', '视频线路切换诊断', {
+            attemptedRouteCount: attemptedVideoRoutes.size,
+            jobName: attachment?.property?.name || attachment?.property?.title || '',
+            targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
+          }, `检测到视频加载失败，正在尝试切换备用线路（已尝试 ${attemptedVideoRoutes.size} 条线路）。`, { correlationId: mediaCorrelationId });
           $console.warn('检测到视频加载失败，正在尝试切换备用线路。');
           $message.warn('检测到视频加载失败，正在尝试切换备用线路。');
           return;
         }
 
         if (isVideoLoadFailure(doc)) {
+          logDebug('error', '视频线路切换失败诊断', {
+            attemptedRouteCount: attemptedVideoRoutes.size,
+            jobName: attachment?.property?.name || attachment?.property?.title || '',
+            targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
+          }, '视频加载失败且没有可用备用线路，即将跳过视频。', { correlationId: mediaCorrelationId });
           $console.error('检测到视频加载失败，即将跳过视频。');
           $message.error('检测到视频加载失败，即将跳过视频。');
           clearInterval(reloadInterval);
