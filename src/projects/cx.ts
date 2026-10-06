@@ -36,6 +36,13 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { shouldSkipCacheForAutomaticRetry } from './cx-retry-cache.js';
+import {
+  handleVisibleContentRecovery,
+  isVideoLoadFailure,
+  resumeVisibleContentRecovery,
+  trySwitchVideoRoute,
+  VISIBLE_CONTENT_RECOVERY_STORAGE_KEY
+} from './cx-recovery.js';
 
 let topWindow: Window = window.top ?? window;
 
@@ -58,6 +65,31 @@ const state = {
 };
 
 const TOP_CENTER_NOTICE_ID = 'cx-plus-top-center-notice';
+
+function getVisibleContentRecoveryStorage(): Storage | undefined {
+  try {
+    return topWindow.sessionStorage;
+  } catch {
+    try {
+      return topWindow.localStorage;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+async function waitForTopWindowLoad() {
+  try {
+    if (topWindow.document.readyState === 'complete') {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      topWindow.addEventListener('load', () => resolve(), { once: true });
+    });
+  } catch {
+    // Continue in restricted frames where the top window cannot be inspected.
+  }
+}
 AnswerWrapperHandlerConfig.timeout_seconds = Math.max(
   AnswerWrapperHandlerConfig.timeout_seconds ?? 60,
   TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
@@ -1731,9 +1763,25 @@ function hasPendingCurrentPageJobAttachments() {
   return attachments.some((attachment) => attachment.job === true);
 }
 
+function buildVisibleContentRecoverySignature() {
+  const chapterKey = CXAnalyses.getCurrentChapterKey() || CXAnalyses.getCurrentChapterStayKey() || 'unknown-chapter';
+  return `${chapterKey}::url=${topWindow.location.href}`;
+}
+
 export async function study(opts: StudyOptions) {
   clearWorkResultsOnPageLoad();
-  await sleep(3000);
+  await waitForTopWindowLoad();
+  const recoveryStorage = getVisibleContentRecoveryStorage();
+  const recoverySignature = buildVisibleContentRecoverySignature();
+  const resumedAfterRecovery = await resumeVisibleContentRecovery({
+    storage: recoveryStorage,
+    storageKey: VISIBLE_CONTENT_RECOVERY_STORAGE_KEY,
+    signature: recoverySignature,
+    wait: sleep
+  });
+  if (!resumedAfterRecovery) {
+    await sleep(3000);
+  }
 
   const searchedJobs: Job[] = [];
   let searching = true;
@@ -1766,6 +1814,11 @@ export async function study(opts: StudyOptions) {
 
     const job = result.job;
     if (job && job.func) {
+      try {
+        getVisibleContentRecoveryStorage()?.removeItem(VISIBLE_CONTENT_RECOVERY_STORAGE_KEY);
+      } catch {
+        // Ignore storage cleanup failures after a runnable task is found.
+      }
       CXAnalyses.clearChapterSubTaskProgress();
       try {
         await job.func();
@@ -1776,6 +1829,11 @@ export async function study(opts: StudyOptions) {
       await sleep(1000);
       await runJobs();
     } else if (visibleContentState === 'finished-job' && !hasPendingCurrentPageJobAttachments()) {
+      try {
+        getVisibleContentRecoveryStorage()?.removeItem(VISIBLE_CONTENT_RECOVERY_STORAGE_KEY);
+      } catch {
+        // Ignore storage cleanup failures after a completed task is detected.
+      }
       attachmentCount = 0;
       searching = false;
     } else if (attachmentCount > 0) {
@@ -1969,6 +2027,38 @@ export async function study(opts: StudyOptions) {
 
   if (visibleContentState !== 'empty' && visibleContentState !== 'finished-job' && !currentChapterFinished) {
     const msg = '检测到页面存在可处理内容，但当前未识别为标准任务点。';
+    const recoveryStorage = getVisibleContentRecoveryStorage();
+    const recoveryResult = handleVisibleContentRecovery({
+      storage: recoveryStorage,
+      storageKey: VISIBLE_CONTENT_RECOVERY_STORAGE_KEY,
+      signature: buildVisibleContentRecoverySignature(),
+      reload: () => {
+        topWindow.location['reload']();
+      },
+      notifyFinalFailure: () => {
+        logDebug('warn', '未识别标准任务点刷新兜底耗尽诊断', {
+          visibleContentState,
+          currentChapterFinished,
+          searchedJobCount: searchedJobs.length,
+          maxReloads: 3,
+          ...siblingSubTaskDiagnostics,
+          activeChapterId: chapterCompletionDiagnostics.activeChapterId,
+          completedIconExists: chapterCompletionDiagnostics.completedIconExists
+        }, undefined, { correlationId: chapterCorrelationId });
+      }
+    });
+
+    if (recoveryResult === 'reloading') {
+      logDebug('info', '未识别标准任务点自动刷新诊断', {
+        visibleContentState,
+        currentChapterFinished,
+        searchedJobCount: searchedJobs.length,
+        maxReloads: 3,
+        ...siblingSubTaskDiagnostics
+      }, undefined, { correlationId: chapterCorrelationId });
+      return;
+    }
+
     logDebug('warn', '未识别标准任务点诊断', {
       visibleContentState,
       currentChapterFinished,
@@ -2437,13 +2527,15 @@ const JobRunner = {
     }
 
     return new Promise<void>((resolve) => {
+      const attemptedVideoRoutes = new Set<unknown>();
       const reloadInterval = setInterval(() => {
-        const errorDiv = doc.querySelector<HTMLElement>('.vjs-modal-dialog-content');
-        if (
-          ['视频文件损坏', '网络错误导致视频下载中途失败', '视频因格式不支持', '网络的问题无法加载'].some((s) =>
-            errorDiv?.innerText.includes(s)
-          )
-        ) {
+        if (trySwitchVideoRoute(doc, attemptedVideoRoutes)) {
+          $console.warn('检测到视频加载失败，正在尝试切换备用线路。');
+          $message.warn('检测到视频加载失败，正在尝试切换备用线路。');
+          return;
+        }
+
+        if (isVideoLoadFailure(doc)) {
           $console.error('检测到视频加载失败，即将跳过视频。');
           $message.error('检测到视频加载失败，即将跳过视频。');
           clearInterval(reloadInterval);
