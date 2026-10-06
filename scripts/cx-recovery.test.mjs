@@ -129,6 +129,47 @@ test('video route recovery keeps waiting briefly after a successful route switch
   assert.equal(mod.shouldWaitAfterVideoRouteSwitch(undefined, 11000), false);
 });
 
+test('video route recovery ignores stale error text while the media element is playing', async () => {
+  const mod = await loadHelperModule();
+  const errorText = '视频因格式不支持或者服务器或网络的问题无法加载。';
+  const root = {
+    querySelector(selector) {
+      if (selector === 'video, audio') {
+        return { paused: false, readyState: 4, error: null };
+      }
+      return { innerText: errorText };
+    }
+  };
+
+  assert.equal(mod.isVideoLoadFailure(root), false);
+  assert.equal(mod.isVideoLoadFailure({ innerText: errorText }), true);
+});
+
+test('video diagnostics expose stale error text, media playback state, and route controls', async () => {
+  const mod = await loadHelperModule();
+  const root = {
+    querySelector(selector) {
+      if (selector === 'video, audio') {
+        return { paused: false, readyState: 4, currentTime: 12, duration: 60, networkState: 1, error: null };
+      }
+      return { innerText: '视频因格式不支持或者服务器或网络的问题无法加载。', style: {} };
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, 'input[type="radio"]');
+      return [
+        { value: '公网1', checked: true, disabled: false },
+        { value: '公网2', checked: false, disabled: false }
+      ];
+    }
+  };
+
+  const diagnostics = mod.inspectVideoLoadState(root);
+  assert.equal(diagnostics.failureTextDetected, true);
+  assert.equal(diagnostics.playbackHealthy, true);
+  assert.equal(diagnostics.mediaCurrentTime, 12);
+  assert.deepEqual(diagnostics.routeControls.map((route) => route.key), ['公网1', '公网2']);
+});
+
 test('cx wires recovery into the study scanner and media runner', async () => {
   const source = await (await import('node:fs/promises')).readFile(resolve(process.cwd(), 'src', 'projects', 'cx.ts'), 'utf8');
 
@@ -141,6 +182,8 @@ test('cx wires recovery into the study scanner and media runner', async () => {
   assert.equal(source.includes('CXAnalyses.getCurrentChapterKey() || CXAnalyses.getCurrentChapterStayKey()'), false);
   assert.equal(source.includes('handleVisibleContentRecovery'), true);
   assert.equal(source.includes('trySwitchVideoRoute'), true);
+  assert.equal(source.includes('inspectVideoLoadState'), true);
+  assert.equal(source.includes('视频线路状态诊断'), true);
   assert.equal(source.includes('shouldWaitAfterVideoRouteSwitch'), true);
   assert.equal(source.includes('视频线路切换等待诊断'), true);
   assert.equal(source.includes("logDebug('warn', '视频线路切换诊断'"), true);

@@ -38,6 +38,7 @@ import { resolveManualAnswerState } from './cx-manual-state.js';
 import { shouldSkipCacheForAutomaticRetry } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
+  inspectVideoLoadState,
   isVideoLoadFailure,
   resumeVisibleContentRecovery,
   shouldWaitAfterVideoRouteSwitch,
@@ -2539,10 +2540,23 @@ const JobRunner = {
         jobName: attachment?.property?.name || attachment?.property?.title
       });
       const reloadInterval = setInterval(() => {
+        const videoDiagnostics = inspectVideoLoadState(doc);
+        if (videoDiagnostics.failureTextDetected || lastVideoRouteSwitchAt !== undefined) {
+          logDebug('info', '视频线路状态诊断', {
+            ...videoDiagnostics,
+            attemptedRouteCount: attemptedVideoRoutes.size
+          }, `视频状态：failureText=${String(videoDiagnostics.failureTextDetected)} errorVisible=${String(videoDiagnostics.errorElementVisible)} playbackHealthy=${String(videoDiagnostics.playbackHealthy)} paused=${String(videoDiagnostics.mediaPaused)} readyState=${String(videoDiagnostics.mediaReadyState)} currentTime=${String(videoDiagnostics.mediaCurrentTime)}`, {
+            correlationId: mediaCorrelationId,
+            throttleKey: `video-route-state:${mediaCorrelationId}:${String(videoDiagnostics.failureTextDetected)}:${String(videoDiagnostics.playbackHealthy)}:${String(videoDiagnostics.mediaPaused)}:${String(videoDiagnostics.mediaReadyState)}:${videoDiagnostics.routeControls.map((route) => `${route.key}:${String(route.checked)}:${String(route.disabled)}`).join(',')}`,
+            throttleMs: 5000
+          });
+        }
+
         if (trySwitchVideoRoute(doc, attemptedVideoRoutes)) {
           lastVideoRouteSwitchAt = Date.now();
           logDebug('warn', '视频线路切换诊断', {
             attemptedRouteCount: attemptedVideoRoutes.size,
+            ...videoDiagnostics,
             jobName: attachment?.property?.name || attachment?.property?.title || '',
             targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
           }, `检测到视频加载失败，正在尝试切换备用线路（已尝试 ${attemptedVideoRoutes.size} 条线路）。`, { correlationId: mediaCorrelationId });
@@ -2555,6 +2569,7 @@ const JobRunner = {
           if (shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
             logDebug('info', '视频线路切换等待诊断', {
               attemptedRouteCount: attemptedVideoRoutes.size,
+              ...videoDiagnostics,
               graceMs: VIDEO_ROUTE_SWITCH_GRACE_MS,
               jobName: attachment?.property?.name || attachment?.property?.title || '',
               targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
@@ -2564,6 +2579,7 @@ const JobRunner = {
 
           logDebug('error', '视频线路切换失败诊断', {
             attemptedRouteCount: attemptedVideoRoutes.size,
+            ...videoDiagnostics,
             jobName: attachment?.property?.name || attachment?.property?.title || '',
             targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
           }, '视频加载失败且没有可用备用线路，即将跳过视频。', { correlationId: mediaCorrelationId });
