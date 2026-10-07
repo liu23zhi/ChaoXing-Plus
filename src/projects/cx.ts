@@ -35,7 +35,7 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
-import { shouldSkipCacheForAutomaticRetry } from './cx-retry-cache.js';
+import { shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
   inspectVideoLoadState,
@@ -850,6 +850,23 @@ async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continu
   return result;
 }
 
+const manualAnswerRequiredMessage = '检测到题目但当前无法安全自动作答，请手动处理。';
+const aiFallbackNoAnswerMessage = 'AI 兜底未返回可用答案。';
+
+function notifyManualAnswerRequired(results: RetryFailureSnapshot[]) {
+  const requiresManualAnswer = results.some((result) =>
+    !result.result?.finish && [result.error, ...(result.ctx?.searchInfos ?? []).map((info) => info.error)]
+      .some((error) => error?.includes(aiFallbackNoAnswerMessage))
+  );
+  if (!requiresManualAnswer) {
+    return;
+  }
+
+  showTopCenterNotice(manualAnswerRequiredMessage, { duration: 0, tone: 'warning' });
+  $message.warn({ content: manualAnswerRequiredMessage, duration: 0 });
+  $console.warn(manualAnswerRequiredMessage);
+}
+
 async function appendAIFallbackSearchInfos(
   searchInfos: SearchInformation[],
   workOptions: Pick<CommonWorkOptions, 'enableAIFallbackAnswer' | 'aiFallbackFailureAction'>,
@@ -879,16 +896,14 @@ async function appendAIFallbackSearchInfos(
     return searchInfos.concat(fallbackInfos);
   }
 
-  const msg = '检测到题目但当前无法安全自动作答，请手动处理。';
-  showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
-  $message.warn({ content: msg, duration: 0 });
-  $console.warn(msg);
-
   if (workOptions.aiFallbackFailureAction === 'skip') {
-    return searchInfos.concat(fallbackInfos);
+    return searchInfos.concat(fallbackInfos.map((info) => ({
+      ...info,
+      error: [info.error, aiFallbackNoAnswerMessage].filter(Boolean).join(' ')
+    })));
   }
 
-  throw new Error(msg);
+  throw new Error(aiFallbackNoAnswerMessage);
 }
 
 function detectChapterRetakePrompt() {
@@ -2990,6 +3005,7 @@ const JobRunner = {
         }, undefined, { correlationId: chapterRetryCorrelationId });
         const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
         const retriedResults = await retryWorker.doWork();
+        notifyManualAnswerRequired(retriedResults);
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
           total: roots.length,
@@ -3083,6 +3099,7 @@ const JobRunner = {
 
     const results = await worker.doWork();
     const retryableResults = await retryUnfinishedChapterQuestions(results);
+    notifyManualAnswerRequired(retryableResults);
     logDebug('info', '动作节点诊断：答题结果已生成', {
       resultCount: retryableResults.length,
       uploadMode: upload,
@@ -3132,6 +3149,7 @@ const JobRunner = {
             clearChapterRetakePrompt();
             const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });
             const retryResults = await aiRetryWorker.doWork();
+            notifyManualAnswerRequired(retryResults);
             logDebug('info', '动作节点诊断：AI 二次改答完成', {
               resultCount: retryResults.length,
               uploadMode: upload,
@@ -3961,6 +3979,7 @@ function workOrExam(
         }, undefined, { correlationId: workExamCorrelationId });
         const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
         const retriedResults = await retryWorker.doWork();
+        notifyManualAnswerRequired(retriedResults);
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
           total: liveRoots().length,
@@ -3991,6 +4010,7 @@ function workOrExam(
       try {
         const results = await worker.doWork();
         const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);
+        notifyManualAnswerRequired(retryableResults);
         logDebug('info', '动作节点诊断：作业/考试答题完成', {
           type,
           preview_mode,
@@ -4028,6 +4048,7 @@ function workOrExam(
         await sleep(1000);
       }
 
+      notifyManualAnswerRequired(accumulatedResults);
       await uploadWorkOrExamResults(accumulatedResults);
       worker.emit('done');
     })();

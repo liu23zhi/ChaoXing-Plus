@@ -203,7 +203,7 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
               res = await work(result.ctx);
             }
           } else {
-            error = '搜索不到答案, 请重新运行, 或者忽略此题。';
+            error = result.error ?? '搜索不到答案, 请重新运行, 或者忽略此题。';
           }
         } catch (err) {
           error = (err as any)?.message || String(err);
