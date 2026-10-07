@@ -177,3 +177,19 @@ test('workOrExam debug log panel can be dragged from its header', async () => {
   assert.equal(source.includes("panel.style.bottom = 'auto';"), true);
   assert.equal(source.includes('bindDebugLogPanelDrag(panel, header, targetDocument);'), true);
 });
+
+test('debug log panel reports hit-tested pointer targets and whether its handlers run', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('function bindDebugLogPanelInteractionDiagnostics('), true);
+  assert.equal(source.includes("'pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'click'"), true);
+  assert.equal(source.includes('targetDocument.elementFromPoint(x, y)'), true);
+  assert.equal(source.includes('pointerEvents: style?.pointerEvents'), true);
+  assert.equal(source.includes('panelInEventPath'), true);
+  assert.equal(source.includes('__cxDebugLogPanelDiagnosticsCleanup'), true);
+  assert.equal(source.includes('viewport.removeEventListener(eventType, listener, true);'), true);
+  assert.equal(source.includes("logDebug('info', '调试日志面板交互诊断'"), true);
+  assert.equal(source.includes("logDebug('info', '调试日志面板按钮处理诊断'"), true);
+  assert.equal(source.includes("logDebug('info', '调试日志面板拖动处理诊断'"), true);
+  assert.equal(source.includes('bindDebugLogPanelInteractionDiagnostics(panel, targetDocument);'), true);
+});

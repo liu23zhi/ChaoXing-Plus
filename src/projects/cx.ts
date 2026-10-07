@@ -433,7 +433,11 @@ function isDebugLogPanelEnabled() {
 
 function removeDebugLogPanel() {
   try {
-    getDebugLogPanelDocument().getElementById(debugLogPanelId)?.remove();
+    const panel = getDebugLogPanelDocument().getElementById(debugLogPanelId) as (HTMLElement & {
+      __cxDebugLogPanelDiagnosticsCleanup?: () => void;
+    }) | null;
+    panel?.__cxDebugLogPanelDiagnosticsCleanup?.();
+    panel?.remove();
   } catch {
     // Debug UI must never break the automation flow.
   }
@@ -529,6 +533,113 @@ async function copyDebugLogPanelText(text: string, targetDocument: Document) {
   }
 }
 
+function describeDebugLogPanelHitTarget(element: Element | null, targetDocument: Document) {
+  if (!element) {
+    return null;
+  }
+
+  const style = targetDocument.defaultView?.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return {
+    tagName: element.tagName.toLowerCase(),
+    id: element.id || undefined,
+    className: typeof element.className === 'string' ? element.className.trim().slice(0, 120) || undefined : undefined,
+    closestId: element.closest<HTMLElement>('[id]')?.id || undefined,
+    pointerEvents: style?.pointerEvents,
+    zIndex: style?.zIndex,
+    position: style?.position,
+    display: style?.display,
+    visibility: style?.visibility,
+    opacity: style?.opacity,
+    rect: {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    }
+  };
+}
+
+function bindDebugLogPanelInteractionDiagnostics(panel: HTMLElement, targetDocument: Document) {
+  const viewport = targetDocument.defaultView;
+  const panelWithDiagnostics = panel as HTMLElement & {
+    __cxDebugLogPanelDiagnosticsBound?: boolean;
+    __cxDebugLogPanelDiagnosticsCleanup?: () => void;
+  };
+  if (!viewport || panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound) {
+    return;
+  }
+
+  panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound = true;
+  let pointerSequenceStartedInsidePanel = false;
+  let pointerMoveLogged = false;
+
+  const eventTypes = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'click'] as const;
+  const listeners: Array<{ eventType: typeof eventTypes[number]; listener: (event: Event) => void }> = [];
+  for (const eventType of eventTypes) {
+    const listener = (event: Event) => {
+      const pointerEvent = event as PointerEvent;
+      const x = typeof pointerEvent.clientX === 'number' ? pointerEvent.clientX : undefined;
+      const y = typeof pointerEvent.clientY === 'number' ? pointerEvent.clientY : undefined;
+      const rect = panel.getBoundingClientRect();
+      const pointInsidePanel = x !== undefined && y !== undefined
+        && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      const panelInEventPath = event.composedPath().includes(panel);
+      const isFirstDragMove = eventType === 'pointermove' && pointerSequenceStartedInsidePanel && !pointerMoveLogged;
+
+      if (!pointInsidePanel && !panelInEventPath && !isFirstDragMove) {
+        return;
+      }
+
+      if (eventType === 'pointerdown' && pointInsidePanel) {
+        pointerSequenceStartedInsidePanel = true;
+        pointerMoveLogged = false;
+      }
+
+      const hitTarget = x !== undefined && y !== undefined ? targetDocument.elementFromPoint(x, y) : event.target as Element | null;
+      const hitStack = x !== undefined && y !== undefined
+        ? targetDocument.elementsFromPoint(x, y).slice(0, 6).map((element) => describeDebugLogPanelHitTarget(element, targetDocument))
+        : [];
+      const details = {
+        eventType,
+        target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
+        elementFromPoint: describeDebugLogPanelHitTarget(hitTarget, targetDocument),
+        hitStack,
+        panelInEventPath,
+        defaultPrevented: event.defaultPrevented,
+        eventPhase: event.eventPhase,
+        pointerId: typeof pointerEvent.pointerId === 'number' ? pointerEvent.pointerId : undefined,
+        pointerType: pointerEvent.pointerType,
+        button: pointerEvent.button,
+        buttons: pointerEvent.buttons,
+        activeElement: describeDebugLogPanelHitTarget(targetDocument.activeElement, targetDocument),
+        visibilityState: targetDocument.visibilityState,
+        fullscreenElement: describeDebugLogPanelHitTarget(targetDocument.fullscreenElement, targetDocument),
+        pointInsidePanel
+      };
+      logDebug('info', '调试日志面板交互诊断', details);
+
+      if (isFirstDragMove) {
+        pointerMoveLogged = true;
+      }
+      if (eventType === 'pointerup' || eventType === 'pointercancel') {
+        pointerSequenceStartedInsidePanel = false;
+        pointerMoveLogged = false;
+      }
+    };
+    listeners.push({ eventType, listener });
+    viewport.addEventListener(eventType, listener, true);
+  }
+
+  panelWithDiagnostics.__cxDebugLogPanelDiagnosticsCleanup = () => {
+    for (const { eventType, listener } of listeners) {
+      viewport.removeEventListener(eventType, listener, true);
+    }
+    panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound = false;
+    panelWithDiagnostics.__cxDebugLogPanelDiagnosticsCleanup = undefined;
+  };
+}
+
 function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDocument: Document) {
   if ((panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound) {
     return;
@@ -536,9 +647,30 @@ function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDo
 
   (panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound = true;
   header.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || (event.target as HTMLElement | null)?.closest('button')) {
+    const rejectedReason = event.button !== 0
+      ? 'non-primary-button'
+      : (event.target as HTMLElement | null)?.closest('button')
+        ? 'button-target'
+        : undefined;
+    if (rejectedReason) {
+      logDebug('info', '调试日志面板拖动处理诊断', {
+        stage: 'pointerdown-rejected',
+        reason: rejectedReason,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
+        panelInEventPath: event.composedPath().includes(panel)
+      });
       return;
     }
+
+    logDebug('info', '调试日志面板拖动处理诊断', {
+      stage: 'pointerdown',
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
+      panelInEventPath: event.composedPath().includes(panel)
+    });
 
     const rect = panel.getBoundingClientRect();
     const startX = event.clientX;
@@ -559,6 +691,11 @@ function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDo
     };
 
     const onUp = () => {
+      logDebug('info', '调试日志面板拖动处理诊断', {
+        stage: 'pointerup',
+        pointerId: event.pointerId,
+        hasPointerCapture: header.hasPointerCapture?.(event.pointerId) ?? false
+      });
       viewport.removeEventListener('pointermove', onMove);
       viewport.removeEventListener('pointerup', onUp);
     };
@@ -662,17 +799,40 @@ function ensureDebugLogPanel() {
   debugLogPanelBody.style.flexDirection = 'column';
   debugLogPanelBody.style.gap = '8px';
 
-  clearButton.addEventListener('click', () => {
+  clearButton.addEventListener('click', (event) => {
+    logDebug('info', '调试日志面板按钮处理诊断', {
+      action: 'clear',
+      stage: 'click',
+      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
+      logCountBeforeClear: debugLogPanelBody.children.length
+    });
     debugLogPanelBody.replaceChildren();
   });
-  copyButton.addEventListener('click', async () => {
-    const copied = await copyDebugLogPanelText(collectDebugLogPanelText(debugLogPanelBody), targetDocument);
+  copyButton.addEventListener('click', async (event) => {
+    const text = collectDebugLogPanelText(debugLogPanelBody);
+    logDebug('info', '调试日志面板按钮处理诊断', {
+      action: 'copy',
+      stage: 'click',
+      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
+      textLength: text.length
+    });
+    const copied = await copyDebugLogPanelText(text, targetDocument);
+    logDebug('info', '调试日志面板按钮处理诊断', {
+      action: 'copy',
+      stage: 'complete',
+      copied
+    });
     copyButton.textContent = copied ? '已复制' : '无日志';
     window.setTimeout(() => {
       copyButton.textContent = '复制';
     }, 1500);
   });
-  hideButton.addEventListener('click', () => {
+  hideButton.addEventListener('click', (event) => {
+    logDebug('info', '调试日志面板按钮处理诊断', {
+      action: 'hide',
+      stage: 'click',
+      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument)
+    });
     panel.style.display = 'none';
   });
 
@@ -681,6 +841,7 @@ function ensureDebugLogPanel() {
   bindDebugLogPanelDrag(panel, header, targetDocument);
   panel.append(header, debugLogPanelBody);
   (targetDocument.body || targetDocument.documentElement).appendChild(panel);
+  bindDebugLogPanelInteractionDiagnostics(panel, targetDocument);
 
   return debugLogPanelBody;
 }
