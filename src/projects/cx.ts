@@ -2535,21 +2535,46 @@ const JobRunner = {
     return new Promise<void>((resolve) => {
       const attemptedVideoRoutes = new Set<unknown>();
       let lastVideoRouteSwitchAt: number | undefined;
+      let lastVideoRouteWaitLoggedAt: number | undefined;
+      let lastVideoRouteStateKey: string | undefined;
       const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
         targetJobId: attachment?.jobid || attachment?.property?._jobid,
         jobName: attachment?.property?.name || attachment?.property?.title
       });
       const reloadInterval = setInterval(() => {
         const videoDiagnostics = inspectVideoLoadState(doc);
-        if (videoDiagnostics.failureTextDetected || lastVideoRouteSwitchAt !== undefined) {
+        const videoRouteStateKey = JSON.stringify({
+          failureTextDetected: videoDiagnostics.failureTextDetected,
+          errorElementVisible: videoDiagnostics.errorElementVisible,
+          loadFailureReason: videoDiagnostics.loadFailureReason,
+          mediaLoaded: videoDiagnostics.mediaLoaded,
+          mediaPaused: videoDiagnostics.mediaPaused,
+          mediaErrorCode: videoDiagnostics.mediaErrorCode,
+          routeControls: videoDiagnostics.routeControls
+        });
+        if (
+          videoRouteStateKey !== lastVideoRouteStateKey &&
+          (videoDiagnostics.failureTextDetected || videoDiagnostics.loadFailureDetected || lastVideoRouteSwitchAt !== undefined)
+        ) {
+          lastVideoRouteStateKey = videoRouteStateKey;
           logDebug('info', '视频线路状态诊断', {
             ...videoDiagnostics,
             attemptedRouteCount: attemptedVideoRoutes.size
-          }, `视频状态：failureText=${String(videoDiagnostics.failureTextDetected)} errorVisible=${String(videoDiagnostics.errorElementVisible)} playbackHealthy=${String(videoDiagnostics.playbackHealthy)} paused=${String(videoDiagnostics.mediaPaused)} readyState=${String(videoDiagnostics.mediaReadyState)} currentTime=${String(videoDiagnostics.mediaCurrentTime)}`, {
-            correlationId: mediaCorrelationId,
-            throttleKey: `video-route-state:${mediaCorrelationId}:${String(videoDiagnostics.failureTextDetected)}:${String(videoDiagnostics.playbackHealthy)}:${String(videoDiagnostics.mediaPaused)}:${String(videoDiagnostics.mediaReadyState)}:${videoDiagnostics.routeControls.map((route) => `${route.key}:${String(route.checked)}:${String(route.disabled)}`).join(',')}`,
-            throttleMs: 5000
-          });
+          }, `视频状态：loadFailure=${String(videoDiagnostics.loadFailureDetected)} reason=${videoDiagnostics.loadFailureReason} failureText=${String(videoDiagnostics.failureTextDetected)} errorVisible=${String(videoDiagnostics.errorElementVisible)} mediaLoaded=${String(videoDiagnostics.mediaLoaded)} playbackHealthy=${String(videoDiagnostics.playbackHealthy)} paused=${String(videoDiagnostics.mediaPaused)} readyState=${String(videoDiagnostics.mediaReadyState)} currentTime=${String(videoDiagnostics.mediaCurrentTime)}`, { correlationId: mediaCorrelationId });
+        }
+
+        if (videoDiagnostics.loadFailureDetected && shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
+          if (lastVideoRouteWaitLoggedAt !== lastVideoRouteSwitchAt) {
+            lastVideoRouteWaitLoggedAt = lastVideoRouteSwitchAt;
+            logDebug('info', '视频线路切换等待诊断', {
+              attemptedRouteCount: attemptedVideoRoutes.size,
+              ...videoDiagnostics,
+              graceMs: VIDEO_ROUTE_SWITCH_GRACE_MS,
+              jobName: attachment?.property?.name || attachment?.property?.title || '',
+              targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
+            }, '备用线路已切换，等待播放器完成线路加载。', { correlationId: mediaCorrelationId });
+          }
+          return;
         }
 
         if (trySwitchVideoRoute(doc, attemptedVideoRoutes)) {
@@ -2559,24 +2584,13 @@ const JobRunner = {
             ...videoDiagnostics,
             jobName: attachment?.property?.name || attachment?.property?.title || '',
             targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
-          }, `检测到视频加载失败，正在尝试切换备用线路（已尝试 ${attemptedVideoRoutes.size} 条线路）。`, { correlationId: mediaCorrelationId });
+          }, `检测到视频加载失败，正在尝试切换备用线路（已尝试 ${attemptedVideoRoutes.size} 条线路，含初始线路）。`, { correlationId: mediaCorrelationId });
           $console.warn('检测到视频加载失败，正在尝试切换备用线路。');
           $message.warn('检测到视频加载失败，正在尝试切换备用线路。');
           return;
         }
 
         if (isVideoLoadFailure(doc)) {
-          if (shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
-            logDebug('info', '视频线路切换等待诊断', {
-              attemptedRouteCount: attemptedVideoRoutes.size,
-              ...videoDiagnostics,
-              graceMs: VIDEO_ROUTE_SWITCH_GRACE_MS,
-              jobName: attachment?.property?.name || attachment?.property?.title || '',
-              targetJobId: attachment?.jobid || attachment?.property?._jobid || ''
-            }, '备用线路已切换，等待播放器完成线路加载。', { correlationId: mediaCorrelationId });
-            return;
-          }
-
           logDebug('error', '视频线路切换失败诊断', {
             attemptedRouteCount: attemptedVideoRoutes.size,
             ...videoDiagnostics,
@@ -2589,7 +2603,9 @@ const JobRunner = {
           setTimeout(resolve, 3000);
         }
 
-        lastVideoRouteSwitchAt = undefined;
+        if (!shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
+          lastVideoRouteSwitchAt = undefined;
+        }
       }, 3000);
 
       const playFunction = async () => {

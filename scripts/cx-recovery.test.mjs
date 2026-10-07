@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 
 const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-cx-recovery-cjs');
@@ -44,6 +46,71 @@ function createStorage() {
     },
     removeItem(key) {
       values.delete(key);
+    }
+  };
+}
+
+async function createVideoMonitor(mod) {
+  const source = await readFile(resolve(process.cwd(), 'src', 'projects', 'cx.ts'), 'utf8');
+  const start = source.indexOf('const attemptedVideoRoutes = new Set<unknown>();');
+  const intervalEnd = '}, 3000);';
+  const end = source.indexOf(intervalEnd, start);
+  assert.ok(start >= 0 && end > start, 'the media route monitor must be present');
+  const script = ts.transpileModule(source.slice(start, end + intervalEnd.length), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const media = { paused: true, readyState: 0, networkState: 3, error: { code: 4 } };
+  const clicks = [];
+  const logs = [];
+  const skips = [];
+  let activeIndex = 0;
+  let now = 1000;
+  let tick;
+  const doc = {
+    querySelector(selector) {
+      return selector === 'video, audio'
+        ? media
+        : { innerText: '视频因格式不支持或者服务器或网络的问题无法加载。', style: {} };
+    },
+    querySelectorAll() {
+      return Array.from({ length: 3 }, (_, index) => ({
+        value: 'on',
+        checked: index === activeIndex,
+        click() {
+          activeIndex = index;
+          clicks.push(index);
+        }
+      }));
+    }
+  };
+  // Execute the production interval without starting a browser or real timers.
+  runInNewContext(script, {
+    ...mod,
+    doc,
+    attachment: { jobid: 'video-1', property: { name: '木雕' } },
+    CXAnalyses: { getCurrentChapterStayKey: () => 'chapter-1' },
+    buildChapterCorrelationId: () => 'chapter-1:video-1',
+    Date: { now: () => now },
+    shouldWaitAfterVideoRouteSwitch: (switchedAt) => mod.shouldWaitAfterVideoRouteSwitch(switchedAt, now),
+    logDebug: (level, title, details) => logs.push({ level, title, details }),
+    $console: { warn() {}, error() {} },
+    $message: { warn() {}, error() {} },
+    setInterval(callback, delay) {
+      assert.equal(delay, 3000);
+      tick = callback;
+      return 1;
+    },
+    clearInterval() {},
+    setTimeout(callback, delay) {
+      skips.push(delay);
+    },
+    resolve() {}
+  });
+  return {
+    media, clicks, logs, skips,
+    tick(time) {
+      now = time;
+      tick();
     }
   };
 }
@@ -145,6 +212,139 @@ test('video route recovery ignores stale error text while the media element is p
   assert.equal(mod.isVideoLoadFailure({ innerText: errorText }), true);
 });
 
+test('recovered video can pause or buffer without triggering route recovery from stale text', async () => {
+  const mod = await loadHelperModule();
+  const media = { paused: true, readyState: 4, networkState: 1, currentTime: 35.397296, error: null };
+  let clicks = 0;
+  const root = {
+    querySelector(selector) {
+      return selector === 'video, audio'
+        ? media
+        : { innerText: '视频因格式不支持或者服务器或网络的问题无法加载。', style: {} };
+    },
+    querySelectorAll() {
+      return [{ checked: false, disabled: false, click() { clicks += 1; } }];
+    }
+  };
+
+  const diagnostics = mod.inspectVideoLoadState(root);
+  assert.equal(diagnostics.playbackHealthy, false);
+  assert.equal(mod.isVideoLoadFailure(root), false);
+  assert.equal(mod.trySwitchVideoRoute(root, new Set()), false);
+  assert.equal(clicks, 0);
+
+  media.readyState = 1;
+  media.networkState = 2;
+  assert.equal(mod.isVideoLoadFailure(root), false);
+  media.readyState = 0;
+  assert.equal(mod.isVideoLoadFailure(root), false);
+
+  media.error = { code: 4, message: 'New source error' };
+  assert.equal(mod.isVideoLoadFailure(root), true);
+});
+
+test('actual media errors trigger recovery even when no error text is present', async () => {
+  const mod = await loadHelperModule();
+  const root = {
+    querySelector(selector) {
+      return selector === 'video, audio'
+        ? { paused: true, readyState: 0, networkState: 3, error: { code: 4 } }
+        : null;
+    }
+  };
+  assert.equal(mod.isVideoLoadFailure(root), true);
+});
+
+test('error visibility checks the computed style of parent elements', async () => {
+  const mod = await loadHelperModule();
+  const parent = { style: {} };
+  const ownerDocument = {
+    defaultView: {
+      getComputedStyle(node) {
+        return { display: node === parent ? 'none' : 'block', visibility: 'visible', opacity: '1' };
+      }
+    }
+  };
+  parent.ownerDocument = ownerDocument;
+  const errorElement = {
+    innerText: '视频因格式不支持或者服务器或网络的问题无法加载。',
+    style: {},
+    parentElement: parent,
+    ownerDocument
+  };
+  const root = {
+    querySelector(selector) {
+      return selector === 'video, audio'
+        ? { paused: true, readyState: 0, networkState: 3, error: null }
+        : errorElement;
+    }
+  };
+
+  assert.equal(mod.inspectVideoLoadState(root).errorElementVisible, false);
+  assert.equal(mod.isVideoLoadFailure(root), false);
+});
+
+test('visible load errors still recover when the media has no usable source', async () => {
+  const mod = await loadHelperModule();
+  const media = { paused: true, readyState: 0, networkState: 3, error: null };
+  const root = {
+    querySelector(selector) {
+      return selector === 'video, audio'
+        ? media
+        : { innerText: '视频因格式不支持或者服务器或网络的问题无法加载。', style: {} };
+    }
+  };
+  assert.equal(mod.isVideoLoadFailure(root), true);
+  media.networkState = 0;
+  assert.equal(mod.isVideoLoadFailure(root), true);
+});
+
+test('radio routes with the default on value keep distinct identities across recreated controls', async () => {
+  const mod = await loadHelperModule();
+  const attempted = new Set();
+  let activeIndex = 0;
+  const clicks = [];
+  const root = {
+    innerText: '视频因格式不支持或者服务器或网络的问题无法加载。',
+    querySelectorAll() {
+      return Array.from({ length: 3 }, (_, index) => ({
+        value: 'on',
+        checked: index === activeIndex,
+        disabled: false,
+        click() {
+          activeIndex = index;
+          clicks.push(index);
+        }
+      }));
+    }
+  };
+
+  assert.deepEqual(mod.inspectVideoLoadState(root).routeControls.map((route) => route.key), ['route-1', 'route-2', 'route-3']);
+  assert.equal(mod.trySwitchVideoRoute(root, attempted), true);
+  assert.equal(mod.trySwitchVideoRoute(root, attempted), true);
+  assert.equal(mod.trySwitchVideoRoute(root, attempted), false);
+  assert.deepEqual(clicks, [1, 2]);
+  assert.equal(attempted.size, 3);
+});
+
+test('explicit route values cannot collide with generated default-on route keys', async () => {
+  const mod = await loadHelperModule();
+  let clicks = 0;
+  const root = {
+    innerText: '视频因格式不支持或者服务器或网络的问题无法加载。',
+    querySelectorAll() {
+      return [
+        { value: 'route-2', checked: true },
+        { value: 'on', checked: false, click() { clicks += 1; } }
+      ];
+    }
+  };
+  const keys = mod.inspectVideoLoadState(root).routeControls.map((route) => route.key);
+  assert.equal(new Set(keys).size, 2);
+  assert.equal(mod.trySwitchVideoRoute(root, new Set()), true);
+  assert.equal(clicks, 1);
+});
+
 test('video diagnostics expose stale error text, media playback state, and route controls', async () => {
   const mod = await loadHelperModule();
   const root = {
@@ -167,7 +367,85 @@ test('video diagnostics expose stale error text, media playback state, and route
   assert.equal(diagnostics.failureTextDetected, true);
   assert.equal(diagnostics.playbackHealthy, true);
   assert.equal(diagnostics.mediaCurrentTime, 12);
-  assert.deepEqual(diagnostics.routeControls.map((route) => route.key), ['公网1', '公网2']);
+  assert.deepEqual(diagnostics.routeControls.map((route) => route.key), ['value:公网1', 'value:公网2']);
+});
+
+test('the media monitor waits for each alternate route and does not skip recovered pauses', async () => {
+  const mod = await loadHelperModule();
+  const monitor = await createVideoMonitor(mod);
+  monitor.tick(1000);
+  assert.deepEqual(monitor.clicks, [1]);
+  monitor.tick(4000);
+  assert.deepEqual(monitor.clicks, [1]);
+  assert.equal(monitor.logs.at(-1).title, '视频线路切换等待诊断');
+  monitor.tick(12000);
+  assert.deepEqual(monitor.clicks, [1, 2]);
+  monitor.tick(15000);
+  assert.deepEqual(monitor.skips, []);
+
+  Object.assign(monitor.media, { error: null, paused: false, readyState: 4, networkState: 1 });
+  monitor.tick(18000);
+  monitor.media.paused = true;
+  monitor.tick(53000);
+  assert.deepEqual(monitor.clicks, [1, 2]);
+  assert.deepEqual(monitor.skips, []);
+  assert.equal(monitor.logs.some((log) => log.level === 'error'), false);
+});
+
+test('the media monitor reports failure only after all alternate routes finish their grace periods', async () => {
+  const mod = await loadHelperModule();
+  const monitor = await createVideoMonitor(mod);
+  monitor.tick(1000);
+  monitor.tick(4000);
+  monitor.tick(12000);
+  monitor.tick(15000);
+  assert.deepEqual(monitor.clicks, [1, 2]);
+  assert.deepEqual(monitor.skips, []);
+  monitor.tick(23000);
+  assert.deepEqual(monitor.skips, [3000]);
+  assert.equal(monitor.logs.at(-1).title, '视频线路切换失败诊断');
+  assert.equal(monitor.logs.at(-1).details.loadFailureReason, 'media-error');
+});
+
+test('the media monitor preserves its grace period while the new source is still loading', async () => {
+  const mod = await loadHelperModule();
+  for (const readyState of [0, 1]) {
+    const monitor = await createVideoMonitor(mod);
+    monitor.tick(1000);
+    Object.assign(monitor.media, { error: null, readyState, networkState: 2 });
+    monitor.tick(4000);
+    monitor.media.error = { code: 4 };
+    monitor.tick(7000);
+    assert.deepEqual(monitor.clicks, [1]);
+    assert.deepEqual(monitor.skips, []);
+    monitor.tick(12000);
+    assert.deepEqual(monitor.clicks, [1, 2]);
+  }
+});
+
+test('video state and route waiting diagnostics are not repeated while the state stays unchanged', async () => {
+  const mod = await loadHelperModule();
+  const monitor = await createVideoMonitor(mod);
+  Object.assign(monitor.media, { error: null, paused: false, readyState: 4, networkState: 1, currentTime: 2 });
+  monitor.tick(1000);
+  monitor.media.currentTime = 8;
+  monitor.tick(7000);
+  monitor.media.readyState = 3;
+  monitor.tick(13000);
+  assert.equal(monitor.logs.filter((log) => log.title === '视频线路状态诊断').length, 1);
+  monitor.media.paused = true;
+  monitor.tick(19000);
+  monitor.tick(25000);
+  assert.equal(monitor.logs.filter((log) => log.title === '视频线路状态诊断').length, 2);
+
+  const failing = await createVideoMonitor(mod);
+  failing.tick(1000);
+  failing.tick(4000);
+  const stateLogCount = failing.logs.filter((log) => log.title === '视频线路状态诊断').length;
+  failing.tick(7000);
+  failing.tick(10000);
+  assert.equal(failing.logs.filter((log) => log.title === '视频线路状态诊断').length, stateLogCount);
+  assert.equal(failing.logs.filter((log) => log.title === '视频线路切换等待诊断').length, 1);
 });
 
 test('cx wires recovery into the study scanner and media runner', async () => {

@@ -144,6 +144,47 @@ type VideoRouteControlDiagnostics = {
   disabled: boolean;
 };
 
+type VideoRouteControl = {
+  id?: string;
+  value?: string;
+  ariaLabel?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  ariaDisabled?: string;
+  click?: () => void;
+};
+
+function getVideoRouteControls(root: VideoRouteRoot) {
+  const controls = Array.from(root.querySelectorAll?.('input[type="radio"]') ?? []) as VideoRouteControl[];
+  const identities = controls.map((control) => {
+    if (control.id) return `id:${control.id}`;
+    if (control.ariaLabel) return `label:${control.ariaLabel}`;
+    return control.value && control.value !== 'on' ? `value:${control.value}` : '';
+  });
+  return controls.map((control, index) => ({
+    control,
+    key: identities[index] && identities.indexOf(identities[index]) === identities.lastIndexOf(identities[index])
+      ? identities[index]
+      : `route-${index + 1}`
+  }));
+}
+
+function isVideoErrorElementVisible(element: HTMLElement | null): boolean {
+  if (!element || element.isConnected === false) {
+    return false;
+  }
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (current.hidden) {
+      return false;
+    }
+    const style = current.ownerDocument?.defaultView?.getComputedStyle(current) ?? current.style;
+    if (style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse' || style?.opacity === '0') {
+      return false;
+    }
+  }
+  return true;
+}
+
 export type VideoLoadDiagnostics = {
   failureTextDetected: boolean;
   errorText: string;
@@ -157,7 +198,11 @@ export type VideoLoadDiagnostics = {
   mediaNetworkState?: number;
   mediaErrorCode?: number;
   mediaErrorMessage?: string;
+  mediaLoaded: boolean;
+  mediaHasError: boolean;
   playbackHealthy: boolean;
+  loadFailureDetected: boolean;
+  loadFailureReason: 'media-error' | 'unloaded-error-display' | 'none';
   routeControls: VideoRouteControlDiagnostics[];
 };
 
@@ -169,52 +214,50 @@ export function inspectVideoLoadState(root: VideoRouteRoot | null | undefined): 
       errorElementFound: false,
       errorElementVisible: false,
       mediaFound: false,
+      mediaLoaded: false,
+      mediaHasError: false,
       playbackHealthy: false,
+      loadFailureDetected: false,
+      loadFailureReason: 'none',
       routeControls: []
     };
   }
 
   const errorElement = typeof root.querySelector === 'function'
-    ? root.querySelector('[id^="vjserrdisplay-"], .vjs-modal-dialog-content') as {
-      innerText?: string;
-      textContent?: string | null;
-      hidden?: boolean;
-      style?: { display?: string; visibility?: string; opacity?: string };
-    } | null
+    ? (root.querySelector('[id^="vjserrdisplay-"], .vjs-modal-dialog-content') as HTMLElement | null) ?? null
     : null;
   const errorText = String(errorElement?.innerText ?? errorElement?.textContent ?? root.innerText ?? root.textContent ?? '');
   const media = typeof root.querySelector === 'function'
-    ? root.querySelector('video, audio') as {
+    ? (root.querySelector('video, audio') as {
       paused?: boolean;
       readyState?: number;
       currentTime?: number;
       duration?: number;
       networkState?: number;
       error?: { code?: number; message?: string } | null;
-    } | null
+    } | null) ?? null
     : null;
   const mediaError = media?.error ?? null;
-  const routeControls = Array.from(root.querySelectorAll?.('input[type="radio"]') ?? []).map((control, index) => {
-    const route = control as {
-      value?: string;
-      ariaLabel?: string;
-      checked?: boolean;
-      disabled?: boolean;
-      ariaDisabled?: string;
-    };
-    return {
-      key: route.value || route.ariaLabel || `route-${index + 1}`,
-      checked: route.checked === true,
-      disabled: route.disabled === true || route.ariaDisabled === 'true'
-    };
-  });
+  const routeControls = getVideoRouteControls(root).map(({ control, key }) => ({
+    key,
+    checked: control.checked === true,
+    disabled: control.disabled === true || control.ariaDisabled === 'true'
+  }));
+  const mediaHasError = Boolean(mediaError);
+  // Pausing or buffering does not invalidate metadata already loaded for this resource.
+  const mediaLoaded = Boolean(media && (media.readyState ?? 0) >= 1 && !mediaError);
   const playbackHealthy = Boolean(media && media.paused === false && (media.readyState ?? 0) >= 2 && !mediaError);
+  const failureTextDetected = videoFailureMessages.some((message) => errorText.includes(message));
+  const errorElementVisible = isVideoErrorElementVisible(errorElement);
+  const hasUnusableSource = !media || media.networkState === 0 || media.networkState === 3 || media.networkState === undefined;
+  const textFailure = failureTextDetected && (errorElement ? errorElementVisible : true) && !mediaLoaded && hasUnusableSource;
+  const loadFailureReason = mediaHasError ? 'media-error' : textFailure ? 'unloaded-error-display' : 'none';
 
   return {
-    failureTextDetected: videoFailureMessages.some((message) => errorText.includes(message)),
+    failureTextDetected,
     errorText,
     errorElementFound: errorElement !== null,
-    errorElementVisible: Boolean(errorElement && errorElement.hidden !== true && errorElement.style?.display !== 'none' && errorElement.style?.visibility !== 'hidden' && errorElement.style?.opacity !== '0'),
+    errorElementVisible,
     mediaFound: media !== null,
     mediaPaused: media?.paused,
     mediaReadyState: media?.readyState,
@@ -223,7 +266,11 @@ export function inspectVideoLoadState(root: VideoRouteRoot | null | undefined): 
     mediaNetworkState: media?.networkState,
     mediaErrorCode: mediaError?.code,
     mediaErrorMessage: mediaError?.message,
+    mediaLoaded,
+    mediaHasError,
     playbackHealthy,
+    loadFailureDetected: loadFailureReason !== 'none',
+    loadFailureReason,
     routeControls
   };
 }
@@ -237,8 +284,7 @@ export function shouldWaitAfterVideoRouteSwitch(
 }
 
 export function isVideoLoadFailure(root: VideoRouteRoot | null | undefined): boolean {
-  const diagnostics = inspectVideoLoadState(root);
-  return diagnostics.failureTextDetected && !diagnostics.playbackHealthy;
+  return inspectVideoLoadState(root).loadFailureDetected;
 }
 
 export function trySwitchVideoRoute(root: VideoRouteRoot | null | undefined, attemptedControls?: Set<unknown>): boolean {
@@ -246,21 +292,18 @@ export function trySwitchVideoRoute(root: VideoRouteRoot | null | undefined, att
     return false;
   }
 
-  const controls = Array.from(root.querySelectorAll?.('input[type="radio"]') ?? []) as Array<{
-    disabled?: boolean;
-    checked?: boolean;
-    value?: string;
-    ariaLabel?: string;
-    ariaDisabled?: string;
-    click?: () => void;
-  }>;
-  const next = controls.find((control) => {
-    const routeKey = control.value || control.ariaLabel || control;
-    return !control.disabled && control.ariaDisabled !== 'true' && !control.checked && !attemptedControls?.has(routeKey);
-  });
-  if (next?.click) {
-    attemptedControls?.add(next.value || next.ariaLabel || next);
-    next.click();
+  const controls = getVideoRouteControls(root);
+  for (const { control, key } of controls) {
+    if (control.checked) {
+      attemptedControls?.add(key);
+    }
+  }
+  const next = controls.find(({ control, key }) => (
+    !control.disabled && control.ariaDisabled !== 'true' && !control.checked && typeof control.click === 'function' && !attemptedControls?.has(key)
+  ));
+  if (next) {
+    attemptedControls?.add(next.key);
+    next.control.click?.();
     return true;
   }
 
