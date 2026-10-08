@@ -357,6 +357,7 @@ const debugLogPanelDefaultEnabled = false;
 const debugLogPanelLevel: DebugLogLevel = 'debug';
 const debugLogPanelMaxEntries = 200;
 const debugLogPanelId = 'chaoxing-plus-debug-log-panel';
+const debugLogPanelBindingOwner = {};
 const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,
@@ -434,8 +435,13 @@ function isDebugLogPanelEnabled() {
 function removeDebugLogPanel() {
   try {
     const panel = getDebugLogPanelDocument().getElementById(debugLogPanelId) as (HTMLElement & {
+      __cxDebugLogPanelControlsCleanup?: () => void;
+      __cxDebugLogPanelDragCleanup?: () => void;
       __cxDebugLogPanelDiagnosticsCleanup?: () => void;
+      __cxDebugLogPanelBindingOwner?: object;
     }) | null;
+    panel?.__cxDebugLogPanelControlsCleanup?.();
+    panel?.__cxDebugLogPanelDragCleanup?.();
     panel?.__cxDebugLogPanelDiagnosticsCleanup?.();
     panel?.remove();
   } catch {
@@ -561,47 +567,83 @@ function describeDebugLogPanelHitTarget(element: Element | null, targetDocument:
 }
 
 function bindDebugLogPanelInteractionDiagnostics(panel: HTMLElement, targetDocument: Document) {
-  const viewport = targetDocument.defaultView;
   const panelWithDiagnostics = panel as HTMLElement & {
     __cxDebugLogPanelDiagnosticsBound?: boolean;
     __cxDebugLogPanelDiagnosticsCleanup?: () => void;
+    __cxDebugLogPanelDiagnosticsOwner?: object;
   };
-  if (!viewport || panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound) {
+  if (panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound && panelWithDiagnostics.__cxDebugLogPanelDiagnosticsOwner === debugLogPanelBindingOwner) {
     return;
   }
 
   panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound = true;
+  const eventTypes = ['pointerdown', 'pointerup', 'pointercancel', 'click'] as const;
+  const header = panel.querySelector<HTMLElement>('[data-cx-debug-log-panel-drag-handle="true"]');
+  const observedDocuments = new Set<Document>();
+  const observedFrames = new Set<HTMLIFrameElement | HTMLFrameElement>();
+  const listeners: Array<{ target: Document; eventType: typeof eventTypes[number]; listener: (event: Event) => void }> = [];
+  const frameLoadListeners: Array<{ frame: HTMLIFrameElement | HTMLFrameElement; listener: () => void }> = [];
+  const observers: MutationObserver[] = [];
   let pointerSequenceStartedInsidePanel = false;
-  let pointerMoveLogged = false;
 
-  const eventTypes = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'click'] as const;
-  const listeners: Array<{ eventType: typeof eventTypes[number]; listener: (event: Event) => void }> = [];
-  for (const eventType of eventTypes) {
-    const listener = (event: Event) => {
+  const resolveTopViewportPoint = (sourceDocument: Document, clientX: number, clientY: number) => {
+    let currentDocument = sourceDocument;
+    let topClientX = clientX;
+    let topClientY = clientY;
+
+    while (currentDocument !== targetDocument) {
+      const frameElement = currentDocument.defaultView?.frameElement as HTMLElement | null;
+      if (!frameElement) {
+        return undefined;
+      }
+
+      const frameRect = frameElement.getBoundingClientRect();
+      topClientX += frameRect.left;
+      topClientY += frameRect.top;
+      currentDocument = frameElement.ownerDocument;
+    }
+
+    return { clientX: topClientX, clientY: topClientY };
+  };
+
+  const registerDocument = (sourceDocument: Document) => {
+    const viewport = sourceDocument.defaultView;
+    if (!viewport) {
+      return;
+    }
+
+    if (!observedDocuments.has(sourceDocument)) {
+      observedDocuments.add(sourceDocument);
+      for (const eventType of eventTypes) {
+      const listener = (event: Event) => {
       const pointerEvent = event as PointerEvent;
       const x = typeof pointerEvent.clientX === 'number' ? pointerEvent.clientX : undefined;
       const y = typeof pointerEvent.clientY === 'number' ? pointerEvent.clientY : undefined;
-      const rect = panel.getBoundingClientRect();
-      const pointInsidePanel = x !== undefined && y !== undefined
-        && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      const topPoint = x !== undefined && y !== undefined ? resolveTopViewportPoint(sourceDocument, x, y) : undefined;
+      const headerRect = header?.getBoundingClientRect();
+      const pointInsideInteractiveArea = topPoint !== undefined && headerRect !== undefined
+        && topPoint.clientX >= headerRect.left && topPoint.clientX <= headerRect.right
+        && topPoint.clientY >= headerRect.top && topPoint.clientY <= headerRect.bottom;
       const panelInEventPath = event.composedPath().includes(panel);
-      const isFirstDragMove = eventType === 'pointermove' && pointerSequenceStartedInsidePanel && !pointerMoveLogged;
+      const headerInEventPath = header ? event.composedPath().includes(header) : false;
 
-      if (!pointInsidePanel && !panelInEventPath && !isFirstDragMove) {
+      if (!pointInsideInteractiveArea && !headerInEventPath && !pointerSequenceStartedInsidePanel) {
         return;
       }
 
-      if (eventType === 'pointerdown' && pointInsidePanel) {
+      if (eventType === 'pointerdown' && (pointInsideInteractiveArea || headerInEventPath)) {
         pointerSequenceStartedInsidePanel = true;
-        pointerMoveLogged = false;
       }
 
-      const hitTarget = x !== undefined && y !== undefined ? targetDocument.elementFromPoint(x, y) : event.target as Element | null;
-      const hitStack = x !== undefined && y !== undefined
-        ? targetDocument.elementsFromPoint(x, y).slice(0, 6).map((element) => describeDebugLogPanelHitTarget(element, targetDocument))
+      const hitTarget = topPoint !== undefined
+        ? targetDocument.elementFromPoint(topPoint.clientX, topPoint.clientY)
+        : event.target as Element | null;
+      const hitStack = topPoint !== undefined
+        ? targetDocument.elementsFromPoint(topPoint.clientX, topPoint.clientY).slice(0, 6).map((element) => describeDebugLogPanelHitTarget(element, targetDocument))
         : [];
       const details = {
         eventType,
+        sourceDocument: sourceDocument === targetDocument ? 'top' : 'frame',
         target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
         elementFromPoint: describeDebugLogPanelHitTarget(hitTarget, targetDocument),
         hitStack,
@@ -615,38 +657,80 @@ function bindDebugLogPanelInteractionDiagnostics(panel: HTMLElement, targetDocum
         activeElement: describeDebugLogPanelHitTarget(targetDocument.activeElement, targetDocument),
         visibilityState: targetDocument.visibilityState,
         fullscreenElement: describeDebugLogPanelHitTarget(targetDocument.fullscreenElement, targetDocument),
-        pointInsidePanel
+        pointInsideInteractiveArea,
+        headerInEventPath,
+        topClientX: topPoint?.clientX,
+        topClientY: topPoint?.clientY
       };
       logDebug('info', '调试日志面板交互诊断', details);
 
-      if (isFirstDragMove) {
-        pointerMoveLogged = true;
-      }
       if (eventType === 'pointerup' || eventType === 'pointercancel') {
         pointerSequenceStartedInsidePanel = false;
-        pointerMoveLogged = false;
       }
-    };
-    listeners.push({ eventType, listener });
-    viewport.addEventListener(eventType, listener, true);
-  }
+      };
+      listeners.push({ target: sourceDocument, eventType, listener });
+      sourceDocument.addEventListener(eventType, listener, true);
+      }
+    }
+
+    for (const frame of Array.from(sourceDocument.querySelectorAll<HTMLIFrameElement | HTMLFrameElement>('iframe,frame'))) {
+      if (observedFrames.has(frame)) {
+        continue;
+      }
+
+      observedFrames.add(frame);
+      const registerFrame = () => {
+        try {
+          if (frame.contentDocument) {
+            registerDocument(frame.contentDocument);
+          }
+        } catch {
+          // Cross-origin frames cannot expose their document to diagnostics.
+        }
+      };
+      frameLoadListeners.push({ frame, listener: registerFrame });
+      frame.addEventListener('load', registerFrame);
+      registerFrame();
+    }
+
+    if (sourceDocument.documentElement) {
+      const observer = new MutationObserver(() => registerDocument(sourceDocument));
+      observer.observe(sourceDocument.documentElement, { childList: true, subtree: true });
+      observers.push(observer);
+    }
+  };
+
+  registerDocument(targetDocument);
 
   panelWithDiagnostics.__cxDebugLogPanelDiagnosticsCleanup = () => {
-    for (const { eventType, listener } of listeners) {
-      viewport.removeEventListener(eventType, listener, true);
+    for (const { target, eventType, listener } of listeners) {
+      target.removeEventListener(eventType, listener, true);
+    }
+    for (const { frame, listener } of frameLoadListeners) {
+      frame.removeEventListener('load', listener);
+    }
+    for (const observer of observers) {
+      observer.disconnect();
     }
     panelWithDiagnostics.__cxDebugLogPanelDiagnosticsBound = false;
+    panelWithDiagnostics.__cxDebugLogPanelDiagnosticsOwner = undefined;
     panelWithDiagnostics.__cxDebugLogPanelDiagnosticsCleanup = undefined;
-  };
+  }
+  panelWithDiagnostics.__cxDebugLogPanelDiagnosticsOwner = debugLogPanelBindingOwner;
 }
 
 function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDocument: Document) {
-  if ((panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound) {
+  const panelWithDrag = panel as HTMLElement & {
+    __cxDebugLogPanelDragBound?: boolean;
+    __cxDebugLogPanelDragCleanup?: () => void;
+    __cxDebugLogPanelDragOwner?: object;
+  };
+  if (panelWithDrag.__cxDebugLogPanelDragBound && panelWithDrag.__cxDebugLogPanelDragOwner === debugLogPanelBindingOwner) {
     return;
   }
 
-  (panel as HTMLElement & { __cxDebugLogPanelDragBound?: boolean }).__cxDebugLogPanelDragBound = true;
-  header.addEventListener('pointerdown', (event) => {
+  panelWithDrag.__cxDebugLogPanelDragBound = true;
+  const onPointerDown = (event: PointerEvent) => {
     const rejectedReason = event.button !== 0
       ? 'non-primary-button'
       : (event.target as HTMLElement | null)?.closest('button')
@@ -703,7 +787,15 @@ function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDo
     header.setPointerCapture?.(event.pointerId);
     viewport.addEventListener('pointermove', onMove);
     viewport.addEventListener('pointerup', onUp);
-  });
+  };
+  header.addEventListener('pointerdown', onPointerDown);
+  panelWithDrag.__cxDebugLogPanelDragCleanup = () => {
+    header.removeEventListener('pointerdown', onPointerDown);
+    panelWithDrag.__cxDebugLogPanelDragBound = false;
+    panelWithDrag.__cxDebugLogPanelDragOwner = undefined;
+    panelWithDrag.__cxDebugLogPanelDragCleanup = undefined;
+  };
+  panelWithDrag.__cxDebugLogPanelDragOwner = debugLogPanelBindingOwner;
 }
 
 function ensureDebugLogPanel() {
@@ -716,6 +808,24 @@ function ensureDebugLogPanel() {
   const existingPanel = targetDocument.getElementById(debugLogPanelId);
   const existingBody = existingPanel?.querySelector<HTMLElement>('[data-cx-debug-log-panel-body="true"]');
   if (existingBody) {
+    const existingHeader = existingPanel?.querySelector<HTMLElement>('[data-cx-debug-log-panel-drag-handle="true"]');
+    const existingPanelWithBindings = existingPanel as (HTMLElement & {
+      __cxDebugLogPanelControlsCleanup?: () => void;
+      __cxDebugLogPanelDragCleanup?: () => void;
+      __cxDebugLogPanelDiagnosticsCleanup?: () => void;
+      __cxDebugLogPanelBindingOwner?: object;
+    }) | null;
+    const needsRebind = existingPanelWithBindings && (existingPanelWithBindings.__cxDebugLogPanelBindingOwner !== debugLogPanelBindingOwner);
+    if (needsRebind) {
+      existingPanelWithBindings?.__cxDebugLogPanelControlsCleanup?.();
+      existingPanelWithBindings?.__cxDebugLogPanelDragCleanup?.();
+      existingPanelWithBindings?.__cxDebugLogPanelDiagnosticsCleanup?.();
+    }
+    if (needsRebind && existingPanel && existingHeader) {
+      bindDebugLogPanelControls(existingPanel, existingBody, targetDocument);
+      bindDebugLogPanelDrag(existingPanel, existingHeader, targetDocument);
+      bindDebugLogPanelInteractionDiagnostics(existingPanel, targetDocument);
+    }
     return existingBody;
   }
 
@@ -763,6 +873,7 @@ function ensureDebugLogPanel() {
 
   const clearButton = targetDocument.createElement('button');
   clearButton.type = 'button';
+  clearButton.dataset.cxDebugLogPanelAction = 'clear';
   clearButton.textContent = '清空';
   clearButton.style.border = '1px solid rgba(255,255,255,0.22)';
   clearButton.style.borderRadius = '6px';
@@ -773,6 +884,7 @@ function ensureDebugLogPanel() {
 
   const copyButton = targetDocument.createElement('button');
   copyButton.type = 'button';
+  copyButton.dataset.cxDebugLogPanelAction = 'copy';
   copyButton.textContent = '复制';
   copyButton.style.border = clearButton.style.border;
   copyButton.style.borderRadius = clearButton.style.borderRadius;
@@ -783,6 +895,7 @@ function ensureDebugLogPanel() {
 
   const hideButton = targetDocument.createElement('button');
   hideButton.type = 'button';
+  hideButton.dataset.cxDebugLogPanelAction = 'hide';
   hideButton.textContent = '隐藏';
   hideButton.style.border = clearButton.style.border;
   hideButton.style.borderRadius = clearButton.style.borderRadius;
@@ -799,21 +912,56 @@ function ensureDebugLogPanel() {
   debugLogPanelBody.style.flexDirection = 'column';
   debugLogPanelBody.style.gap = '8px';
 
-  clearButton.addEventListener('click', (event) => {
+  bindDebugLogPanelControls(panel, debugLogPanelBody, targetDocument, { clearButton, copyButton, hideButton });
+
+  controls.append(copyButton, clearButton, hideButton);
+  header.append(title, controls);
+  bindDebugLogPanelDrag(panel, header, targetDocument);
+  panel.append(header, debugLogPanelBody);
+  (targetDocument.body || targetDocument.documentElement).appendChild(panel);
+  bindDebugLogPanelInteractionDiagnostics(panel, targetDocument);
+
+  return debugLogPanelBody;
+}
+
+function bindDebugLogPanelControls(
+  panel: HTMLElement,
+  debugLogPanelBody: HTMLElement,
+  targetDocument: Document,
+  controls?: { clearButton: HTMLButtonElement; copyButton: HTMLButtonElement; hideButton: HTMLButtonElement }
+) {
+  const panelWithControls = panel as HTMLElement & {
+    __cxDebugLogPanelControlsCleanup?: () => void;
+    __cxDebugLogPanelControlsOwner?: Window;
+    __cxDebugLogPanelBindingOwner?: object;
+  };
+  if (!controls && panelWithControls.__cxDebugLogPanelControlsOwner === window) {
+    return;
+  }
+  panelWithControls.__cxDebugLogPanelControlsCleanup?.();
+  const existingControls = controls ?? {
+    clearButton: panel.querySelector<HTMLButtonElement>('button[data-cx-debug-log-panel-action="clear"]'),
+    copyButton: panel.querySelector<HTMLButtonElement>('button[data-cx-debug-log-panel-action="copy"]'),
+    hideButton: panel.querySelector<HTMLButtonElement>('button[data-cx-debug-log-panel-action="hide"]')
+  };
+  if (!existingControls.clearButton || !existingControls.copyButton || !existingControls.hideButton) {
+    return;
+  }
+
+  const { clearButton, copyButton, hideButton } = existingControls;
+  const onClear = () => {
     logDebug('info', '调试日志面板按钮处理诊断', {
       action: 'clear',
       stage: 'click',
-      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
       logCountBeforeClear: debugLogPanelBody.children.length
     });
     debugLogPanelBody.replaceChildren();
-  });
-  copyButton.addEventListener('click', async (event) => {
+  };
+  const onCopy = async () => {
     const text = collectDebugLogPanelText(debugLogPanelBody);
     logDebug('info', '调试日志面板按钮处理诊断', {
       action: 'copy',
       stage: 'click',
-      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument),
       textLength: text.length
     });
     const copied = await copyDebugLogPanelText(text, targetDocument);
@@ -826,24 +974,26 @@ function ensureDebugLogPanel() {
     window.setTimeout(() => {
       copyButton.textContent = '复制';
     }, 1500);
-  });
-  hideButton.addEventListener('click', (event) => {
+  };
+  const onHide = () => {
     logDebug('info', '调试日志面板按钮处理诊断', {
       action: 'hide',
-      stage: 'click',
-      target: describeDebugLogPanelHitTarget(event.target as Element | null, targetDocument)
+      stage: 'click'
     });
     panel.style.display = 'none';
-  });
-
-  controls.append(copyButton, clearButton, hideButton);
-  header.append(title, controls);
-  bindDebugLogPanelDrag(panel, header, targetDocument);
-  panel.append(header, debugLogPanelBody);
-  (targetDocument.body || targetDocument.documentElement).appendChild(panel);
-  bindDebugLogPanelInteractionDiagnostics(panel, targetDocument);
-
-  return debugLogPanelBody;
+  };
+  clearButton.addEventListener('click', onClear);
+  copyButton.addEventListener('click', onCopy);
+  hideButton.addEventListener('click', onHide);
+  panelWithControls.__cxDebugLogPanelControlsCleanup = () => {
+    clearButton.removeEventListener('click', onClear);
+    copyButton.removeEventListener('click', onCopy);
+    hideButton.removeEventListener('click', onHide);
+    panelWithControls.__cxDebugLogPanelControlsCleanup = undefined;
+    panelWithControls.__cxDebugLogPanelControlsOwner = undefined;
+  };
+  panelWithControls.__cxDebugLogPanelControlsOwner = window;
+  panelWithControls.__cxDebugLogPanelBindingOwner = debugLogPanelBindingOwner;
 }
 
 function appendDebugLogPanelEntry(
