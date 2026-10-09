@@ -354,9 +354,13 @@ type DebugLogLevel = 'debug' | 'info' | 'warn' | 'error';
 const debugLogPanelSettingKey = 'cx.new.study.enableDebugLogPanel';
 const sharedDebugLogPanelAttribute = getSharedRuntimeStoreAttributeName(debugLogPanelSettingKey);
 const debugLogPanelDefaultEnabled = false;
+let debugLogPanelEnabledState: boolean | undefined;
 const debugLogPanelLevel: DebugLogLevel = 'debug';
 const debugLogPanelMaxEntries = 200;
+const debugLogPanelRenderBatchSize = 20;
+const debugLogPanelMaxEntryTextLength = 4000;
 const debugLogPanelId = 'chaoxing-plus-debug-log-panel';
+const debugLogPanelRenderStateKey = '__chaoxing_plus_debug_log_render_state__';
 const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,
@@ -428,7 +432,15 @@ function getSharedRuntimeStoreAttributeName(key: string) {
 }
 
 function isDebugLogPanelEnabled() {
-  return runtimeStore.get(debugLogPanelSettingKey, debugLogPanelDefaultEnabled);
+  if (typeof debugLogPanelEnabledState !== 'boolean') {
+    debugLogPanelEnabledState = runtimeStore.get(debugLogPanelSettingKey, debugLogPanelDefaultEnabled);
+  }
+  return debugLogPanelEnabledState;
+}
+
+function refreshDebugLogPanelEnabledState() {
+  debugLogPanelEnabledState = runtimeStore.get(debugLogPanelSettingKey, debugLogPanelDefaultEnabled);
+  return debugLogPanelEnabledState;
 }
 
 function removeDebugLogPanel() {
@@ -440,7 +452,7 @@ function removeDebugLogPanel() {
 }
 
 function syncDebugLogPanelVisibility() {
-  if (isDebugLogPanelEnabled()) {
+  if (refreshDebugLogPanelEnabledState()) {
     ensureDebugLogPanel();
   } else {
     removeDebugLogPanel();
@@ -501,6 +513,124 @@ function collectDebugLogPanelText(debugLogPanelBody: HTMLElement) {
     .map((entry) => entry.textContent?.trim() ?? '')
     .filter((line) => Boolean(line))
     .join('\n\n');
+}
+
+type PendingDebugLogPanelEntry = {
+  level: DebugLogLevel;
+  prefix: string;
+  detail?: Record<string, unknown>;
+  textDetail?: string;
+  correlationId?: string;
+};
+
+type DebugLogPanelRenderState = {
+  pending: PendingDebugLogPanelEntry[];
+  scheduled: boolean;
+};
+
+type DebugLogPanelBody = HTMLElement & Record<string, unknown>;
+
+function getDebugLogPanelRenderState(debugLogPanelBody: HTMLElement) {
+  const body = debugLogPanelBody as DebugLogPanelBody;
+  const existingState = body[debugLogPanelRenderStateKey];
+  if (existingState && typeof existingState === 'object') {
+    return existingState as DebugLogPanelRenderState;
+  }
+
+  const state: DebugLogPanelRenderState = { pending: [], scheduled: false };
+  body[debugLogPanelRenderStateKey] = state;
+  return state;
+}
+
+function createDebugLogPanelEntryElement(
+  targetDocument: Document,
+  { level, prefix, detail, textDetail, correlationId }: PendingDebugLogPanelEntry
+) {
+  const row = targetDocument.createElement('div');
+  row.style.borderLeft = `3px solid ${level === 'error' ? '#ff7b72' : level === 'warn' ? '#d29922' : level === 'info' ? '#58a6ff' : '#8b949e'}`;
+  row.style.padding = '6px 8px';
+  row.style.background = 'rgba(255,255,255,0.05)';
+  row.style.borderRadius = '8px';
+  row.style.wordBreak = 'break-word';
+
+  const title = targetDocument.createElement('div');
+  title.textContent = `${new Date().toLocaleTimeString()} ${prefix}`;
+  title.style.color = level === 'error' ? '#ffb4ad' : level === 'warn' ? '#f2cc60' : '#c9d1d9';
+  title.style.fontWeight = '700';
+  row.append(title);
+
+  const lines = [
+    textDetail,
+    formatDebugLogPanelValue(detail),
+    correlationId ? `correlationId=${correlationId}` : ''
+  ].filter((line) => Boolean(line));
+
+  if (lines.length > 0) {
+    const content = targetDocument.createElement('pre');
+    const text = lines.join('\n');
+    const boundedText = text.slice(0, debugLogPanelMaxEntryTextLength);
+    content.textContent = boundedText.length < text.length ? `${boundedText}\n...[内容已截断]` : boundedText;
+    content.style.margin = '4px 0 0';
+    content.style.whiteSpace = 'pre-wrap';
+    content.style.color = '#adbac7';
+    content.style.fontFamily = 'inherit';
+    content.style.fontSize = '11px';
+    row.append(content);
+  }
+
+  return row;
+}
+
+function flushDebugLogPanelEntries(debugLogPanelBody: HTMLElement, targetDocument: Document) {
+  const state = getDebugLogPanelRenderState(debugLogPanelBody);
+  state.scheduled = false;
+  if (state.pending.length === 0) {
+    return;
+  }
+
+  const fragment = targetDocument.createDocumentFragment();
+  const entries = state.pending.splice(0, debugLogPanelRenderBatchSize);
+  for (const entry of entries) {
+    fragment.append(createDebugLogPanelEntryElement(targetDocument, entry));
+  }
+
+  debugLogPanelBody.prepend(fragment);
+  while (debugLogPanelBody.children.length > debugLogPanelMaxEntries) {
+    debugLogPanelBody.lastElementChild?.remove();
+  }
+
+  if (state.pending.length > 0) {
+    scheduleDebugLogPanelFlush(debugLogPanelBody, targetDocument);
+  }
+}
+
+function scheduleDebugLogPanelFlush(debugLogPanelBody: HTMLElement, targetDocument: Document) {
+  const state = getDebugLogPanelRenderState(debugLogPanelBody);
+  if (state.scheduled) {
+    return;
+  }
+
+  state.scheduled = true;
+  const viewport = targetDocument.defaultView;
+  if (viewport?.requestAnimationFrame) {
+    viewport.requestAnimationFrame(() => flushDebugLogPanelEntries(debugLogPanelBody, targetDocument));
+  } else {
+    viewport?.setTimeout(() => flushDebugLogPanelEntries(debugLogPanelBody, targetDocument), 0);
+  }
+}
+
+function enqueueDebugLogPanelEntry(debugLogPanelBody: HTMLElement, targetDocument: Document, entry: PendingDebugLogPanelEntry) {
+  const state = getDebugLogPanelRenderState(debugLogPanelBody);
+  state.pending.push(entry);
+  if (state.pending.length > debugLogPanelMaxEntries) {
+    state.pending.splice(0, state.pending.length - debugLogPanelMaxEntries);
+  }
+  scheduleDebugLogPanelFlush(debugLogPanelBody, targetDocument);
+}
+
+function clearPendingDebugLogPanelEntries(debugLogPanelBody: HTMLElement) {
+  const state = getDebugLogPanelRenderState(debugLogPanelBody);
+  state.pending.length = 0;
 }
 
 async function copyDebugLogPanelText(text: string, targetDocument: Document) {
@@ -663,6 +793,7 @@ function ensureDebugLogPanel() {
   debugLogPanelBody.style.gap = '8px';
 
   clearButton.addEventListener('click', () => {
+    clearPendingDebugLogPanelEntries(debugLogPanelBody);
     debugLogPanelBody.replaceChildren();
   });
   copyButton.addEventListener('click', async () => {
@@ -702,41 +833,13 @@ function appendDebugLogPanelEntry(
       return;
     }
 
-    const targetDocument = body.ownerDocument;
-    const row = targetDocument.createElement('div');
-    row.style.borderLeft = `3px solid ${level === 'error' ? '#ff7b72' : level === 'warn' ? '#d29922' : level === 'info' ? '#58a6ff' : '#8b949e'}`;
-    row.style.padding = '6px 8px';
-    row.style.background = 'rgba(255,255,255,0.05)';
-    row.style.borderRadius = '8px';
-    row.style.wordBreak = 'break-word';
-
-    const title = targetDocument.createElement('div');
-    title.textContent = `${new Date().toLocaleTimeString()} ${prefix}`;
-    title.style.color = level === 'error' ? '#ffb4ad' : level === 'warn' ? '#f2cc60' : '#c9d1d9';
-    title.style.fontWeight = '700';
-    row.append(title);
-
-    const lines = [
+    enqueueDebugLogPanelEntry(body, body.ownerDocument, {
+      level,
+      prefix,
+      detail,
       textDetail,
-      formatDebugLogPanelValue(detail),
-      meta?.correlationId ? `correlationId=${meta.correlationId}` : ''
-    ].filter((line) => Boolean(line));
-
-    if (lines.length > 0) {
-      const content = targetDocument.createElement('pre');
-      content.textContent = lines.join('\n');
-      content.style.margin = '4px 0 0';
-      content.style.whiteSpace = 'pre-wrap';
-      content.style.color = '#adbac7';
-      content.style.fontFamily = 'inherit';
-      content.style.fontSize = '11px';
-      row.append(content);
-    }
-
-    body.prepend(row);
-    while (body.children.length > debugLogPanelMaxEntries) {
-      body.lastElementChild?.remove();
-    }
+      correlationId: meta?.correlationId
+    });
   } catch {
     // Debug UI must never break the automation flow.
   }

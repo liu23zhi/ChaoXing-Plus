@@ -135,6 +135,8 @@ test('workOrExam exposes an on-page debug log panel for submit diagnostics', asy
   assert.equal(source.includes('const debugLogPanelDefaultEnabled = false;'), true);
   assert.equal(source.includes('function isDebugLogPanelEnabled('), true);
   assert.equal(source.includes('runtimeStore.get(debugLogPanelSettingKey, debugLogPanelDefaultEnabled)'), true);
+  assert.equal(source.includes('let debugLogPanelEnabledState: boolean | undefined;'), true);
+  assert.equal(source.includes('function refreshDebugLogPanelEnabledState()'), true);
   assert.equal(source.includes('function getSharedRuntimeStoreAttributeName(key: string)'), true);
   assert.equal(source.includes("return `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;"), true);
   assert.equal(source.includes('const sharedDebugLogPanelAttribute = getSharedRuntimeStoreAttributeName(debugLogPanelSettingKey);'), true);
