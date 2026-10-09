@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -159,6 +159,37 @@ test('tiku adapter config exposes long AI fallback timeouts and status helpers',
     mod.createTikuAdapterAIFallbackStatusUrl('https://adapter.local/', 'task-1'),
     'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-1'
   );
+});
+
+test('tiku adapter AI fallback error contract includes insufficient balance', async () => {
+  const source = await readFile(helperSourcePath, 'utf8');
+
+  assert.match(source, /TikuAdapterAIFallbackErrorCode\s*=\s*[^;]*INSUFFICIENT_BALANCE/);
+});
+
+test('AI fallback preserves insufficient balance error details', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => Response.json({
+    success: false,
+    error: {
+      code: 'INSUFFICIENT_BALANCE',
+      message: '当前余额不足，AI 兜底已禁用，请充值后再使用'
+    }
+  });
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '1+1=?', type: 'single', options: '1\n2' },
+      { requestTimeoutMs: 1000, retryAttempts: 1, retryDelayMs: 1, preferAsyncTask: false }
+    );
+
+    assert.equal(result[0].error, 'INSUFFICIENT_BALANCE: 当前余额不足，AI 兜底已禁用，请充值后再使用');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('AI fallback retries transient failures before returning an answer', async () => {

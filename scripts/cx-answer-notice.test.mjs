@@ -45,9 +45,10 @@ async function createRuntime(responses, action = 'pause') {
     getStoredTikuAdapterConfig: () => ({}),
     requestTikuAdapterAIFallback: async () => {
       const response = responses[Math.min(requests++, responses.length - 1)];
+      const detail = response.error?.message || 'upstream detail';
       return [{
         name: 'AI', results: response.success ? [{ answer: 'A' }] : [], response,
-        error: response.success ? undefined : `${response.error.code}: upstream detail`
+        error: response.success ? undefined : `${response.error.code}: ${detail}`
       }];
     },
     showTopCenterNotice: (message) => notifications.push(['notice', message]),
@@ -141,6 +142,34 @@ test('unavailable AI keeps its existing log without a manual-intervention warnin
   assert.equal(typeof runtime.notify, 'function');
   runtime.notify(results);
   assert.deepEqual(runtime.notifications, [['console', 'AI 兜底未配置，已跳过 AI 搜题']]);
+});
+
+test('insufficient balance keeps the actionable adapter error instead of the generic no-answer message', async () => {
+  const runtime = await createRuntime([{
+    success: false,
+    error: {
+      code: 'INSUFFICIENT_BALANCE',
+      message: '当前余额不足，AI 兜底已禁用，请充值后再使用'
+    }
+  }]);
+  const results = await runtime.createWorker().doWork();
+
+  assert.match(results[0].error, /当前余额不足，AI 兜底已禁用，请充值后再使用/);
+  assert.doesNotMatch(results[0].error, /AI 兜底未返回可用答案/);
+});
+
+test('skip mode preserves insufficient balance details in search results', async () => {
+  const runtime = await createRuntime([{
+    success: false,
+    error: {
+      code: 'INSUFFICIENT_BALANCE',
+      message: '当前余额不足，AI 兜底已禁用，请充值后再使用'
+    }
+  }], 'skip');
+  const results = await runtime.createWorker().doWork();
+
+  assert.match(results[0].ctx.searchInfos[0].error, /当前余额不足，AI 兜底已禁用，请充值后再使用/);
+  assert.doesNotMatch(results[0].ctx.searchInfos[0].error, /AI 兜底未返回可用答案/);
 });
 
 test('empty searches still report the existing generic error', async () => {

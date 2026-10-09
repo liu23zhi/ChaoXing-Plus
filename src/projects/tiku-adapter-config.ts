@@ -14,7 +14,7 @@ export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 600;
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
-export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER';
+export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER' | 'INSUFFICIENT_BALANCE';
 
 export type TikuAdapterAIFallbackResult = {
   success: boolean;

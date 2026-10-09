@@ -164,6 +164,18 @@ test('workOrExam exposes an on-page debug log panel for submit diagnostics', asy
   assert.equal(source.includes('作业/考试提交函数诊断'), true);
 });
 
+test('debug log panel batches rendering and bounds each entry so answering is not blocked by log DOM work', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('const debugLogPanelRenderBatchSize = 20;'), true);
+  assert.equal(source.includes('const debugLogPanelMaxEntryTextLength = 4000;'), true);
+  assert.equal(source.includes('function flushDebugLogPanelEntries('), true);
+  assert.equal(source.includes('requestAnimationFrame'), true);
+  assert.equal(source.includes('DocumentFragment'), true);
+  assert.equal(source.includes('debugLogPanelRenderStateKey'), true);
+  assert.equal(source.includes('text.slice(0, debugLogPanelMaxEntryTextLength)'), true);
+});
+
 test('workOrExam debug log panel can be dragged from its header', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 

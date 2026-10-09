@@ -896,6 +896,13 @@ async function appendAIFallbackSearchInfos(
     return searchInfos.concat(fallbackInfos);
   }
 
+  if (fallbackError?.code === 'INSUFFICIENT_BALANCE') {
+    if (workOptions.aiFallbackFailureAction === 'skip') {
+      return searchInfos.concat(fallbackInfos);
+    }
+    throw new Error(fallbackInfos[0]?.error || fallbackError.message || 'AI 兜底余额或令牌额度不足，请充值或调整额度后重试。');
+  }
+
   if (workOptions.aiFallbackFailureAction === 'skip') {
     return searchInfos.concat(fallbackInfos.map((info) => ({
       ...info,
