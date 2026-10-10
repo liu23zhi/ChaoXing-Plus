@@ -27,7 +27,11 @@ import {
   splitAnswer
 } from '../utils/work.js';
 import { $console } from './background.js';
-import { requestTikuAdapterAIFallback, TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS } from './tiku-adapter-config.js';
+import {
+  collectTikuAdapterWarnings,
+  requestTikuAdapterAIFallback,
+  TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
+} from './tiku-adapter-config.js';
 import {
   CommonProject,
   getStoredTikuAdapterConfig,
@@ -1102,6 +1106,34 @@ async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continu
 
 const manualAnswerRequiredMessage = '检测到题目但当前无法安全自动作答，请手动处理。';
 const aiFallbackNoAnswerMessage = 'AI 兜底未返回可用答案。';
+
+/**
+ * 记录 tikuAdapter 返回的管理员提示（例如「AI 模型未配置价格」）。
+ *
+ * 这些提示必须**只对管理员可见**：这里统一写入调试日志面板，
+ * 而调试日志面板默认关闭、只有部署方管理员会打开，
+ * 普通用户既看不到面板，也不会收到任何弹窗/提示/错题信息。
+ */
+function logTikuAdapterWarnings(warnings: string[], source: string) {
+  warnings.forEach((warning) => {
+    // logDebug 仅在调试日志面板开启时才会真正落到面板里。
+    logDebug('warn', 'tikuAdapter 管理提示', { source, warning }, warning);
+  });
+}
+
+/**
+ * 把查题结果的转发 + 管理提示记录包在一起，供各条搜题链路复用。
+ *
+ * 这里刻意保持「只记录日志」：返回值原样透传，绝不修改答案、错误或结果条数，
+ * 因此普通用户拿到的内容与改动前完全一致。
+ */
+async function withTikuAdapterAdminWarnings(
+  searchInfos: SearchInformation[] | Promise<SearchInformation[]>
+): Promise<SearchInformation[]> {
+  const resolvedInfos = await searchInfos;
+  logTikuAdapterWarnings(collectTikuAdapterWarnings(resolvedInfos), 'search');
+  return resolvedInfos;
+}
 
 function notifyManualAnswerRequired(results: RetryFailureSnapshot[]) {
   const requiresManualAnswer = results.some((result) =>
@@ -3078,14 +3110,16 @@ const JobRunner = {
                   options: optionsText,
                   skipCache: Boolean(workerOptions.skipCache)
                 });
-            return appendAIFallbackSearchInfos(
-              baseInfos,
-              { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
-              {
-                title,
-                type: questionType ?? 'unknown',
-                optionsText
-              }
+            return withTikuAdapterAdminWarnings(
+              appendAIFallbackSearchInfos(
+                baseInfos,
+                { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
+                {
+                  title,
+                  type: questionType ?? 'unknown',
+                  optionsText
+                }
+              )
             );
           };
 
@@ -3938,14 +3972,16 @@ function workOrExam(
             options: optionsText,
             skipCache: Boolean(workerOptions.skipCache)
           });
-          return appendAIFallbackSearchInfos(
-            baseInfos,
-            { enableAIFallbackAnswer, aiFallbackFailureAction },
-            {
-              title,
-              type: questionType ?? 'unknown',
-              optionsText
-            }
+          return withTikuAdapterAdminWarnings(
+            appendAIFallbackSearchInfos(
+              baseInfos,
+              { enableAIFallbackAnswer, aiFallbackFailureAction },
+              {
+                title,
+                type: questionType ?? 'unknown',
+                optionsText
+              }
+            )
           );
         };
 

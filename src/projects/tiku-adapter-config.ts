@@ -29,6 +29,11 @@ export type TikuAdapterAIFallbackResult = {
     code?: TikuAdapterAIFallbackErrorCode;
     message?: string;
   };
+  /**
+   * 服务端的非阻断提示，例如「AI 正在使用未配置价格的模型」。
+   * 只用于管理员排查（调试日志面板），绝不出现在面向普通用户的界面里。
+   */
+  warnings?: string[];
 };
 
 export type TikuAdapterAIFallbackResponse = SearchInformation & {
@@ -376,8 +381,50 @@ export function resolveTikuAdapterQuestionType(type: string | undefined): number
   }
 }
 
-export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdapterConfigProblem | undefined {
-  const baseurl = normalizeTikuAdapterBaseUrl(config.baseurl);
+/**
+ * 读取 tikuAdapter 返回的非阻断提示（例如「AI 模型未配置价格」）。
+ *
+ * 这些提示只面向部署方的管理员，普通用户不应看到，因此这里只做「提取」，
+ * 由调用方决定写进管理员可见的调试日志面板，绝不进入题目结果或用户提示。
+ */
+export function resolveTikuAdapterWarnings(response: unknown): string[] {
+  if (!response || typeof response !== 'object') {
+    return [];
+  }
+
+  const rawWarnings = (response as { warnings?: unknown }).warnings;
+  if (!Array.isArray(rawWarnings)) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  rawWarnings.forEach((item) => {
+    const text = String(item ?? '').trim();
+    if (text && !warnings.includes(text)) {
+      warnings.push(text);
+    }
+  });
+  return warnings;
+}
+
+/** 从一批查题结果里收集 tikuAdapter 的管理员提示。 */
+export function collectTikuAdapterWarnings(searchInfos: unknown): string[] {
+  if (!Array.isArray(searchInfos)) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  searchInfos.forEach((info) => {
+    resolveTikuAdapterWarnings((info as { response?: unknown } | undefined)?.response).forEach((warning) => {
+      if (!warnings.includes(warning)) {
+        warnings.push(warning);
+      }
+    });
+  });
+  return warnings;
+}
+
+export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdapterConfigProblem | undefined {  const baseurl = normalizeTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
 
   if (!baseurl) {

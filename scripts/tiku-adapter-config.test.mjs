@@ -333,3 +333,115 @@ test('AI fallback polls task status until the adapter reports a final answer', a
     globalThis.fetch = originalFetch;
   }
 });
+
+test('resolves adapter warnings into a deduplicated list of texts', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(typeof mod.resolveTikuAdapterWarnings, 'function');
+  assert.deepEqual(mod.resolveTikuAdapterWarnings(undefined), []);
+  assert.deepEqual(mod.resolveTikuAdapterWarnings({}), []);
+  assert.deepEqual(mod.resolveTikuAdapterWarnings({ warnings: 'not-an-array' }), []);
+  assert.deepEqual(mod.resolveTikuAdapterWarnings({ warnings: ['  ', null, 'A'] }), ['A']);
+  assert.deepEqual(mod.resolveTikuAdapterWarnings({ warnings: ['同一提示', '同一提示'] }), ['同一提示']);
+});
+
+test('collects adapter warnings across search infos', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(typeof mod.collectTikuAdapterWarnings, 'function');
+  assert.deepEqual(mod.collectTikuAdapterWarnings(undefined), []);
+  assert.deepEqual(
+    mod.collectTikuAdapterWarnings([
+      { response: { warnings: ['提示一'] } },
+      { response: undefined },
+      { response: { warnings: ['提示一', '提示二'] } }
+    ]),
+    ['提示一', '提示二']
+  );
+});
+
+// 管理员提示只能出现在调试通道，绝不能污染用户可见的答案或错误文案。
+test('adapter warnings never leak into user-facing results or errors', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () =>
+    Response.json({
+      success: true,
+      result: { question: '1+1=?', answer: '2' },
+      warnings: ['AI 模型「gpt-no-price」尚未配置价格，本次调用按 0 元计费。']
+    });
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '1+1=?', type: 'single', options: '1\n2' },
+      { requestTimeoutMs: 1000, retryAttempts: 1, retryDelayMs: 1, preferAsyncTask: false }
+    );
+
+    const info = result[0];
+    // 答案照常可用，且不含任何价格提示文案。
+    assert.equal(info.results[0].answer, '2');
+    assert.equal(info.error, undefined);
+    assert.doesNotMatch(info.results[0].answer, /价格/);
+    assert.equal(info.results[0].extra_data.ai, true);
+
+    // 警告只保留在 response 里，由调用方决定是否写进管理员可见的调试日志。
+    assert.deepEqual(info.response.warnings, ['AI 模型「gpt-no-price」尚未配置价格，本次调用按 0 元计费。']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('adapter search results do not carry warning text into answers', async () => {
+  const mod = await loadHelperModule();
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key'
+  });
+  const handler = Function(wrapper.handler)();
+
+  const result = handler({
+    question: '单选题',
+    type: 0,
+    answer: { answerIndex: [1], answerKeyText: 'B', answerText: 'B' },
+    warnings: ['AI 模型「gpt-no-price」尚未配置价格。']
+  });
+
+  assert.deepEqual(result, ['单选题', 'B', { source: 'tikuAdapter' }]);
+});
+
+test('cx logs adapter warnings only through the admin debug log path', async () => {
+  const source = await readFile(resolve(process.cwd(), 'src', 'projects', 'cx.ts'), 'utf8');
+
+  // 必须存在一个只写调试日志的转发函数。
+  assert.match(source, /function logTikuAdapterWarnings/);
+  assert.match(source, /logDebug\('warn', 'tikuAdapter 管理提示'/);
+
+  // 提示不得进入用户可见的提示/弹窗/错误通道。
+  const forwardingBlock = source.slice(
+    source.indexOf('function logTikuAdapterWarnings'),
+    source.indexOf('function logTikuAdapterWarnings') + 400
+  );
+  assert.doesNotMatch(forwardingBlock, /\$message|\$console\.warn|showTopCenterNotice|throw new Error/);
+
+  // 包装函数必须原样透传结果，绝不改写答案或错误。
+  const wrapperStart = source.indexOf('async function withTikuAdapterAdminWarnings');
+  const wrapperBlock = source.slice(wrapperStart, wrapperStart + 600);
+  assert.match(wrapperBlock, /const resolvedInfos = await searchInfos;/);
+  assert.match(wrapperBlock, /return resolvedInfos;/);
+  assert.doesNotMatch(wrapperBlock, /\$message|showTopCenterNotice|throw new Error|\.error\s*=/);
+
+  // 两条搜题链路都要走这个包装函数（普通搜题 + AI 兜底），加上包装函数自身的引用共 3 处。
+  assert.equal(source.match(/withTikuAdapterAdminWarnings\(/g).length, 3);
+  assert.match(source, /logTikuAdapterWarnings\(collectTikuAdapterWarnings\(resolvedInfos\), 'search'\)/);
+
+  // appendAIFallbackSearchInfos 必须保持纯净：不引用任何日志转发函数，
+  // 否则既有的行为测试（在 vm 中只注入部分声明）会直接抛 ReferenceError。
+  const appendStart = source.indexOf('async function appendAIFallbackSearchInfos');
+  const appendBlock = source.slice(appendStart, appendStart + 2600);
+  assert.doesNotMatch(
+    appendBlock,
+    /logTikuAdapterWarnings|withTikuAdapterAdminWarnings|collectTikuAdapterWarnings/
+  );
+});
