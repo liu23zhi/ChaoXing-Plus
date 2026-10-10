@@ -361,6 +361,10 @@ const debugLogPanelRenderBatchSize = 20;
 const debugLogPanelMaxEntryTextLength = 4000;
 const debugLogPanelId = 'chaoxing-plus-debug-log-panel';
 const debugLogPanelRenderStateKey = '__chaoxing_plus_debug_log_render_state__';
+const debugLogPanelEntryEvent = 'chaoxing-plus:debug-log-panel-entry';
+const debugLogPanelSyncEvent = 'chaoxing-plus:debug-log-panel-sync';
+const debugLogPanelControllerKey = '__chaoxing_plus_debug_log_panel_controller__';
+const debugLogPanelZIndex = 2147483645;
 const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,
@@ -404,27 +408,12 @@ function getDebugLogPanelDocument() {
   try {
     return (window.top ?? window).document;
   } catch {
-    return topWindow?.document ?? document;
+    return document;
   }
 }
 
 function getDebugLogPanelSyncDocuments() {
-  const documents: Document[] = [];
-  const pushDocument = (targetDocument: Document | null | undefined) => {
-    if (targetDocument && !documents.includes(targetDocument)) {
-      documents.push(targetDocument);
-    }
-  };
-
-  pushDocument(document);
-
-  try {
-    pushDocument((window.top ?? window).document);
-  } catch {
-    pushDocument(topWindow?.document);
-  }
-
-  return documents;
+  return [document];
 }
 
 function getSharedRuntimeStoreAttributeName(key: string) {
@@ -443,20 +432,58 @@ function refreshDebugLogPanelEnabledState() {
   return debugLogPanelEnabledState;
 }
 
-function removeDebugLogPanel() {
+function dispatchDebugLogPanelOwnerEvent(type: string, detail?: unknown) {
+  const targetDocument = getDebugLogPanelDocument();
+  if (targetDocument === document) {
+    return false;
+  }
+
   try {
-    getDebugLogPanelDocument().getElementById(debugLogPanelId)?.remove();
+    targetDocument.dispatchEvent(new CustomEvent(type, { detail }));
+    return true;
   } catch {
-    // Debug UI must never break the automation flow.
+    return false;
   }
 }
 
-function syncDebugLogPanelVisibility() {
-  if (refreshDebugLogPanelEnabledState()) {
-    ensureDebugLogPanel();
-  } else {
-    removeDebugLogPanel();
+function getDebugLogPanelController() {
+  const targetDocument = getDebugLogPanelDocument();
+  const root = targetDocument.documentElement as (HTMLElement & Record<string, unknown>) | null;
+  const existingController = root?.[debugLogPanelControllerKey];
+  if (existingController && typeof existingController === 'object') {
+    return existingController as DebugLogPanelController;
   }
+
+  if (targetDocument !== document) {
+    return undefined;
+  }
+
+  const controller = createDebugLogPanelController(targetDocument);
+  if (root) {
+    root[debugLogPanelControllerKey] = controller;
+  }
+  return controller;
+}
+
+function removeDebugLogPanel() {
+  const controller = getDebugLogPanelController();
+  if (controller) {
+    controller.remove();
+    return;
+  }
+
+  dispatchDebugLogPanelOwnerEvent(debugLogPanelSyncEvent, { enabled: false });
+}
+
+function syncDebugLogPanelVisibility() {
+  refreshDebugLogPanelEnabledState();
+  const controller = getDebugLogPanelController();
+  if (controller) {
+    controller.sync();
+    return;
+  }
+
+  dispatchDebugLogPanelOwnerEvent(debugLogPanelSyncEvent);
 }
 
 try {
@@ -474,9 +501,17 @@ try {
     if (syncDocument.documentElement) {
       debugLogPanelObserver.observe(syncDocument.documentElement, { attributes: true });
     }
-    syncDocument.addEventListener('chaoxing-plus:shared-store-sync', syncDebugLogPanelVisibility);
-    syncDocument.addEventListener('chaoxing-plus:shared-store-hydrate', syncDebugLogPanelVisibility);
+    const onSharedStoreChanged = (event: Event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (detail && Object.prototype.hasOwnProperty.call(detail, debugLogPanelSettingKey)) {
+        syncDebugLogPanelVisibility();
+      }
+    };
+    syncDocument.addEventListener('chaoxing-plus:shared-store-sync', onSharedStoreChanged);
+    syncDocument.addEventListener('chaoxing-plus:shared-store-hydrate', onSharedStoreChanged);
   }
+
+  document.addEventListener('DOMContentLoaded', syncDebugLogPanelVisibility, { once: true });
 
   window.addEventListener('storage', (event) => {
     if (event.key === debugLogPanelSettingKey) {
@@ -485,6 +520,12 @@ try {
   });
 } catch {
   // ignore debug log panel observer failures
+}
+
+try {
+  syncDebugLogPanelVisibility();
+} catch {
+  // Debug UI must never block script startup.
 }
 
 function shouldAppendDebugLogPanelEntry(level: DebugLogLevel) {
@@ -497,13 +538,53 @@ function formatDebugLogPanelValue(value: unknown) {
   }
 
   if (typeof value === 'string') {
-    return value;
+    return value.slice(0, debugLogPanelMaxEntryTextLength);
   }
 
   try {
-    return JSON.stringify(value, null, 2);
+    let remainingNodes = 80;
+    let remainingTextLength = debugLogPanelMaxEntryTextLength;
+    const seen = new WeakSet<object>();
+    const projectValue = (item: unknown, depth: number): unknown => {
+      if (--remainingNodes < 0 || depth > 4 || remainingTextLength <= 0) {
+        return '[内容已截断]';
+      }
+      if (typeof item === 'string') {
+        const text = item.slice(0, remainingTextLength);
+        remainingTextLength -= text.length;
+        return text;
+      }
+      if (!item || typeof item !== 'object') {
+        return typeof item === 'function' || typeof item === 'bigint' ? String(item) : item;
+      }
+      if (seen.has(item)) {
+        return '[循环引用]';
+      }
+      seen.add(item);
+      if (Array.isArray(item)) {
+        const items = [];
+        for (let index = 0; index < Math.min(item.length, 20) && remainingNodes > 0 && remainingTextLength > 0; index++) {
+          const descriptor = Object.getOwnPropertyDescriptor(item, String(index));
+          items.push(descriptor && 'value' in descriptor ? projectValue(descriptor.value, depth + 1) : '[访问器]');
+        }
+        return items;
+      }
+      const result: Record<string, unknown> = Object.create(null);
+      let propertyCount = 0;
+      for (const key in item) {
+        if (propertyCount >= 20 || remainingNodes <= 0 || remainingTextLength <= 0) break;
+        const descriptor = Object.getOwnPropertyDescriptor(item, key);
+        if (!descriptor) continue;
+        propertyCount++;
+        const boundedKey = key.slice(0, Math.min(remainingTextLength, 120));
+        remainingTextLength -= boundedKey.length;
+        result[boundedKey] = 'value' in descriptor ? projectValue(descriptor.value, depth + 1) : '[访问器]';
+      }
+      return result;
+    };
+    return JSON.stringify(projectValue(value, 0), null, 2).slice(0, debugLogPanelMaxEntryTextLength);
   } catch {
-    return String(value);
+    return '[无法序列化日志内容]';
   }
 }
 
@@ -518,9 +599,14 @@ function collectDebugLogPanelText(debugLogPanelBody: HTMLElement) {
 type PendingDebugLogPanelEntry = {
   level: DebugLogLevel;
   prefix: string;
-  detail?: Record<string, unknown>;
-  textDetail?: string;
-  correlationId?: string;
+  content: string;
+  timestamp: number;
+};
+
+type DebugLogPanelController = {
+  append: (level: DebugLogLevel, prefix: string, detail?: Record<string, unknown>, textDetail?: string, meta?: DebugMeta) => void;
+  sync: () => void;
+  remove: () => void;
 };
 
 type DebugLogPanelRenderState = {
@@ -544,7 +630,7 @@ function getDebugLogPanelRenderState(debugLogPanelBody: HTMLElement) {
 
 function createDebugLogPanelEntryElement(
   targetDocument: Document,
-  { level, prefix, detail, textDetail, correlationId }: PendingDebugLogPanelEntry
+  { level, prefix, content: entryText, timestamp }: PendingDebugLogPanelEntry
 ) {
   const row = targetDocument.createElement('div');
   row.style.borderLeft = `3px solid ${level === 'error' ? '#ff7b72' : level === 'warn' ? '#d29922' : level === 'info' ? '#58a6ff' : '#8b949e'}`;
@@ -552,22 +638,17 @@ function createDebugLogPanelEntryElement(
   row.style.background = 'rgba(255,255,255,0.05)';
   row.style.borderRadius = '8px';
   row.style.wordBreak = 'break-word';
+  row.style.flexShrink = '0';
 
   const title = targetDocument.createElement('div');
-  title.textContent = `${new Date().toLocaleTimeString()} ${prefix}`;
+  title.textContent = `${new Date(timestamp).toLocaleTimeString()} ${prefix}`;
   title.style.color = level === 'error' ? '#ffb4ad' : level === 'warn' ? '#f2cc60' : '#c9d1d9';
   title.style.fontWeight = '700';
   row.append(title);
 
-  const lines = [
-    textDetail,
-    formatDebugLogPanelValue(detail),
-    correlationId ? `correlationId=${correlationId}` : ''
-  ].filter((line) => Boolean(line));
-
-  if (lines.length > 0) {
+  if (entryText) {
     const content = targetDocument.createElement('pre');
-    const text = lines.join('\n');
+    const text = entryText;
     const boundedText = text.slice(0, debugLogPanelMaxEntryTextLength);
     content.textContent = boundedText.length < text.length ? `${boundedText}\n...[内容已截断]` : boundedText;
     content.style.margin = '4px 0 0';
@@ -584,13 +665,17 @@ function createDebugLogPanelEntryElement(
 function flushDebugLogPanelEntries(debugLogPanelBody: HTMLElement, targetDocument: Document) {
   const state = getDebugLogPanelRenderState(debugLogPanelBody);
   state.scheduled = false;
+  if (!debugLogPanelBody.isConnected) {
+    state.pending.length = 0;
+    return;
+  }
   if (state.pending.length === 0) {
     return;
   }
 
   const fragment = targetDocument.createDocumentFragment();
   const entries = state.pending.splice(0, debugLogPanelRenderBatchSize);
-  for (const entry of entries) {
+  for (const entry of entries.reverse()) {
     fragment.append(createDebugLogPanelEntryElement(targetDocument, entry));
   }
 
@@ -611,7 +696,7 @@ function scheduleDebugLogPanelFlush(debugLogPanelBody: HTMLElement, targetDocume
   }
 
   state.scheduled = true;
-  const viewport = targetDocument.defaultView;
+  const viewport = targetDocument.defaultView ?? window;
   if (viewport?.requestAnimationFrame) {
     viewport.requestAnimationFrame(() => flushDebugLogPanelEntries(debugLogPanelBody, targetDocument));
   } else {
@@ -631,6 +716,58 @@ function enqueueDebugLogPanelEntry(debugLogPanelBody: HTMLElement, targetDocumen
 function clearPendingDebugLogPanelEntries(debugLogPanelBody: HTMLElement) {
   const state = getDebugLogPanelRenderState(debugLogPanelBody);
   state.pending.length = 0;
+}
+
+function createDebugLogPanelController(targetDocument: Document): DebugLogPanelController {
+  // Only this document's realm owns its DOM, listeners and scheduled rendering.
+  targetDocument.getElementById(debugLogPanelId)?.remove();
+  let body: HTMLElement | undefined;
+  const ensureBody = () => {
+    if (!body?.isConnected) body = ensureDebugLogPanel();
+    return body;
+  };
+  const controller: DebugLogPanelController = {
+    append(level, prefix, detail, textDetail, meta) {
+      if (!shouldAppendDebugLogPanelEntry(level)) return;
+      const panelBody = ensureBody();
+      if (!panelBody) return;
+      const lines = [
+        textDetail?.slice(0, debugLogPanelMaxEntryTextLength),
+        formatDebugLogPanelValue(detail),
+        meta?.correlationId ? `correlationId=${meta.correlationId.slice(0, debugLogPanelMaxEntryTextLength)}` : ''
+      ].filter(Boolean);
+      enqueueDebugLogPanelEntry(panelBody, targetDocument, {
+        level,
+        prefix: prefix.slice(0, 500),
+        content: lines.join('\n').slice(0, debugLogPanelMaxEntryTextLength + 1),
+        timestamp: Date.now()
+      });
+    },
+    sync() {
+      if (refreshDebugLogPanelEnabledState()) {
+        ensureBody();
+      } else {
+        controller.remove();
+      }
+    },
+    remove() {
+      if (body) clearPendingDebugLogPanelEntries(body);
+      targetDocument.getElementById(debugLogPanelId)?.remove();
+      body = undefined;
+    }
+  };
+  targetDocument.addEventListener(debugLogPanelEntryEvent, (event) => {
+    try {
+      const entry = (event as CustomEvent).detail;
+      if (entry && entry.level in debugLogPanelLevelRank && typeof entry.prefix === 'string') {
+        controller.append(entry.level, entry.prefix, entry.detail, entry.textDetail, entry.meta);
+      }
+    } catch {
+      // Ignore malformed diagnostic events.
+    }
+  });
+  targetDocument.addEventListener(debugLogPanelSyncEvent, () => controller.sync());
+  return controller;
 }
 
 async function copyDebugLogPanelText(text: string, targetDocument: Document) {
@@ -691,15 +828,26 @@ function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDo
     const onUp = () => {
       viewport.removeEventListener('pointermove', onMove);
       viewport.removeEventListener('pointerup', onUp);
+      viewport.removeEventListener('pointercancel', onUp);
     };
 
-    header.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    try {
+      header.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Window listeners can still handle a pointer without capture.
+    }
     viewport.addEventListener('pointermove', onMove);
     viewport.addEventListener('pointerup', onUp);
+    viewport.addEventListener('pointercancel', onUp);
   });
 }
 
 function ensureDebugLogPanel() {
+  if (getDebugLogPanelDocument() !== document) {
+    return undefined;
+  }
+
   if (!isDebugLogPanelEnabled()) {
     removeDebugLogPanel();
     return undefined;
@@ -719,7 +867,7 @@ function ensureDebugLogPanel() {
   panel.style.bottom = '16px';
   panel.style.width = 'min(560px, calc(100vw - 32px))';
   panel.style.maxHeight = '48vh';
-  panel.style.zIndex = '2147483647';
+  panel.style.zIndex = String(debugLogPanelZIndex);
   panel.style.display = 'flex';
   panel.style.flexDirection = 'column';
   panel.style.borderRadius = '12px';
@@ -743,6 +891,7 @@ function ensureDebugLogPanel() {
   header.style.cursor = 'move';
   header.style.userSelect = 'none';
   header.style.touchAction = 'none';
+  header.style.flexShrink = '0';
   header.dataset.cxDebugLogPanelDragHandle = 'true';
 
   const title = targetDocument.createElement('div');
@@ -787,6 +936,7 @@ function ensureDebugLogPanel() {
   const debugLogPanelBody = targetDocument.createElement('div');
   debugLogPanelBody.dataset.cxDebugLogPanelBody = 'true';
   debugLogPanelBody.style.overflowY = 'auto';
+  debugLogPanelBody.style.minHeight = '0';
   debugLogPanelBody.style.padding = '8px 10px';
   debugLogPanelBody.style.display = 'flex';
   debugLogPanelBody.style.flexDirection = 'column';
@@ -823,22 +973,19 @@ function appendDebugLogPanelEntry(
   textDetail?: string,
   meta?: DebugMeta
 ) {
-  if (!shouldAppendDebugLogPanelEntry(level)) {
-    return;
-  }
-
   try {
-    const body = ensureDebugLogPanel();
-    if (!body) {
+    const controller = getDebugLogPanelController();
+    if (controller) {
+      controller.append(level, prefix, detail, textDetail, meta);
       return;
     }
 
-    enqueueDebugLogPanelEntry(body, body.ownerDocument, {
+    dispatchDebugLogPanelOwnerEvent(debugLogPanelEntryEvent, {
       level,
       prefix,
       detail,
       textDetail,
-      correlationId: meta?.correlationId
+      meta
     });
   } catch {
     // Debug UI must never break the automation flow.
