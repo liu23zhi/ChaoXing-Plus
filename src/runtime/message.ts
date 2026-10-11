@@ -5,6 +5,10 @@ const swalAliasKey = '__chaoxing_plus_swal__';
 const swalHostId = 'chaoxing-plus-swal-host';
 const swalTargetId = 'chaoxing-plus-swal-target';
 const swalStyleId = 'chaoxing-plus-swal-style-reset';
+// 弹窗必须严格高于所有面板：z-index 上限是 2147483647，
+// 因此把面板栈整体压到 2147483646 及以下（见 panel.ts / common.ts / cx.ts），
+// 只把最高位留给弹窗，保证弹窗永远压在主面板之上。
+const swalContainerZIndex = 2147483647;
 
 type SwalOwnerWindow = Window & Record<string, unknown>;
 type SwalFireOptions = SweetAlertOptions;
@@ -32,6 +36,7 @@ function ensureSwalStyleReset(targetDocument: Document) {
       style.id = swalStyleId;
       style.textContent = `
 #${swalTargetId} .swal2-container {
+  z-index: ${swalContainerZIndex} !important;
   font-size: 16px !important;
   line-height: 1.5 !important;
   --swal2-container-padding: 10px;
@@ -47,6 +52,19 @@ function ensureSwalStyleReset(targetDocument: Document) {
     }
   } catch {
     // ignore style injection failures and fall back to default SweetAlert styling
+  }
+}
+
+// 兜底：页面自身也可能使用最高 z-index，把弹窗宿主移动到 body 末尾，
+// 同层级时按文档顺序绘制，弹窗仍然压在上面。
+function pinSwalHostToPaintTop(targetDocument: Document, host: HTMLElement) {
+  try {
+    const parent = targetDocument.body || targetDocument.documentElement;
+    if (parent && parent.lastElementChild !== host) {
+      parent.appendChild(host);
+    }
+  } catch {
+    // ignore DOM access failures and keep the previously mounted host position
   }
 }
 
@@ -69,6 +87,8 @@ function getOrCreateSwalTarget(targetDocument: Document) {
     }
     target.style.fontSize = '16px';
     target.style.lineHeight = '1.5';
+
+    pinSwalHostToPaintTop(targetDocument, host);
 
     return target;
   } catch {

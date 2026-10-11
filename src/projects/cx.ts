@@ -136,7 +136,8 @@ function showTopCenterNotice(
   overlay.style.top = '0';
   overlay.style.width = '100vw';
   overlay.style.height = '100vh';
-  overlay.style.zIndex = '2147483647';
+  // 顶部提示也要低于弹窗，避免盖住「当前倍速…」「题库配置已保存。」等弹窗。
+  overlay.style.zIndex = '2147483646';
   overlay.style.display = 'flex';
   overlay.style.alignItems = 'center';
   overlay.style.justifyContent = 'center';
@@ -368,7 +369,7 @@ const debugLogPanelRenderStateKey = '__chaoxing_plus_debug_log_render_state__';
 const debugLogPanelEntryEvent = 'chaoxing-plus:debug-log-panel-entry';
 const debugLogPanelSyncEvent = 'chaoxing-plus:debug-log-panel-sync';
 const debugLogPanelControllerKey = '__chaoxing_plus_debug_log_panel_controller__';
-const debugLogPanelZIndex = 2147483645;
+const debugLogPanelZIndex = 2147483643;
 const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,

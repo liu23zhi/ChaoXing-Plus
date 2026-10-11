@@ -7,8 +7,13 @@ import { fileURLToPath } from 'node:url';
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const commonPath = resolve(scriptsDir, '..', 'src', 'projects', 'common.ts');
 
+// 源码检出可能是 CRLF，断言只关心代码结构，先统一换行再比较。
+async function readCommonSource() {
+  return (await readFile(commonPath, 'utf8')).replace(/\r\n/g, '\n');
+}
+
 test('common work results panel renders pause continue and retry controls', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });"), true);
   assert.equal(source.includes("const retryButton = createElement('button', { text: result.retrying ? '正在重答...' : '重答本题' });"), true);
@@ -18,7 +23,7 @@ test('common work results panel renders pause continue and retry controls', asyn
 });
 
 test('common work results panel uses the shared tone helper for number and question views', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("const tone = resolveWorkResultTone(result, index === state.workResults.currentResultIndex);"), true);
   assert.equal(source.includes("if (tone === 'manual')"), true);
@@ -28,7 +33,7 @@ test('common work results panel uses the shared tone helper for number and quest
 });
 
 test('common preserves work result scroll and retrying state across result refreshes', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("retrying: item.retrying ?? existing?.retrying ?? false"), true);
   assert.equal(source.includes('retrying: item.retrying ?? false'), false);
@@ -41,7 +46,7 @@ test('common preserves work result scroll and retrying state across result refre
 });
 
 test('common preserves newer finished retry answers when stale result refreshes arrive', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes('function hasUsableWorkResultAnswer(result: SimplifyWorkResult | undefined)'), true);
   assert.equal(source.includes('function shouldPreserveExistingWorkResult(existing: SimplifyWorkResult | undefined, incoming: SimplifyWorkResult)'), true);
@@ -54,7 +59,7 @@ test('common preserves newer finished retry answers when stale result refreshes 
 });
 
 test('common work options default to submit and expose upload mode toggle in the study panel', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("upload: 'submit'"), true);
   assert.equal(source.includes('enableExamAutoSubmit: boolean;'), true);
@@ -81,7 +86,7 @@ test('common work options default to submit and expose upload mode toggle in the
 });
 
 test('common exposes exam auto-submit and debug log switches in the panel', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("label: '考试自动交卷'"), true);
   assert.equal(source.includes("title: '开启后，考试答题完成且完成率满足提交条件时才会自动交卷。默认关闭。'"), true);
@@ -100,7 +105,7 @@ test('common exposes exam auto-submit and debug log switches in the panel', asyn
 });
 
 test('common exposes a default-enabled local question cache switch and gates cache reads', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("label: '本地题库缓存'"), true);
   assert.equal(source.includes("title: '开启后优先使用本地已缓存题目答案。默认开启。'"), true);
@@ -117,7 +122,7 @@ test('common exposes a default-enabled local question cache switch and gates cac
 });
 
 test('common moves AI fallback controls from the study settings section into the work results control hero', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("const aiFallbackToggleField = createConfigField(studyScript, 'enableAIFallbackAnswer', {"), true);
   assert.equal(source.includes("const aiAnswerRow = createElement('div');"), true);
@@ -135,7 +140,7 @@ test('common moves AI fallback controls from the study settings section into the
 });
 
 test('common study panel exposes random fallback and ai fallback controls', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes('enableRandomFallbackAnswer'), true);
   assert.equal(source.includes("label: '无答案时随机作答'"), true);
@@ -147,7 +152,7 @@ test('common study panel exposes random fallback and ai fallback controls', asyn
 });
 
 test('common watches shared config attributes so the floating panel updates live across pages', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';"), true);
   assert.equal(source.includes('const lastSharedAttributeValues = new Map<string, string | null>();'), true);
@@ -162,7 +167,7 @@ test('common watches shared config attributes so the floating panel updates live
 });
 
 test('common ignores panel-authored shared config mutations so focused inputs are not rebuilt', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes('function setRuntimeStoreValueFromPanel<T>(key: string, value: T)'), true);
   assert.equal(source.includes('function serializeSharedStoreValue(value: unknown): string | undefined'), true);
@@ -178,7 +183,7 @@ test('common ignores panel-authored shared config mutations so focused inputs ar
 });
 
 test('common shares all study settings across domains and warns for playback rate at or above 2x', async () => {
-  const source = await readFile(commonPath, 'utf8');
+  const source = await readCommonSource();
 
   assert.equal(source.includes("const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';"), true);
   assert.equal(source.includes('function isSharedStudySettingKey(key: string) {'), true);
@@ -187,11 +192,10 @@ test('common shares all study settings across domains and warns for playback rat
   assert.equal(source.includes('if (isSharedStudySettingKey(storageKey)) {'), true);
   assert.equal(source.includes('syncStudySettingCrossDomain(storageKey, nextValue);'), true);
   assert.match(source, /if \(key === 'playbackRate' && options\.warn !== false\) \{\s+void maybeWarnHighPlaybackRate\(script, value\);\s+\}/);
-  assert.equal(source.includes('if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {'), true);
-  assert.equal(source.includes("const confirmed = await $modal.confirm({"), true);
-  assert.equal(source.includes("content: '当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。'"), true);
-  assert.equal(source.includes("confirmButtonText: '继续使用'"), true);
-  assert.equal(source.includes("cancelButtonText: '降到 1 倍'"), true);
-  assert.equal(source.includes("setStudySettingValueInternal(script, 'playbackRate', 1, { warn: false });"), true);
+  assert.equal(source.includes('const highPlaybackRateWarningState = createHighPlaybackRateWarningState();'), true);
+  assert.equal(source.includes('void warnOnHighPlaybackRate(highPlaybackRateWarningState, value, {'), true);
+  assert.equal(source.includes('confirm: (prompt) => $modal.confirm(prompt),'), true);
+  assert.equal(source.includes("restorePlaybackRate: (rate) => setStudySettingValueInternal(script, 'playbackRate', rate, { warn: false })"), true);
+  assert.equal(source.includes('hasWarnedHighPlaybackRateInCurrentPage'), false);
 });
 

@@ -33,7 +33,8 @@ export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel
     root.style.position = 'fixed';
     root.style.top = '16px';
     root.style.right = '16px';
-    root.style.zIndex = '2147483646';
+    // 面板层级必须低于弹窗（弹窗固定 2147483647），最高位留给弹窗。
+    root.style.zIndex = '2147483644';
     root.style.width = '360px';
     root.style.maxHeight = '80vh';
     root.style.overflow = 'auto';

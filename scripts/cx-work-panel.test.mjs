@@ -7,8 +7,13 @@ import { fileURLToPath } from 'node:url';
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const cxProjectPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
 
+// 源码检出可能是 CRLF，断言只关心代码结构，先统一换行再比较。
+async function readCxSource() {
+  return (await readFile(cxProjectPath, 'utf8')).replace(/\r\n/g, '\n');
+}
+
 test('work script hides its standalone runtime panel so work pages reuse common results panel', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   const workScriptBlock = source.match(/work:\s*\{[\s\S]*?autoRead:\s*\{/);
 
@@ -17,7 +22,7 @@ test('work script hides its standalone runtime panel so work pages reuse common 
 });
 
 test('study clears work results before moving to the next chapter page', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('const resetWorkResults = () => {'), true);
   assert.equal(source.includes('workResultsMethods().clearRuntimeControls?.();'), true);
@@ -26,7 +31,7 @@ test('study clears work results before moving to the next chapter page', async (
 });
 
 test('cx clears stale work result questions when study or work pages load before rendering detected questions', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function clearWorkResultsOnPageLoad()'), true);
   assert.equal(source.includes('clearWorkResultsOnPageLoad();'), true);
@@ -38,7 +43,7 @@ test('cx clears stale work result questions when study or work pages load before
 });
 
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes("const workOrExamTitleSelector = !preview_mode"), true);
   assert.equal(source.includes("'.splitS-left .mark_name'"), true);
@@ -49,7 +54,7 @@ test('workOrExam uses step-by-step exam selectors and ignores generic type distr
 });
 
 test('workOrExam applies choice answers with native click before synthetic fallback', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function isWorkOrExamChoiceChecked('), true);
   assert.equal(source.includes('const checkedBeforeClick = isWorkOrExamChoiceChecked(option);'), true);
@@ -60,7 +65,7 @@ test('workOrExam applies choice answers with native click before synthetic fallb
 });
 
 test('workOrExam auto uploads work and exam results after answering', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('async function uploadWorkOrExamResults(results:'), true);
   assert.equal(source.includes("const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);"), true);
@@ -78,7 +83,7 @@ test('workOrExam auto uploads work and exam results after answering', async () =
 });
 
 test('workOrExam gates exam auto-submit behind the panel switch', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('enableExamAutoSubmit,'), true);
   assert.equal(source.includes("const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);"), true);
@@ -90,7 +95,7 @@ test('workOrExam gates exam auto-submit behind the panel switch', async () => {
 });
 
 test('workOrExam submits through the window that owns chaoxing submit functions', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function getWorkOrExamRuntimeWindowCandidates('), true);
   assert.equal(source.includes('function findWorkOrExamRuntimeWindow('), true);
@@ -101,7 +106,7 @@ test('workOrExam submits through the window that owns chaoxing submit functions'
 });
 
 test('workOrExam fallback submit confirms chaoxing popup before retrying generic submit buttons', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function clickWorkOrExamSubmitConfirmButton('), true);
   assert.equal(source.includes("doc.querySelector<HTMLElement>('#popok')"), true);
@@ -115,7 +120,7 @@ test('workOrExam fallback submit confirms chaoxing popup before retrying generic
 });
 
 test('workOrExam fallback submit logs visible enabled click targets', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function describeWorkOrExamClickTarget('), true);
   assert.equal(source.includes('function isWorkOrExamClickableElement('), true);
@@ -127,7 +132,7 @@ test('workOrExam fallback submit logs visible enabled click targets', async () =
 });
 
 test('workOrExam exposes an on-page debug log panel for submit diagnostics', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes("title.textContent = '超星学习助手';"), true);
   assert.equal(source.includes('Chaoxing Plus ${debugLogPanelLevel.toUpperCase()} Log'), false);
@@ -141,7 +146,7 @@ test('workOrExam exposes an on-page debug log panel for submit diagnostics', asy
   assert.equal(source.includes("return `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;"), true);
   assert.equal(source.includes('const sharedDebugLogPanelAttribute = getSharedRuntimeStoreAttributeName(debugLogPanelSettingKey);'), true);
   assert.equal(source.includes('function syncDebugLogPanelVisibility('), true);
-  assert.equal(source.includes('const debugLogPanelZIndex = 2147483645;'), true);
+  assert.equal(source.includes('const debugLogPanelZIndex = 2147483643;'), true);
   assert.equal(source.includes('panel.style.zIndex = String(debugLogPanelZIndex);'), true);
   assert.equal(source.includes("document.addEventListener('DOMContentLoaded', syncDebugLogPanelVisibility, { once: true });"), true);
   assert.match(source, /try \{\s*syncDebugLogPanelVisibility\(\);\s*\} catch/);
@@ -173,7 +178,7 @@ test('workOrExam exposes an on-page debug log panel for submit diagnostics', asy
 });
 
 test('debug log panel batches rendering and bounds each entry so answering is not blocked by log DOM work', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('const debugLogPanelRenderBatchSize = 20;'), true);
   assert.equal(source.includes('const debugLogPanelMaxEntryTextLength = 4000;'), true);
@@ -185,7 +190,7 @@ test('debug log panel batches rendering and bounds each entry so answering is no
 });
 
 test('workOrExam debug log panel can be dragged from its header', async () => {
-  const source = await readFile(cxProjectPath, 'utf8');
+  const source = await readCxSource();
 
   assert.equal(source.includes('function bindDebugLogPanelDrag('), true);
   assert.equal(source.includes("header.dataset.cxDebugLogPanelDragHandle = 'true';"), true);

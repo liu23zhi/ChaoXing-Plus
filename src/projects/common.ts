@@ -10,6 +10,10 @@ import {
 } from './study-panel-state.js';
 import { shouldShowFloatingPanel } from './panel-visibility.js';
 import {
+  createHighPlaybackRateWarningState,
+  warnOnHighPlaybackRate
+} from './high-playback-rate-warning.js';
+import {
   formatQuestionTypeLabel,
   formatWorkResultStatus,
   resolveWorkResultTone,
@@ -156,7 +160,7 @@ const defaultWorkOptions: CommonWorkOptions = {
 };
 
 const answerCache = new Map<string, SearchInformation[]>();
-let hasWarnedHighPlaybackRateInCurrentPage = false;
+const highPlaybackRateWarningState = createHighPlaybackRateWarningState();
 
 function canShowFloatingPanel() {
   try {
@@ -516,23 +520,11 @@ function applyStudySettingRuntimeEffect(key: string, value: unknown) {
   });
 }
 
-async function maybeWarnHighPlaybackRate(script: { cfg: Record<string, unknown>; namespace?: string }, value: unknown) {
-  const rate = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {
-    return;
-  }
-
-  hasWarnedHighPlaybackRateInCurrentPage = true;
-  const confirmed = await $modal.confirm({
-    content: '当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。',
-    confirmButtonText: '继续使用',
-    cancelButtonText: '降到 1 倍',
-    defaultConfirmed: true
+function maybeWarnHighPlaybackRate(script: { cfg: Record<string, unknown>; namespace?: string }, value: unknown) {
+  void warnOnHighPlaybackRate(highPlaybackRateWarningState, value, {
+    confirm: (prompt) => $modal.confirm(prompt),
+    restorePlaybackRate: (rate) => setStudySettingValueInternal(script, 'playbackRate', rate, { warn: false })
   });
-
-  if (!confirmed) {
-    setStudySettingValueInternal(script, 'playbackRate', 1, { warn: false });
-  }
 }
 
 function setStudySettingValueInternal(
@@ -2286,7 +2278,7 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
     panel.root.style.right = '16px';
     panel.root.style.top = '108px';
   }
-  panel.root.style.zIndex = kind === 'workResults' ? '2147483647' : '2147483646';
+  panel.root.style.zIndex = kind === 'workResults' ? '2147483645' : '2147483644';
   panel.root.style.width = kind === 'workResults' ? '460px' : '360px';
   panel.root.style.maxHeight = kind === 'workResults' ? '76vh' : '50vh';
   panel.root.style.overflow = 'auto';
