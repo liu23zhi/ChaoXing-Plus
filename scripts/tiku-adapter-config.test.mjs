@@ -106,6 +106,35 @@ test('creates a post fetch wrapper with bearer auth and adapter search url', asy
   assert.ok(wrapper.retry?.maxAttempts >= 2);
 });
 
+// 服务端已彻底删除 plat（历史取值恒为 -1，没有任何区分度），请求侧不得再提交该字段。
+test('tiku adapter request payload no longer carries the removed plat field', async () => {
+  const mod = await loadHelperModule();
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key'
+  });
+
+  assert.equal(wrapper.data.plat, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(wrapper.data, 'plat'), false);
+
+  // 其余请求字段保持原样，避免顺手改动引入回归。
+  assert.deepEqual(Object.keys(wrapper.data), [
+    'qid',
+    'question',
+    'options',
+    'type',
+    'courseName',
+    'extra',
+    'skipCache'
+  ]);
+});
+
+test('tiku adapter config source no longer mentions plat at all', async () => {
+  const source = await readFile(helperSourcePath, 'utf8');
+
+  assert.doesNotMatch(source, /\bplat\b/);
+});
+
 test('tiku adapter wrapper prefers computed choice keys for objective choice answers', async () => {
   const mod = await loadHelperModule();
 
@@ -141,6 +170,91 @@ test('tiku adapter wrapper forwards per-request cache bypass flag', async () => 
   assert.equal(resolveSkipCache({ skipCache: true }), true);
   assert.equal(resolveSkipCache({ skipCache: false }), false);
   assert.equal(resolveSkipCache({}), undefined);
+});
+
+/** 线上一次请求携带 55 条 options，其中绝大多数是 UEditor / jQuery 源码，这里复刻其中的典型行。 */
+const NOISY_OPTIONS_SAMPLE = [
+  'A. 正确',
+  'var wordNum = "";',
+  'B. 错误',
+  'if (wordNum == "") {',
+  'window.UEDITOR_CONFIG.wordCount = false;',
+  "editor1.addListener('contentChange', function() {",
+  '$( "#answer406157359" ).parent().find(".edui-editor.edui-default").removeClass("borblue");',
+  '}',
+  '// 编辑器脚本注释',
+  'wordNum = "";',
+  'editorInstance = null;',
+  'C. 不确定'
+].join('\n');
+
+function createOptionsResolver(mod) {
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key'
+  });
+
+  // handler 必须是单行字符串，因为它会被 Function(...) 直接求值。
+  assert.equal(wrapper.data.options.handler.split('\n').length, 1);
+  const resolveOptions = Function(wrapper.data.options.handler)();
+  assert.equal(typeof resolveOptions, 'function');
+  return resolveOptions;
+}
+
+test('tiku adapter options drop editor script noise while keeping real options in order', async () => {
+  const mod = await loadHelperModule();
+  const resolveOptions = createOptionsResolver(mod);
+
+  assert.deepEqual(resolveOptions({ options: NOISY_OPTIONS_SAMPLE }), [
+    'A. 正确',
+    'B. 错误',
+    'C. 不确定'
+  ]);
+});
+
+test('tiku adapter options deduplicate repeated entries preserving first-seen order', async () => {
+  const mod = await loadHelperModule();
+  const resolveOptions = createOptionsResolver(mod);
+
+  assert.deepEqual(
+    resolveOptions({ options: 'A. 正确\nB. 错误\nA. 正确\nC. 不确定\nB. 错误' }),
+    ['A. 正确', 'B. 错误', 'C. 不确定']
+  );
+});
+
+test('tiku adapter options fall back to the raw list when every entry looks like noise', async () => {
+  const mod = await loadHelperModule();
+  const resolveOptions = createOptionsResolver(mod);
+
+  const rawOptions = [
+    'var wordNum = "";',
+    '}',
+    'function setupEditor() {',
+    '// 注释行'
+  ].join('\n');
+
+  // 过滤后一条不剩时必须回退，绝不能把整题选项全丢掉。
+  assert.deepEqual(resolveOptions({ options: rawOptions }), [
+    'var wordNum = "";',
+    '}',
+    'function setupEditor() {',
+    '// 注释行'
+  ]);
+});
+
+test('tiku adapter options do not false-positive on natural language or formulas', async () => {
+  const mod = await loadHelperModule();
+  const resolveOptions = createOptionsResolver(mod);
+
+  assert.deepEqual(
+    resolveOptions({ options: 'A. (1, 2)\nB. 3x + 2\nC. 变量 var 的值\nD. f(x) 的定义域\nE. 正确\nF. 分号; 位于句子中间' }),
+    ['A. (1, 2)', 'B. 3x + 2', 'C. 变量 var 的值', 'D. f(x) 的定义域', 'E. 正确', 'F. 分号; 位于句子中间']
+  );
+
+  // 无选项时保持既有行为：返回空数组而不是抛错。
+  assert.deepEqual(resolveOptions({}), []);
+  assert.deepEqual(resolveOptions({ options: '' }), []);
+  assert.deepEqual(resolveOptions({ options: '   \n  \n' }), []);
 });
 
 test('tiku adapter config exposes long AI fallback timeouts and status helpers', async () => {

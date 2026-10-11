@@ -468,12 +468,18 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     },
     data: {
       qid: '',
-      plat: -1,
       question: {
         handler: `return (env) => String(env.title ?? '').trim()`
       },
       options: {
-        handler: `return (env) => String(env.options ?? '').split(/\\n+/).map((item) => item.trim()).filter(Boolean)`
+        // 抓取页面选项时会把富文本编辑器（UEditor）与 jQuery 初始化源码一起带进来：线上实测一次请求 55 条 options 里绝大多数是源码。
+        // 这些噪音会挤掉真实选项、让 AI 分心、显著拉长响应（单次 36.9 秒），进而触发客户端超时重发，所以在提交前按行剔除。
+        // 判定依据：编辑器/框架源码行必然命中代码符号（function( / function foo( / => / $( / .parent( / .removeClass( / .css( 等）、
+        // 或以上述关键字开头（var / let / const / if / else / window. / document. / editor1. 等）、或是纯符号行、以 // 开头的注释行，
+        // 或是以 ASCII 分号 `;` 结尾的 JS 语句行（截断后的片段如 `wordNum = "";` 会绕过前几条规则，而选项文本不会以 `;` 收尾）；
+        // 正常选项是自然语言或公式，不会以这些 token 开头或收尾，也不会只由符号组成，因此不会被误删。
+        // 结果按首次出现顺序去重；若过滤后一条不剩（整题选项恰好长得像代码），回退为原始列表，绝不返回空数组。
+        handler: `return (env) => { const raw = String(env.options ?? '').split(/\\n+/).map((item) => item.trim()).filter(Boolean); const isNoise = (item) => /function\\s*[$\\w]*\\s*\\(|=>|\\$\\(|\\.parent\\(|\\.find\\(|\\.removeClass\\(|\\.addClass\\(|\\.css\\(|UEDITOR_CONFIG|\\.edui-|addListener\\(|contentChange|;$/.test(item) || /^(var|let|const|if|else|window\\.|document\\.|editor\\d*\\.|\\$\\.|\\/\\/|\\/\\*|\\} else|\\.\\w+\\()/.test(item) || !/[\\p{L}\\p{N}]/u.test(item); const kept = []; for (const item of raw) { if (!isNoise(item) && !kept.includes(item)) kept.push(item); } return kept.length > 0 ? kept : raw; }`
       },
       type: {
         handler: `return (env) => {
