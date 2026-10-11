@@ -39,6 +39,87 @@
         color: #334155;
       }
 
+      .switch-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: #f8fafc;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        cursor: pointer;
+      }
+
+      .switch-copy {
+        display: grid;
+        gap: 2px;
+      }
+
+      .switch-label {
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .switch-state {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .switch {
+        position: relative;
+        flex: 0 0 auto;
+        width: 46px;
+        height: 26px;
+      }
+
+      .switch input {
+        position: absolute;
+        inset: 0;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      .switch-track {
+        position: absolute;
+        inset: 0;
+        border-radius: 999px;
+        background: #cbd5e1;
+        transition: background 0.2s ease;
+      }
+
+      .switch-thumb {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #ffffff;
+        box-shadow: 0 2px 6px rgba(15, 23, 42, 0.25);
+        transition: transform 0.2s ease;
+      }
+
+      .switch input:checked ~ .switch-track {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+      }
+
+      .switch input:checked ~ .switch-thumb {
+        transform: translateX(20px);
+      }
+
+      .switch input:focus-visible ~ .switch-track {
+        outline: 2px solid #93c5fd;
+        outline-offset: 2px;
+      }
+
+      .note {
+        font-size: 12px;
+        line-height: 1.6;
+        color: #64748b;
+      }
+
       .button {
         appearance: none;
         border: 0;
@@ -59,8 +140,20 @@
   <body>
     <section class="card">
       <div class="title">超星学习助手</div>
-      <div class="desc">这是一个给 chaoxing.com 官方站点使用的自动学习 / 自动搜题扩展。</div>
-      <button id="open-chaoxing" class="button" type="button">打开 chaoxing.com 官网</button>
+      <div class="desc">为 chaoxing.com 打造的自动学习与自动搜题扩展：视频自动播放、章节测验、作业与考试自动答题。</div>
+      <label class="switch-row" for="extension-enabled">
+        <span class="switch-copy">
+          <span class="switch-label">启用扩展</span>
+          <span class="switch-state" id="extension-enabled-state">已启用</span>
+        </span>
+        <span class="switch">
+          <input id="extension-enabled" type="checkbox" role="switch" checked />
+          <span class="switch-track"></span>
+          <span class="switch-thumb"></span>
+        </span>
+      </label>
+      <div class="note">关闭后超星页面不再运行自动学习与答题；切换后已打开的页面会自动刷新。</div>
+      <button id="open-chaoxing" class="button" type="button">打开超星官网</button>
     </section>
     <script type="module" src="./popup.js"></script>
   </body>

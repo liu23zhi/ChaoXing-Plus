@@ -113,6 +113,7 @@
       });
 
       applySharedStoreValues(nextValues);
+      reloadForExtensionSwitch(changes?.[extensionEnabledKey]);
     });
   }
 
@@ -126,6 +127,40 @@
   const injectedWindowKey = '__chaoxing_plus_injected__';
   const swalHostId = 'chaoxing-plus-swal-host';
   const swalTargetId = 'chaoxing-plus-swal-target';
+  // 弹窗里的「启用 / 禁用」总开关，写在 chrome.storage.local，注入主脚本前先读它。
+  const extensionEnabledKey = 'common.settings.extension-enabled';
+
+  const isEnabledValue = (value) => value !== false;
+
+  const readExtensionEnabled = () => new Promise((resolve) => {
+    try {
+      if (!chrome?.storage?.local?.get) {
+        resolve(true);
+        return;
+      }
+
+      chrome.storage.local.get(extensionEnabledKey, (result) => {
+        resolve(isEnabledValue(result?.[extensionEnabledKey]));
+      });
+    } catch {
+      resolve(true);
+    }
+  });
+
+  const reloadForExtensionSwitch = (change) => {
+    if (!change || isEnabledValue(change.oldValue) === isEnabledValue(change.newValue)) {
+      return;
+    }
+
+    try {
+      // 顶层刷新会带着所有子框架一起重载；子框架不单独刷新，避免重复加载。
+      if (window.self === window.top) {
+        window.location.reload();
+      }
+    } catch {
+      // ignore cross-frame access errors
+    }
+  };
 
   function getSwalScriptDocument() {
     try {
@@ -217,6 +252,12 @@
     if (root.dataset[injectedMarkerKey] === frameMarker || window[injectedWindowKey] === frameMarker) {
       return;
     }
+
+    if (!(await readExtensionEnabled())) {
+      // 总开关关闭：不注入主脚本，页面保持原样，也不创建面板。
+      return;
+    }
+
     root.dataset[injectedMarkerKey] = frameMarker;
     window[injectedWindowKey] = frameMarker;
 

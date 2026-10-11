@@ -8,9 +8,12 @@ const packageJsonPath = resolve(process.cwd(), 'package.json');
 const packageLockPath = resolve(process.cwd(), 'package-lock.json');
 const popupHtmlPath = resolve(process.cwd(), 'src', 'popup.html');
 const popupJsPath = resolve(process.cwd(), 'src', 'popup.js');
+const entryScriptPath = resolve(process.cwd(), 'src', 'extension-entry.js');
 
 const expectedDescription = '给超星网站使用的自动学习与自动搜题扩展。';
 const expectedHomepage = 'https://www.chaoxing.com/';
+const expectedPopupDescription = '为 chaoxing.com 打造的自动学习与自动搜题扩展：视频自动播放、章节测验、作业与考试自动答题。';
+const expectedExtensionEnabledKey = 'common.settings.extension-enabled';
 
 test('build script declares extension icons, popup, and updated description', async () => {
   const source = await readFile(buildScriptPath, 'utf8');
@@ -38,8 +41,35 @@ test('popup page introduces the extension for Chaoxing users', async () => {
 
   assert.equal(source.includes('<title>超星学习助手</title>'), true);
   assert.equal(source.includes('<div class="title">超星学习助手</div>'), true);
-  assert.equal(source.includes('给 chaoxing.com 官方站点使用的自动学习 / 自动搜题扩展'), true);
-  assert.equal(source.includes('打开 chaoxing.com 官网'), true);
+  assert.equal(source.includes(expectedPopupDescription), true);
+  assert.equal(source.includes('打开超星官网'), true);
+  // 优化前的文案不允许回归
+  assert.equal(source.includes('这是一个给 chaoxing.com 官方站点使用的自动学习 / 自动搜题扩展。'), false);
+  assert.equal(source.includes('打开 chaoxing.com 官网'), false);
+});
+
+test('popup page ships an enable and disable switch for the whole extension', async () => {
+  const source = await readFile(popupHtmlPath, 'utf8');
+
+  assert.equal(source.includes('<input id="extension-enabled" type="checkbox" role="switch" checked />'), true);
+  assert.equal(source.includes('<span class="switch-label">启用扩展</span>'), true);
+  assert.equal(source.includes('<span class="switch-state" id="extension-enabled-state">已启用</span>'), true);
+  assert.equal(source.includes('关闭后超星页面不再运行自动学习与答题；切换后已打开的页面会自动刷新。'), true);
+});
+
+test('popup switch persists the shared extension-enabled key that gates the content script', async () => {
+  const popupSource = await readFile(popupJsPath, 'utf8');
+  const entrySource = await readFile(entryScriptPath, 'utf8');
+
+  const popupKey = popupSource.match(/const extensionEnabledKey = '([^']+)'/)?.[1];
+  const entryKey = entrySource.match(/const extensionEnabledKey = '([^']+)'/)?.[1];
+
+  assert.equal(popupKey, expectedExtensionEnabledKey);
+  assert.equal(entryKey, popupKey);
+  assert.equal(popupSource.includes('chrome.storage.local.get(extensionEnabledKey, (result) => {'), true);
+  assert.equal(popupSource.includes('renderExtensionEnabled(result?.[extensionEnabledKey] !== false);'), true);
+  assert.equal(popupSource.includes('chrome.storage.local.set({ [extensionEnabledKey]: enabled });'), true);
+  assert.equal(popupSource.includes("enabledState.textContent = enabled ? '已启用' : '已禁用';"), true);
 });
 
 test('popup script opens the Chaoxing homepage', async () => {

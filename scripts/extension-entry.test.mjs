@@ -77,6 +77,34 @@ test('extension entry starts the main script without blocking on SweetAlert runt
   assert.equal(source.includes("script.src = chrome.runtime.getURL('chaoxing-plus.js');"), true);
 });
 
+test('extension entry skips the main script while the popup switch is off', async () => {
+  const source = await readFile(extensionEntryPath, 'utf8');
+
+  assert.equal(source.includes("const extensionEnabledKey = 'common.settings.extension-enabled';"), true);
+  assert.equal(source.includes('const isEnabledValue = (value) => value !== false;'), true);
+  assert.equal(source.includes('const readExtensionEnabled = () => new Promise((resolve) => {'), true);
+  assert.equal(source.includes('chrome.storage.local.get(extensionEnabledKey, (result) => {'), true);
+  assert.equal(source.includes('resolve(isEnabledValue(result?.[extensionEnabledKey]));'), true);
+  assert.equal(source.includes('if (!(await readExtensionEnabled())) {'), true);
+  assert.equal(source.includes('// 总开关关闭：不注入主脚本，页面保持原样，也不创建面板。'), true);
+
+  // 开关判断必须发生在创建 script 标签之前，关闭时页面完全不加载主脚本。
+  assert.equal(
+    source.indexOf('if (!(await readExtensionEnabled())) {') < source.indexOf("script.src = chrome.runtime.getURL('chaoxing-plus.js');"),
+    true
+  );
+});
+
+test('extension entry reloads the top frame when the popup switch changes', async () => {
+  const source = await readFile(extensionEntryPath, 'utf8');
+
+  assert.equal(source.includes('const reloadForExtensionSwitch = (change) => {'), true);
+  assert.equal(source.includes('reloadForExtensionSwitch(changes?.[extensionEnabledKey]);'), true);
+  assert.equal(source.includes('if (!change || isEnabledValue(change.oldValue) === isEnabledValue(change.newValue)) {'), true);
+  assert.equal(source.includes('if (window.self === window.top) {'), true);
+  assert.equal(source.includes('window.location.reload();'), true);
+});
+
 test('runtime logger stringifies object payloads as readable JSON', async () => {
   const loggerPath = resolve(scriptsDir, '..', 'src', 'runtime', 'logger.ts');
   const source = await readFile(loggerPath, 'utf8');
