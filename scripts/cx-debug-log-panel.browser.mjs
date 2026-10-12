@@ -28,7 +28,20 @@ before(async () => {
     ${store}
     const topWindow = window.top;
     ${panel}
-    window.__logTest = { append: appendDebugLogPanelEntry };
+    window.__logTest = {
+      append: appendDebugLogPanelEntry,
+      duplicate(id) {
+        const message = {
+          namespace: debugLogPanelMessageNamespace,
+          kind: 'entry',
+          id,
+          token: debugLogPanelTransportToken,
+          entry: { level: 'info', prefix: id, detail: '', textDetail: '', meta: {} }
+        };
+        window.parent.postMessage(message, '*');
+        window.parent.postMessage(message, '*');
+      }
+    };
   })();`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   server = createServer((request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -43,7 +56,11 @@ before(async () => {
   browser = await puppeteer.launch({
     executablePath: process.env.CX_BROWSER_EXECUTABLE,
     headless: true,
-    args: ['--no-first-run', '--no-default-browser-check'],
+    args: [
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--host-resolver-rules=MAP a.chaoxing.com 127.0.0.1,MAP b.chaoxing.com 127.0.0.1,MAP c.chaoxing.com 127.0.0.1'
+    ],
     defaultViewport: { width: 1280, height: 900 }
   });
 });
@@ -228,26 +245,52 @@ test('large and accessor details are bounded without executing page getters', as
   } finally { await page.close(); }
 });
 
-test('a cross-origin top document falls back to the current frame without a startup error', async () => {
-  const page = await openPage(false);
+test('nested cross-origin Chaoxing frames share one top-level debug log panel', async () => {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
   try {
+    const topUrl = url.replace('127.0.0.1', 'a.chaoxing.com');
+    await page.goto(topUrl);
+    await page.evaluate(key => localStorage.setItem(key, 'true'), key);
     await page.addScriptTag({ content: script });
-    const frameUrl = url.replace('127.0.0.1', 'localhost');
+    const bUrl = topUrl.replace('a.chaoxing.com', 'b.chaoxing.com');
     await page.evaluate(frameUrl => {
       const frame = document.createElement('iframe');
-      frame.style.width = '900px';
-      frame.style.height = '600px';
       frame.src = frameUrl;
       document.body.append(frame);
-    }, frameUrl);
-    await page.waitForFrame(frame => frame.url().startsWith(frameUrl));
-    const frame = page.frames().find(frame => frame.parentFrame());
-    await frame.evaluate(key => localStorage.setItem(key, 'true'), key);
-    await frame.addScriptTag({ content: script });
-    await frame.evaluate(() => window.__logTest.append('info', 'cross-origin-entry', {}));
-    await frame.waitForFunction(() => document.querySelector('[data-cx-debug-log-panel-body]')?.textContent.includes('cross-origin-entry'));
-    await frame.locator('::-p-text(清空)').click();
-    assert.equal(await frame.$eval('[data-cx-debug-log-panel-body]', body => body.children.length), 0);
-    assert.equal(await page.$('#chaoxing-plus-debug-log-panel'), null);
+    }, bUrl);
+    const bFrame = await page.waitForFrame(frame => frame.url().startsWith(bUrl));
+    await bFrame.evaluate(key => localStorage.setItem(key, 'true'), key);
+    await bFrame.addScriptTag({ content: script });
+
+    const cUrl = bUrl.replace('b.chaoxing.com', 'c.chaoxing.com');
+    await bFrame.evaluate(frameUrl => {
+      const frame = document.createElement('iframe');
+      frame.src = frameUrl;
+      document.body.append(frame);
+    }, cUrl);
+    const cFrame = await page.waitForFrame(frame => frame.url().startsWith(cUrl));
+    await cFrame.evaluate(key => localStorage.setItem(key, 'true'), key);
+    await cFrame.addScriptTag({ content: script });
+
+    await cFrame.evaluate(() => window.__logTest.append('info', 'nested-cross-origin-entry', { answer: 'C' }));
+    await page.waitForFunction(() => document.querySelector('[data-cx-debug-log-panel-body]')?.textContent.includes('nested-cross-origin-entry'));
+    assert.equal(await page.$$eval('#chaoxing-plus-debug-log-panel', panels => panels.length), 1);
+    assert.equal(await bFrame.$('#chaoxing-plus-debug-log-panel'), null);
+    assert.equal(await cFrame.$('#chaoxing-plus-debug-log-panel'), null);
+
+    await cFrame.evaluate(() => window.__logTest.duplicate('duplicate-entry-test'));
+    await page.waitForFunction(() => document.querySelector('[data-cx-debug-log-panel-body]')?.textContent.includes('duplicate-entry-test'));
+    assert.equal(await page.$eval('[data-cx-debug-log-panel-body]', body => Array.from(body.children).filter(node => node.textContent.includes('duplicate-entry-test')).length), 1);
+
+    await page.evaluate(() => window.postMessage({
+      namespace: 'chaoxing-plus:debug-log-panel',
+      kind: 'entry',
+      id: 'top-window-spoof-test',
+      token: 'spoofed-token',
+      entry: { level: 'info', prefix: 'top-window-spoof-test', detail: '', textDetail: '', meta: {} }
+    }, '*'));
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 50)));
+    assert.equal(await page.$eval('[data-cx-debug-log-panel-body]', body => body.textContent.includes('top-window-spoof-test')), false);
   } finally { await page.close(); }
 });

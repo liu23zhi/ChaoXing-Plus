@@ -369,6 +369,9 @@ const debugLogPanelRenderStateKey = '__chaoxing_plus_debug_log_render_state__';
 const debugLogPanelEntryEvent = 'chaoxing-plus:debug-log-panel-entry';
 const debugLogPanelSyncEvent = 'chaoxing-plus:debug-log-panel-sync';
 const debugLogPanelControllerKey = '__chaoxing_plus_debug_log_panel_controller__';
+const debugLogPanelMessageNamespace = 'chaoxing-plus:debug-log-panel';
+const debugLogPanelOwnerTokenKey = '__chaoxing_plus_debug_log_panel_owner_token__';
+const debugLogPanelSeenMessageIdsKey = '__chaoxing_plus_debug_log_panel_seen_message_ids__';
 const debugLogPanelZIndex = 2147483643;
 const unfinishedQuestionRetryAttempts = 3;
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
@@ -409,11 +412,30 @@ function shouldSkipThrottledDebugLog(throttleKey: string, throttleMs = 1500) {
   return false;
 }
 
-function getDebugLogPanelDocument() {
+type DebugLogPanelWindowState = Window & Record<string, unknown>;
+type DebugLogPanelMessage = {
+  namespace: string;
+  kind: 'hello' | 'init' | 'entry' | 'sync';
+  token?: string;
+  id?: string;
+  entry?: {
+    level: DebugLogLevel;
+    prefix: string;
+    detail?: Record<string, unknown>;
+    textDetail?: string;
+    meta?: DebugMeta;
+  };
+};
+
+let debugLogPanelTransportToken: string | undefined;
+const pendingDebugLogPanelEntries: DebugLogPanelMessage[] = [];
+const pendingDebugLogPanelChildWindows = new Set<Window>();
+
+function getDebugLogPanelDocument(): Document | undefined {
   try {
     return (window.top ?? window).document;
   } catch {
-    return document;
+    return undefined;
   }
 }
 
@@ -423,6 +445,247 @@ function getDebugLogPanelSyncDocuments() {
 
 function getSharedRuntimeStoreAttributeName(key: string) {
   return `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
+}
+
+function isDebugLogPanelOwnerWindow() {
+  return getDebugLogPanelDocument() === document;
+}
+
+function isDirectDebugLogPanelChild(source: MessageEventSource | null) {
+  if (!source || source === window) {
+    return false;
+  }
+
+  try {
+    return Array.from(window.frames).some((frame) => frame === source);
+  } catch {
+    return false;
+  }
+}
+
+function createDebugLogPanelToken() {
+  try {
+    if (typeof crypto?.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Fall through to the local entropy fallback.
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getDebugLogPanelOwnerToken() {
+  if (!isDebugLogPanelOwnerWindow()) {
+    return undefined;
+  }
+
+  const ownerWindow = window as unknown as DebugLogPanelWindowState;
+  const existingToken = ownerWindow[debugLogPanelOwnerTokenKey];
+  if (typeof existingToken === 'string' && existingToken.length > 0) {
+    return existingToken;
+  }
+
+  const token = createDebugLogPanelToken();
+  ownerWindow[debugLogPanelOwnerTokenKey] = token;
+  return token;
+}
+
+function getDebugLogPanelSeenMessageIds() {
+  if (!isDebugLogPanelOwnerWindow()) {
+    return undefined;
+  }
+
+  const ownerWindow = window as unknown as DebugLogPanelWindowState;
+  const existingIds = ownerWindow[debugLogPanelSeenMessageIdsKey];
+  if (existingIds instanceof Set) {
+    return existingIds as Set<string>;
+  }
+
+  const nextIds = new Set<string>();
+  ownerWindow[debugLogPanelSeenMessageIdsKey] = nextIds;
+  return nextIds;
+}
+
+function markDebugLogPanelMessageSeen(id: string) {
+  const seenIds = getDebugLogPanelSeenMessageIds();
+  if (!seenIds) {
+    return true;
+  }
+
+  if (seenIds.has(id)) {
+    return false;
+  }
+
+  seenIds.add(id);
+  while (seenIds.size > debugLogPanelMaxEntries * 4) {
+    const first = seenIds.values().next().value;
+    if (typeof first !== 'string') {
+      break;
+    }
+    seenIds.delete(first);
+  }
+  return true;
+}
+
+function postDebugLogPanelMessage(message: DebugLogPanelMessage, targetWindow: Window = window.parent) {
+  try {
+    targetWindow.postMessage(message, '*');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function flushPendingDebugLogPanelChildWindows() {
+  const token = debugLogPanelTransportToken;
+  if (!token) {
+    return;
+  }
+
+  for (const childWindow of pendingDebugLogPanelChildWindows) {
+    postDebugLogPanelMessage({
+      namespace: debugLogPanelMessageNamespace,
+      kind: 'init',
+      token
+    }, childWindow);
+  }
+  pendingDebugLogPanelChildWindows.clear();
+}
+
+function flushPendingDebugLogPanelEntries() {
+  const token = debugLogPanelTransportToken;
+  if (!token || window.parent === window) {
+    return;
+  }
+
+  while (pendingDebugLogPanelEntries.length > 0) {
+    const message = pendingDebugLogPanelEntries.shift();
+    if (!message) {
+      continue;
+    }
+    message.token = token;
+    postDebugLogPanelMessage(message);
+  }
+}
+
+function sendDebugLogPanelHello() {
+  if (window.parent === window) {
+    return;
+  }
+
+  postDebugLogPanelMessage({
+    namespace: debugLogPanelMessageNamespace,
+    kind: 'hello'
+  });
+}
+
+function queueOrSendDebugLogPanelEntry(entry: DebugLogPanelMessage['entry']) {
+  if (!entry || window.parent === window) {
+    return;
+  }
+
+  const message: DebugLogPanelMessage = {
+    namespace: debugLogPanelMessageNamespace,
+    kind: 'entry',
+    id: `${Date.now()}-${debugSequence}-${Math.random().toString(36).slice(2)}`,
+    token: debugLogPanelTransportToken,
+    entry
+  };
+  if (!debugLogPanelTransportToken) {
+    pendingDebugLogPanelEntries.push(message);
+    sendDebugLogPanelHello();
+    return;
+  }
+  postDebugLogPanelMessage(message);
+}
+
+function forwardDebugLogPanelSync() {
+  if (window.parent === window) {
+    return;
+  }
+
+  if (!debugLogPanelTransportToken) {
+    sendDebugLogPanelHello();
+    return;
+  }
+
+  postDebugLogPanelMessage({
+    namespace: debugLogPanelMessageNamespace,
+    kind: 'sync',
+    token: debugLogPanelTransportToken
+  });
+}
+
+function handleDebugLogPanelMessage(event: MessageEvent<DebugLogPanelMessage>) {
+  const message = event.data;
+  if (!message || message.namespace !== debugLogPanelMessageNamespace || !message.kind) {
+    return;
+  }
+
+  if (message.kind === 'hello') {
+    if (!isDirectDebugLogPanelChild(event.source)) {
+      return;
+    }
+
+    const token = isDebugLogPanelOwnerWindow() ? getDebugLogPanelOwnerToken() : debugLogPanelTransportToken;
+    if (token) {
+      postDebugLogPanelMessage({
+        namespace: debugLogPanelMessageNamespace,
+        kind: 'init',
+        token
+      }, event.source as Window);
+    } else {
+      pendingDebugLogPanelChildWindows.add(event.source as Window);
+    }
+    return;
+  }
+
+  if (message.kind === 'init') {
+    if (event.source !== window.parent || typeof message.token !== 'string' || message.token.length === 0) {
+      return;
+    }
+    debugLogPanelTransportToken = message.token;
+    flushPendingDebugLogPanelEntries();
+    flushPendingDebugLogPanelChildWindows();
+    return;
+  }
+
+  if (!isDirectDebugLogPanelChild(event.source)) {
+    return;
+  }
+
+  const expectedToken = isDebugLogPanelOwnerWindow() ? getDebugLogPanelOwnerToken() : debugLogPanelTransportToken;
+  if (!expectedToken || message.token !== expectedToken) {
+    return;
+  }
+
+  if (message.kind === 'entry') {
+    if (!message.id || !message.entry || !markDebugLogPanelMessageSeen(message.id)) {
+      return;
+    }
+
+    if (isDebugLogPanelOwnerWindow()) {
+      getDebugLogPanelController()?.append(
+        message.entry.level,
+        message.entry.prefix,
+        message.entry.detail,
+        message.entry.textDetail,
+        message.entry.meta
+      );
+    } else {
+      postDebugLogPanelMessage(message);
+    }
+    return;
+  }
+
+  if (message.kind === 'sync') {
+    if (isDebugLogPanelOwnerWindow()) {
+      getDebugLogPanelController()?.sync();
+    } else {
+      postDebugLogPanelMessage(message);
+    }
+  }
 }
 
 function isDebugLogPanelEnabled() {
@@ -439,7 +702,7 @@ function refreshDebugLogPanelEnabledState() {
 
 function dispatchDebugLogPanelOwnerEvent(type: string, detail?: unknown) {
   const targetDocument = getDebugLogPanelDocument();
-  if (targetDocument === document) {
+  if (!targetDocument || targetDocument === document) {
     return false;
   }
 
@@ -453,6 +716,9 @@ function dispatchDebugLogPanelOwnerEvent(type: string, detail?: unknown) {
 
 function getDebugLogPanelController() {
   const targetDocument = getDebugLogPanelDocument();
+  if (!targetDocument) {
+    return undefined;
+  }
   const root = targetDocument.documentElement as (HTMLElement & Record<string, unknown>) | null;
   const existingController = root?.[debugLogPanelControllerKey];
   if (existingController && typeof existingController === 'object') {
@@ -488,7 +754,16 @@ function syncDebugLogPanelVisibility() {
     return;
   }
 
-  dispatchDebugLogPanelOwnerEvent(debugLogPanelSyncEvent);
+  if (!dispatchDebugLogPanelOwnerEvent(debugLogPanelSyncEvent)) {
+    forwardDebugLogPanelSync();
+  }
+}
+
+try {
+  window.addEventListener('message', handleDebugLogPanelMessage);
+  sendDebugLogPanelHello();
+} catch {
+  // Cross-frame diagnostics must never block the automation flow.
 }
 
 try {
@@ -849,7 +1124,7 @@ function bindDebugLogPanelDrag(panel: HTMLElement, header: HTMLElement, targetDo
 }
 
 function ensureDebugLogPanel() {
-  if (getDebugLogPanelDocument() !== document) {
+  if (!isDebugLogPanelOwnerWindow()) {
     return undefined;
   }
 
@@ -859,6 +1134,9 @@ function ensureDebugLogPanel() {
   }
 
   const targetDocument = getDebugLogPanelDocument();
+  if (!targetDocument) {
+    return undefined;
+  }
   const existingPanel = targetDocument.getElementById(debugLogPanelId);
   const existingBody = existingPanel?.querySelector<HTMLElement>('[data-cx-debug-log-panel-body="true"]');
   if (existingBody) {
@@ -985,13 +1263,17 @@ function appendDebugLogPanelEntry(
       return;
     }
 
-    dispatchDebugLogPanelOwnerEvent(debugLogPanelEntryEvent, {
+    const entry = {
       level,
       prefix,
       detail,
       textDetail,
       meta
-    });
+    };
+    if (dispatchDebugLogPanelOwnerEvent(debugLogPanelEntryEvent, entry)) {
+      return;
+    }
+    queueOrSendDebugLogPanelEntry(entry);
   } catch {
     // Debug UI must never break the automation flow.
   }
