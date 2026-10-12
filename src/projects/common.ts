@@ -32,6 +32,7 @@ export interface CommonWorkOptions {
   redundanceWordsText: string;
   answerSeparators: string;
   answerMatchMode: 'exact' | 'includes' | 'similar';
+  enableRandomFallbackAnswer: boolean;
   enableAIFallbackAnswer: boolean;
   aiFallbackFailureAction: 'pause' | 'skip';
 }
@@ -62,7 +63,7 @@ interface QuestionCache {
 }
 
 const WORK_RESULTS_PANEL_POSITION_KEY = 'common.work-results.panel-position';
-const STUDY_PLAYBACK_RATE_WARNING_ACK_KEY = 'cx.new.study.playback-rate-warning-ack';
+let hasWarnedHighPlaybackRateInCurrentPage = false;
 
 const WORK_OPTIONS_KEY = 'common.settings.work-options';
 const WORK_RESULTS_KEY = 'common.work-results.results';
@@ -78,6 +79,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   redundanceWordsText: '',
   answerSeparators: '#,|,;,；',
   answerMatchMode: 'includes',
+  enableRandomFallbackAnswer: false,
   enableAIFallbackAnswer: false,
   aiFallbackFailureAction: 'pause'
 };
@@ -167,6 +169,7 @@ function getWorkOptions(): CommonWorkOptions {
 
   return {
     ...stored,
+    enableRandomFallbackAnswer: getStudySettingValue('enableRandomFallbackAnswer', stored.enableRandomFallbackAnswer ?? false),
     enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
     aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
@@ -399,17 +402,12 @@ function applyStudySettingRuntimeEffect(key: string, value: unknown) {
 
 function maybeWarnHighPlaybackRate(value: unknown) {
   const rate = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(rate) || rate <= 2) {
+  if (!Number.isFinite(rate) || rate < 2 || hasWarnedHighPlaybackRateInCurrentPage) {
     return;
   }
 
-  const warnedRate = runtimeStore.get(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, 0);
-  if (typeof warnedRate === 'number' && warnedRate === rate) {
-    return;
-  }
-
-  runtimeStore.set(STUDY_PLAYBACK_RATE_WARNING_ACK_KEY, rate);
-  void $modal.alert('当前倍速已超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');
+  hasWarnedHighPlaybackRateInCurrentPage = true;
+  void $modal.alert('当前倍速已达到或超过 2 倍。超星存在较强风控，高倍速可能导致进度清空、回退或学习异常，请谨慎使用。');
 }
 
 function setStudySettingValue(script: { cfg: Record<string, unknown>; namespace?: string }, key: string, value: unknown) {

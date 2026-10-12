@@ -13,20 +13,33 @@
     '[id="panel-common-render"]'
   ].join(', ');
 
-  const sharedStoreKeyPrefix = 'common.settings.';
+  const sharedStoreKeyPrefixes = ['common.settings.', 'cx.new.study.'];
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
   const sharedStoreHydrateEvent = 'chaoxing-plus:shared-store-hydrate';
 
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
+  const isSharedStoreKey = (key) => sharedStoreKeyPrefixes.some((prefix) => key.startsWith(prefix));
+  const serializeSharedStoreValue = (value) => {
+    if (typeof value !== 'string' && typeof value !== 'boolean' && typeof value !== 'number') {
+      return undefined;
+    }
+
+    return JSON.stringify(value);
+  };
 
   const applySharedStoreValues = (values) => {
     Object.entries(values ?? {}).forEach(([key, value]) => {
-      if (!key.startsWith(sharedStoreKeyPrefix) || typeof value !== 'string') {
+      if (!isSharedStoreKey(key)) {
         return;
       }
 
-      root.setAttribute(getSharedAttributeName(key), value);
-      localStorage.setItem(key, JSON.stringify(value));
+      const serialized = serializeSharedStoreValue(value);
+      if (serialized === undefined) {
+        return;
+      }
+
+      root.setAttribute(getSharedAttributeName(key), serialized);
+      localStorage.setItem(key, serialized);
     });
 
     document.dispatchEvent(new CustomEvent(sharedStoreHydrateEvent, { detail: values }));
@@ -39,12 +52,17 @@
 
     const nextValues = {};
     Object.entries(detail).forEach(([key, value]) => {
-      if (!key.startsWith(sharedStoreKeyPrefix) || typeof value !== 'string') {
+      if (!isSharedStoreKey(key)) {
+        return;
+      }
+
+      const serialized = serializeSharedStoreValue(value);
+      if (serialized === undefined) {
         return;
       }
 
       nextValues[key] = value;
-      root.setAttribute(getSharedAttributeName(key), value);
+      root.setAttribute(getSharedAttributeName(key), serialized);
     });
 
     if (Object.keys(nextValues).length > 0) {

@@ -7,11 +7,12 @@ import {
   domSearchAll,
   OCSWorker,
   request,
+  type QuestionTypes,
   type SearchInformation,
   type SimplifyWorkResult
 } from '../core/index.js';
 import { Project, $gm, runtimeStore } from '../runtime/index.js';
-import { $message } from '../runtime/message.js';
+import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
 import { playbackRate, volume } from '../utils/configs.js';
@@ -1427,7 +1428,8 @@ const JobRunner = {
       stopSecondWhenFinish,
       redundanceWordsText,
       answerSeparators,
-      answerMatchMode
+      answerMatchMode,
+      enableRandomFallbackAnswer
     } = options;
 
     if (answererWrappers === undefined || answererWrappers.length === 0) {
@@ -1571,15 +1573,15 @@ const JobRunner = {
           if (type && (type === 'completion' || type === 'multiple' || type === 'judgement' || type === 'single')) {
             const resolver = createDefaultQuestionResolver(ctx)[type];
 
-            const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
-              if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
+            const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {
+              if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
                 const checked =
                   option.parentElement?.querySelector('label input')?.getAttribute('checked') === 'checked' ||
                   option.parentElement?.getAttribute('aria-checked') === 'true';
                 if (!checked) {
                   option.click();
                 }
-              } else if (questionType === 'completion' && option && answer.trim()) {
+              } else if (resolvedType === 'completion' && option && answer.trim()) {
                 const text = option.parentElement?.querySelector('textarea');
                 const textareaFrame = option.parentElement?.querySelector('iframe');
                 if (text) {
@@ -1588,11 +1590,19 @@ const JobRunner = {
                 if (textareaFrame?.contentDocument) {
                   textareaFrame.contentDocument.body.innerHTML = answer;
                 }
-                option.parentElement?.parentElement?.querySelector<HTMLElement>('[onclick*=saveQuestion]')?.click();
+                const saveButton = option.parentElement?.parentElement?.querySelector('[onclick*=saveQuestion]');
+                if (saveButton instanceof HTMLElement) {
+                  saveButton.click();
+                }
               }
             };
 
-            return resolver(searchInfos, elements.options.map((option) => optimizationElementWithImage(option)), handler as any);
+            const result = await resolver(searchInfos, elements.options.map((option) => optimizationElementWithImage(option)), handler as any);
+            return result.finish
+              ? result
+              : ((await runRandomChoiceFallback(type, elements.options.map((option) => optimizationElementWithImage(option)), { enableRandomFallbackAnswer }, handler as any)) ?? {
+                  finish: false
+                });
           } else if (type === 'line') {
             for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
               let ans = answers;
@@ -1689,6 +1699,11 @@ const JobRunner = {
 
     worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
+
+    const confirmed = await confirmBeforeAutoAnswer({ emit: (event) => worker.emit(event) });
+    if (!confirmed) {
+      return;
+    }
 
     const results = await worker.doWork();
     const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
@@ -1958,16 +1973,23 @@ function workOrExam(
 
     worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
-    void worker
-      .doWork()
-      .then(() => {
-        $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
-        worker.emit('done');
-      })
-      .catch((err) => {
-        console.error(err);
-        $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
-      });
+    void (async () => {
+      const confirmed = await confirmBeforeAutoAnswer(worker);
+      if (!confirmed) {
+        return;
+      }
+
+      await worker
+        .doWork()
+        .then(() => {
+          $message.info({ content: '作业/考试完成，请自行检查后保存或提交。', duration: 0 });
+          worker.emit('done');
+        })
+        .catch((err) => {
+          console.error(err);
+          $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
+        });
+    })();
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
     let next = getNextBtn();
@@ -1987,6 +2009,46 @@ function workOrExam(
   }
 
   return worker;
+}
+
+async function confirmBeforeAutoAnswer(worker: { emit: (...args: any[]) => unknown }) {
+  const confirmed = await $modal.confirm({
+    content: '5 秒后将开始自动答题，若你想先手动作答，请点击“手动答题”。',
+    confirmButtonText: '立即自动答题',
+    cancelButtonText: '手动答题',
+    timer: 5000,
+    timerProgressBar: true,
+    defaultConfirmed: true
+  });
+
+  if (!confirmed) {
+    worker.emit('stop');
+  }
+
+  return confirmed;
+}
+
+async function runRandomChoiceFallback(
+  type: ReturnType<typeof getQuestionType>,
+  options: HTMLElement[],
+  fallbackOptions: { enableRandomFallbackAnswer?: boolean },
+  handler: (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => Promise<void>
+) {
+  if (!fallbackOptions.enableRandomFallbackAnswer || !type || (type !== 'single' && type !== 'multiple' && type !== 'judgement')) {
+    return undefined;
+  }
+
+  if (options.length === 0) {
+    return { finish: false };
+  }
+
+  const picked = options[Math.floor(Math.random() * options.length)];
+  if (!picked) {
+    return { finish: false };
+  }
+
+  await handler(type, '', picked);
+  return { finish: true };
 }
 
 function detectManualAnswer(

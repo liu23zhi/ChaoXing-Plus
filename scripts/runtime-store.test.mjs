@@ -20,7 +20,8 @@ test('runtime store falls back to shared bootstrap values when localStorage is e
   const memory = new Map();
   const attributes = new Map([
     ['data-chaoxing-plus-shared-common-settings-tiku-adapter-baseurl', 'https://adapter.shared'],
-    ['data-chaoxing-plus-shared-common-settings-tiku-adapter-key', 'shared-key']
+    ['data-chaoxing-plus-shared-common-settings-tiku-adapter-key', 'shared-key'],
+    ['data-chaoxing-plus-shared-cx-new-study-enableAnswer', 'true']
   ]);
 
   globalThis.localStorage = {
@@ -57,6 +58,7 @@ test('runtime store falls back to shared bootstrap values when localStorage is e
   assert.equal(typeof mod.runtimeStore?.get, 'function');
   assert.equal(mod.runtimeStore.get('common.settings.tiku-adapter.baseurl', ''), 'https://adapter.shared');
   assert.equal(mod.runtimeStore.get('common.settings.tiku-adapter.key', ''), 'shared-key');
+  assert.equal(mod.runtimeStore.get('cx.new.study.enableAnswer', false), true);
 });
 
 test('runtime store updates shared config when the extension hydrates another page', async () => {
@@ -102,12 +104,14 @@ test('runtime store updates shared config when the extension hydrates another pa
     type: 'chaoxing-plus:shared-store-hydrate',
     detail: {
       'common.settings.tiku-adapter.baseurl': 'https://adapter.live',
-      'common.settings.tiku-adapter.key': 'live-key'
+      'common.settings.tiku-adapter.key': 'live-key',
+      'cx.new.study.enableAnswer': true
     }
   });
 
   assert.equal(mod.runtimeStore.get('common.settings.tiku-adapter.baseurl', ''), 'https://adapter.live');
   assert.equal(mod.runtimeStore.get('common.settings.tiku-adapter.key', ''), 'live-key');
+  assert.equal(mod.runtimeStore.get('cx.new.study.enableAnswer', false), true);
 });
 
 test('runtime store reads the latest localStorage value even after another page writes it', async () => {

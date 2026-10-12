@@ -25,7 +25,19 @@ test('modal alerts route Swal calls through the top window when available', asyn
   const source = await readFile(modalRuntimePath, 'utf8');
 
   assert.equal(source.includes('function getTopWindowSwal()'), true);
-  assert.equal(source.includes('return topWindow.Swal as typeof Swal;'), true);
   assert.equal(source.includes('const runtimeSwal = getTopWindowSwal();'), true);
-  assert.equal(source.includes("const result = await runtimeSwal.fire({ icon: 'info', text: content, confirmButtonText: '知道了'"), true);
+  assert.equal(source.includes('return runtimeSwal.fire({'), true);
+});
+
+test('modal runtime creates a safe Swal target in the top document before firing', async () => {
+  const source = await readFile(modalRuntimePath, 'utf8');
+
+  assert.equal(source.includes("const swalHostId = 'chaoxing-plus-swal-host';"), true);
+  assert.equal(source.includes('function getOrCreateSwalTarget()'), true);
+  assert.equal(source.includes("host = targetDocument.createElement('div');"), true);
+  assert.equal(source.includes('host.attachShadow({ mode: ' + "'open'" + ' });'), true);
+  assert.equal(source.includes("target.id = swalTargetId;"), true);
+  assert.equal(source.includes('(targetDocument.body || targetDocument.documentElement).appendChild(host);'), true);
+  assert.equal(source.includes('target: getOrCreateSwalTarget()'), true);
+  assert.equal(source.includes("const host = topDocument?.getElementById('chaoxing-plus-swal-host');"), false);
 });

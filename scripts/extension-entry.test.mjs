@@ -21,14 +21,16 @@ test('extension entry does not write URL-derived injection markers into dataset 
 test('extension entry bootstraps and persists shared settings through chrome storage by prefix', async () => {
   const source = await readFile(extensionEntryPath, 'utf8');
 
-  assert.equal(source.includes("const sharedStoreKeyPrefix = 'common.settings.';"), true);
+  assert.equal(source.includes("const sharedStoreKeyPrefixes = ['common.settings.', 'cx.new.study.'];"), true);
   assert.equal(source.includes('Object.entries(values ?? {}).forEach(([key, value]) => {'), true);
-  assert.equal(source.includes("if (!key.startsWith(sharedStoreKeyPrefix) || typeof value !== 'string') {"), true);
+  assert.equal(source.includes('if (!isSharedStoreKey(key)) {'), true);
+  assert.equal(source.includes("if (typeof value !== 'string' && typeof value !== 'boolean' && typeof value !== 'number') {"), true);
   assert.equal(source.includes("Object.entries(detail).forEach(([key, value]) => {"), true);
   assert.equal(source.includes('chrome.storage.local.get(null, (result) => {'), true);
   assert.equal(source.includes('chaoxing-plus:shared-store-sync'), true);
   assert.equal(source.includes('common.settings.tiku-adapter.baseurl'), false);
   assert.equal(source.includes('common.settings.tiku-adapter.key'), false);
+  assert.equal(source.includes('cx.new.study.enableAnswer'), false);
 });
 
 test('extension entry injects SweetAlert2 styles into the top document for top-window modals', async () => {
