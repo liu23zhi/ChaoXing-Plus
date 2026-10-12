@@ -19,6 +19,7 @@ import {
   resolveWorkResultTone,
   summarizeSearchInfoError
 } from './work-results-status.js';
+import { shouldCacheSearchInfos } from './cx-retry-cache.js';
 import {
   DEFAULT_TIKU_BASE_URL,
   TIKU_ADAPTER_BASEURL_KEY,
@@ -2467,14 +2468,20 @@ export const CommonProject = Project.create({
             if (!isLocalQuestionCacheEnabled()) {
               return provider().then((result) => {
                 if (Array.isArray(result)) {
-                  answerCache.set(title, result as SearchInformation[]);
+                  if (shouldCacheSearchInfos(result)) {
+                    answerCache.set(title, result as SearchInformation[]);
+                  }
                 }
                 return result;
               });
             }
 
             if (answerCache.has(title)) {
-              return Promise.resolve(answerCache.get(title) as T);
+              const cachedResults = answerCache.get(title);
+              if (cachedResults && shouldCacheSearchInfos(cachedResults)) {
+                return Promise.resolve(cachedResults as T);
+              }
+              answerCache.delete(title);
             }
 
             const cacheResults = questionCachesToSearchInfos(title);
@@ -2485,7 +2492,9 @@ export const CommonProject = Project.create({
 
             return provider().then((result) => {
               if (Array.isArray(result)) {
-                answerCache.set(title, result as SearchInformation[]);
+                if (shouldCacheSearchInfos(result)) {
+                  answerCache.set(title, result as SearchInformation[]);
+                }
               }
               return result;
             });

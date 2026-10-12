@@ -33,17 +33,27 @@ async function loadHelperModule() {
   return require(helperModulePath);
 }
 
-test('automatic retry keeps cache enabled when the search timed out', async () => {
+test('automatic retry bypasses cache when the search timed out', async () => {
   const mod = await loadHelperModule();
 
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
     error: '题库请求超时，可能是题库问题，或者请检查网络或者重试。'
-  }), undefined);
+  }), true);
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
     ctx: {
       searchInfos: [{ error: 'request timeout' }]
     }
-  }), undefined);
+  }), true);
+});
+
+test('automatic retry bypasses cache after a non-timeout search error', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(mod.shouldSkipCacheForAutomaticRetry({
+    ctx: {
+      searchInfos: [{ error: '题库连接失败，请检查网络。' }]
+    }
+  }), true);
 });
 
 test('automatic retry keeps cache enabled when no answer is displayed', async () => {
@@ -57,7 +67,7 @@ test('automatic retry keeps cache enabled when no answer is displayed', async ()
   }), undefined);
 });
 
-test('automatic retry skips cache only when an answer was returned but did not match', async () => {
+test('automatic retry bypasses cache when a returned answer did not match', async () => {
   const mod = await loadHelperModule();
 
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
@@ -68,4 +78,12 @@ test('automatic retry skips cache only when an answer was returned but did not m
       }]
     }
   }), true);
+});
+
+test('search results with provider errors are never eligible for local caching', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [], error: 'request failed' }]), false);
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [] }]), true);
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [{ answer: 'A' }] }]), true);
 });
