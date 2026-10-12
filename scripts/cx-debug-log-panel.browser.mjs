@@ -23,7 +23,8 @@ before(async () => {
   const projectSource = process.env.CX_TEST_BASELINE
     ? execFileSync('git', ['show', 'HEAD:src/projects/cx.ts'], { encoding: 'utf8' })
     : await readFile('src/projects/cx.ts', 'utf8');
-  const panel = `const debugLogPanelSettingKey${projectSource.split('const debugLogPanelSettingKey')[1].split('type DebugMeta')[0]}`;
+  const panel = `let debugSequence = 0;
+    const debugLogPanelSettingKey${projectSource.split('const debugLogPanelSettingKey')[1].split('type DebugMeta')[0]}`;
   script = ts.transpileModule(`(() => {
     ${store}
     const topWindow = window.top;
@@ -59,6 +60,7 @@ before(async () => {
     args: [
       '--no-first-run',
       '--no-default-browser-check',
+      '--no-proxy-server',
       '--host-resolver-rules=MAP a.chaoxing.com 127.0.0.1,MAP b.chaoxing.com 127.0.0.1,MAP c.chaoxing.com 127.0.0.1'
     ],
     defaultViewport: { width: 1280, height: 900 }
