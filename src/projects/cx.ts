@@ -349,6 +349,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   answerMatchMode: 'includes',
   enableRandomFallbackAnswer: false,
   enableAIFallbackAnswer: false,
+  deepThinking: false,
   aiFallbackFailureAction: 'pause'
 };
 
@@ -1435,7 +1436,7 @@ function notifyManualAnswerRequired(results: RetryFailureSnapshot[]) {
 
 async function appendAIFallbackSearchInfos(
   searchInfos: SearchInformation[],
-  workOptions: Pick<CommonWorkOptions, 'enableAIFallbackAnswer' | 'aiFallbackFailureAction'>,
+  workOptions: Pick<CommonWorkOptions, 'enableAIFallbackAnswer' | 'deepThinking' | 'aiFallbackFailureAction'>,
   payload: {
     title: string;
     type: string;
@@ -1449,7 +1450,8 @@ async function appendAIFallbackSearchInfos(
   const fallbackInfos = await requestTikuAdapterAIFallback(getStoredTikuAdapterConfig(), {
     title: payload.title,
     type: payload.type,
-    options: payload.optionsText
+    options: payload.optionsText,
+    deepThinking: workOptions.deepThinking === true
   });
   const fallbackError = fallbackInfos[0]?.response?.error;
 
@@ -3277,6 +3279,7 @@ const JobRunner = {
       answerMatchMode,
       enableRandomFallbackAnswer,
       enableAIFallbackAnswer,
+      deepThinking,
       aiFallbackFailureAction
     } = options;
 
@@ -3394,12 +3397,13 @@ const JobRunner = {
                     type: questionType,
                     title,
                     options: optionsText,
+                    deepThinking,
                     skipCache: Boolean(workerOptions.skipCache)
                   });
               return withTikuAdapterAdminWarnings(
                 appendAIFallbackSearchInfos(
                   baseInfos,
-                  { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
+                  { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), deepThinking, aiFallbackFailureAction },
                   {
                     title,
                     type: questionType ?? 'unknown',
@@ -3410,7 +3414,7 @@ const JobRunner = {
             };
             const requestKey = JSON.stringify([
               title, questionType ?? 'unknown', optionsText,
-              Boolean(workerOptions.forceAIFallbackOnly), enableAIFallbackAnswer, aiFallbackFailureAction
+              Boolean(workerOptions.forceAIFallbackOnly), enableAIFallbackAnswer, deepThinking, aiFallbackFailureAction
             ]);
             return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
           };
@@ -3822,6 +3826,7 @@ function workOrExam(
     answerMatchMode,
     enableRandomFallbackAnswer,
     enableAIFallbackAnswer,
+    deepThinking,
     aiFallbackFailureAction,
     preview_mode
   }: CommonWorkOptions & {
@@ -4264,12 +4269,13 @@ function workOrExam(
               type: questionType,
               title,
               options: optionsText,
+              deepThinking,
               skipCache: Boolean(workerOptions.skipCache)
             });
             return withTikuAdapterAdminWarnings(
               appendAIFallbackSearchInfos(
                 baseInfos,
-                { enableAIFallbackAnswer, aiFallbackFailureAction },
+                { enableAIFallbackAnswer, deepThinking, aiFallbackFailureAction },
                 {
                   title,
                   type: questionType ?? 'unknown',
@@ -4280,7 +4286,7 @@ function workOrExam(
           };
           const requestKey = JSON.stringify([
             title, questionType ?? 'unknown', optionsText,
-            false, enableAIFallbackAnswer, aiFallbackFailureAction
+            false, enableAIFallbackAnswer, deepThinking, aiFallbackFailureAction
           ]);
           return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
         };

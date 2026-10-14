@@ -223,6 +223,7 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
         return [{ name: 'AI', results: [{ answer: 'A' }] }];
       },
       enableAIFallbackAnswer: true,
+      deepThinking: false,
       aiFallbackFailureAction: 'skip',
       appsMethods: () => ({ searchAnswerInCaches: (_title, provider) => provider() })
     });

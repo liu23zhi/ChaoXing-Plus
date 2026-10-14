@@ -45,6 +45,7 @@ export interface CommonWorkOptions {
   answerMatchMode: 'exact' | 'includes' | 'similar';
   enableRandomFallbackAnswer: boolean;
   enableAIFallbackAnswer: boolean;
+  deepThinking: boolean;
   aiFallbackFailureAction: 'pause' | 'skip';
 }
 
@@ -158,6 +159,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   answerMatchMode: 'includes',
   enableRandomFallbackAnswer: false,
   enableAIFallbackAnswer: false,
+  deepThinking: false,
   aiFallbackFailureAction: 'pause'
 };
 
@@ -256,6 +258,7 @@ function getWorkOptions(): CommonWorkOptions {
       stored.enableRandomFallbackAnswer ?? false
     ),
     enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
+    deepThinking: getStudySettingValue('deepThinking', stored.deepThinking ?? false),
     aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
   };
@@ -1184,7 +1187,24 @@ function createConfigField(
     stateDesc.style.lineHeight = '1.5';
 
     toggle.append(stateText, stateDesc);
+    let confirmationPending = false;
     toggle.onclick = () => {
+      if (key === 'deepThinking' && !checked) {
+        if (confirmationPending) return;
+        confirmationPending = true;
+        void $modal.confirm({
+          content: '开启深度思考后，AI 会进行多轮模型与联网搜索调用，等待时间会更长，费用也可能更高。确定开启吗？',
+          confirmButtonText: '确认开启',
+          cancelButtonText: '暂不开启'
+        }).then((confirmed) => {
+          if (confirmed) {
+            setStudySettingValue(script, key, true);
+          }
+        }).finally(() => {
+          confirmationPending = false;
+        });
+        return;
+      }
       setStudySettingValue(script, key, !checked);
     };
     control = toggle;
@@ -1419,6 +1439,11 @@ function createStudySettingsPanel() {
       attrs: { type: 'checkbox', title: '普通题库失败后，允许调用 tikuAdapter AI fallback。' },
       defaultValue: false
     },
+    deepThinking: {
+      label: '深度思考',
+      attrs: { type: 'checkbox', title: '开启后 AI 搜题会更慢，且费用可能更高。默认关闭。' },
+      defaultValue: false
+    },
     aiFallbackFailureAction: {
       label: 'AI 兜底失败后行为',
       options: [
@@ -1499,6 +1524,7 @@ function createStudySettingsPanel() {
     'enableHyperlink',
     'notifyWhenHasFaceRecognition'
   ];
+  const aiSearchKeys = ['enableAIFallbackAnswer', 'deepThinking', 'aiFallbackFailureAction'];
   const examAndDebugKeys = ['enableExamAutoSubmit', 'enableDebugLogPanel'];
   const cacheKeys = ['enableLocalQuestionCache'];
 
@@ -1584,6 +1610,7 @@ function createStudySettingsPanel() {
       taskKeys,
       formatEnabledStudyTaskCapabilitySummary(script.cfg, taskKeys)
     ),
+    createSettingsGroup('AI 搜题', '深度思考会增加等待时间，且费用可能更高；默认关闭。', aiSearchKeys),
     createSettingsGroup('考试与诊断', '控制考试自动交卷权限和页面日志窗口。', examAndDebugKeys)
     ,
     createSettingsGroup('题库缓存', '控制是否优先使用本地缓存命中题目答案。', cacheKeys)

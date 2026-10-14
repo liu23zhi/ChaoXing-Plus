@@ -119,6 +119,7 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
   title: string;
   type?: string;
   options?: string;
+  deepThinking?: boolean;
 }, options: TikuAdapterAIFallbackRequestOptions = {}): Promise<TikuAdapterAIFallbackResponse[]> {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
@@ -161,6 +162,7 @@ function buildTikuAdapterAIFallbackPayload(payload: {
   title: string;
   type?: string;
   options?: string;
+  deepThinking?: boolean;
 }) {
   return {
     question: String(payload.title ?? '').trim(),
@@ -168,7 +170,8 @@ function buildTikuAdapterAIFallbackPayload(payload: {
     options: String(payload.options ?? '')
       .split(/\n+/)
       .map((item) => item.trim())
-      .filter(Boolean)
+      .filter(Boolean),
+    ...(payload.deepThinking === true ? { deepThinking: true } : {})
   };
 }
 
@@ -499,6 +502,9 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       extra: '',
       skipCache: {
         handler: `return (env) => typeof env.skipCache === 'boolean' ? env.skipCache : undefined`
+      },
+      deepThinking: {
+        handler: `return (env) => env.deepThinking === true ? true : undefined`
       }
     },
     handler: `return (res) => {

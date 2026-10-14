@@ -125,7 +125,8 @@ test('tiku adapter request payload no longer carries the removed plat field', as
     'type',
     'courseName',
     'extra',
-    'skipCache'
+    'skipCache',
+    'deepThinking'
   ]);
 });
 
