@@ -12,6 +12,7 @@ const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts');
 const commonSourcePath = resolve(process.cwd(), 'src', 'projects', 'common.ts');
 const cxSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx.ts');
+const messageSourcePath = resolve(process.cwd(), 'src', 'runtime', 'message.ts');
 const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
 
 async function loadHelperModule() {
@@ -114,16 +115,19 @@ test('deep thinking is a disabled-by-default learning setting with a cost and la
 
 test('enabling deep thinking asks for confirmation before persisting the setting', async () => {
   const source = await readFile(commonSourcePath, 'utf8');
+  const messageSource = await readFile(messageSourcePath, 'utf8');
   const clickHandlerStart = source.indexOf("if (key === 'deepThinking' && !checked)");
   const clickHandlerEnd = source.indexOf('\n    };', clickHandlerStart);
   const clickHandler = source.slice(clickHandlerStart, clickHandlerEnd);
 
   assert.notEqual(clickHandlerStart, -1);
   assert.match(clickHandler, /\$modal\.confirm\(/);
-  assert.match(clickHandler, /费用可能更高/);
+  assert.match(clickHandler, /费用(?:也)?可能更高/);
   assert.match(clickHandler, /if \(confirmed\)/);
   assert.match(clickHandler, /setStudySettingValue\(script, key, true\)/);
   assert.match(clickHandler, /return;/);
+  assert.match(messageSource, /return runtimeSwal\.fire\(/);
+  assert.match(messageSource, /async confirm\([\s\S]*?await fireSwal\(/);
 });
 
 test('chapter and work or exam search chains forward deep thinking to both adapter routes', async () => {
