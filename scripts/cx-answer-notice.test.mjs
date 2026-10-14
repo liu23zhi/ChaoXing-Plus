@@ -30,6 +30,7 @@ async function createRuntime(responses, action = 'pause') {
   let requests = 0;
   const source = [
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
+    await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
     await declarations('src/core/worker/worker.ts', ['OCSWorker']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
@@ -68,7 +69,7 @@ async function createRuntime(responses, action = 'pause') {
   const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInContext(code, context);
   const runtime = vm.runInContext(`({
-    OCSWorker, appendAIFallbackSearchInfos,
+    OCSWorker, resolveWorkerThreadCount, appendAIFallbackSearchInfos,
     notify: typeof notifyManualAnswerRequired === 'function' ? notifyManualAnswerRequired : undefined,
     retryChapter: retryUnfinishedChapterQuestions,
     retryWork: retryUnfinishedWorkOrExamQuestions
@@ -94,6 +95,54 @@ test('AI failure stays quiet during answering and preserves its final error', as
   assert.deepEqual(runtime.notifications, []);
   assert.match(results[0].error, /AI 兜底未返回可用答案/);
   assert.equal(results[0].error.includes(manualMessage), false);
+});
+
+test('worker defaults to four concurrent search requests while preserving result order', async () => {
+  const runtime = await createRuntime([success]);
+  const roots = [{ id: 0 }, { id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+  let active = 0;
+  let maxActive = 0;
+  let activeResolvers = 0;
+  let maxActiveResolvers = 0;
+  const searchOrder = [];
+  const answerOrder = [];
+  const worker = new runtime.OCSWorker({
+    root: roots,
+    elements: {},
+    answerer: async (_elements, ctx) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, ctx.root.id === 0 ? 80 : 10));
+      active -= 1;
+      searchOrder.push(ctx.root.id);
+      return [{ name: 'fixture', results: [{ question: String(ctx.root.id), answer: 'A' }] }];
+    },
+    work: async (ctx) => {
+      maxActiveResolvers = Math.max(maxActiveResolvers, ++activeResolvers);
+      answerOrder.push(ctx.root.id);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeResolvers -= 1;
+      return { finish: true };
+    }
+  });
+
+  const results = await worker.doWork();
+
+  assert.equal(maxActive, 4);
+  assert.notEqual(searchOrder[0], 0);
+  assert.equal(maxActiveResolvers, 1);
+  assert.deepEqual(answerOrder, [0, 1, 2, 3, 4]);
+  assert.deepEqual(Array.from(results, (result) => result.ctx.root.id), [0, 1, 2, 3, 4]);
+});
+
+test('worker thread count defaults to four and normalizes invalid values', async () => {
+  const runtime = await createRuntime([success]);
+
+  assert.equal(runtime.resolveWorkerThreadCount(undefined), 4);
+  assert.equal(runtime.resolveWorkerThreadCount(0), 1);
+  assert.equal(runtime.resolveWorkerThreadCount(-2), 1);
+  assert.equal(runtime.resolveWorkerThreadCount(2.9), 2);
+  assert.equal(runtime.resolveWorkerThreadCount(Number.NaN), 4);
 });
 
 for (const mode of ['Chapter', 'Work']) {

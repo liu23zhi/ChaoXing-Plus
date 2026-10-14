@@ -1,5 +1,15 @@
 import { SearchInformation } from '../answer-wrapper/interface';
 
+export const DEFAULT_WORKER_THREAD_COUNT = 4;
+
+export function resolveWorkerThreadCount(thread: number | undefined): number {
+	if (thread === undefined || !Number.isFinite(thread)) {
+		return DEFAULT_WORKER_THREAD_COUNT;
+	}
+
+	return Math.max(1, Math.floor(thread));
+}
+
 export type ElementResolver<R> = (root: HTMLElement | Document) => R;
 export type RawElements = Record<
 	string | symbol,

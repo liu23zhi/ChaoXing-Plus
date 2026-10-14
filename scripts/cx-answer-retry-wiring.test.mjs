@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const cxProjectPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
 const messagePath = resolve(scriptsDir, '..', 'src', 'runtime', 'message.ts');
+const commonProjectPath = resolve(scriptsDir, '..', 'src', 'projects', 'common.ts');
+const workerInterfacePath = resolve(scriptsDir, '..', 'src', 'core', 'worker', 'interface.ts');
+const workerPath = resolve(scriptsDir, '..', 'src', 'core', 'worker', 'worker.ts');
 
 test('cx registers runtime stop continue and retry controls with the common work results panel', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
@@ -17,6 +20,23 @@ test('cx registers runtime stop continue and retry controls with the common work
   assert.equal(source.includes('retryQuestion: async (index) =>'), true);
   assert.equal(source.includes("worker.on('done', clearRuntimeControls);"), true);
   assert.equal(source.includes("worker.on('close', clearRuntimeControls);"), true);
+});
+
+test('search defaults to four concurrent workers across shared and Chaoxing entry points', async () => {
+  const [commonSource, cxSource, workerInterfaceSource, workerSource] = await Promise.all([
+    readFile(commonProjectPath, 'utf8'),
+    readFile(cxProjectPath, 'utf8'),
+    readFile(workerInterfacePath, 'utf8'),
+    readFile(workerPath, 'utf8')
+  ]);
+
+  assert.equal(workerInterfaceSource.includes('export const DEFAULT_WORKER_THREAD_COUNT = 4;'), true);
+  assert.equal(workerInterfaceSource.includes('export function resolveWorkerThreadCount(thread: number | undefined): number'), true);
+  assert.equal(commonSource.includes('thread: DEFAULT_WORKER_THREAD_COUNT,'), true);
+  assert.equal(cxSource.includes('thread: DEFAULT_WORKER_THREAD_COUNT,'), true);
+  assert.equal(cxSource.includes('thread: thread ?? DEFAULT_WORKER_THREAD_COUNT,'), true);
+  assert.equal(workerSource.includes('const threadCount = resolveWorkerThreadCount(this.opts.thread);'), true);
+  assert.equal(cxSource.includes("thread: 1 }),"), false);
 });
 
 test('cx isolates single question retry workers from the main result panel refresh callbacks', async () => {

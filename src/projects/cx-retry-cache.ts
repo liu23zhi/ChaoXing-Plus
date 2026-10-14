@@ -45,6 +45,18 @@ export function shouldCacheSearchInfos(searchInfos: readonly SearchInfoCacheCand
   return searchInfos.every((info) => !hasNonEmptyError(info.error));
 }
 
+export function createSearchRequestDeduplicator<T>(): (key: string, provider: () => Promise<T>) => Promise<T> {
+  const pending = new Map<string, Promise<T>>();
+  return (key, provider) => {
+    const existing = pending.get(key);
+    if (existing) return existing;
+
+    const request = Promise.resolve().then(provider).finally(() => pending.delete(key));
+    pending.set(key, request);
+    return request;
+  };
+}
+
 export function hasReturnedSearchAnswer(result: RetryFailureSnapshot): boolean {
   return (result.ctx?.searchInfos ?? []).some((info) =>
     (info.results ?? []).some((entry) => String(entry.answer ?? '').trim().length > 0)

@@ -2,6 +2,7 @@ import md5 from 'md5';
 import Typr from 'typr.js';
 import {
   createDefaultQuestionResolver,
+  DEFAULT_WORKER_THREAD_COUNT,
   AnswerWrapperHandlerConfig,
   defaultAnswerWrapperHandler,
   defaultWorkTypeResolver,
@@ -39,7 +40,7 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
-import { shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
+import { createSearchRequestDeduplicator, shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
   inspectVideoLoadState,
@@ -336,7 +337,7 @@ function getCurrentChapterCompletionDiagnostics() {
 
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
-  thread: 1,
+  thread: DEFAULT_WORKER_THREAD_COUNT,
   upload: 'submit',
   enableExamAutoSubmit: false,
   enableDebugLogPanel: false,
@@ -1947,7 +1948,7 @@ export const CXProject = Project.create({
             {
               start_delay_seconds: workOptions.period,
               enable_control_panel: true,
-              workerProvider: (opts) => workOrExam('exam', { ...opts, preview_mode: false, thread: 1 })
+              workerProvider: (opts) => workOrExam('exam', { ...opts, preview_mode: false })
             },
             workOptions
           );
@@ -3351,6 +3352,7 @@ const JobRunner = {
         .trim();
     };
 
+    const deduplicateSearchRequest = createSearchRequestDeduplicator<SearchInformation[]>();
     const createChapterWorker = (
       questionRoots: HTMLElement[],
       workerOptions: {
@@ -3369,7 +3371,7 @@ const JobRunner = {
           lineAnswerInput: '.line_answer input[name^=answer]',
           lineSelectBox: '.line_answer_ct .selectBox '
         },
-        thread: thread ?? 1,
+        thread: thread ?? DEFAULT_WORKER_THREAD_COUNT,
         answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
         answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
         answerer: (elements, ctx) => {
@@ -3379,31 +3381,38 @@ const JobRunner = {
           }
 
           const provider = async () => {
-            await sleep((period ?? 3) * 1000);
             const questionType = resolveChapterQuestionType(ctx.root, elements);
             const optionsText =
               questionType === 'completion'
                 ? ''
                 : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
-            const baseInfos = workerOptions.forceAIFallbackOnly
-              ? []
-              : await defaultAnswerWrapperHandler(answererWrappers, {
-                  type: questionType,
-                  title,
-                  options: optionsText,
-                  skipCache: Boolean(workerOptions.skipCache)
-                });
-            return withTikuAdapterAdminWarnings(
-              appendAIFallbackSearchInfos(
-                baseInfos,
-                { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
-                {
-                  title,
-                  type: questionType ?? 'unknown',
-                  optionsText
-                }
-              )
-            );
+            const request = async () => {
+              await sleep((period ?? 3) * 1000);
+              const baseInfos = workerOptions.forceAIFallbackOnly
+                ? []
+                : await defaultAnswerWrapperHandler(answererWrappers, {
+                    type: questionType,
+                    title,
+                    options: optionsText,
+                    skipCache: Boolean(workerOptions.skipCache)
+                  });
+              return withTikuAdapterAdminWarnings(
+                appendAIFallbackSearchInfos(
+                  baseInfos,
+                  { enableAIFallbackAnswer: enableAIFallbackAnswer || Boolean(workerOptions.forceAIFallbackOnly), aiFallbackFailureAction },
+                  {
+                    title,
+                    type: questionType ?? 'unknown',
+                    optionsText
+                  }
+                )
+              );
+            };
+            const requestKey = JSON.stringify([
+              title, questionType ?? 'unknown', optionsText,
+              Boolean(workerOptions.forceAIFallbackOnly), enableAIFallbackAnswer, aiFallbackFailureAction
+            ]);
+            return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
           };
 
           const searchInCaches = appsMethods().searchAnswerInCaches;
@@ -4212,6 +4221,7 @@ function workOrExam(
     }, undefined, { correlationId: workExamCorrelationId });
   }
 
+  const deduplicateSearchRequest = createSearchRequestDeduplicator<SearchInformation[]>();
   const createWorkOrExamWorker = (
     questionRoots: string | HTMLElement[],
     workerOptions: {
@@ -4230,7 +4240,7 @@ function workOrExam(
         reading: '.reading_answer',
         filling: '.filling_answer'
       },
-      thread: thread ?? 1,
+      thread: thread ?? DEFAULT_WORKER_THREAD_COUNT,
       answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
       answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
       answerer: (elements, ctx) => {
@@ -4243,29 +4253,36 @@ function workOrExam(
         }
 
         const provider = async () => {
-          await sleep((period ?? 3) * 1000);
           const questionType = resolveAnswerSearchType(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.questionLi') ?? document);
           const optionsText =
             ctx.type === 'completion'
               ? ''
               : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
-          const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
-            type: questionType,
-            title,
-            options: optionsText,
-            skipCache: Boolean(workerOptions.skipCache)
-          });
-          return withTikuAdapterAdminWarnings(
-            appendAIFallbackSearchInfos(
-              baseInfos,
-              { enableAIFallbackAnswer, aiFallbackFailureAction },
-              {
-                title,
-                type: questionType ?? 'unknown',
-                optionsText
-              }
-            )
-          );
+          const request = async () => {
+            await sleep((period ?? 3) * 1000);
+            const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
+              type: questionType,
+              title,
+              options: optionsText,
+              skipCache: Boolean(workerOptions.skipCache)
+            });
+            return withTikuAdapterAdminWarnings(
+              appendAIFallbackSearchInfos(
+                baseInfos,
+                { enableAIFallbackAnswer, aiFallbackFailureAction },
+                {
+                  title,
+                  type: questionType ?? 'unknown',
+                  optionsText
+                }
+              )
+            );
+          };
+          const requestKey = JSON.stringify([
+            title, questionType ?? 'unknown', optionsText,
+            false, enableAIFallbackAnswer, aiFallbackFailureAction
+          ]);
+          return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
         };
 
         const searchInCaches = appsMethods().searchAnswerInCaches;

@@ -1,4 +1,5 @@
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType } from '../core/index.js';
+import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
 import { $modal } from '../runtime/message.js';
 import type { ScriptPanel, ConfigDefinition } from '../runtime/types.js';
@@ -145,7 +146,7 @@ const panelPinkTheme = {
 
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
-  thread: 1,
+  thread: DEFAULT_WORKER_THREAD_COUNT,
   upload: 'submit',
   enableExamAutoSubmit: false,
   enableDebugLogPanel: false,

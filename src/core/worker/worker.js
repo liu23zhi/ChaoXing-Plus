@@ -1,6 +1,7 @@
 import { CommonEventEmitter } from '../utils/event.js';
 import { sleep } from '../../runtime/dom.js';
 import { domSearchAll } from '../utils/dom';
+import { resolveWorkerThreadCount } from './interface';
 import { createDefaultQuestionResolver } from './question.resolver';
 import { defaultWorkTypeResolver } from './utils';
 import { AnswerWrapperHandlerConfig } from '../answer-wrapper';
@@ -181,6 +182,7 @@ export class OCSWorker extends CommonEventEmitter {
             }
         };
         const requestThreadHandler = async () => {
+            const threadCount = resolveWorkerThreadCount(this.opts.thread);
             const locks = [];
             const waitForLock = () => {
                 return new Promise((resolve, reject) => {
@@ -204,12 +206,12 @@ export class OCSWorker extends CommonEventEmitter {
             for (let index = 0; index < results.length; index++) {
                 requestThreads.push(() => requestThread(index));
             }
-            for (let index = 0; index < (this.opts.thread || 1); index++) {
+            for (let index = 0; index < threadCount; index++) {
                 locks.push(index + 1);
             }
             let requestFinished = 0;
             const promises = [];
-            for (let index = 0; index < (this.opts.thread || 1); index++) {
+            for (let index = 0; index < threadCount; index++) {
                 promises.push(async () => {
                     try {
                         while (requestFinished < results.length && requestThreads.length > 0 && this.isClose === false) {

@@ -10,7 +10,8 @@ import {
   WorkerEvents,
   WorkOptions,
   WorkResult,
-  WorkUploadType
+  WorkUploadType,
+  resolveWorkerThreadCount
 } from './interface';
 import { createDefaultQuestionResolver } from './question.resolver';
 import { defaultWorkTypeResolver } from './utils';
@@ -229,6 +230,7 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
     };
 
     const requestThreadHandler = async () => {
+      const threadCount = resolveWorkerThreadCount(this.opts.thread);
       const locks: number[] = [];
 
       const waitForLock = () => {
@@ -256,13 +258,13 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
         requestThreads.push(() => requestThread(index));
       }
 
-      for (let index = 0; index < (this.opts.thread || 1); index++) {
+      for (let index = 0; index < threadCount; index++) {
         locks.push(index + 1);
       }
       let requestFinished = 0;
 
       const promises: Array<() => Promise<void>> = [];
-      for (let index = 0; index < (this.opts.thread || 1); index++) {
+      for (let index = 0; index < threadCount; index++) {
         promises.push(async () => {
           try {
             while (requestFinished < results.length && requestThreads.length > 0 && this.isClose === false) {
