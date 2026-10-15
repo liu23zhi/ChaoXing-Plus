@@ -57,6 +57,18 @@ test('popup page ships an enable and disable switch for the whole extension', as
   assert.equal(source.includes('关闭后超星页面不再运行自动学习与答题；切换后已打开的页面会自动刷新。'), true);
 });
 
+test('popup uses a compact safe-area-aware layout on narrow screens', async () => {
+  const source = await readFile(popupHtmlPath, 'utf8');
+
+  assert.equal(source.includes('box-sizing: border-box;'), true);
+  assert.match(source, /@media\s*\(max-width:\s*480px\)/);
+  assert.equal(source.includes('min-height: 100svh;'), true);
+  assert.equal(source.includes('env(safe-area-inset-top)'), true);
+  assert.equal(source.includes('env(safe-area-inset-bottom)'), true);
+  assert.equal(source.includes('width: 100%;'), true);
+  assert.equal(source.includes('align-content: center;'), true);
+});
+
 test('popup switch persists the shared extension-enabled key that gates the content script', async () => {
   const popupSource = await readFile(popupJsPath, 'utf8');
   const entrySource = await readFile(entryScriptPath, 'utf8');

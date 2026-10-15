@@ -10,10 +10,26 @@
         font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
       }
 
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 0;
+        min-height: 100%;
+      }
+
       body {
         margin: 0;
-        width: 320px;
-        padding: 20px;
+        width: 360px;
+        max-width: 100%;
+        min-width: 0;
+        min-height: 100svh;
+        padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+        display: grid;
+        align-content: center;
         background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
         color: #0f172a;
       }
@@ -26,6 +42,9 @@
         background: rgba(255, 255, 255, 0.96);
         border: 1px solid rgba(148, 163, 184, 0.18);
         box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        width: 100%;
+        max-width: 360px;
+        margin-inline: auto;
       }
 
       .title {
@@ -54,6 +73,8 @@
       .switch-copy {
         display: grid;
         gap: 2px;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .switch-label {
@@ -125,6 +146,7 @@
         border: 0;
         border-radius: 12px;
         padding: 10px 14px;
+        min-height: 44px;
         font-size: 14px;
         font-weight: 700;
         color: #ffffff;
@@ -134,6 +156,32 @@
 
       .button:hover {
         filter: brightness(1.03);
+      }
+
+      @media (max-width: 480px) {
+        body {
+          width: 100%;
+          padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        }
+
+        .card {
+          gap: 14px;
+          padding: 16px;
+          border-radius: 14px;
+        }
+
+        .title {
+          font-size: 17px;
+        }
+
+        .desc,
+        .note {
+          font-size: 12px;
+        }
+
+        .switch-row {
+          padding: 12px;
+        }
       }
     </style>
   </head>
