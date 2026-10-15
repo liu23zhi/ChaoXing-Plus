@@ -176,3 +176,43 @@ test('runtime store reads the latest localStorage value even after another page 
 
   assert.equal(mod.runtimeStore.get('shared-key', ''), 'second');
 });
+
+test('runtime store shares question caches while keeping work results page-local', async () => {
+  const memory = new Map();
+  const events = [];
+  globalThis.localStorage = {
+    getItem(key) {
+      return memory.has(key) ? memory.get(key) : null;
+    },
+    setItem(key, value) {
+      memory.set(key, value);
+    },
+    removeItem(key) {
+      memory.delete(key);
+    }
+  };
+  globalThis.document = {
+    documentElement: {
+      getAttribute() {
+        return null;
+      },
+      setAttribute() {},
+      removeAttribute() {}
+    },
+    addEventListener() {},
+    dispatchEvent(event) {
+      events.push(event);
+      return true;
+    }
+  };
+
+  const mod = await loadStoreModule();
+  const caches = [{ title: '题目 A', answer: '答案 A' }];
+
+  mod.runtimeStore.set('common.apps.question-caches', caches);
+  mod.runtimeStore.set('common.work-results.results', [{ question: '题目 A' }]);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'chaoxing-plus:shared-store-sync');
+  assert.deepEqual(events[0].detail, { 'common.apps.question-caches': caches });
+});

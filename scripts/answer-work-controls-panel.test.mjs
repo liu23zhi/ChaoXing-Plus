@@ -121,6 +121,18 @@ test('common exposes a default-enabled local question cache switch and gates cac
   assert.equal(source.includes('if (Array.isArray(result)) {'), true);
 });
 
+test('common hydrates question caches from another page and invalidates stale in-memory hits', async () => {
+  const source = await readCommonSource();
+
+  assert.equal(source.includes('function applyQuestionCaches(value: unknown)'), true);
+  assert.equal(source.includes("const sharedQuestionCaches = detail?.[QUESTION_CACHE_KEY];"), true);
+  assert.equal(source.includes('if (applyQuestionCaches(sharedQuestionCaches)) {'), true);
+  assert.equal(source.includes('state.apps.localQuestionCaches = value as QuestionCache[];'), true);
+  assert.equal(source.includes('answerCache.clear();'), true);
+  assert.equal(source.includes('renderAppsPanel();'), true);
+  assert.equal(source.includes('renderWorkResultsPanel();'), true);
+});
+
 test('common moves AI fallback controls from the study settings section into the work results control hero', async () => {
   const source = await readCommonSource();
 
@@ -179,7 +191,7 @@ test('common ignores panel-authored shared config mutations so focused inputs ar
   assert.equal(source.includes("keyInput.addEventListener('input'"), false);
   assert.equal(source.includes('setStudySettingValue(script, key, value, { render: false });'), true);
   assert.equal(source.includes('syncVolumeUi?.(Math.round(Number(value) * 100));'), true);
-  assert.equal(source.includes('if (!detail || shouldRefreshPanelForSharedValues(detail)) {'), true);
+  assert.equal(source.includes('let shouldRefreshWorkResultsPanel = !detail || shouldRefreshPanelForSharedValues(detail);'), true);
 });
 
 test('common shares all study settings across domains and warns for playback rate at or above 2x', async () => {

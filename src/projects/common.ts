@@ -209,6 +209,17 @@ const state = {
   }
 };
 
+function applyQuestionCaches(value: unknown) {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  state.apps.localQuestionCaches = value as QuestionCache[];
+  answerCache.clear();
+  renderAppsPanel();
+  return true;
+}
+
 const questionPositionSyncHandlers: Record<QuestionPositionSyncHandlerType, (index: number) => void> = {
   cx(index) {
     const el = document.querySelectorAll<HTMLElement>('[id*="sigleQuestionDiv"], .questionLi')?.item(index);
@@ -2351,9 +2362,9 @@ window.addEventListener('storage', (event) => {
   }
 
   if (event.key === QUESTION_CACHE_KEY) {
-    state.apps.localQuestionCaches = parseStoredValue(event.newValue, [] as QuestionCache[]);
-    renderAppsPanel();
-    renderWorkResultsPanel();
+    if (applyQuestionCaches(parseStoredValue(event.newValue, [] as QuestionCache[]))) {
+      renderWorkResultsPanel();
+    }
   }
 });
 
@@ -2361,8 +2372,14 @@ document.addEventListener('chaoxing-plus:shared-store-hydrate', (event) => {
   const detail = typeof event === 'object' && event && 'detail' in event
     ? (event as CustomEvent<Record<string, unknown>>).detail
     : undefined;
+  const sharedQuestionCaches = detail?.[QUESTION_CACHE_KEY];
+  let shouldRefreshWorkResultsPanel = !detail || shouldRefreshPanelForSharedValues(detail);
 
-  if (!detail || shouldRefreshPanelForSharedValues(detail)) {
+  if (applyQuestionCaches(sharedQuestionCaches)) {
+    shouldRefreshWorkResultsPanel = true;
+  }
+
+  if (shouldRefreshWorkResultsPanel) {
     renderWorkResultsPanel();
   }
 });

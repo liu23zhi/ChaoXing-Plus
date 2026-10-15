@@ -9,6 +9,8 @@ const SHARED_STORE_PREFIXES = [
 ];
 const SHARED_STORE_EXCLUDED_KEYS = new Set([
   'common.work-results.results',
+]);
+const SHARED_STORE_EXACT_KEYS = new Set([
   'common.apps.question-caches'
 ]);
 
@@ -16,7 +18,8 @@ const SHARED_STORE_HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
 const SHARED_STORE_SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
 
 function shouldShareStoreKey(key: string) {
-  return SHARED_STORE_EXCLUDED_KEYS.has(key) === false && SHARED_STORE_PREFIXES.some((prefix) => key.startsWith(prefix));
+  return SHARED_STORE_EXCLUDED_KEYS.has(key) === false
+    && (SHARED_STORE_EXACT_KEYS.has(key) || SHARED_STORE_PREFIXES.some((prefix) => key.startsWith(prefix)));
 }
 
 function getSharedAttributeName(key: string) {

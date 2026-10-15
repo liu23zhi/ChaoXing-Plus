@@ -49,7 +49,11 @@ test('extension entry bootstraps and persists shared config through namespace fi
   assert.equal(source.includes("'cx.new.study-dispatcher.'"), true);
   assert.equal(source.includes('const sharedStoreExcludedKeys = new Set(['), true);
   assert.equal(source.includes("'common.work-results.results'"), true);
+  const excludedKeys = source.match(/const sharedStoreExcludedKeys = new Set\(\[[\s\S]*?\]\);/)?.[0] ?? '';
+  assert.equal(excludedKeys.includes("'common.apps.question-caches'"), false);
+  assert.equal(source.includes('const sharedStoreExactKeys = new Set(['), true);
   assert.equal(source.includes("'common.apps.question-caches'"), true);
+  assert.equal(source.includes('sharedStoreExactKeys.has(key)'), true);
   assert.equal(source.includes('const shouldShareStoreKey = (key) => ('), true);
   assert.equal(source.includes('Object.entries(values ?? {}).forEach(([key, value]) => {'), true);
   assert.equal(source.includes('chrome.storage.local.get(null, (result) => {'), true);

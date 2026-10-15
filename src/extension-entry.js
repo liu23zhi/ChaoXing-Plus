@@ -21,7 +21,9 @@
     'cx.new.study-dispatcher.'
   ];
   const sharedStoreExcludedKeys = new Set([
-    'common.work-results.results',
+    'common.work-results.results'
+  ]);
+  const sharedStoreExactKeys = new Set([
     'common.apps.question-caches'
   ]);
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
@@ -31,7 +33,7 @@
   const shouldShareStoreKey = (key) => (
     typeof key === 'string'
     && sharedStoreExcludedKeys.has(key) === false
-    && sharedStorePrefixes.some((prefix) => key.startsWith(prefix))
+    && (sharedStoreExactKeys.has(key) || sharedStorePrefixes.some((prefix) => key.startsWith(prefix)))
   );
 
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
