@@ -2478,6 +2478,9 @@ export const CommonProject = Project.create({
           getResults() {
             return state.workResults.results;
           },
+          refresh() {
+            renderWorkResultsPanel();
+          },
           createWorkResultsPanel
         };
       },

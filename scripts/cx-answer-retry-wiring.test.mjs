@@ -16,7 +16,11 @@ test('cx registers runtime stop continue and retry controls with the common work
 
   assert.equal(source.includes('workResultsMethods().setRuntimeControls?.({'), true);
   assert.equal(source.includes("stop: () => worker.emit('stop')"), true);
-  assert.equal(source.includes("continuate: () => worker.emit('continuate')"), true);
+  assert.equal(source.includes('continuate: () => {'), true);
+  assert.equal(source.includes("worker.emit('continuate')"), true);
+  assert.equal(source.includes('if (tikuAdapterBalanceRecoveryState.paused)'), true);
+  assert.equal(source.includes('void requestTikuAdapterBalanceRecovery();'), true);
+  assert.equal(source.includes('workResultsMethods().refresh?.();'), true);
   assert.equal(source.includes('retryQuestion: async (index) =>'), true);
   assert.equal(source.includes("worker.on('done', clearRuntimeControls);"), true);
   assert.equal(source.includes("worker.on('close', clearRuntimeControls);"), true);

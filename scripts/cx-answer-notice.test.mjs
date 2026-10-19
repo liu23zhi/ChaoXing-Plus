@@ -29,6 +29,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   const root = {};
   let requests = 0;
   let modalConfirmCalls = 0;
+  let panelRefreshes = 0;
   const source = [
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
     await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
@@ -36,7 +37,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
-      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'trackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
+      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'trackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
     ])
@@ -64,7 +65,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     cacheableResults: [],
     chapterActionCorrelationId: 'chapter', workExamCorrelationId: 'work', type: 'work',
     logDebug() {},
-    workResultsMethods: () => ({ patchResult() {} }),
+    workResultsMethods: () => ({ patchResult() {}, refresh() { panelRefreshes++; } }),
     shouldSkipCacheForAutomaticRetry: () => undefined,
     simplifyWorkResult: (results) => results.map((result) => ({ ...result, finish: result.result?.finish })),
     chapterTestTaskQuestionTitleTransform() {}, workOrExamQuestionTitleTransform() {}
@@ -76,6 +77,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     OCSWorker, resolveWorkerThreadCount, appendAIFallbackSearchInfos,
     notify: typeof notifyManualAnswerRequired === 'function' ? notifyManualAnswerRequired : undefined,
     notifyBalance: typeof notifyTikuAdapterInsufficientBalance === 'function' ? notifyTikuAdapterInsufficientBalance : undefined,
+    recoverBalance: typeof requestTikuAdapterBalanceRecovery === 'function' ? requestTikuAdapterBalanceRecovery : undefined,
     trackTikuAdapterWorker: typeof trackTikuAdapterWorker === 'function' ? trackTikuAdapterWorker : undefined,
     retryChapter: retryUnfinishedChapterQuestions,
     retryWork: retryUnfinishedWorkOrExamQuestions
@@ -89,7 +91,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   });
   context.createChapterWorker = createWorker;
   context.createWorkOrExamWorker = createWorker;
-  return { ...runtime, createWorker, notifications, get requests() { return requests; }, get modalConfirmCalls() { return modalConfirmCalls; } };
+  return { ...runtime, createWorker, notifications, get requests() { return requests; }, get modalConfirmCalls() { return modalConfirmCalls; }, get panelRefreshes() { return panelRefreshes; } };
 }
 
 const failure = { success: false, error: { code: 'NO_ANSWER' } };
@@ -274,6 +276,10 @@ test('balance recovery pauses active workers and only continues after confirmati
   });
 
   await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+  assert.equal(runtime.modalConfirmCalls, 1);
+  assert.equal(runtime.panelRefreshes > 0, true);
+  assert.deepEqual(events, ['stop']);
+  await runtime.recoverBalance();
   assert.equal(runtime.modalConfirmCalls, 2);
   assert.deepEqual(events, ['stop', 'continuate']);
 });

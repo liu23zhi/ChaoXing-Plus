@@ -20,6 +20,7 @@ test('common work results panel renders pause continue and retry controls', asyn
   assert.equal(source.includes('setRuntimeControls(controls: WorkResultsRuntimeControls)'), true);
   assert.equal(source.includes('clearRuntimeControls()'), true);
   assert.equal(source.includes('patchResult(index: number, patch: Partial<SimplifyWorkResult>)'), true);
+  assert.equal(source.includes('refresh() {'), true);
 });
 
 test('common work results panel uses the shared tone helper for number and question views', async () => {

@@ -1346,6 +1346,7 @@ function workResultsMethods() {
     updateWorkStateByResults?: (results: unknown) => void;
     patchResult?: (index: number, patch: Partial<SimplifyWorkResult>) => void;
     getResults?: () => SimplifyWorkResult[];
+    refresh?: () => void;
     setRuntimeControls?: (controls: {
       isRunning: () => boolean;
       isStopped: () => boolean;
@@ -1377,7 +1378,9 @@ const tikuAdapterBalanceRecoveryState = {
     emit: (event: 'stop' | 'continuate') => unknown;
     once: (event: 'done' | 'close', listener: () => void) => unknown;
   }>(),
-  promise: undefined as Promise<void> | undefined
+  promise: undefined as Promise<boolean> | undefined,
+  paused: false,
+  config: undefined as ReturnType<typeof getStoredTikuAdapterConfig> | undefined
 };
 
 function trackTikuAdapterWorker<T extends {
@@ -1393,10 +1396,44 @@ function trackTikuAdapterWorker<T extends {
 
 function stopTikuAdapterWorkers() {
   tikuAdapterBalanceRecoveryState.workers.forEach((worker) => worker.emit('stop'));
+  workResultsMethods().refresh?.();
 }
 
 function continueTikuAdapterWorkers() {
   tikuAdapterBalanceRecoveryState.workers.forEach((worker) => worker.emit('continuate'));
+  workResultsMethods().refresh?.();
+}
+
+async function requestTikuAdapterBalanceRecovery(
+  config = tikuAdapterBalanceRecoveryState.config ?? getStoredTikuAdapterConfig()
+) {
+  if (!tikuAdapterBalanceRecoveryState.paused) {
+    return true;
+  }
+
+  if (!tikuAdapterBalanceRecoveryState.promise) {
+    tikuAdapterBalanceRecoveryState.promise = (async () => {
+      const confirmed = await $modal.confirm({
+        content: '当前账号余额不足，当前页面答题已暂停。充值完成后，请点击“已充值，继续答题”。',
+        confirmButtonText: '已充值，继续答题',
+        cancelButtonText: '继续暂停'
+      });
+      if (!confirmed) {
+        workResultsMethods().refresh?.();
+        return false;
+      }
+
+      resetTikuAdapterBalanceGuard(config);
+      tikuAdapterBalanceRecoveryState.paused = false;
+      tikuAdapterBalanceRecoveryState.config = undefined;
+      continueTikuAdapterWorkers();
+      return true;
+    })().finally(() => {
+      tikuAdapterBalanceRecoveryState.promise = undefined;
+    });
+  }
+
+  return tikuAdapterBalanceRecoveryState.promise;
 }
 
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
@@ -1451,27 +1488,10 @@ async function withTikuAdapterAdminWarnings(
 async function notifyTikuAdapterInsufficientBalance(searchInfos: SearchInformation[]) {
   if (!hasInsufficientBalanceError(searchInfos)) return false;
   const config = getStoredTikuAdapterConfig();
+  tikuAdapterBalanceRecoveryState.paused = true;
+  tikuAdapterBalanceRecoveryState.config = config;
   stopTikuAdapterWorkers();
-
-  if (!tikuAdapterBalanceRecoveryState.promise) {
-    tikuAdapterBalanceRecoveryState.promise = (async () => {
-      while (true) {
-        const confirmed = await $modal.confirm({
-          content: '当前账号余额不足，当前页面答题已暂停。充值完成后，请点击“已充值，继续答题”。',
-          confirmButtonText: '已充值，继续答题',
-          cancelButtonText: '继续暂停'
-        });
-        if (confirmed) break;
-      }
-
-      resetTikuAdapterBalanceGuard(config);
-      continueTikuAdapterWorkers();
-    })().finally(() => {
-      tikuAdapterBalanceRecoveryState.promise = undefined;
-    });
-  }
-
-  await tikuAdapterBalanceRecoveryState.promise;
+  await requestTikuAdapterBalanceRecovery(config);
   return true;
 }
 
@@ -3629,7 +3649,13 @@ const JobRunner = {
       isRunning: () => worker.isRunning,
       isStopped: () => worker.isStop,
       stop: () => worker.emit('stop'),
-      continuate: () => worker.emit('continuate'),
+      continuate: () => {
+        if (tikuAdapterBalanceRecoveryState.paused) {
+          void requestTikuAdapterBalanceRecovery();
+          return;
+        }
+        worker.emit('continuate');
+      },
       canRetryQuestion: (index) => Boolean(roots[index]),
       retryQuestion: async (index) => {
         const root = roots[index];
@@ -4623,7 +4649,13 @@ function workOrExam(
       isRunning: () => worker.isRunning,
       isStopped: () => worker.isStop,
       stop: () => worker.emit('stop'),
-      continuate: () => worker.emit('continuate'),
+      continuate: () => {
+        if (tikuAdapterBalanceRecoveryState.paused) {
+          void requestTikuAdapterBalanceRecovery();
+          return;
+        }
+        worker.emit('continuate');
+      },
       canRetryQuestion: (index) => Boolean(liveRoots()[index]),
       retryQuestion: async (index) => {
         const root = liveRoots()[index];
