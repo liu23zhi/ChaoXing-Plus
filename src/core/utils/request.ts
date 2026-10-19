@@ -1,3 +1,13 @@
+import {
+  createTikuAdapterRequestError,
+  hasTikuAdapterAnswer,
+  isTikuAdapterBalanceBlocked,
+  isTikuAdapterRequestUrl,
+  markTikuAdapterBalanceBlocked,
+  resolveTikuAdapterRequestIdentity,
+  TikuAdapterRequestError
+} from './tiku-adapter-error.js';
+
 export async function request<T extends 'json' | 'text'>(
   url: string,
   opts: {
@@ -27,6 +37,12 @@ export async function request<T extends 'json' | 'text'>(
   const delayMs = Math.max(0, Math.floor(opts?.retry?.delayMs ?? 0));
   let lastError: unknown;
 
+  const isTikuAdapterRequest = isTikuAdapterRequestUrl(url);
+  const tikuIdentity = isTikuAdapterRequest ? resolveTikuAdapterRequestIdentity(url, headers) : undefined;
+  if (tikuIdentity && isTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key)) {
+    throw new TikuAdapterRequestError('INSUFFICIENT_BALANCE');
+  }
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = opts?.timeoutMs && opts.timeoutMs > 0 ? new AbortController() : undefined;
     const timeout = controller
@@ -43,7 +59,18 @@ export async function request<T extends 'json' | 'text'>(
 
       if (!response.ok) {
         const text = await response.text();
-        const error = new Error(text || `HTTP ${response.status}`);
+        if (isTikuAdapterRequest) {
+          let payload: unknown = text;
+          try { payload = JSON.parse(text); } catch { /* legacy servers may return plain text */ }
+          const error = createTikuAdapterRequestError(payload, response.status);
+          if (error.code === 'INSUFFICIENT_BALANCE' && tikuIdentity) {
+            markTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key);
+          }
+          throw error;
+        }
+
+        const error = new Error(text || `HTTP ${response.status}`) as Error & { status?: number };
+        error.status = response.status;
         if (attempt < maxAttempts && isRetryableStatus(response.status)) {
           lastError = error;
           await waitRequestRetryDelay(delayMs, attempt);
@@ -56,7 +83,15 @@ export async function request<T extends 'json' | 'text'>(
         return (await response.text()) as T extends 'json' ? any : string;
       }
 
-      return (await response.json()) as T extends 'json' ? any : string;
+      const responseData = await response.json();
+      if (isTikuAdapterRequest && responseData?.error && !hasTikuAdapterAnswer(responseData)) {
+        const error = createTikuAdapterRequestError(responseData);
+        if (error.code === 'INSUFFICIENT_BALANCE' && tikuIdentity) {
+          markTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key);
+        }
+        throw error;
+      }
+      return responseData as T extends 'json' ? any : string;
     } catch (err) {
       lastError = err;
       if (attempt >= maxAttempts || !isRetryableRequestError(err)) {
@@ -78,6 +113,10 @@ function isRetryableStatus(status: number) {
 }
 
 function isRetryableRequestError(err: unknown) {
+  if (err instanceof TikuAdapterRequestError) return false;
+  if (err && typeof err === 'object' && typeof (err as { status?: unknown }).status === 'number') {
+    return false;
+  }
   if (err instanceof DOMException && err.name === 'AbortError') {
     return true;
   }

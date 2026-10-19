@@ -301,8 +301,9 @@ test('AI fallback preserves insufficient balance error details', async () => {
       { requestTimeoutMs: 1000, retryAttempts: 1, retryDelayMs: 1, preferAsyncTask: false }
     );
 
-    assert.equal(result[0].error, 'INSUFFICIENT_BALANCE: 当前余额不足，AI 兜底已禁用，请充值后再使用');
+    assert.equal(result[0].error, 'INSUFFICIENT_BALANCE: 当前账号余额不足，请充值后重试。');
   } finally {
+    mod.resetTikuAdapterBalanceGuard({ baseurl: 'https://adapter.local', key: 'secret' });
     globalThis.fetch = originalFetch;
   }
 });

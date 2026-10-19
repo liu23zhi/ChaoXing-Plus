@@ -24,17 +24,19 @@ async function declarations(path, names) {
   return found.join('\n').replace(/^export /gm, '');
 }
 
-async function createRuntime(responses, action = 'pause') {
+async function createRuntime(responses, action = 'pause', modalConfirmResponses = [true]) {
   const notifications = [];
   const root = {};
   let requests = 0;
+  let modalConfirmCalls = 0;
   const source = [
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
     await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
     await declarations('src/core/worker/worker.ts', ['OCSWorker']),
+    await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
-      'notifyManualAnswerRequired', 'unfinishedQuestionRetryAttempts',
+      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'trackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
     ])
@@ -44,6 +46,7 @@ async function createRuntime(responses, action = 'pause') {
     domSearchAll: () => ({ title: [{}], options: [{}] }),
     AnswerWrapperHandlerConfig: { timeout_seconds: 1 },
     getStoredTikuAdapterConfig: () => ({}),
+    resetTikuAdapterBalanceGuard: () => {},
     requestTikuAdapterAIFallback: async () => {
       const response = responses[Math.min(requests++, responses.length - 1)];
       const detail = response.error?.message || 'upstream detail';
@@ -54,6 +57,7 @@ async function createRuntime(responses, action = 'pause') {
     },
     showTopCenterNotice: (message) => notifications.push(['notice', message]),
     $message: { warn: ({ content }) => notifications.push(['message', content]) },
+    $modal: { confirm: async ({ content }) => { notifications.push(['modal', content]); const response = modalConfirmResponses[Math.min(modalConfirmCalls++, modalConfirmResponses.length - 1)]; return response !== false; } },
     $console: { warn: (message) => notifications.push(['console', message]) },
     roots: [root],
     document: { querySelectorAll: () => [root] },
@@ -71,6 +75,8 @@ async function createRuntime(responses, action = 'pause') {
   const runtime = vm.runInContext(`({
     OCSWorker, resolveWorkerThreadCount, appendAIFallbackSearchInfos,
     notify: typeof notifyManualAnswerRequired === 'function' ? notifyManualAnswerRequired : undefined,
+    notifyBalance: typeof notifyTikuAdapterInsufficientBalance === 'function' ? notifyTikuAdapterInsufficientBalance : undefined,
+    trackTikuAdapterWorker: typeof trackTikuAdapterWorker === 'function' ? trackTikuAdapterWorker : undefined,
     retryChapter: retryUnfinishedChapterQuestions,
     retryWork: retryUnfinishedWorkOrExamQuestions
   })`, context);
@@ -83,7 +89,7 @@ async function createRuntime(responses, action = 'pause') {
   });
   context.createChapterWorker = createWorker;
   context.createWorkOrExamWorker = createWorker;
-  return { ...runtime, createWorker, notifications, get requests() { return requests; } };
+  return { ...runtime, createWorker, notifications, get requests() { return requests; }, get modalConfirmCalls() { return modalConfirmCalls; } };
 }
 
 const failure = { success: false, error: { code: 'NO_ANSWER' } };
@@ -205,6 +211,7 @@ test('insufficient balance keeps the actionable adapter error instead of the gen
 
   assert.match(results[0].error, /当前余额不足，AI 兜底已禁用，请充值后再使用/);
   assert.doesNotMatch(results[0].error, /AI 兜底未返回可用答案/);
+  assert.equal(runtime.notifications.filter(([kind]) => kind === 'modal').length, 1);
 });
 
 test('skip mode preserves insufficient balance details in search results', async () => {
@@ -227,6 +234,48 @@ test('empty searches still report the existing generic error', async () => {
   worker.opts.answerer = async () => [];
   const results = await worker.doWork();
   assert.equal(results[0].error, '搜索不到答案, 请重新运行, 或者忽略此题。');
+});
+
+for (const mode of ['Chapter', 'Work']) {
+  test(`${mode} balance failure never automatically retries a question`, async () => {
+    const runtime = await createRuntime([{ success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } }]);
+    const initial = await runtime.createWorker().doWork();
+    const results = await runtime[`retry${mode}`](initial);
+    assert.equal(runtime.requests, 1);
+    assert.match(results[0].error, /余额不足/);
+  });
+}
+
+test('ordinary search balance rejection skips AI fallback in either failure action', async () => {
+  for (const action of ['skip', 'pause']) {
+    const runtime = await createRuntime([success], action);
+    const infos = [{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }];
+    const result = await runtime.appendAIFallbackSearchInfos(infos, { enableAIFallbackAnswer: true, aiFallbackFailureAction: action }, { title: 'question', type: 'single', optionsText: 'A' });
+    assert.equal(runtime.requests, 0);
+    assert.equal(result, infos);
+    assert.equal(runtime.notifications.filter(([kind]) => kind === 'modal').length, 1);
+  }
+});
+
+test('balance recovery requires the explicit continue confirmation', async () => {
+  const runtime = await createRuntime([success]);
+  assert.equal(typeof runtime.notifyBalance, 'function');
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+  assert.equal(runtime.notifications.filter(([kind]) => kind === 'modal').length, 1);
+  assert.match(runtime.notifications.find(([kind]) => kind === 'modal')?.[1], /已充值/);
+});
+
+test('balance recovery pauses active workers and only continues after confirmation', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, true]);
+  const events = [];
+  runtime.trackTikuAdapterWorker({
+    emit: (event) => events.push(event),
+    once: () => undefined
+  });
+
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+  assert.equal(runtime.modalConfirmCalls, 2);
+  assert.deepEqual(events, ['stop', 'continuate']);
 });
 
 test('successful searches finish without an error', async () => {

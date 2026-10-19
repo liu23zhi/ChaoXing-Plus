@@ -30,6 +30,7 @@ import {
 import { $console } from './background.js';
 import {
   collectTikuAdapterWarnings,
+  resetTikuAdapterBalanceGuard,
   requestTikuAdapterAIFallback,
   TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
 } from './tiku-adapter-config.js';
@@ -40,7 +41,7 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
-import { createSearchRequestDeduplicator, shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
+import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
   inspectVideoLoadState,
@@ -1371,6 +1372,33 @@ function hasAnyResolvedSearchResults(searchInfos: SearchInformation[]) {
   return searchInfos.some((info) => info.results.length > 0);
 }
 
+const tikuAdapterBalanceRecoveryState = {
+  workers: new Set<{
+    emit: (event: 'stop' | 'continuate') => unknown;
+    once: (event: 'done' | 'close', listener: () => void) => unknown;
+  }>(),
+  promise: undefined as Promise<void> | undefined
+};
+
+function trackTikuAdapterWorker<T extends {
+  emit: (event: 'stop' | 'continuate') => unknown;
+  once: (event: 'done' | 'close', listener: () => void) => unknown;
+}>(worker: T): T {
+  tikuAdapterBalanceRecoveryState.workers.add(worker);
+  const cleanup = () => tikuAdapterBalanceRecoveryState.workers.delete(worker);
+  worker.once('done', cleanup);
+  worker.once('close', cleanup);
+  return worker;
+}
+
+function stopTikuAdapterWorkers() {
+  tikuAdapterBalanceRecoveryState.workers.forEach((worker) => worker.emit('stop'));
+}
+
+function continueTikuAdapterWorkers() {
+  tikuAdapterBalanceRecoveryState.workers.forEach((worker) => worker.emit('continuate'));
+}
+
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
   const result = await $modal.confirm({
     content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
@@ -1420,6 +1448,33 @@ async function withTikuAdapterAdminWarnings(
   return resolvedInfos;
 }
 
+async function notifyTikuAdapterInsufficientBalance(searchInfos: SearchInformation[]) {
+  if (!hasInsufficientBalanceError(searchInfos)) return false;
+  const config = getStoredTikuAdapterConfig();
+  stopTikuAdapterWorkers();
+
+  if (!tikuAdapterBalanceRecoveryState.promise) {
+    tikuAdapterBalanceRecoveryState.promise = (async () => {
+      while (true) {
+        const confirmed = await $modal.confirm({
+          content: '当前账号余额不足，当前页面答题已暂停。充值完成后，请点击“已充值，继续答题”。',
+          confirmButtonText: '已充值，继续答题',
+          cancelButtonText: '继续暂停'
+        });
+        if (confirmed) break;
+      }
+
+      resetTikuAdapterBalanceGuard(config);
+      continueTikuAdapterWorkers();
+    })().finally(() => {
+      tikuAdapterBalanceRecoveryState.promise = undefined;
+    });
+  }
+
+  await tikuAdapterBalanceRecoveryState.promise;
+  return true;
+}
+
 function notifyManualAnswerRequired(results: RetryFailureSnapshot[]) {
   const requiresManualAnswer = results.some((result) =>
     !result.result?.finish && [result.error, ...(result.ctx?.searchInfos ?? []).map((info) => info.error)]
@@ -1443,7 +1498,7 @@ async function appendAIFallbackSearchInfos(
     optionsText: string;
   }
 ) {
-  if (!workOptions.enableAIFallbackAnswer || hasAnyResolvedSearchResults(searchInfos)) {
+  if (await notifyTikuAdapterInsufficientBalance(searchInfos) || !workOptions.enableAIFallbackAnswer || hasAnyResolvedSearchResults(searchInfos)) {
     return searchInfos;
   }
 
@@ -1454,6 +1509,7 @@ async function appendAIFallbackSearchInfos(
     deepThinking: workOptions.deepThinking === true
   });
   const fallbackError = fallbackInfos[0]?.response?.error;
+  await notifyTikuAdapterInsufficientBalance(fallbackInfos);
 
   if (fallbackError?.code === 'AI_UNAVAILABLE') {
     $console.warn('AI 兜底未配置，已跳过 AI 搜题');
@@ -3365,7 +3421,7 @@ const JobRunner = {
         suppressWorkResultsPanelUpdate?: boolean;
       } = {}
     ) =>
-      new OCSWorker({
+      trackTikuAdapterWorker(new OCSWorker({
         root: questionRoots,
         elements: {
           title: '.Zy_TItle .clearfix',
@@ -3559,7 +3615,7 @@ const JobRunner = {
             });
           }
         }
-      });
+      }));
 
     const cacheableResults: SimplifyWorkResult[] = [];
     const worker = createChapterWorker(roots, {
@@ -3580,6 +3636,8 @@ const JobRunner = {
         if (!root) {
           return undefined;
         }
+
+        resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
 
         const chapterRetryCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
           targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
@@ -3618,6 +3676,7 @@ const JobRunner = {
 
       let latestResult = initialResult;
       for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+        if (hasInsufficientBalanceError(latestResult)) break;
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
           index,
           total: roots.length,
@@ -4234,7 +4293,7 @@ function workOrExam(
       suppressWorkResultsPanelUpdate?: boolean;
     } = {}
   ) =>
-    new OCSWorker({
+    trackTikuAdapterWorker(new OCSWorker({
       root: questionRoots,
       elements: {
         title: (root) => Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector)).filter((element) => Boolean(element.textContent?.trim())),
@@ -4430,7 +4489,7 @@ function workOrExam(
           appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
         }
       }
-    });
+    }));
 
   const worker = createWorkOrExamWorker('.questionLi');
 
@@ -4442,6 +4501,7 @@ function workOrExam(
   ) {
     let latestResult = initialResult;
     for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+      if (hasInsufficientBalanceError(latestResult)) break;
       logDebug('info', '动作节点诊断：未完成单题自动重试', {
         index,
         total,
@@ -4570,6 +4630,8 @@ function workOrExam(
         if (!root) {
           return undefined;
         }
+
+        resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
 
         logDebug('info', '动作节点诊断：开始单题重答', {
           index,

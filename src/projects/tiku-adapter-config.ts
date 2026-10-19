@@ -1,6 +1,17 @@
 /// <reference path="../types.d.ts" />
 import { type SearchInformation } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
+import {
+  createTikuAdapterRequestError,
+  claimTikuAdapterBalanceNotice as claimBalanceNotice,
+  isTikuAdapterBalanceBlocked,
+  isTikuAdapterInsufficientBalance,
+  markTikuAdapterBalanceBlocked,
+  resolveTikuAdapterRequestIdentity,
+  resetTikuAdapterBalanceGuard as resetBalanceGuard,
+  TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE,
+  TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
+} from '../core/utils/tiku-adapter-error.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
@@ -129,9 +140,28 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
     throw new Error(problem);
   }
 
+  if (isTikuAdapterBalanceBlocked(baseurl, key)) {
+    throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
+  }
+
   const requestOptions = normalizeAIFallbackRequestOptions(options);
   const requestPayload = buildTikuAdapterAIFallbackPayload(payload);
-  const response = await resolveTikuAdapterAIFallbackResponse(baseurl, key, requestPayload, requestOptions);
+  let rawResponse: TikuAdapterAIFallbackResult;
+  try {
+    rawResponse = await resolveTikuAdapterAIFallbackResponse(baseurl, key, requestPayload, requestOptions);
+  } catch (err) {
+    const requestError = err instanceof Error && (err as { isTikuAdapterRequestError?: boolean }).isTikuAdapterRequestError
+      ? err as Error & { code: 'INSUFFICIENT_BALANCE' | 'UPSTREAM_ERROR'; status?: number }
+      : createTikuAdapterRequestError(err);
+    if (requestError.code === 'INSUFFICIENT_BALANCE') {
+      markTikuAdapterBalanceBlocked(baseurl, key);
+    }
+    rawResponse = { success: false, error: { code: requestError.code, message: requestError.message } };
+  }
+  if (isTikuAdapterInsufficientBalance(rawResponse)) {
+    markTikuAdapterBalanceBlocked(baseurl, key);
+  }
+  const response = sanitizeAIFallbackResponse(rawResponse);
 
   const question = String(response?.result?.question ?? payload.title ?? '').trim();
   const answer = String(response?.result?.answer ?? '').trim();
@@ -156,6 +186,53 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
       error: response?.success ? undefined : `${errorCode || 'UPSTREAM_ERROR'}${errorMessage ? `: ${errorMessage}` : ''}`
     }
   ];
+}
+
+export function resetTikuAdapterBalanceGuard(config: TikuAdapterConfig) {
+  resetBalanceGuard(resolveTikuAdapterBaseUrl(config.baseurl), String(config.key ?? '').trim());
+}
+
+export function claimTikuAdapterBalanceNotice(config: TikuAdapterConfig) {
+  const identity = { baseurl: resolveTikuAdapterBaseUrl(config.baseurl), key: String(config.key ?? '').trim() };
+  return claimBalanceNotice(identity.baseurl, identity.key);
+}
+
+function sanitizeAIFallbackResponse(response: TikuAdapterAIFallbackResult): TikuAdapterAIFallbackResult {
+  const error = response?.error;
+  if (!error && response?.success) {
+    return {
+      success: true,
+      ...(response.status ? { status: response.status } : {}),
+      ...(response.taskId ? { taskId: response.taskId } : {}),
+      ...(response.statusUrl ? { statusUrl: response.statusUrl } : {}),
+      ...(response.result ? { result: { question: response.result.question, answer: response.result.answer } } : {}),
+      ...(Array.isArray(response.warnings) ? { warnings: response.warnings.map(String) } : {})
+    };
+  }
+
+  const code = error?.code === 'INSUFFICIENT_BALANCE' || error?.code === 'AI_UNAVAILABLE' || error?.code === 'NO_ANSWER' || error?.code === 'INVALID_INPUT' || error?.code === 'UNSAFE_TO_ANSWER'
+    ? error.code
+    : 'UPSTREAM_ERROR';
+  const message = code === 'INSUFFICIENT_BALANCE'
+    ? TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE
+    : code === 'NO_ANSWER'
+      ? 'AI 兜底未返回可用答案。'
+      : code === 'AI_UNAVAILABLE'
+        ? 'AI 兜底暂不可用，请联系管理员。'
+        : code === 'UNSAFE_TO_ANSWER'
+          ? 'AI 未能安全确认答案。'
+          : code === 'INVALID_INPUT'
+            ? '题目数据无效，搜题失败。'
+            : TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE;
+
+  return {
+    success: false,
+    ...(response.status ? { status: response.status } : {}),
+    ...(response.taskId ? { taskId: response.taskId } : {}),
+    ...(response.statusUrl ? { statusUrl: response.statusUrl } : {}),
+    ...(Array.isArray(response.warnings) ? { warnings: response.warnings.map(String) } : {}),
+    error: { code, message }
+  };
 }
 
 function buildTikuAdapterAIFallbackPayload(payload: {
@@ -303,6 +380,13 @@ async function requestTikuAdapterJSON<T>(
     retryDelayMs: number;
   }
 ): Promise<T> {
+  const identity = resolveTikuAdapterRequestIdentity(url, {
+    Authorization: createTikuAdapterAuthorizationHeader(key)
+  });
+  if (isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+    throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
+  }
+
   let lastError: unknown;
   const maxAttempts = Math.max(1, options.retryAttempts);
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -320,9 +404,23 @@ async function requestTikuAdapterJSON<T>(
       });
       if (!response.ok) {
         const message = await response.text();
-        throw createHTTPError(response.status, message || `HTTP ${response.status}`);
+        let responseBody: unknown = message;
+        try { responseBody = JSON.parse(message); } catch { /* old versions can return plain text */ }
+        const requestError = createTikuAdapterRequestError(responseBody, response.status);
+        if (requestError.code === 'INSUFFICIENT_BALANCE') {
+          markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
+          throw requestError;
+        }
+        if (response.status === 404) {
+          throw createHTTPError(404, 'Not found');
+        }
+        throw requestError;
       }
-      return (await response.json()) as T;
+      const responseData = await response.json();
+      if (isTikuAdapterInsufficientBalance(responseData)) {
+        markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
+      }
+      return responseData as T;
     } catch (err) {
       lastError = err;
       if (attempt >= maxAttempts || !isRetryableTikuAdapterError(err)) {

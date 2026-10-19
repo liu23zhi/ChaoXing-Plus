@@ -58,7 +58,14 @@ async function loadAnswererFactory(factoryName, dependencies) {
   };
   visit(parsed);
   assert.ok(factory);
-  const properties = factory.initializer.body.arguments[0].properties;
+  const initializer = ts.isArrowFunction(factory.initializer) ? factory.initializer.body : factory.initializer;
+  const workerExpression = ts.isNewExpression(initializer)
+    ? initializer
+    : ts.isCallExpression(initializer) && ts.isNewExpression(initializer.arguments[0])
+      ? initializer.arguments[0]
+      : undefined;
+  assert.ok(workerExpression);
+  const properties = workerExpression.arguments[0].properties;
   const answerer = properties.find((property) => property.name?.getText(parsed) === 'answerer').initializer;
   const scope = factory.parent.parent.parent;
   const deduplicator = scope.statements.find((statement) =>
