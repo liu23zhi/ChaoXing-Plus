@@ -1,10 +1,13 @@
-import Swal, { type SweetAlertOptions } from 'sweetalert2';
+import Swal, { type SweetAlertOptions, type SweetAlertResult } from 'sweetalert2';
 
 const toastEnabled = false;
 const swalAliasKey = '__chaoxing_plus_swal__';
 const swalHostId = 'chaoxing-plus-swal-host';
 const swalTargetId = 'chaoxing-plus-swal-target';
 const swalStyleId = 'chaoxing-plus-swal-style-reset';
+const swalFireKey = '__chaoxing_plus_fire_swal__';
+const swalBridgeNamespace = 'chaoxing-plus:swal';
+const swalBridgeWaitMs = 2500;
 // 弹窗必须严格高于所有面板：z-index 上限是 2147483647，
 // 因此把面板栈整体压到 2147483646 及以下（见 panel.ts / common.ts / cx.ts），
 // 只把最高位留给弹窗，保证弹窗永远压在主面板之上。
@@ -12,14 +15,21 @@ const swalContainerZIndex = 2147483647;
 
 type SwalOwnerWindow = Window & Record<string, unknown>;
 type SwalFireOptions = SweetAlertOptions;
+type SwalFire = (options: SwalFireOptions) => Promise<SweetAlertResult>;
+
+function isSwalRuntime(value: unknown): value is typeof Swal {
+  return Boolean(value)
+    && (typeof value === 'object' || typeof value === 'function')
+    && typeof (value as typeof Swal).fire === 'function';
+}
 
 function getSwalRuntime() {
   try {
     const topWindow = window.top as SwalOwnerWindow | null;
     const topDocument = topWindow?.document;
     const runtimeSwal = topWindow?.[swalAliasKey];
-    if (runtimeSwal && typeof runtimeSwal === 'object' && 'fire' in runtimeSwal && topDocument?.documentElement) {
-      return { runtimeSwal: runtimeSwal as typeof Swal, targetDocument: topDocument };
+    if (isSwalRuntime(runtimeSwal) && topDocument?.documentElement) {
+      return { runtimeSwal, targetDocument: topDocument };
     }
   } catch {
     // ignore cross-frame access errors and fall back to local Swal runtime
@@ -98,7 +108,7 @@ function getOrCreateSwalTarget(targetDocument: Document) {
   return undefined;
 }
 
-function fireSwal(options: SwalFireOptions) {
+function fireLocalSwal(options: SwalFireOptions) {
   const { runtimeSwal, targetDocument } = getSwalRuntime();
   ensureSwalStyleReset(targetDocument);
   return runtimeSwal.fire({
@@ -106,6 +116,118 @@ function fireSwal(options: SwalFireOptions) {
     target: getOrCreateSwalTarget(targetDocument)
   });
 }
+
+function isSwalBridgeChild(event: MessageEvent) {
+  try {
+    if (!event.source || event.source === window || (event.source as Window).top !== window) {
+      return false;
+    }
+    const origin = new URL(event.origin);
+    return event.origin === window.location.origin
+      || ((origin.protocol === 'https:' || origin.protocol === 'http:')
+        && (origin.hostname === 'chaoxing.com' || origin.hostname.endsWith('.chaoxing.com')));
+  } catch {
+    return false;
+  }
+}
+
+function isSwalBridgeOptions(options: unknown): options is SwalFireOptions {
+  if (!options || typeof options !== 'object') return false;
+  const fields: Record<string, string> = {
+    icon: 'string', text: 'string', confirmButtonText: 'string', cancelButtonText: 'string', denyButtonText: 'string',
+    showConfirmButton: 'boolean', showCancelButton: 'boolean', showDenyButton: 'boolean',
+    allowOutsideClick: 'boolean', allowEscapeKey: 'boolean', timer: 'number', timerProgressBar: 'boolean'
+  };
+  return Object.entries(options).every(([key, value]) =>
+    Object.prototype.hasOwnProperty.call(fields, key) && (value === undefined || typeof value === fields[key])
+  );
+}
+
+function installSwalBridge() {
+  if (window.top !== window) return;
+  const owner = window as unknown as SwalOwnerWindow;
+  if (typeof owner[swalFireKey] === 'function') return;
+  owner[swalFireKey] = fireLocalSwal;
+  window.addEventListener('message', (event: MessageEvent) => {
+    const message = event.data;
+    if (!message || message.namespace !== swalBridgeNamespace || typeof message.id !== 'string'
+      || !isSwalBridgeChild(event)) return;
+    const source = event.source as Window;
+    if (message.kind === 'hello') {
+      source.postMessage({ namespace: swalBridgeNamespace, kind: 'ready', id: message.id }, event.origin);
+    } else if (message.kind === 'fire' && isSwalBridgeOptions(message.options)) {
+      void Promise.resolve().then(() => fireLocalSwal(message.options)).then(
+        (result) => source.postMessage({ namespace: swalBridgeNamespace, kind: 'result', id: message.id, result }, event.origin),
+        () => source.postMessage({ namespace: swalBridgeNamespace, kind: 'result', id: message.id, error: true }, event.origin)
+      );
+    }
+  });
+}
+
+function requestTopSwal(options: SwalFireOptions): Promise<SweetAlertResult | undefined> {
+  const targetWindow = window.top;
+  if (!targetWindow || targetWindow === window) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let sent = false;
+    let targetOrigin: string | undefined;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearInterval(retry);
+      window.removeEventListener('message', onMessage);
+    };
+    const onMessage = (event: MessageEvent) => {
+      const message = event.data;
+      if (event.source !== targetWindow || !message || message.namespace !== swalBridgeNamespace || message.id !== id) return;
+      if (message.kind === 'ready' && !sent) {
+        sent = true;
+        targetOrigin = event.origin;
+        // 顶层接管后只等待用户操作，不能超时后再弹第二个本地窗口。
+        clearTimeout(timeout);
+        clearInterval(retry);
+        try {
+          targetWindow.postMessage({ namespace: swalBridgeNamespace, kind: 'fire', id, options }, targetOrigin);
+        } catch {
+          cleanup();
+          resolve(undefined);
+        }
+      } else if (sent && message.kind === 'result' && event.origin === targetOrigin) {
+        cleanup();
+        if (message.error) reject(new Error('无法显示顶层弹窗。'));
+        else resolve(message.result as SweetAlertResult);
+      }
+    };
+    const hello = () => {
+      try {
+        targetWindow.postMessage({ namespace: swalBridgeNamespace, kind: 'hello', id }, '*');
+      } catch {
+        cleanup();
+        resolve(undefined);
+      }
+    };
+    const timeout = setTimeout(() => { cleanup(); resolve(undefined); }, swalBridgeWaitMs);
+    const retry = setInterval(hello, 100);
+    window.addEventListener('message', onMessage);
+    hello();
+  });
+}
+
+function fireSwal(options: SwalFireOptions): Promise<SweetAlertResult> {
+  try {
+    const topWindow = window.top as SwalOwnerWindow | null;
+    const topFire = topWindow?.[swalFireKey];
+    if (typeof topFire === 'function') return (topFire as SwalFire)(options);
+    if (isSwalRuntime(topWindow?.[swalAliasKey])) return fireLocalSwal(options);
+  } catch {
+    // Cross-origin frames delegate to the top runtime through the message bridge.
+  }
+  if (window.top && window.top !== window) {
+    return requestTopSwal(options).then((result) => result ?? fireLocalSwal(options));
+  }
+  return fireLocalSwal(options);
+}
+
+installSwalBridge();
 
 function toast(icon: 'info' | 'success' | 'warning' | 'error', text: string, timer = 3000) {
   if (!toastEnabled) {
