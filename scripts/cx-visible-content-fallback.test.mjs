@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import ts from 'typescript';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const cxPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
+const messagePath = resolve(scriptsDir, '..', 'src', 'runtime', 'message.ts');
 
 test('cx rate hack only registers the seekBarControl override once per top window runtime', async () => {
   const source = await readFile(cxPath, 'utf8');
@@ -25,6 +28,79 @@ test('cx study exposes visible-content fallback states and avoids treating visib
   assert.equal(source.includes('visibleContentState !== \'empty\''), true);
   assert.equal(source.includes('检测到页面存在可处理内容，但当前未识别为标准任务点。'), true);
   assert.equal(source.includes('页面任务点已完成，即将跳转。'), true);
+});
+
+test('cx completion in both chapter paths uses a blocking success modal', async () => {
+  const source = await readFile(cxPath, 'utf8');
+  const completionAlert = /await \$modal\.alert\(\{\s*content,\s*icon: 'success',\s*allowOutsideClick: false,\s*allowEscapeKey: false\s*\}\);/g;
+
+  assert.equal(source.match(completionAlert)?.length, 2);
+  assert.equal(source.includes("showTopCenterNotice(content, { duration: 5000, tone: 'success' });"), false);
+});
+
+test('blocking success alert keeps its promise pending until Swal closes', async () => {
+  const source = await readFile(messagePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true
+    }
+  }).outputText;
+  const style = { id: 'chaoxing-plus-swal-style-reset' };
+  const host = { id: 'chaoxing-plus-swal-host', style: {} };
+  const target = { id: 'chaoxing-plus-swal-target', style: {} };
+  const elements = new Map([[style.id, style], [host.id, host], [target.id, target]]);
+  const targetDocument = {
+    body: { lastElementChild: host },
+    documentElement: {},
+    getElementById: (id) => elements.get(id)
+  };
+  let resolveSwal;
+  let swalOptions;
+  let alertResolved = false;
+  const swalPromise = new Promise((resolve) => { resolveSwal = resolve; });
+  const swal = {
+    DismissReason: { timer: 'timer' },
+    fire(options) {
+      swalOptions = options;
+      return swalPromise;
+    }
+  };
+  const module = { exports: {} };
+  const context = vm.createContext({
+    module,
+    exports: module.exports,
+    require: (id) => {
+      assert.equal(id, 'sweetalert2');
+      return { default: swal };
+    },
+    window: { top: { document: targetDocument, __chaoxing_plus_swal__: swal } },
+    document: targetDocument
+  });
+
+  vm.runInContext(compiled, context);
+  const alertPromise = module.exports.$modal.alert({
+    content: '全部任务点已完成！',
+    icon: 'success',
+    allowOutsideClick: false,
+    allowEscapeKey: false
+  });
+  alertPromise.then(() => { alertResolved = true; });
+  await Promise.resolve();
+
+  assert.equal(swalOptions.text, '全部任务点已完成！');
+  assert.equal(swalOptions.icon, 'success');
+  assert.equal(swalOptions.confirmButtonText, '知道了');
+  assert.equal(swalOptions.showConfirmButton, true);
+  assert.equal(swalOptions.timer, undefined);
+  assert.equal(swalOptions.allowOutsideClick, false);
+  assert.equal(swalOptions.allowEscapeKey, false);
+  assert.equal(alertResolved, false);
+
+  resolveSwal({ isDenied: false });
+  await alertPromise;
+  assert.equal(alertResolved, true);
 });
 
 test('cx study merges visible-content states instead of keeping the first non-empty state', async () => {

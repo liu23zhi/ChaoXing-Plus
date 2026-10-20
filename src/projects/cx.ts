@@ -2598,11 +2598,16 @@ export async function study(opts: StudyOptions) {
           ? '全部任务点已完成！'
           : '已经抵达最后一个章节！但仍然有任务点未完成，请手动切换至未完成的章节。';
         if (CXAnalyses.isFinishedAllChapters()) {
-          showTopCenterNotice(content, { duration: 5000, tone: 'success' });
+          await $modal.alert({
+            content,
+            icon: 'success',
+            allowOutsideClick: false,
+            allowEscapeKey: false
+          });
         } else {
           showTopCenterNotice(content, { duration: 0, tone: 'warning' });
+          $message.warn(content);
         }
-        $message.warn(content);
       }
 
       settingsMethods().notificationBySetting?.(content);
@@ -2617,8 +2622,12 @@ export async function study(opts: StudyOptions) {
 
         if (elements.length === 0) {
           const content = '全部任务点已完成！';
-          showTopCenterNotice(content, { duration: 5000, tone: 'success' });
-          $message.info(content);
+          await $modal.alert({
+            content,
+            icon: 'success',
+            allowOutsideClick: false,
+            allowEscapeKey: false
+          });
           settingsMethods().notificationBySetting?.(content);
           return;
         }

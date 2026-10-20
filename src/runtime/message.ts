@@ -146,11 +146,21 @@ export const $message = {
 };
 
 export const $modal = {
-  async alert(args: { content: string; denyButtonText?: string; onDeny?: () => Promise<void> | void } | string): Promise<void> {
+  async alert(args: {
+    content: string;
+    icon?: SweetAlertOptions['icon'];
+    allowOutsideClick?: SweetAlertOptions['allowOutsideClick'];
+    allowEscapeKey?: SweetAlertOptions['allowEscapeKey'];
+    denyButtonText?: string;
+    onDeny?: () => Promise<void> | void;
+  } | string): Promise<void> {
     const content = typeof args === 'string' ? args : args.content;
+    const icon = typeof args === 'string' ? 'info' : args.icon ?? 'info';
+    const allowOutsideClick = typeof args === 'string' ? undefined : args.allowOutsideClick;
+    const allowEscapeKey = typeof args === 'string' ? undefined : args.allowEscapeKey;
     const denyButtonText = typeof args === 'string' ? undefined : args.denyButtonText;
     const onDeny = typeof args === 'string' ? undefined : args.onDeny;
-    const result = await fireSwal({ icon: 'info', text: content, confirmButtonText: '知道了', showDenyButton: Boolean(denyButtonText), denyButtonText });
+    const result = await fireSwal({ icon, text: content, confirmButtonText: '知道了', showConfirmButton: true, showDenyButton: Boolean(denyButtonText), denyButtonText, allowOutsideClick, allowEscapeKey });
 
     if (result.isDenied) {
       await onDeny?.();
