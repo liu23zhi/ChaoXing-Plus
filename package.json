@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "md5": "^2.3.0",
-    "sweetalert2": "^11.26.24",
+    "sweetalert2": "^11.26.25",
     "typr.js": "^1.0.0"
   }
 }
