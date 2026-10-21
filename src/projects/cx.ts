@@ -1449,6 +1449,10 @@ async function requestTikuAdapterBalanceRecovery(
   return tikuAdapterBalanceRecoveryState.promise;
 }
 
+async function allowTikuAdapterRetryAfterBalanceRecovery() {
+  return !tikuAdapterBalanceRecoveryState.paused || requestTikuAdapterBalanceRecovery();
+}
+
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
   const result = await $modal.confirm({
     content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
@@ -3682,10 +3686,14 @@ const JobRunner = {
         }
         worker.emit('continuate');
       },
-      canRetryQuestion: (index) => Boolean(roots[index]),
+      canRetryQuestion: (index) => Boolean(roots[index]) && !tikuAdapterBalanceRecoveryState.paused,
       retryQuestion: async (index) => {
         const root = roots[index];
         if (!root) {
+          return undefined;
+        }
+
+        if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
           return undefined;
         }
 
@@ -3728,7 +3736,7 @@ const JobRunner = {
 
       let latestResult = initialResult;
       for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
-        if (hasInsufficientBalanceError(latestResult)) break;
+        if (tikuAdapterBalanceRecoveryState.paused) break;
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
           index,
           total: roots.length,
@@ -4609,7 +4617,7 @@ function workOrExam(
   ) {
     let latestResult = initialResult;
     for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
-      if (hasInsufficientBalanceError(latestResult)) break;
+      if (tikuAdapterBalanceRecoveryState.paused) break;
       logDebug('info', '动作节点诊断：未完成单题自动重试', {
         index,
         total,
@@ -4738,10 +4746,14 @@ function workOrExam(
         }
         worker.emit('continuate');
       },
-      canRetryQuestion: (index) => Boolean(liveRoots()[index]),
+      canRetryQuestion: (index) => Boolean(liveRoots()[index]) && !tikuAdapterBalanceRecoveryState.paused,
       retryQuestion: async (index) => {
         const root = liveRoots()[index];
         if (!root) {
+          return undefined;
+        }
+
+        if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
           return undefined;
         }
 

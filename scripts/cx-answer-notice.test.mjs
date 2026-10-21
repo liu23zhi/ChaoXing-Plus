@@ -37,7 +37,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
-      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
+      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
     ])
@@ -78,6 +78,8 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     notify: typeof notifyManualAnswerRequired === 'function' ? notifyManualAnswerRequired : undefined,
     notifyBalance: typeof notifyTikuAdapterInsufficientBalance === 'function' ? notifyTikuAdapterInsufficientBalance : undefined,
     recoverBalance: typeof requestTikuAdapterBalanceRecovery === 'function' ? requestTikuAdapterBalanceRecovery : undefined,
+    allowRetryAfterBalanceRecovery: typeof allowTikuAdapterRetryAfterBalanceRecovery === 'function' ? allowTikuAdapterRetryAfterBalanceRecovery : undefined,
+    balanceState: tikuAdapterBalanceRecoveryState,
     trackTikuAdapterWorker: typeof trackTikuAdapterWorker === 'function' ? trackTikuAdapterWorker : undefined,
     untrackTikuAdapterWorker: typeof untrackTikuAdapterWorker === 'function' ? untrackTikuAdapterWorker : undefined,
     retryChapter: retryUnfinishedChapterQuestions,
@@ -296,14 +298,76 @@ test('empty searches still report the existing generic error', async () => {
 });
 
 for (const mode of ['Chapter', 'Work']) {
-  test(`${mode} balance failure never automatically retries a question`, async () => {
-    const runtime = await createRuntime([{ success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } }]);
+  test(`${mode} retries a balance-failed question after the explicit recovery confirmation`, async () => {
+    const runtime = await createRuntime([
+      { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } },
+      success
+    ]);
     const initial = await runtime.createWorker().doWork();
-    const results = await runtime[`retry${mode}`](initial);
     assert.equal(runtime.requests, 1);
+    assert.equal(runtime.balanceState.paused, false);
+
+    const results = await runtime[`retry${mode}`](initial);
+    assert.equal(runtime.requests, 2);
+    assert.equal(results[0].result.finish, true);
+    assert.equal(results[0].error, undefined);
+  });
+
+  test(`${mode} waits for balance recovery between retries and respects the three-retry limit`, async () => {
+    const balanceFailure = { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } };
+    const runtime = await createRuntime([balanceFailure]);
+    const initial = await runtime.createWorker().doWork();
+
+    const results = await runtime[`retry${mode}`](initial);
+
+    assert.equal(runtime.requests, 4, 'one initial request plus three retries');
+    assert.equal(runtime.modalConfirmCalls, 4, 'each insufficient-balance response requires confirmation');
+    assert.equal(results[0].result.finish, false);
+    assert.match(results[0].error, /余额不足/);
+  });
+
+  test(`${mode} does not retry while balance recovery remains paused`, async () => {
+    const runtime = await createRuntime([
+      { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } },
+      success
+    ], 'pause', [false]);
+    const initial = await runtime.createWorker().doWork();
+
+    assert.equal(runtime.balanceState.paused, true);
+    const results = await runtime[`retry${mode}`](initial);
+
+    assert.equal(runtime.requests, 1);
+    assert.equal(results[0].result.finish, false);
+  });
+
+  test(`${mode} stops unfinished retries when balance recovery is declined`, async () => {
+    const balanceFailure = { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } };
+    const runtime = await createRuntime([balanceFailure], 'pause', [true, false]);
+    const initial = await runtime.createWorker().doWork();
+
+    const results = await runtime[`retry${mode}`](initial);
+
+    assert.equal(runtime.requests, 2, 'the retry that encountered insufficient balance must finish before pausing');
+    assert.equal(runtime.modalConfirmCalls, 2, 'the retry must request a new confirmation');
+    assert.equal(runtime.balanceState.paused, true);
+    assert.equal(results[0].result.finish, false);
     assert.match(results[0].error, /余额不足/);
   });
 }
+
+test('manual retry waits for recovery confirmation and issues no request while recovery is declined', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, false, true]);
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+
+  assert.equal(runtime.balanceState.paused, true);
+  assert.equal(await runtime.allowRetryAfterBalanceRecovery(), false);
+  assert.equal(runtime.balanceState.paused, true);
+  assert.equal(runtime.requests, 0);
+
+  assert.equal(await runtime.allowRetryAfterBalanceRecovery(), true);
+  assert.equal(runtime.balanceState.paused, false);
+  assert.equal(runtime.requests, 0);
+});
 
 test('ordinary search balance rejection skips AI fallback in either failure action', async () => {
   for (const action of ['skip', 'pause']) {

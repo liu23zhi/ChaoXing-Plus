@@ -958,6 +958,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
       return;
     }
 
+    const previousResult = { ...result };
     patchWorkResult(selectedIndex, { retrying: true, error: undefined, manual: false });
     try {
       const retried = await runtimeControls.retryQuestion(selectedIndex);
@@ -968,7 +969,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
           manual: false
         });
       } else {
-        patchWorkResult(selectedIndex, { retrying: false });
+        patchWorkResult(selectedIndex, { ...previousResult, retrying: false });
       }
     } catch (err) {
       patchWorkResult(selectedIndex, {

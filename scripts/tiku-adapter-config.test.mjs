@@ -155,7 +155,7 @@ test('tiku adapter request payload no longer carries the removed plat field', as
   ]);
 });
 
-test('async search submits once with idempotency and returns successful empty-answer results', async () => {
+test('async search submits once with idempotency, follows another-origin status URL, and returns empty answers', async () => {
   const mod = await loadHelperModule();
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -171,7 +171,7 @@ test('async search submits once with idempotency and returns successful empty-an
         success: false,
         status: 'running',
         taskId: 'task-1',
-        statusUrl: '/adapter-service/search/status?taskId=task-1'
+        statusUrl: 'https://tasks.other.test/adapter-service/search/status?taskId=task-1'
       }, { status: 202 });
     }
     return Response.json({ success: true, status: 'succeeded', taskId: 'task-1', result });
@@ -191,7 +191,8 @@ test('async search submits once with idempotency and returns successful empty-an
     assert.deepEqual(JSON.parse(calls[0].init.body), {
       qid: '', question: '题目', options: [], type: 0, courseName: '', extra: ''
     });
-    assert.equal(calls[1].url, 'https://adapter.local/adapter-service/search/status?taskId=task-1');
+    assert.equal(calls[1].url, 'https://tasks.other.test/adapter-service/search/status?taskId=task-1');
+    assert.equal(calls[1].init.headers.Authorization, 'Bearer secret');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -443,22 +444,24 @@ test('AI fallback task endpoint 404 does not silently downgrade to the synchrono
   }
 });
 
-test('AI fallback uses the async task endpoint by default', async () => {
+test('AI fallback defaults to async and follows an absolute status URL from another origin', async () => {
   const mod = await loadHelperModule();
   const originalFetch = globalThis.fetch;
   const urls = [];
+  const statusAuthorizations = [];
 
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     urls.push(String(url));
     if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
       return Response.json({
         success: false,
         status: 'running',
         taskId: 'task-1',
-        statusUrl: '/adapter-service/ai-fallback/status?taskId=task-1'
+        statusUrl: 'https://jobs.other.test/adapter-service/ai-fallback/status?taskId=task-1'
       });
     }
     if (String(url).includes('/adapter-service/ai-fallback/status')) {
+      statusAuthorizations.push(init.headers.Authorization);
       return Response.json({
         success: true,
         status: 'succeeded',
@@ -487,8 +490,9 @@ test('AI fallback uses the async task endpoint by default', async () => {
 
     assert.deepEqual(urls, [
       'https://adapter.local/adapter-service/ai-fallback/tasks',
-      'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-1'
+      'https://jobs.other.test/adapter-service/ai-fallback/status?taskId=task-1'
     ]);
+    assert.deepEqual(statusAuthorizations, ['Bearer secret']);
     assert.equal(result[0].results[0].answer, '2');
   } finally {
     globalThis.fetch = originalFetch;

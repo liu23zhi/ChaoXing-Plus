@@ -17,6 +17,8 @@ test('common work results panel renders pause continue and retry controls', asyn
 
   assert.equal(source.includes("const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });"), true);
   assert.equal(source.includes("const retryButton = createElement('button', { text: result.retrying ? '正在重答...' : '重答本题' });"), true);
+  assert.equal(source.includes('const previousResult = { ...result };'), true);
+  assert.equal(source.includes('patchWorkResult(selectedIndex, { ...previousResult, retrying: false });'), true);
   assert.equal(source.includes('setRuntimeControls(controls: WorkResultsRuntimeControls)'), true);
   assert.equal(source.includes('clearRuntimeControls()'), true);
   assert.equal(source.includes('patchResult(index: number, patch: Partial<SimplifyWorkResult>)'), true);
