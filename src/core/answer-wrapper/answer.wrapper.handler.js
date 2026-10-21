@@ -5,12 +5,15 @@ export const AnswerWrapperHandlerConfig = {
 };
 export async function defaultAnswerWrapperHandler(answererWrappers, env) {
     const searchInfos = [];
-    const temp = JSON.parse(JSON.stringify(answererWrappers));
+    const temp = answererWrappers.map((wrapper) => ({
+        ...JSON.parse(JSON.stringify(wrapper)),
+        executeRequest: wrapper.executeRequest
+    }));
     if (temp.length === 0) {
         throw new Error('题库配置不能为空，请配置后重新开始自动答题。');
     }
     await Promise.all(temp.map(async (wrapper) => {
-        const { name = '未知题库', homepage = '#', method = 'get', type = 'fetch', contentType = 'json', headers = {}, data: wrapperData = {}, handler = 'return (res)=> [JSON.stringify(res), undefined]' } = wrapper;
+        const { name = '未知题库', homepage = '#', method = 'get', type = 'fetch', contentType = 'json', headers = {}, data: wrapperData = {}, timeoutSeconds = AnswerWrapperHandlerConfig.timeout_seconds ?? 60, retry, executeRequest, handler = 'return (res)=> [JSON.stringify(res), undefined]' } = wrapper;
         try {
             let results = [];
             let requestData;
@@ -43,16 +46,28 @@ export async function defaultAnswerWrapperHandler(answererWrappers, env) {
             else {
                 throw new Error('不支持的请求方式');
             }
-            const responseData = await Promise.race([
-                request(url.toString(), {
-                    method,
-                    responseType: contentType,
+            const timeoutMs = Math.max(1, timeoutSeconds) * 1000;
+            const responseData = executeRequest
+                ? await executeRequest({
+                    url: url.toString(),
+                    method: method.toLowerCase(),
+                    contentType,
                     data: requestData,
-                    type,
-                    headers: JSON.parse(JSON.stringify(headers || {}))
-                }),
-                sleep((AnswerWrapperHandlerConfig.timeout_seconds ?? 60) * 1000)
-            ]);
+                    headers: JSON.parse(JSON.stringify(headers || {})),
+                    timeoutMs
+                })
+                : await Promise.race([
+                    request(url.toString(), {
+                        method,
+                        responseType: contentType,
+                        data: requestData,
+                        type,
+                        headers: JSON.parse(JSON.stringify(headers || {})),
+                        timeoutMs,
+                        retry
+                    }),
+                    sleep(timeoutMs)
+                ]);
             if (responseData === undefined) {
                 throw new Error('题库请求超时，可能是题库问题，或者请检查网络或者重试。');
             }

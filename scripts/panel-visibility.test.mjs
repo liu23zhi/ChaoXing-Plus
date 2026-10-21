@@ -1,16 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
 
-const helperModulePath = resolve(process.cwd(), '.tmp-tests', 'panel-visibility.js');
+const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'panel-visibility.ts');
 
 async function loadPanelVisibilityModule() {
-  try {
-    return await import(pathToFileURL(helperModulePath).href);
-  } catch {
-    return {};
-  }
+  return loadCompiledTypeScriptModule(helperSourcePath, ['panel-visibility.js', 'projects/panel-visibility.js']);
 }
 
 test('floating panel stays hidden in deeply nested iframes so only the outermost page owns it', async () => {

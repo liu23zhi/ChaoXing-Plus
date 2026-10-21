@@ -28,7 +28,7 @@ export function splitAnswer(answer: string): string[] {
   return answer.split(/[#,，;；\n]/).map((item) => item.trim()).filter(Boolean);
 }
 
-export function simplifyWorkResult<T extends { ctx?: any; error?: string; requested: boolean; resolved: boolean; result?: { finish?: boolean } }>(
+export function simplifyWorkResult<T extends { ctx?: any; error?: string; requested: boolean; searching?: boolean; resolved: boolean; result?: { finish?: boolean } }>(
   results: T[],
   titleTransform?: (titles: (HTMLElement | undefined)[]) => string
 ): SimplifyWorkResult[] {
@@ -38,6 +38,7 @@ export function simplifyWorkResult<T extends { ctx?: any; error?: string; reques
     error: item.error,
     finish: item.result?.finish,
     requested: item.requested,
+    searching: item.searching,
     resolved: item.resolved,
     searchInfos: (item.ctx?.searchInfos ?? []).map((info: any) => ({
       name: info.name,

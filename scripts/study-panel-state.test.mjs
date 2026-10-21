@@ -2,17 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
 
-const helperModulePath = resolve(process.cwd(), '.tmp-tests', 'study-panel-state.js');
+const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'study-panel-state.ts');
 const commonProjectPath = resolve(process.cwd(), 'src', 'projects', 'common.ts');
 
 async function loadStudyPanelStateModule() {
-  try {
-    return await import(pathToFileURL(helperModulePath).href);
-  } catch {
-    return {};
-  }
+  return loadCompiledTypeScriptModule(helperSourcePath, ['study-panel-state.js', 'projects/study-panel-state.js']);
 }
 
 test('answer automation defaults to enabled', async () => {

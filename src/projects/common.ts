@@ -45,6 +45,7 @@ export interface CommonWorkOptions {
   answerMatchMode: 'exact' | 'includes' | 'similar';
   enableRandomFallbackAnswer: boolean;
   enableAIFallbackAnswer: boolean;
+  useAsyncTikuSearch: boolean;
   deepThinking: boolean;
   aiFallbackFailureAction: 'pause' | 'skip';
 }
@@ -159,6 +160,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   answerMatchMode: 'includes',
   enableRandomFallbackAnswer: false,
   enableAIFallbackAnswer: false,
+  useAsyncTikuSearch: true,
   deepThinking: false,
   aiFallbackFailureAction: 'pause'
 };
@@ -245,6 +247,7 @@ export function getStoredTikuAdapterConfig() {
 function getWorkOptions(): CommonWorkOptions {
   const stored = runtimeStore.get(WORK_OPTIONS_KEY, defaultWorkOptions);
   const tikuConfig = getStoredTikuAdapterConfig();
+  const useAsyncTikuSearch = getStudySettingValue('useAsyncTikuSearch', stored.useAsyncTikuSearch ?? true);
   const resolvedBaseurl = resolveTikuAdapterBaseUrl(tikuConfig.baseurl, DEFAULT_TIKU_BASE_URL);
   const dynamicProblem = getTikuAdapterConfigProblem({
     baseurl: resolvedBaseurl,
@@ -255,7 +258,8 @@ function getWorkOptions(): CommonWorkOptions {
     ? undefined
     : createTikuAdapterAnswererWrapper({
         baseurl: resolvedBaseurl,
-        key: tikuConfig.key
+        key: tikuConfig.key,
+        asyncSearch: useAsyncTikuSearch
       });
 
   return {
@@ -269,6 +273,7 @@ function getWorkOptions(): CommonWorkOptions {
       stored.enableRandomFallbackAnswer ?? false
     ),
     enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
+    useAsyncTikuSearch,
     deepThinking: getStudySettingValue('deepThinking', stored.deepThinking ?? false),
     aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
@@ -1450,6 +1455,11 @@ function createStudySettingsPanel() {
       attrs: { type: 'checkbox', title: '普通题库失败后，允许调用 tikuAdapter AI fallback。' },
       defaultValue: false
     },
+    useAsyncTikuSearch: {
+      label: '异步搜题',
+      attrs: { type: 'checkbox', title: '默认使用任务接口创建普通搜题并轮询结果；关闭后使用兼容旧客户端的同步接口。' },
+      defaultValue: true
+    },
     deepThinking: {
       label: '深度思考',
       attrs: { type: 'checkbox', title: '开启后 AI 搜题会更慢，且费用可能更高。默认关闭。' },
@@ -1535,7 +1545,7 @@ function createStudySettingsPanel() {
     'enableHyperlink',
     'notifyWhenHasFaceRecognition'
   ];
-  const aiSearchKeys = ['enableAIFallbackAnswer', 'deepThinking', 'aiFallbackFailureAction'];
+  const aiSearchKeys = ['enableAIFallbackAnswer', 'useAsyncTikuSearch', 'deepThinking', 'aiFallbackFailureAction'];
   const examAndDebugKeys = ['enableExamAutoSubmit', 'enableDebugLogPanel'];
   const cacheKeys = ['enableLocalQuestionCache'];
 
@@ -1795,6 +1805,7 @@ function createWorkResultsPanel() {
     cfg: {
       enableAnswer: getStudySettingValue('enableAnswer', true),
       enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', false),
+      useAsyncTikuSearch: getStudySettingValue('useAsyncTikuSearch', true),
       aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', 'pause'),
       enableExamAutoSubmit: getStudySettingValue('enableExamAutoSubmit', false),
       enableDebugLogPanel: getStudySettingValue('enableDebugLogPanel', false),

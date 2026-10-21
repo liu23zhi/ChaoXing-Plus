@@ -1,23 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
 
-const helperModulePaths = [
-  resolve(process.cwd(), '.tmp-tests', 'cx-manual-state.js'),
-  resolve(process.cwd(), '.tmp-tests', 'projects', 'cx-manual-state.js')
-];
+const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx-manual-state.ts');
 
 async function loadHelperModule() {
-  for (const helperModulePath of helperModulePaths) {
-    try {
-      return await import(pathToFileURL(helperModulePath).href);
-    } catch {
-      // try next compiled location
-    }
-  }
-
-  return {};
+  return loadCompiledTypeScriptModule(helperSourcePath, ['cx-manual-state.js', 'projects/cx-manual-state.js']);
 }
 
 function createRoot({ checked = false, ariaChecked = false, textareaValue = '', frameText = '', fillText = '', active = false } = {}) {

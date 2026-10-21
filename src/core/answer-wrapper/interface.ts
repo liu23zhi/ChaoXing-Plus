@@ -41,6 +41,15 @@ export interface AnswererWrapper {
 	type: 'fetch' | 'GM_xmlhttpRequest';
 	/** 附带请求头 */
 	headers: Record<string, string>;
+	/** 可选的自定义请求执行器，用于异步任务等多阶段协议 */
+	executeRequest?: (input: {
+		url: string;
+		method: 'get' | 'post';
+		contentType: 'json' | 'text';
+		data: Record<string, any>;
+		headers: Record<string, string>;
+		timeoutMs: number;
+	}) => Promise<unknown>;
 	/** 单次题库请求超时时间，秒 */
 	timeoutSeconds?: number;
 	/** 题库请求失败重试配置 */

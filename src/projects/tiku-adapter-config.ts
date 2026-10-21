@@ -1,6 +1,7 @@
 /// <reference path="../types.d.ts" />
 import { type SearchInformation } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
+import { pollTikuAdapterSearchTask, pollTikuAdapterTask, type TikuAdapterTaskEnvelope } from '../core/answer-wrapper/task-poller.js';
 import {
   createTikuAdapterRequestError,
   claimTikuAdapterBalanceNotice as claimBalanceNotice,
@@ -16,12 +17,14 @@ import {
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
 export const TIKU_ADAPTER_SEARCH_TIMEOUT_SECONDS = 240;
+export const TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS = 10000;
+export const TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS = 600000;
 export const TIKU_ADAPTER_AI_FALLBACK_REQUEST_TIMEOUT_MS = 180000;
-export const TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS = 300000;
+export const TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS = 600000;
 export const TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS = 2500;
 export const TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS = 3;
 export const TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS = 2000;
-export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 600;
+export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1220;
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
@@ -55,6 +58,17 @@ export type TikuAdapterAIFallbackResponse = SearchInformation & {
 export type TikuAdapterConfig = {
   baseurl: string;
   key: string;
+  asyncSearch?: boolean;
+};
+
+export type TikuAdapterSearchTaskOptions = {
+  requestTimeoutMs?: number;
+  statusTimeoutMs?: number;
+  pollIntervalMs?: number;
+  maxConsecutiveFailures?: number;
+  retryAttempts?: number;
+  retryDelayMs?: number;
+  idempotencyKey?: string;
 };
 
 export type TikuAdapterAIFallbackRequestOptions = {
@@ -102,6 +116,21 @@ export function createTikuAdapterSearchUrl(baseurl: string): string {
   return normalized ? `${normalized}/adapter-service/search` : '';
 }
 
+export function createTikuAdapterSearchTaskUrl(baseurl: string): string {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl);
+  return normalized ? `${normalized}/adapter-service/search/tasks` : '';
+}
+
+export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string): string {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl);
+  if (!normalized) {
+    return '';
+  }
+  const url = new URL(`${normalized}/adapter-service/search/status`);
+  url.searchParams.set('taskId', String(taskId ?? '').trim());
+  return url.toString();
+}
+
 export function createTikuAdapterAIFallbackUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
   return normalized ? `${normalized}/adapter-service/ai-fallback` : '';
@@ -120,6 +149,59 @@ export function createTikuAdapterAIFallbackStatusUrl(baseurl: string, taskId: st
   const url = new URL(`${normalized}/adapter-service/ai-fallback/status`);
   url.searchParams.set('taskId', String(taskId ?? '').trim());
   return url.toString();
+}
+
+export async function requestTikuAdapterSearchTask(
+  config: TikuAdapterConfig,
+  payload: Record<string, unknown>,
+  options: TikuAdapterSearchTaskOptions = {}
+): Promise<unknown> {
+  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
+  const key = String(config.key ?? '').trim();
+  const problem = getTikuAdapterConfigProblem({ baseurl, key });
+  if (problem) throw new Error(problem);
+
+  const phaseStartedAt = Date.now();
+  const requestTimeoutMs = normalizePositiveInteger(
+    options.requestTimeoutMs,
+    TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS
+  );
+  const taskCreateTimeoutMs = Math.min(requestTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS);
+  const retryAttempts = normalizePositiveInteger(options.retryAttempts, TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS);
+  const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS));
+  const idempotencyKey = String(options.idempotencyKey ?? createTikuAdapterIdempotencyKey()).trim();
+  const initial = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(
+    createTikuAdapterSearchTaskUrl(baseurl),
+    key,
+    {
+      method: 'POST',
+      data: payload,
+      timeoutMs: taskCreateTimeoutMs,
+      retryAttempts,
+      retryDelayMs,
+      extraHeaders: { 'Idempotency-Key': idempotencyKey }
+    }
+  );
+
+  if (String(initial.status ?? '').toLowerCase() === 'succeeded' && initial.result !== undefined) {
+    return initial.result;
+  }
+  if (!initial.taskId && initial.result !== undefined) {
+    return initial.result;
+  }
+
+  return pollTikuAdapterSearchTask(initial, {
+    statusUrlBase: createTikuAdapterSearchStatusUrl(baseurl, ''),
+    pollIntervalMs: options.pollIntervalMs ?? TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS,
+    timeoutMs: Math.max(1, (options.statusTimeoutMs ?? TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS) - (Date.now() - phaseStartedAt)),
+    maxConsecutiveFailures: options.maxConsecutiveFailures ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
+    getStatus: (statusUrl, _taskId, remainingMs) => requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(statusUrl, key, {
+      method: 'GET',
+      timeoutMs: Math.min(taskCreateTimeoutMs, 10000, remainingMs),
+      retryAttempts: 1,
+      retryDelayMs: 0
+    })
+  });
 }
 
 export function createTikuAdapterAuthorizationHeader(key: string): string {
@@ -268,30 +350,35 @@ function normalizePositiveInteger(value: number | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function createTikuAdapterIdempotencyKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 async function resolveTikuAdapterAIFallbackResponse(
   baseurl: string,
   key: string,
   payload: ReturnType<typeof buildTikuAdapterAIFallbackPayload>,
   options: ReturnType<typeof normalizeAIFallbackRequestOptions>
 ): Promise<TikuAdapterAIFallbackResult> {
+  const phaseStartedAt = Date.now();
   if (options.preferAsyncTask) {
-    try {
-      const taskResponse = await requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(createTikuAdapterAIFallbackTaskUrl(baseurl), key, {
-        method: 'POST',
-        data: payload,
-        timeoutMs: options.requestTimeoutMs,
-        retryAttempts: 1,
-        retryDelayMs: 0
+    const taskResponse = await requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(createTikuAdapterAIFallbackTaskUrl(baseurl), key, {
+      method: 'POST',
+      data: payload,
+      timeoutMs: Math.min(options.requestTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS),
+      retryAttempts: 1,
+      retryDelayMs: 0
+    });
+    if (isAIFallbackPendingResponse(taskResponse)) {
+      return pollTikuAdapterAIFallbackStatus(baseurl, key, taskResponse, {
+        ...options,
+        statusTimeoutMs: Math.max(1, options.statusTimeoutMs - (Date.now() - phaseStartedAt))
       });
-      if (isAIFallbackPendingResponse(taskResponse)) {
-        return pollTikuAdapterAIFallbackStatus(baseurl, key, taskResponse, options);
-      }
-      return taskResponse;
-    } catch (err) {
-      if (!isNotFoundError(err)) {
-        throw err;
-      }
     }
+    return taskResponse;
   }
 
   const directResponse = await requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(createTikuAdapterAIFallbackUrl(baseurl), key, {
@@ -303,7 +390,10 @@ async function resolveTikuAdapterAIFallbackResponse(
   });
 
   if (isAIFallbackPendingResponse(directResponse)) {
-    return pollTikuAdapterAIFallbackStatus(baseurl, key, directResponse, options);
+    return pollTikuAdapterAIFallbackStatus(baseurl, key, directResponse, {
+      ...options,
+      statusTimeoutMs: Math.max(1, options.statusTimeoutMs - (Date.now() - phaseStartedAt))
+    });
   }
   return directResponse;
 }
@@ -314,37 +404,49 @@ async function pollTikuAdapterAIFallbackStatus(
   initialResponse: TikuAdapterAIFallbackResult,
   options: ReturnType<typeof normalizeAIFallbackRequestOptions>
 ): Promise<TikuAdapterAIFallbackResult> {
-  const taskId = String(initialResponse.taskId ?? '').trim();
   const statusUrl = resolveAIFallbackStatusUrl(baseurl, initialResponse);
+  const taskId = String(initialResponse.taskId ?? '').trim();
   if (!statusUrl) {
     return initialResponse;
   }
 
   const startedAt = Date.now();
-  let latestResponse = initialResponse;
-  while (Date.now() - startedAt < options.statusTimeoutMs) {
-    await sleepAIFallback(options.pollIntervalMs);
-    latestResponse = await requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(statusUrl, key, {
-      method: 'GET',
-      timeoutMs: Math.min(options.requestTimeoutMs, Math.max(options.pollIntervalMs * 2, 1000)),
-      retryAttempts: options.retryAttempts,
-      retryDelayMs: options.retryDelayMs
+  try {
+    const terminal = await pollTikuAdapterTask<{ question?: string; answer?: string }>(initialResponse, {
+      statusUrlBase: statusUrl || createTikuAdapterAIFallbackStatusUrl(baseurl, taskId),
+      pollIntervalMs: options.pollIntervalMs,
+      timeoutMs: options.statusTimeoutMs,
+      maxConsecutiveFailures: 3,
+      isTerminalFailure: (response) =>
+        typeof response.error === 'object' && response.error?.code === 'NO_ANSWER',
+      getStatus: (url, _taskId, remainingMs) => requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(url, key, {
+        method: 'GET',
+        timeoutMs: Math.min(options.requestTimeoutMs, 10000, remainingMs),
+        retryAttempts: 1,
+        retryDelayMs: 0
+      })
     });
-
-    if (!isAIFallbackPendingResponse(latestResponse)) {
-      return latestResponse;
-    }
+    return {
+      success: terminal.success === true,
+      status: terminal.status,
+      taskId,
+      ...(terminal.result ? { result: terminal.result } : {}),
+      ...(terminal.error ? { error: terminal.error as TikuAdapterAIFallbackResult['error'] } : {}),
+      ...(Array.isArray((terminal as TikuAdapterAIFallbackResult).warnings)
+        ? { warnings: (terminal as TikuAdapterAIFallbackResult).warnings }
+        : {})
+    };
+  } catch (error) {
+    return {
+      success: false,
+      status: Date.now() - startedAt >= options.statusTimeoutMs ? 'timeout' : 'failed',
+      taskId,
+      error: {
+        code: 'UPSTREAM_ERROR',
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
   }
-
-  return {
-    success: false,
-    status: 'timeout',
-    taskId,
-    error: {
-      code: 'UPSTREAM_ERROR',
-      message: `AI 搜题仍在处理中，等待状态超时（${Math.round(options.statusTimeoutMs / 1000)} 秒）`
-    }
-  };
 }
 
 function resolveAIFallbackStatusUrl(baseurl: string, response: TikuAdapterAIFallbackResult) {
@@ -378,6 +480,7 @@ async function requestTikuAdapterJSON<T>(
     timeoutMs: number;
     retryAttempts: number;
     retryDelayMs: number;
+    extraHeaders?: Record<string, string>;
   }
 ): Promise<T> {
   const identity = resolveTikuAdapterRequestIdentity(url, {
@@ -397,6 +500,7 @@ async function requestTikuAdapterJSON<T>(
         method: options.method,
         headers: {
           Authorization: createTikuAdapterAuthorizationHeader(key),
+          ...options.extraHeaders,
           ...(options.method === 'POST' ? { 'Content-Type': 'application/json' } : {})
         },
         body: options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined,
@@ -438,10 +542,6 @@ function createHTTPError(status: number, message: string) {
   const error = new Error(message) as Error & { status?: number };
   error.status = status;
   return error;
-}
-
-function isNotFoundError(err: unknown) {
-  return Boolean(err && typeof err === 'object' && (err as { status?: number }).status === 404);
 }
 
 function isRetryableTikuAdapterError(err: unknown) {
@@ -553,7 +653,7 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
   }
 
   return {
-    url: createTikuAdapterSearchUrl(baseurl),
+    url: config.asyncSearch === false ? createTikuAdapterSearchUrl(baseurl) : createTikuAdapterSearchTaskUrl(baseurl),
     name: 'Zelly的题库',
     homepage: baseurl,
     method: 'post',
@@ -562,6 +662,13 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     headers: {
       Authorization: createTikuAdapterAuthorizationHeader(key)
     },
+    ...(config.asyncSearch === false ? {} : {
+      executeRequest: ({ data, timeoutMs }) => requestTikuAdapterSearchTask(
+        { baseurl, key },
+        data,
+        { requestTimeoutMs: timeoutMs }
+      )
+    }),
     timeoutSeconds: TIKU_ADAPTER_SEARCH_TIMEOUT_SECONDS,
     retry: {
       maxAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
@@ -600,9 +707,6 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       extra: '',
       skipCache: {
         handler: `return (env) => typeof env.skipCache === 'boolean' ? env.skipCache : undefined`
-      },
-      deepThinking: {
-        handler: `return (env) => env.deepThinking === true ? true : undefined`
       }
     },
     handler: `return (res) => {

@@ -66,6 +66,7 @@ export class OCSWorker extends CommonEventEmitter {
         if (options?.enable_debug) {
             console.debug('上下文已初始化: ', results);
         }
+        await this.opts.onResultsInitialized?.(results);
         const requestThread = async (index) => {
             let error;
             const result = results[index];
@@ -78,6 +79,8 @@ export class OCSWorker extends CommonEventEmitter {
                 await waitForContinuate(() => this.isStop);
             }
             ctx.searchInfos = [];
+            result.searching = true;
+            await this.opts.onResultsUpdate?.(result, index, results);
             if (options?.enable_debug) {
                 console.groupEnd();
                 console.group('开始搜题: ', ctx.elements.title
@@ -100,6 +103,7 @@ export class OCSWorker extends CommonEventEmitter {
                 error = String(err);
             }
             result.ctx = ctx;
+            result.searching = false;
             result.requested = true;
             result.error = error;
             if (options?.enable_debug) {
@@ -163,11 +167,16 @@ export class OCSWorker extends CommonEventEmitter {
                         }
                     }
                     else {
-                        error = '搜索不到答案, 请重新运行, 或者忽略此题。';
+                        error = result.error ?? '搜索不到答案, 请重新运行, 或者忽略此题。';
                     }
                 }
                 catch (err) {
                     error = err?.message || String(err);
+                }
+                if (!error && res && res.finish === false) {
+                    error = result.ctx?.searchInfos
+                        ?.map((info) => info.error)
+                        .find((message) => Boolean(message));
                 }
                 result.error = error;
                 result.result = res || { finish: false };

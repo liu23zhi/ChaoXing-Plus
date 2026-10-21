@@ -54,6 +54,19 @@ test('resolves search url from normalized baseurl', async () => {
   );
 });
 
+test('creates async search task and status urls', async () => {
+  const mod = await loadHelperModule();
+
+  assert.equal(
+    mod.createTikuAdapterSearchTaskUrl('https://adapter.local/'),
+    'https://adapter.local/adapter-service/search/tasks'
+  );
+  assert.equal(
+    mod.createTikuAdapterSearchStatusUrl('https://adapter.local/', 'task-1'),
+    'https://adapter.local/adapter-service/search/status?taskId=task-1'
+  );
+});
+
 test('creates bearer authorization header text', async () => {
   const mod = await loadHelperModule();
 
@@ -86,7 +99,7 @@ test('maps current chaoxing question types to tikuAdapter numeric types', async 
   assert.equal(mod.resolveTikuAdapterQuestionType('unknown'), 4);
 });
 
-test('creates a post fetch wrapper with bearer auth and adapter search url', async () => {
+test('creates a post wrapper using async search by default', async () => {
   const mod = await loadHelperModule();
 
   assert.equal(typeof mod.createTikuAdapterAnswererWrapper, 'function');
@@ -95,7 +108,8 @@ test('creates a post fetch wrapper with bearer auth and adapter search url', asy
     key: 'demo-key'
   });
 
-  assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search');
+  assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search/tasks');
+  assert.equal(typeof wrapper.executeRequest, 'function');
   assert.equal(wrapper.method, 'post');
   assert.equal(wrapper.type, 'fetch');
   assert.equal(wrapper.contentType, 'json');
@@ -104,6 +118,18 @@ test('creates a post fetch wrapper with bearer auth and adapter search url', asy
   });
   assert.ok(wrapper.timeoutSeconds >= 180);
   assert.ok(wrapper.retry?.maxAttempts >= 2);
+});
+
+test('disabling async search keeps the legacy synchronous endpoint', async () => {
+  const mod = await loadHelperModule();
+  const wrapper = mod.createTikuAdapterAnswererWrapper({
+    baseurl: 'https://adapter.local/',
+    key: 'demo-key',
+    asyncSearch: false
+  });
+
+  assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search');
+  assert.equal(wrapper.executeRequest, undefined);
 });
 
 // 服务端已彻底删除 plat（历史取值恒为 -1，没有任何区分度），请求侧不得再提交该字段。
@@ -117,7 +143,7 @@ test('tiku adapter request payload no longer carries the removed plat field', as
   assert.equal(wrapper.data.plat, undefined);
   assert.equal(Object.prototype.hasOwnProperty.call(wrapper.data, 'plat'), false);
 
-  // 其余请求字段保持原样，避免顺手改动引入回归。
+  // 普通搜题固定使用兼容请求体中的 7 个字段。
   assert.deepEqual(Object.keys(wrapper.data), [
     'qid',
     'question',
@@ -125,9 +151,50 @@ test('tiku adapter request payload no longer carries the removed plat field', as
     'type',
     'courseName',
     'extra',
-    'skipCache',
-    'deepThinking'
+    'skipCache'
   ]);
+});
+
+test('async search submits once with idempotency and returns successful empty-answer results', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const result = {
+    question: '题目',
+    answer: { answerText: '' }
+  };
+
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith('/adapter-service/search/tasks')) {
+      return Response.json({
+        success: false,
+        status: 'running',
+        taskId: 'task-1',
+        statusUrl: '/adapter-service/search/status?taskId=task-1'
+      }, { status: 202 });
+    }
+    return Response.json({ success: true, status: 'succeeded', taskId: 'task-1', result });
+  };
+
+  try {
+    const response = await mod.requestTikuAdapterSearchTask(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { qid: '', question: '题目', options: [], type: 0, courseName: '', extra: '', skipCache: undefined },
+      { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 0, retryAttempts: 1, idempotencyKey: 'stable-1' }
+    );
+
+    assert.deepEqual(response, result);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].url, 'https://adapter.local/adapter-service/search/tasks');
+    assert.equal(calls[0].init.headers['Idempotency-Key'], 'stable-1');
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      qid: '', question: '题目', options: [], type: 0, courseName: '', extra: ''
+    });
+    assert.equal(calls[1].url, 'https://adapter.local/adapter-service/search/status?taskId=task-1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('tiku adapter config source no longer mentions plat at all', async () => {
@@ -260,10 +327,13 @@ test('tiku adapter options do not false-positive on natural language or formulas
 
 test('tiku adapter config exposes long AI fallback timeouts and status helpers', async () => {
   const mod = await loadHelperModule();
+  const source = await readFile(helperSourcePath, 'utf8');
 
   assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_REQUEST_TIMEOUT_MS >= 180000);
-  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS >= 300000);
-  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS >= 600);
+  assert.equal(mod.TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS, 600000);
+  assert.ok(mod.TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS >= 1220);
+  assert.match(source, /timeoutMs: Math\.min\(taskCreateTimeoutMs, 10000, remainingMs\)/);
+  assert.match(source, /timeoutMs: Math\.min\(options\.requestTimeoutMs, 10000, remainingMs\)/);
   assert.equal(typeof mod.createTikuAdapterAIFallbackTaskUrl, 'function');
   assert.equal(typeof mod.createTikuAdapterAIFallbackStatusUrl, 'function');
   assert.equal(
@@ -308,26 +378,14 @@ test('AI fallback preserves insufficient balance error details', async () => {
   }
 });
 
-test('AI fallback retries transient failures before returning an answer', async () => {
+test('AI fallback task endpoint 404 does not silently downgrade to the synchronous endpoint', async () => {
   const mod = await loadHelperModule();
   const originalFetch = globalThis.fetch;
   const calls = [];
 
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init });
-    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
-      return new Response('not found', { status: 404 });
-    }
-    if (String(url).endsWith('/adapter-service/ai-fallback') && calls.filter((item) => String(item.url).endsWith('/adapter-service/ai-fallback')).length === 1) {
-      return new Response('bad gateway', { status: 502 });
-    }
-    return Response.json({
-      success: true,
-      result: {
-        question: '1+1=?',
-        answer: '2'
-      }
-    });
+    return new Response('not found', { status: 404 });
   };
 
   try {
@@ -337,9 +395,11 @@ test('AI fallback retries transient failures before returning an answer', async 
       { requestTimeoutMs: 1000, retryAttempts: 2, retryDelayMs: 1, preferAsyncTask: true }
     );
 
-    assert.equal(calls.length, 3);
-    assert.equal(result[0].results[0].answer, '2');
-    assert.equal(result[0].error, undefined);
+    assert.deepEqual(calls.map(({ url }) => url), [
+      'https://adapter.local/adapter-service/ai-fallback/tasks'
+    ]);
+    assert.deepEqual(result[0].results, []);
+    assert.match(result[0].error, /UPSTREAM_ERROR/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -445,6 +505,40 @@ test('AI fallback polls task status until the adapter reports a final answer', a
     assert.equal(statusCalls, 2);
     assert.equal(result[0].results[0].answer, '答案');
     assert.equal(result[0].response.status, 'succeeded');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI fallback treats terminal NO_ANSWER as complete without repeated status queries', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const urls = [];
+
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+      return Response.json({ success: false, status: 'running', taskId: 'task-no-answer' });
+    }
+    return Response.json({
+      success: false,
+      status: 'failed',
+      taskId: 'task-no-answer',
+      error: { code: 'NO_ANSWER', message: '未找到可用答案' }
+    });
+  };
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://adapter.local', key: 'secret' },
+      { title: '题目', type: 'completion', options: '' },
+      { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 1, retryAttempts: 1, preferAsyncTask: true }
+    );
+
+    assert.equal(urls.length, 2);
+    assert.equal(urls[1], 'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-no-answer');
+    assert.deepEqual(result[0].results, []);
+    assert.equal(result[0].response.error.code, 'NO_ANSWER');
   } finally {
     globalThis.fetch = originalFetch;
   }

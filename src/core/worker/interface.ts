@@ -57,8 +57,10 @@ export interface ResolverResult {
 
 /** 答题结果 */
 export interface WorkResult<E extends RawElements> {
-	/** 查题完毕 */
+	/** 是否已完成搜题 */
 	requested: boolean;
+	/** 是否正在查题 */
+	searching?: boolean;
 	/** 答题完毕 */
 	resolved: boolean;
 	result?: ResolverResult;
@@ -80,8 +82,10 @@ export interface SimplifyWorkResult {
 	error?: string;
 	/** 是否完成 */
 	finish?: boolean;
-	/** 正在等待 查题 线程处理 */
+	/** 是否已完成搜题 */
 	requested: boolean;
+	/** 是否正在查题 */
+	searching?: boolean;
 	/** 正在等待 答题 线程处理 */
 	resolved: boolean;
 	/** 是否存在人工介入 */
@@ -224,6 +228,8 @@ export interface WorkOptions<E extends RawElements> {
 	answerMatchMode?: AnswerMatchMode;
 	/** 当元素被搜索到 */
 	onElementSearched?: (elements: SearchedElements<E, HTMLElement[]>, root: HTMLElement) => void | Promise<void>;
+	/** 所有题目元素初始化完成，尚未开始搜题 */
+	onResultsInitialized?: (res: WorkResult<E>[]) => void | Promise<void>;
 	/** 监听搜题结果 */
 	onAnswerSearched?: (
 		searchInfo: SearchInformation,

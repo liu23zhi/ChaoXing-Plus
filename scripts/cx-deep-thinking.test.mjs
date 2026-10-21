@@ -36,32 +36,15 @@ async function loadHelperModule() {
   return require(helperModulePath);
 }
 
-test('normal search omits deepThinking unless explicitly enabled', async () => {
+test('normal search never sends deepThinking outside the seven-field search contract', async () => {
   const mod = await loadHelperModule();
   const wrapper = mod.createTikuAdapterAnswererWrapper({
     baseurl: 'https://adapter.local',
     key: 'secret'
   });
 
-  assert.ok(wrapper.data.deepThinking);
-  const resolveDeepThinking = Function(wrapper.data.deepThinking.handler)();
-  const disabledPayload = Object.fromEntries(Object.entries(wrapper.data).map(([key, value]) => [
-    key,
-    value && typeof value === 'object' && value.handler
-      ? Function(value.handler)()({ deepThinking: false })
-      : value
-  ]));
-  const enabledPayload = Object.fromEntries(Object.entries(wrapper.data).map(([key, value]) => [
-    key,
-    value && typeof value === 'object' && value.handler
-      ? Function(value.handler)()({ deepThinking: true })
-      : value
-  ]));
-
-  assert.equal(resolveDeepThinking({ deepThinking: false }), undefined);
-  assert.equal(resolveDeepThinking({}), undefined);
-  assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(disabledPayload)), 'deepThinking'), false);
-  assert.equal(JSON.parse(JSON.stringify(enabledPayload)).deepThinking, true);
+  assert.equal(wrapper.data.deepThinking, undefined);
+  assert.deepEqual(Object.keys(wrapper.data), ['qid', 'question', 'options', 'type', 'courseName', 'extra', 'skipCache']);
 });
 
 test('AI fallback omits deepThinking by default and sends true when enabled', async () => {
@@ -109,7 +92,7 @@ test('deep thinking is a disabled-by-default learning setting with a cost and la
   assert.match(source, /getStudySettingValue\('deepThinking',\s*stored\.deepThinking\s*\?\?\s*false\)/);
   assert.match(source, /deepThinking:\s*\{[\s\S]{0,220}?label:\s*'深度思考'[\s\S]{0,220}?type:\s*'checkbox'[\s\S]{0,220}?defaultValue:\s*false/);
   assert.match(source, /深度思考[\s\S]{0,100}(?:更慢|更长)[\s\S]{0,100}(?:费用|成本)[\s\S]{0,30}(?:更高|增加)/);
-  assert.ok(source.includes("const aiSearchKeys = ['enableAIFallbackAnswer', 'deepThinking', 'aiFallbackFailureAction'];"));
+  assert.ok(source.includes("const aiSearchKeys = ['enableAIFallbackAnswer', 'useAsyncTikuSearch', 'deepThinking', 'aiFallbackFailureAction'];"));
   assert.ok(source.includes("createSettingsGroup('AI 搜题', '深度思考会增加等待时间，且费用可能更高；默认关闭。', aiSearchKeys)"));
 });
 

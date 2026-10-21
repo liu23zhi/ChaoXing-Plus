@@ -1,23 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
 
-const helperModulePaths = [
-  resolve(process.cwd(), '.tmp-tests', 'projects', 'work-results-status.js'),
-  resolve(process.cwd(), '.tmp-tests', 'work-results-status.js')
-];
+const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'work-results-status.ts');
 
 async function loadHelperModule() {
-  for (const helperModulePath of helperModulePaths) {
-    try {
-      return await import(pathToFileURL(helperModulePath).href);
-    } catch {
-      // try next compiled location
-    }
-  }
-
-  return {};
+  return loadCompiledTypeScriptModule(helperSourcePath, ['projects/work-results-status.js', 'work-results-status.js']);
 }
 
 function createResult(overrides = {}) {
@@ -92,12 +81,23 @@ test('formats manual and retrying labels explicitly', async () => {
   const mod = await loadHelperModule();
 
   assert.equal(typeof mod.formatWorkResultStatus, 'function');
+  assert.equal(mod.formatWorkResultStatus(createResult()), '等待搜索中');
   assert.equal(mod.formatWorkResultStatus(createResult({ manual: true })), '已人工答题');
   assert.equal(mod.formatWorkResultStatus(createResult({ retrying: true })), '正在重答...');
+  assert.equal(mod.formatWorkResultStatus(createResult({ searching: true })), '搜题中');
   assert.equal(
     mod.formatWorkResultStatus(createResult({ requested: true, searchInfos: [] })),
     '未搜索到答案'
   );
+});
+
+test('search-in-progress is separate from the completed search requested flag', async () => {
+  const mod = await loadHelperModule();
+  const result = createResult({ searching: true });
+
+  assert.equal(result.requested, false);
+  assert.equal(mod.formatWorkResultStatus(result), '搜题中');
+  assert.equal(mod.resolveWorkResultStatusSource(result), 'idle');
 });
 
 test('summarizes structured tiku errors while preserving a plain-text fallback', async () => {

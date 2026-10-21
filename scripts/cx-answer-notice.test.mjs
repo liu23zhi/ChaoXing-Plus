@@ -37,7 +37,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
-      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'trackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
+      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
     ])
@@ -79,6 +79,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     notifyBalance: typeof notifyTikuAdapterInsufficientBalance === 'function' ? notifyTikuAdapterInsufficientBalance : undefined,
     recoverBalance: typeof requestTikuAdapterBalanceRecovery === 'function' ? requestTikuAdapterBalanceRecovery : undefined,
     trackTikuAdapterWorker: typeof trackTikuAdapterWorker === 'function' ? trackTikuAdapterWorker : undefined,
+    untrackTikuAdapterWorker: typeof untrackTikuAdapterWorker === 'function' ? untrackTikuAdapterWorker : undefined,
     retryChapter: retryUnfinishedChapterQuestions,
     retryWork: retryUnfinishedWorkOrExamQuestions
   })`, context);
@@ -151,6 +152,62 @@ test('worker thread count defaults to four and normalizes invalid values', async
   assert.equal(runtime.resolveWorkerThreadCount(-2), 1);
   assert.equal(runtime.resolveWorkerThreadCount(2.9), 2);
   assert.equal(runtime.resolveWorkerThreadCount(Number.NaN), 4);
+});
+
+test('worker publishes every question before searching, then reports searching, search completion, and answer completion', async () => {
+  const runtime = await createRuntime([success]);
+  const events = [];
+  const roots = [{ id: 0 }, { id: 1 }];
+  const worker = new runtime.OCSWorker({
+    root: roots,
+    elements: {},
+    thread: 1,
+    onResultsInitialized: (results) => {
+      events.push({
+        kind: 'initialized',
+        questions: Array.from(results, (result) => ({
+          requested: result.requested,
+          resolved: result.resolved,
+          searching: result.searching ?? false
+        }))
+      });
+    },
+    onResultsUpdate: (result, index) => {
+      events.push({
+        kind: result.searching ? 'searching' : result.resolved ? 'answered' : 'searched',
+        index,
+        requested: result.requested,
+        resolved: result.resolved
+      });
+    },
+    answerer: async (_elements, ctx) => {
+      events.push({ kind: 'answerer', index: ctx.root.id });
+      return [{ name: 'fixture', results: [{ question: '题目', answer: '答案' }] }];
+    },
+    work: async () => ({ finish: true })
+  });
+
+  await worker.doWork();
+
+  const initializedIndex = events.findIndex((event) => event.kind === 'initialized');
+  assert.notEqual(initializedIndex, -1);
+  assert.deepEqual(events[initializedIndex].questions, [
+    { requested: false, resolved: false, searching: false },
+    { requested: false, resolved: false, searching: false }
+  ]);
+  for (const index of [0, 1]) {
+    const searchingIndex = events.findIndex((event) => event.kind === 'searching' && event.index === index);
+    const answererIndex = events.findIndex((event) => event.kind === 'answerer' && event.index === index);
+    const searchedIndex = events.findIndex((event) => event.kind === 'searched' && event.index === index);
+    const answeredIndex = events.findIndex((event) => event.kind === 'answered' && event.index === index);
+    assert.ok(initializedIndex < searchingIndex);
+    assert.ok(searchingIndex < answererIndex);
+    assert.ok(answererIndex < searchedIndex);
+    assert.ok(searchedIndex < answeredIndex);
+    assert.equal(events[searchingIndex].requested, false);
+    assert.equal(events[searchedIndex].requested, true);
+    assert.equal(events[searchedIndex].resolved, false);
+  }
 });
 
 for (const mode of ['Chapter', 'Work']) {
@@ -282,6 +339,36 @@ test('balance recovery pauses active workers and only continues after confirmati
   await runtime.recoverBalance();
   assert.equal(runtime.modalConfirmCalls, 2);
   assert.deepEqual(events, ['stop', 'continuate']);
+});
+
+test('balance recovery keeps a paged worker tracked after an intermediate done event', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, true]);
+  const listeners = new Map();
+  const events = [];
+  const worker = {
+    once(event, listener) {
+      const handlers = listeners.get(event) ?? [];
+      handlers.push(listener);
+      listeners.set(event, handlers);
+    },
+    emit(event) {
+      events.push(event);
+      const handlers = listeners.get(event) ?? [];
+      listeners.delete(event);
+      for (const listener of handlers) listener();
+    }
+  };
+
+  runtime.trackTikuAdapterWorker(worker, true);
+  worker.emit('done');
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+
+  assert.deepEqual(events, ['done', 'stop']);
+  await runtime.recoverBalance();
+  assert.deepEqual(events, ['done', 'stop', 'continuate']);
+  runtime.untrackTikuAdapterWorker(worker);
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+  assert.deepEqual(events, ['done', 'stop', 'continuate']);
 });
 
 test('successful searches finish without an error', async () => {

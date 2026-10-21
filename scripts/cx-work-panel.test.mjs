@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import ts from 'typescript';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const cxProjectPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
@@ -10,6 +12,25 @@ const cxProjectPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
 // 源码检出可能是 CRLF，断言只关心代码结构，先统一换行再比较。
 async function readCxSource() {
   return (await readFile(cxProjectPath, 'utf8')).replace(/\r\n/g, '\n');
+}
+
+async function loadCxFunction(name, context) {
+  const source = await readCxSource();
+  const parsed = ts.createSourceFile(cxProjectPath, source, ts.ScriptTarget.Latest, true);
+  let declaration;
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+      declaration = node.getText(parsed);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.ok(declaration, `Expected ${name} function in cx.ts`);
+  const code = ts.transpileModule(declaration, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  vm.runInContext(code, context);
+  return context[name];
 }
 
 test('work script hides its standalone runtime panel so work pages reuse common results panel', async () => {
@@ -40,6 +61,110 @@ test('cx clears stale work result questions when study or work pages load before
   assert.equal(source.includes('workResultsMethods().init?.();'), true);
   assert.equal(source.includes('workResultsMethods().setResults?.(simplified);'), true);
   assert.equal(source.includes('workResultsMethods().appendResults?.(simplified);'), true);
+});
+
+test('chapter, preview, and step-by-step work publish initialized questions before search', async () => {
+  const source = await readCxSource();
+
+  assert.equal(source.includes('async onResultsInitialized(res) {'), true);
+  assert.equal(source.includes('workResultsMethods().setResults?.(simplified);'), true);
+  assert.equal(source.includes('workResultsMethods().appendResults?.(simplified);'), true);
+  assert.equal(source.includes('const currentBatchStart = Math.max(0, currentResults.length - results.length);'), true);
+  assert.equal(source.includes('workResultsMethods().setResults?.([...currentResults.slice(0, currentBatchStart), ...results]);'), true);
+});
+
+test('step-by-step updates replace the current page batch without losing accumulated results or duplicating questions', async () => {
+  const state = { results: [] };
+  const context = vm.createContext({
+    state,
+    workResultsMethods: () => ({
+      getResults: () => state.results,
+      setResults: (results) => { state.results = results; }
+    })
+  });
+  const replaceCurrentWorkResults = await loadCxFunction('replaceCurrentWorkResults', context);
+
+  state.results.push(
+    { question: '已完成题目', requested: true, resolved: true, finish: true },
+    { question: '当前题目', requested: false, resolved: false }
+  );
+  replaceCurrentWorkResults([{ question: '当前题目', requested: false, searching: true }]);
+  replaceCurrentWorkResults([{ question: '当前题目', requested: true, resolved: false }]);
+
+  assert.equal(state.results.length, 2);
+  assert.equal(state.results[0].question, '已完成题目');
+  assert.equal(state.results[0].finish, true);
+  assert.equal(state.results[1].question, '当前题目');
+  assert.equal(state.results[1].requested, true);
+
+  state.results.push({ question: '下一题', requested: false, resolved: false });
+  replaceCurrentWorkResults([{ question: '下一题', requested: false, searching: true }]);
+  assert.equal(state.results.length, 3);
+  assert.deepEqual(Array.from(state.results, (item) => item.question), ['已完成题目', '当前题目', '下一题']);
+});
+
+test('step-by-step work processes the current page once even when no next button exists', async () => {
+  const context = vm.createContext({});
+  const collectStepwiseWorkResults = await loadCxFunction('collectStepwiseWorkResults', context);
+  let processedPages = 0;
+  let nextButtonChecks = 0;
+
+  const results = await collectStepwiseWorkResults({
+    runCurrentPage: async () => [{ page: ++processedPages }],
+    hasCurrentPage: () => true,
+    getNextButton: () => { nextButtonChecks++; return null; },
+    waitAfterPage: async () => {},
+    advancePage: async () => assert.fail('must not advance without a next button')
+  });
+
+  assert.equal(processedPages, 1);
+  assert.equal(nextButtonChecks, 1);
+  assert.deepEqual(Array.from(results, (result) => result.page), [1]);
+});
+
+test('step-by-step work processes and advances every page including the final page without a next button', async () => {
+  const context = vm.createContext({});
+  const collectStepwiseWorkResults = await loadCxFunction('collectStepwiseWorkResults', context);
+  let page = 0;
+  const advanced = [];
+
+  const results = await collectStepwiseWorkResults({
+    runCurrentPage: async () => [{ page: ++page }],
+    hasCurrentPage: () => page < 2,
+    getNextButton: () => page === 1 ? 'next' : null,
+    waitAfterPage: async () => {},
+    advancePage: async (button) => { advanced.push(button); }
+  });
+
+  assert.deepEqual(advanced, ['next']);
+  assert.deepEqual(Array.from(results, (result) => result.page), [1, 2]);
+});
+
+test('step-by-step worker stays balance-tracked through page runs and releases after the task', async () => {
+  const source = await readCxSource();
+
+  assert.equal(source.includes("const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });"), true);
+  assert.equal(source.includes("})().finally(() => untrackTikuAdapterWorker(worker));"), true);
+});
+
+test('chapter, preview, and step-by-step results refresh after retries and before save or submit', async () => {
+  const source = await readCxSource();
+  const chapterRetry = source.indexOf('const retryableResults = await retryUnfinishedChapterQuestions(results);');
+  const previewRetry = source.indexOf('const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);');
+  const stepRetry = source.indexOf('notifyManualAnswerRequired(accumulatedResults);');
+  const chapterRefresh = source.indexOf('workResultsMethods().refresh?.();', chapterRetry);
+  const previewRefresh = source.indexOf('workResultsMethods().refresh?.();', previewRetry);
+  const stepRefresh = source.indexOf('workResultsMethods().refresh?.();', stepRetry);
+
+  assert.ok(chapterRetry >= 0);
+  assert.ok(previewRetry >= 0);
+  assert.ok(stepRetry >= 0);
+  assert.ok(chapterRefresh > chapterRetry);
+  assert.ok(chapterRefresh < source.indexOf('await sleep(stopSecondWhenFinish * 1000);', chapterRetry));
+  assert.ok(previewRefresh > previewRetry);
+  assert.ok(previewRefresh < source.indexOf('await uploadWorkOrExamResults(retryableResults);', previewRetry));
+  assert.ok(stepRefresh > stepRetry);
+  assert.ok(stepRefresh < source.indexOf('await uploadWorkOrExamResults(accumulatedResults);', stepRetry));
 });
 
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {
@@ -77,8 +202,8 @@ test('workOrExam auto uploads work and exam results after answering', async () =
   assert.equal(source.includes('const results = await worker.doWork();'), true);
   assert.equal(source.includes('const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);'), true);
   assert.equal(source.includes('await uploadWorkOrExamResults(retryableResults);'), true);
-  assert.equal(source.includes('const accumulatedResults = [];'), true);
-  assert.equal(source.includes('accumulatedResults.push(...results);'), true);
+  assert.equal(source.includes('const accumulatedResults = await collectStepwiseWorkResults({'), true);
+  assert.equal(source.includes('runCurrentPage: () => worker.doWork({ enable_debug: false }),'), true);
   assert.equal(source.includes('await uploadWorkOrExamResults(accumulatedResults);'), true);
 });
 

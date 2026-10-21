@@ -140,6 +140,10 @@ export function formatWorkResultStatus(result: SimplifyWorkResult): string {
     return '已人工答题';
   }
 
+  if (result.searching) {
+    return '搜题中';
+  }
+
   if (!result.requested && !result.resolved) {
     return '等待搜索中';
   }

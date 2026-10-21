@@ -16,7 +16,10 @@ export async function defaultAnswerWrapperHandler(
   }
 ): Promise<SearchInformation[]> {
   const searchInfos: SearchInformation[] = [];
-  const temp: AnswererWrapper[] = JSON.parse(JSON.stringify(answererWrappers));
+  const temp: AnswererWrapper[] = answererWrappers.map((wrapper) => ({
+    ...JSON.parse(JSON.stringify(wrapper)),
+    executeRequest: wrapper.executeRequest
+  }));
   if (temp.length === 0) {
     throw new Error('题库配置不能为空，请配置后重新开始自动答题。');
   }
@@ -32,6 +35,7 @@ export async function defaultAnswerWrapperHandler(
           data: wrapperData = {},
           timeoutSeconds = AnswerWrapperHandlerConfig.timeout_seconds ?? 60,
           retry,
+          executeRequest,
           handler = 'return (res)=> [JSON.stringify(res), undefined]'
         } = wrapper;
       try {
@@ -65,18 +69,28 @@ export async function defaultAnswerWrapperHandler(
           throw new Error('不支持的请求方式');
         }
 
-        const responseData = await Promise.race([
-          request(url.toString(), {
-            method,
-            responseType: contentType,
-            data: requestData,
-            type,
-            headers: JSON.parse(JSON.stringify(headers || {})),
-            timeoutMs: Math.max(1, timeoutSeconds) * 1000,
-            retry
-          }),
-          sleep(Math.max(1, timeoutSeconds) * 1000)
-        ]);
+        const timeoutMs = Math.max(1, timeoutSeconds) * 1000;
+        const responseData = executeRequest
+          ? await executeRequest({
+              url: url.toString(),
+              method: method.toLowerCase() as 'get' | 'post',
+              contentType,
+              data: requestData,
+              headers: JSON.parse(JSON.stringify(headers || {})),
+              timeoutMs
+            })
+          : await Promise.race([
+              request(url.toString(), {
+                method,
+                responseType: contentType,
+                data: requestData,
+                type,
+                headers: JSON.parse(JSON.stringify(headers || {})),
+                timeoutMs,
+                retry
+              }),
+              sleep(timeoutMs)
+            ]);
         if (responseData === undefined) {
           throw new Error('题库请求超时，可能是题库问题，或者请检查网络或者重试。');
         }

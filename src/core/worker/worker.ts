@@ -96,6 +96,8 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
       console.debug('上下文已初始化: ', results);
     }
 
+    await this.opts.onResultsInitialized?.(results);
+
     const requestThread = async (index: number) => {
       let error: string | undefined;
       const result = results[index];
@@ -111,6 +113,8 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
       }
 
       ctx.searchInfos = [];
+      result.searching = true;
+      await this.opts.onResultsUpdate?.(result, index, results);
 
       if (options?.enable_debug) {
         console.groupEnd();
@@ -139,6 +143,7 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
       }
 
       result.ctx = ctx;
+      result.searching = false;
       result.requested = true;
       result.error = error;
 
@@ -210,6 +215,11 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
           error = (err as any)?.message || String(err);
         }
 
+        if (!error && res && res.finish === false) {
+          error = result.ctx?.searchInfos
+            ?.map((info) => info.error)
+            .find((message): message is string => Boolean(message));
+        }
         result.error = error;
         result.result = res || { finish: false };
         result.resolved = true;
