@@ -141,6 +141,64 @@ test('an explicit failed task response counts as a failed status query', async (
   assert.equal(calls, 3);
 });
 
+test('task polling preserves structured failure code after three consecutive failures', async () => {
+  const mod = await loadModule();
+  let calls = 0;
+
+  await assert.rejects(
+    mod.pollTikuAdapterTask(
+      { success: true, status: 'pending', taskId: 'task-balance' },
+      pollOptions(async () => {
+        calls++;
+        return {
+          success: false,
+          status: 'failed',
+          taskId: 'task-balance',
+          error: { code: 'INSUFFICIENT_BALANCE', message: 'sensitive backend detail' }
+        };
+      })
+    ),
+    (error) => {
+      assert.equal(error.code, 'INSUFFICIENT_BALANCE');
+      assert.match(error.message, /sensitive backend detail/iu);
+      return true;
+    }
+  );
+
+  assert.equal(calls, 3);
+});
+
+test('a waiting response clears retained failure code before later network failures', async () => {
+  const mod = await loadModule();
+  const states = [
+    { success: false, status: 'failed', error: { code: 'INSUFFICIENT_BALANCE', message: 'old balance error' } },
+    { success: true, status: 'running' },
+    new Error('Failed to fetch'),
+    new Error('Failed to fetch'),
+    new Error('Failed to fetch')
+  ];
+  let calls = 0;
+
+  await assert.rejects(
+    mod.pollTikuAdapterTask(
+      { success: true, status: 'pending', taskId: 'task-reset' },
+      pollOptions(async () => {
+        const state = states[calls++];
+        if (state instanceof Error) throw state;
+        return { taskId: 'task-reset', ...state };
+      })
+    ),
+    (error) => {
+      assert.equal(error.code, undefined);
+      assert.match(error.message, /Failed to fetch/iu);
+      assert.doesNotMatch(error.message, /old balance error/iu);
+      return true;
+    }
+  );
+
+  assert.equal(calls, 5);
+});
+
 test('async search polling times out at the configured phase deadline', async () => {
   const mod = await loadModule();
   let now = 0;

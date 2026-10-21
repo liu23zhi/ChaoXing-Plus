@@ -197,6 +197,44 @@ test('async search submits once with idempotency and returns successful empty-an
   }
 });
 
+test('async ordinary search exposes only the standard insufficient-balance error', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  let statusCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/adapter-service/search/tasks')) {
+      return Response.json({ success: false, status: 'running', taskId: 'balance-search' }, { status: 202 });
+    }
+    statusCalls++;
+    return Response.json({
+      success: false,
+      status: 'failed',
+      taskId: 'balance-search',
+      error: { code: 'INSUFFICIENT_BALANCE', message: 'internal raw provider detail' }
+    });
+  };
+
+  try {
+    await assert.rejects(
+      mod.requestTikuAdapterSearchTask(
+        { baseurl: 'https://balance-search.adapter.local', key: 'balance-search-secret' },
+        { question: '题目', options: [], type: 0 },
+        { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 0, retryAttempts: 1 }
+      ),
+      (error) => {
+        assert.equal(error.code, 'INSUFFICIENT_BALANCE');
+        assert.match(error.message, /当前账号余额不足，请充值后重试。/u);
+        assert.doesNotMatch(error.message, /internal raw provider detail/u);
+        return true;
+      }
+    );
+    assert.equal(statusCalls, 3);
+  } finally {
+    mod.resetTikuAdapterBalanceGuard({ baseurl: 'https://balance-search.adapter.local', key: 'balance-search-secret' });
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('tiku adapter config source no longer mentions plat at all', async () => {
   const source = await readFile(helperSourcePath, 'utf8');
 
@@ -540,6 +578,41 @@ test('AI fallback treats terminal NO_ANSWER as complete without repeated status 
     assert.deepEqual(result[0].results, []);
     assert.equal(result[0].response.error.code, 'NO_ANSWER');
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('AI fallback async polling preserves insufficient balance code with a safe message', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  let statusCalls = 0;
+
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+      return Response.json({ success: false, status: 'running', taskId: 'balance-fallback' });
+    }
+    statusCalls++;
+    return Response.json({
+      success: false,
+      status: 'failed',
+      taskId: 'balance-fallback',
+      error: { code: 'INSUFFICIENT_BALANCE', message: 'internal raw provider detail' }
+    });
+  };
+
+  try {
+    const result = await mod.requestTikuAdapterAIFallback(
+      { baseurl: 'https://balance-fallback.adapter.local', key: 'balance-fallback-secret' },
+      { title: '题目', type: 'completion', options: '' },
+      { requestTimeoutMs: 1000, statusTimeoutMs: 10000, pollIntervalMs: 1, retryAttempts: 1, preferAsyncTask: true }
+    );
+
+    assert.equal(result[0].response.error.code, 'INSUFFICIENT_BALANCE', JSON.stringify(result[0].response));
+    assert.equal(result[0].response.error.message, '当前账号余额不足，请充值后重试。');
+    assert.equal(result[0].error, 'INSUFFICIENT_BALANCE: 当前账号余额不足，请充值后重试。');
+    assert.equal(statusCalls, 3);
+  } finally {
+    mod.resetTikuAdapterBalanceGuard({ baseurl: 'https://balance-fallback.adapter.local', key: 'balance-fallback-secret' });
     globalThis.fetch = originalFetch;
   }
 });

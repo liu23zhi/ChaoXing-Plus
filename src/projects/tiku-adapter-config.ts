@@ -190,18 +190,27 @@ export async function requestTikuAdapterSearchTask(
     return initial.result;
   }
 
-  return pollTikuAdapterSearchTask(initial, {
-    statusUrlBase: createTikuAdapterSearchStatusUrl(baseurl, ''),
-    pollIntervalMs: options.pollIntervalMs ?? TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS,
-    timeoutMs: Math.max(1, (options.statusTimeoutMs ?? TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS) - (Date.now() - phaseStartedAt)),
-    maxConsecutiveFailures: options.maxConsecutiveFailures ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
-    getStatus: (statusUrl, _taskId, remainingMs) => requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(statusUrl, key, {
-      method: 'GET',
-      timeoutMs: Math.min(taskCreateTimeoutMs, 10000, remainingMs),
-      retryAttempts: 1,
-      retryDelayMs: 0
-    })
-  });
+  try {
+    return await pollTikuAdapterSearchTask(initial, {
+      statusUrlBase: createTikuAdapterSearchStatusUrl(baseurl, ''),
+      pollIntervalMs: options.pollIntervalMs ?? TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS,
+      timeoutMs: Math.max(1, (options.statusTimeoutMs ?? TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS) - (Date.now() - phaseStartedAt)),
+      maxConsecutiveFailures: options.maxConsecutiveFailures ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
+      getStatus: (statusUrl, _taskId, remainingMs) => requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(statusUrl, key, {
+        method: 'GET',
+        timeoutMs: Math.min(taskCreateTimeoutMs, 10000, remainingMs),
+        retryAttempts: 1,
+        retryDelayMs: 0,
+        deferBalanceBlockUntilPollingCompletes: true
+      })
+    });
+  } catch (error) {
+    if (isInsufficientBalancePollingError(error)) {
+      markTikuAdapterBalanceBlocked(baseurl, key);
+      throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
+    }
+    throw error;
+  }
 }
 
 export function createTikuAdapterAuthorizationHeader(key: string): string {
@@ -423,7 +432,8 @@ async function pollTikuAdapterAIFallbackStatus(
         method: 'GET',
         timeoutMs: Math.min(options.requestTimeoutMs, 10000, remainingMs),
         retryAttempts: 1,
-        retryDelayMs: 0
+        retryDelayMs: 0,
+        deferBalanceBlockUntilPollingCompletes: true
       })
     });
     return {
@@ -437,16 +447,26 @@ async function pollTikuAdapterAIFallbackStatus(
         : {})
     };
   } catch (error) {
+    const insufficientBalance = isInsufficientBalancePollingError(error);
+    if (insufficientBalance) {
+      markTikuAdapterBalanceBlocked(baseurl, key);
+    }
     return {
       success: false,
       status: Date.now() - startedAt >= options.statusTimeoutMs ? 'timeout' : 'failed',
       taskId,
       error: {
-        code: 'UPSTREAM_ERROR',
-        message: error instanceof Error ? error.message : String(error)
+        code: insufficientBalance ? 'INSUFFICIENT_BALANCE' : 'UPSTREAM_ERROR',
+        message: insufficientBalance
+          ? TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE
+          : error instanceof Error ? error.message : String(error)
       }
     };
   }
+}
+
+function isInsufficientBalancePollingError(error: unknown) {
+  return error instanceof Error && (error as Error & { code?: string }).code === 'INSUFFICIENT_BALANCE';
 }
 
 function resolveAIFallbackStatusUrl(baseurl: string, response: TikuAdapterAIFallbackResult) {
@@ -481,6 +501,7 @@ async function requestTikuAdapterJSON<T>(
     retryAttempts: number;
     retryDelayMs: number;
     extraHeaders?: Record<string, string>;
+    deferBalanceBlockUntilPollingCompletes?: boolean;
   }
 ): Promise<T> {
   const identity = resolveTikuAdapterRequestIdentity(url, {
@@ -512,7 +533,9 @@ async function requestTikuAdapterJSON<T>(
         try { responseBody = JSON.parse(message); } catch { /* old versions can return plain text */ }
         const requestError = createTikuAdapterRequestError(responseBody, response.status);
         if (requestError.code === 'INSUFFICIENT_BALANCE') {
-          markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
+          if (!options.deferBalanceBlockUntilPollingCompletes) {
+            markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
+          }
           throw requestError;
         }
         if (response.status === 404) {
@@ -521,7 +544,7 @@ async function requestTikuAdapterJSON<T>(
         throw requestError;
       }
       const responseData = await response.json();
-      if (isTikuAdapterInsufficientBalance(responseData)) {
+      if (!options.deferBalanceBlockUntilPollingCompletes && isTikuAdapterInsufficientBalance(responseData)) {
         markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
       }
       return responseData as T;

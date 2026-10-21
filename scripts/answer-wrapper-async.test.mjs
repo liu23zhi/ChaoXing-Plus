@@ -46,3 +46,26 @@ test('runtime answer wrapper invokes executeRequest for async task polling', asy
   assert.equal(executeOptions.timeoutMs, 60000);
   assert.equal(infos[0].results[0].answer, 'async-result');
 });
+
+test('runtime answer wrapper keeps the safe insufficient-balance text recognizable', async () => {
+  const defaultAnswerWrapperHandler = await loadRuntimeHandler();
+  const infos = await defaultAnswerWrapperHandler([{
+    name: 'adapter',
+    homepage: 'https://adapter.local',
+    url: 'https://adapter.local/adapter-service/search/tasks',
+    method: 'post',
+    type: 'fetch',
+    contentType: 'json',
+    headers: { Authorization: 'Bearer secret' },
+    data: { question: '题目' },
+    executeRequest: async () => {
+      const error = new Error('当前账号余额不足，请充值后重试。');
+      error.code = 'INSUFFICIENT_BALANCE';
+      throw error;
+    },
+    handler: 'return (response) => [response.question, response.answer]'
+  }], {});
+
+  assert.match(infos[0].error, /INSUFFICIENT_BALANCE|当前(?:账号)?余额不足/u);
+  assert.doesNotMatch(infos[0].error, /provider detail|internal raw/iu);
+});

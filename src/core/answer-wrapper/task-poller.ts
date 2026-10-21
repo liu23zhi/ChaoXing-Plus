@@ -7,6 +7,16 @@ export interface TikuAdapterTaskEnvelope<T = unknown> {
   error?: { code?: string; message?: string } | string;
 }
 
+export class TikuAdapterTaskPollingError extends Error {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'TikuAdapterTaskPollingError';
+    this.code = code;
+  }
+}
+
 export interface TikuAdapterTaskPollOptions<T = unknown> {
   statusUrlBase: string;
   pollIntervalMs?: number;
@@ -40,6 +50,7 @@ export async function pollTikuAdapterTask<T>(
   const startedAt = now();
   let consecutiveFailures = 0;
   let latestError = '';
+  let latestErrorCode: string | undefined;
 
   while (now() - startedAt < timeoutMs) {
     const remainingMs = timeoutMs - (now() - startedAt);
@@ -62,8 +73,9 @@ export async function pollTikuAdapterTask<T>(
       }
       consecutiveFailures += 1;
       latestError = error instanceof Error ? error.message : String(error);
+      latestErrorCode = getThrownErrorCode(error);
       if (consecutiveFailures >= maxFailures) {
-        throw consecutiveFailureError(consecutiveFailures, latestError);
+        throw consecutiveFailureError(consecutiveFailures, latestError, latestErrorCode);
       }
       continue;
     }
@@ -76,6 +88,7 @@ export async function pollTikuAdapterTask<T>(
     if (isWaitingStatus(status)) {
       consecutiveFailures = 0;
       latestError = '';
+      latestErrorCode = undefined;
       continue;
     }
 
@@ -90,16 +103,18 @@ export async function pollTikuAdapterTask<T>(
     if (status === 'failed' || response?.success === false) {
       consecutiveFailures += 1;
       latestError = getErrorMessage(response?.error) || `task status is ${status || 'failed'}`;
+      latestErrorCode = getErrorCode(response?.error);
       if (consecutiveFailures >= maxFailures) {
-        throw consecutiveFailureError(consecutiveFailures, latestError);
+        throw consecutiveFailureError(consecutiveFailures, latestError, latestErrorCode);
       }
       continue;
     }
 
     consecutiveFailures += 1;
     latestError = `unexpected task status: ${status || 'missing'}`;
+    latestErrorCode = undefined;
     if (consecutiveFailures >= maxFailures) {
-      throw consecutiveFailureError(consecutiveFailures, latestError);
+      throw consecutiveFailureError(consecutiveFailures, latestError, latestErrorCode);
     }
   }
 
@@ -141,8 +156,20 @@ function getErrorMessage(error: TikuAdapterTaskEnvelope['error']) {
   return String(error?.message ?? '').trim();
 }
 
-function consecutiveFailureError(count: number, message: string) {
-  return new Error(`${count} consecutive tikuAdapter task status query failures${message ? `: ${message}` : ''}`);
+function getErrorCode(error: TikuAdapterTaskEnvelope['error']) {
+  return typeof error === 'object' ? String(error?.code ?? '').trim() || undefined : undefined;
+}
+
+function getThrownErrorCode(error: unknown) {
+  if (!error || typeof error !== 'object') return undefined;
+  return String((error as { code?: unknown }).code ?? '').trim() || undefined;
+}
+
+function consecutiveFailureError(count: number, message: string, code?: string) {
+  return new TikuAdapterTaskPollingError(
+    `${count} consecutive tikuAdapter task status query failures${message ? `: ${message}` : ''}`,
+    code
+  );
 }
 
 function sleep(ms: number) {
