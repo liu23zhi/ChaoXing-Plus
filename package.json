@@ -14,7 +14,7 @@
     "@types/node": "^24.0.0",
     "puppeteer": "^25.13.0",
     "typescript": "^5.4.5",
-    "vite": "^6.4.3"
+    "vite": "^8.3.4"
   },
   "dependencies": {
     "md5": "^2.3.0",
