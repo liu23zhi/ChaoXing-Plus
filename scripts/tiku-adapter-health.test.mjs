@@ -15,7 +15,7 @@ async function loadModule() {
   await mkdir(outDir, { recursive: true });
   await writeFile(resolve(outDir, 'package.json'), '{"type":"commonjs"}\n');
   await execFileAsync(process.execPath, [
-    resolve('node_modules/typescript/bin/tsc'),
+    resolve('scripts/test-helpers/tsc-compat.mjs'),
     resolve('src/projects/tiku-adapter-config.ts'),
     '--outDir', outDir, '--module', 'commonjs', '--target', 'es2022',
     '--moduleResolution', 'node', '--skipLibCheck'

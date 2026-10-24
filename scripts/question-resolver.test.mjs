@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const resolverSourcePath = resolve(process.cwd(), 'src', 'core', 'worker', 'question.resolver.ts');
 const outDir = resolve(process.cwd(), '.tmp-tests-cjs');
 const resolverModulePath = resolve(outDir, 'worker', 'question.resolver.js');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function compileResolverHelper() {
   await mkdir(outDir, { recursive: true });

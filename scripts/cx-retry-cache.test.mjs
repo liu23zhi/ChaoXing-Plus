@@ -5,13 +5,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import ts from 'typescript';
+import ts from '@typescript/typescript6';
 
 const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-cx-retry-cache-cjs');
 const helperModulePath = resolve(outDir, 'cx-retry-cache.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx-retry-cache.ts');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadHelperModule() {
   await mkdir(outDir, { recursive: true });

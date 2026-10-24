@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-tiku-cjs');
 const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function compileHelperModule() {
   await mkdir(outDir, { recursive: true });

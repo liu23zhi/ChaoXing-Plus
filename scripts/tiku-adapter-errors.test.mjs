@@ -9,7 +9,7 @@ const outDir = resolve('.tmp-tests-adapter-errors-cjs');
 await mkdir(outDir, { recursive: true });
 await writeFile(resolve(outDir, 'package.json'), '{"type":"commonjs"}');
 execFileSync(process.execPath, [
-  resolve('node_modules/typescript/bin/tsc'), resolve('src/core/utils/request.ts'),
+  resolve('scripts/test-helpers/tsc-compat.mjs'), resolve('src/core/utils/request.ts'),
   resolve('src/projects/tiku-adapter-config.ts'), '--outDir', outDir,
   '--module', 'commonjs', '--target', 'es2022', '--moduleResolution', 'node', '--skipLibCheck'
 ]);

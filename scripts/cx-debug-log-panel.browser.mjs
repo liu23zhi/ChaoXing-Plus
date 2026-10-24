@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import ts from 'typescript';
+import ts from '@typescript/typescript6';
 
 // CX_BROWSER_DEPENDENCIES points to a package directory with Puppeteer installed;
 // CX_BROWSER_EXECUTABLE can select Chrome. CX_TEST_BASELINE tests HEAD instead.

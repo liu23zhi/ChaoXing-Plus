@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-high-playback-rate-cjs');
 const helperModulePath = resolve(outDir, 'high-playback-rate-warning.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'high-playback-rate-warning.ts');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 let helperModulePromise;
 

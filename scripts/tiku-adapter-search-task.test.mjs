@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-tiku-search-task-cjs');
 const sourcePath = resolve(process.cwd(), 'src', 'core', 'answer-wrapper', 'task-poller.ts');
 const modulePath = resolve(outDir, 'task-poller.cjs');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadModule() {
   await mkdir(outDir, { recursive: true });

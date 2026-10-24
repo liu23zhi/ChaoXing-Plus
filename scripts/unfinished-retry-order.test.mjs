@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-retry-order');
 const sourcePath = resolve(process.cwd(), 'src', 'core', 'worker', 'unfinished-retry.ts');
 const modulePath = resolve(outDir, 'unfinished-retry.cjs');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadModule() {
   await mkdir(outDir, { recursive: true });

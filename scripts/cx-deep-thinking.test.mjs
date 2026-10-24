@@ -13,7 +13,7 @@ const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter
 const commonSourcePath = resolve(process.cwd(), 'src', 'projects', 'common.ts');
 const cxSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx.ts');
 const messageSourcePath = resolve(process.cwd(), 'src', 'runtime', 'message.ts');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadHelperModule() {
   await mkdir(outDir, { recursive: true });

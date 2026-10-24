@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from '@typescript/typescript6';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const panelRuntimePath = resolve(scriptsDir, '..', 'src', 'runtime', 'panel.ts');

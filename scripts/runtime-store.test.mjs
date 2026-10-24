@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const helperModulePath = resolve(process.cwd(), '.tmp-tests', 'store.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'runtime', 'store.ts');
-const tscCliPath = resolve(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 let importVersion = 0;
 
 async function compileStoreHelper() {
