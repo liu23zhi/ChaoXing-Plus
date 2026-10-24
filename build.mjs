@@ -97,8 +97,7 @@ async function main() {
       },
       rollupOptions: {
         output: {
-          entryFileNames: 'chaoxing-plus.js',
-          inlineDynamicImports: true
+          entryFileNames: 'chaoxing-plus.js'
         }
       },
       outDir: 'dist',
