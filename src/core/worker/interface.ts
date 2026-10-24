@@ -39,6 +39,7 @@ export interface WorkContext<E> {
 	elements: SearchedElements<E, HTMLElement[]>;
 	searchInfos: SearchInformation[];
 	type: QuestionTypes;
+	waitForContinue?: () => Promise<void>;
 	/** 答案分隔符 */
 	answerSeparators?: string[];
 	/**

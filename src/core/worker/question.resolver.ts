@@ -1,4 +1,4 @@
-import { QuestionResolver, WorkContext } from './interface';
+import { QuestionResolver, QuestionTypes, WorkContext } from './interface';
 import { resolvePlainAnswer, splitAnswer } from './utils';
 import { answerSimilar, removeRedundant, clearString, answerExactMatch, Rating } from '../utils/string';
 
@@ -10,6 +10,11 @@ function nowrap(value: string, replacement = ''): string {
 export function createDefaultQuestionResolver<E>(
   ctx: WorkContext<E>
 ): Record<'single' | 'multiple' | 'completion' | 'judgement', QuestionResolver<E>> {
+  const apply = async (type: QuestionTypes, answer: string, option: HTMLElement, handler: Parameters<QuestionResolver<E>>[2]) => {
+    await ctx.waitForContinue?.();
+    await handler(type, answer, option, ctx);
+  };
+
   return {
     async single(infos, options, handler) {
       const allAnswer = infos
@@ -30,7 +35,7 @@ export function createDefaultQuestionResolver<E>(
           }
         });
         if (index !== -1 && max > 0.6) {
-          await handler('single', ans, options[index], ctx);
+          await apply('single', ans, options[index], handler);
           return {
             finish: true,
             ratings: ratings.map((r) => r.rating)
@@ -40,7 +45,7 @@ export function createDefaultQuestionResolver<E>(
         const result = answerExactMatch(allAnswer, optionStrings);
         const index = optionStrings.findIndex((option) => result.includes(option));
         if (result.length) {
-          await handler('single', options[index].innerText, options[index], ctx);
+          await apply('single', options[index].innerText, options[index], handler);
           return {
             finish: true
           };
@@ -55,7 +60,7 @@ export function createDefaultQuestionResolver<E>(
             if (options[index] === undefined) {
               continue;
             }
-            await handler('single', options[index].innerText, options[index], ctx);
+            await apply('single', options[index].innerText, options[index], handler);
             return { finish: true, option: options[index] };
           }
         }
@@ -198,7 +203,7 @@ export function createDefaultQuestionResolver<E>(
 
         if (sorted_similar_list[0]) {
           for (let i = 0; i < sorted_similar_list[0].options.length; i++) {
-            await handler('multiple', sorted_similar_list[0].answers[i], sorted_similar_list[0].options[i], ctx);
+            await apply('multiple', sorted_similar_list[0].answers[i], sorted_similar_list[0].options[i], handler);
           }
 
           return { finish: true, sorted_similar_list, targetOptions, targetAnswers };
@@ -207,7 +212,7 @@ export function createDefaultQuestionResolver<E>(
         const sorted_exact_list = exact_list.sort((a, b) => b.length - a.length);
         if (sorted_exact_list[0]?.length) {
           for (let i = 0; i < sorted_exact_list[0].length; i++) {
-            await handler('multiple', sorted_exact_list[0][i].innerText, sorted_exact_list[0][i], ctx);
+            await apply('multiple', sorted_exact_list[0][i].innerText, sorted_exact_list[0][i], handler);
           }
 
           return {
@@ -229,7 +234,7 @@ export function createDefaultQuestionResolver<E>(
             if (options[index] === undefined) {
               continue;
             }
-            await handler('multiple', options[index].innerText, options[index], ctx);
+            await apply('multiple', options[index].innerText, options[index], handler);
             plainOptions.push(options[index]);
           }
         }
@@ -275,12 +280,12 @@ export function createDefaultQuestionResolver<E>(
 
             if (answerShowCorrect && textShowCorrect) {
               option = el;
-              await handler('judgement', answerShowCorrect, el, ctx);
+              await apply('judgement', answerShowCorrect, el, handler);
               break;
             }
             if (answerShowIncorrect && textShowIncorrect) {
               option = el;
-              await handler('judgement', answerShowIncorrect, el, ctx);
+              await apply('judgement', answerShowIncorrect, el, handler);
               break;
             }
           }
@@ -309,11 +314,11 @@ export function createDefaultQuestionResolver<E>(
           if (ans.length === options.length) {
             for (let index = 0; index < options.length; index++) {
               const element = options[index];
-              await handler('completion', ans[index], element, ctx);
+              await apply('completion', ans[index], element, handler);
             }
             return { finish: true };
           } else if (options.length === 1) {
-            await handler('completion', ans.join(' '), options[0], ctx);
+            await apply('completion', ans.join(' '), options[0], handler);
             return { finish: true };
           }
 

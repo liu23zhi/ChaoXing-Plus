@@ -1453,6 +1453,21 @@ async function allowTikuAdapterRetryAfterBalanceRecovery() {
   return !tikuAdapterBalanceRecoveryState.paused || requestTikuAdapterBalanceRecovery();
 }
 
+async function waitForTikuAdapterBalanceRecovery() {
+  if (!tikuAdapterBalanceRecoveryState.paused) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const interval = setInterval(() => {
+      if (!tikuAdapterBalanceRecoveryState.paused) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, 200);
+  });
+}
+
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
   const result = await $modal.confirm({
     content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
@@ -3529,6 +3544,7 @@ const JobRunner = {
             const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
 
             const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
+              await ctx.waitForContinue?.();
               if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
                 const checkedBeforeClick = isChapterChoiceChecked(option);
                 let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
@@ -3537,12 +3553,14 @@ const JobRunner = {
                 if (!checkedBeforeClick) {
                   option.click();
                   await sleep(100);
+                  await ctx.waitForContinue?.();
                   checkedAfterNativeClick = isChapterChoiceChecked(option);
                   if (checkedAfterNativeClick) {
                     appliedBy = 'native-click';
                   } else {
                     triggerSyntheticClick(option);
                     await sleep(100);
+                    await ctx.waitForContinue?.();
                     appliedBy = isChapterChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
                   }
                 }
@@ -3592,6 +3610,7 @@ const JobRunner = {
                 for (let index = 0; index < elements.lineSelectBox.length; index++) {
                   const box = elements.lineSelectBox[index];
                   if (ans[index]) {
+                    await ctx.waitForContinue?.();
                     box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
                     await sleep(200);
                   }
@@ -3676,8 +3695,8 @@ const JobRunner = {
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
 
     workResultsMethods().setRuntimeControls?.({
-      isRunning: () => worker.isRunning,
-      isStopped: () => worker.isStop,
+      isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
+      isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => worker.emit('stop'),
       continuate: () => {
         if (tikuAdapterBalanceRecoveryState.paused) {
@@ -3736,6 +3755,7 @@ const JobRunner = {
 
       let latestResult = initialResult;
       for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+        await waitForTikuAdapterBalanceRecovery();
         if (tikuAdapterBalanceRecoveryState.paused) break;
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
           index,
@@ -3785,6 +3805,7 @@ const JobRunner = {
     async function retryUnfinishedChapterQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
       const retryableResults = results.slice();
       for (let index = 0; index < retryableResults.length; index++) {
+        await waitForTikuAdapterBalanceRecovery();
         const result = retryableResults[index];
         if (result.result?.finish) {
           continue;
@@ -3795,113 +3816,124 @@ const JobRunner = {
       return retryableResults;
     }
 
-    worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
 
     const confirmed = await confirmBeforeAutoAnswer(worker);
     if (!confirmed) {
+      clearRuntimeControls();
       return { finished: false };
     }
 
-    const results = await worker.doWork();
-    const retryableResults = await retryUnfinishedChapterQuestions(results);
-    notifyManualAnswerRequired(retryableResults);
-    workResultsMethods().refresh?.();
-    logDebug('info', '动作节点诊断：答题结果已生成', {
-      resultCount: retryableResults.length,
-      uploadMode: upload,
-      stopSecondWhenFinish
-    }, undefined, { correlationId: chapterActionCorrelationId });
-    const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
-    $console.info(msg);
-    $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
-    await sleep(stopSecondWhenFinish * 1000);
+    try {
+      const results = await worker.doWork();
+      const retryableResults = await retryUnfinishedChapterQuestions(results);
+      await waitForTikuAdapterBalanceRecovery();
+      notifyManualAnswerRequired(retryableResults);
+      workResultsMethods().refresh?.();
+      logDebug('info', '动作节点诊断：答题结果已生成', {
+        resultCount: retryableResults.length,
+        uploadMode: upload,
+        stopSecondWhenFinish
+      }, undefined, { correlationId: chapterActionCorrelationId });
+      const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
+      $console.info(msg);
+      $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
+      await sleep(stopSecondWhenFinish * 1000);
+      await waitForTikuAdapterBalanceRecovery();
 
-    logDebug('info', '动作节点诊断：准备提交或保存', {
-      resultCount: retryableResults.length,
-      uploadMode: upload,
-      stopSecondWhenFinish
-    }, undefined, { correlationId: chapterActionCorrelationId });
-    let chapterFinished = false;
-    let latestFinishedRate: number | undefined;
-    let latestUploadable: boolean | undefined;
-    await worker.uploadHandler({
-      type: upload === 'submit' ? 100 : upload,
-      results: retryableResults,
-      async callback(finishedRate, uploadable) {
-        latestFinishedRate = finishedRate;
-        latestUploadable = uploadable;
-        const shouldSubmit = upload === 'submit' && uploadable;
-        const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
-        $console.info(uploadMsg);
-        $message.success({ content: uploadMsg, duration: 3000 });
-        await sleep(3000);
-
-        if (shouldSubmit) {
-          logDebug('info', '动作节点诊断：执行提交', {
-            finishedRate,
-            uploadMode: upload,
-            shouldSubmit,
-            uploadable
-          }, undefined, { correlationId: chapterActionCorrelationId });
-          (frameWindow as Record<string, any>).btnBlueSubmit?.();
+      logDebug('info', '动作节点诊断：准备提交或保存', {
+        resultCount: retryableResults.length,
+        uploadMode: upload,
+        stopSecondWhenFinish
+      }, undefined, { correlationId: chapterActionCorrelationId });
+      let chapterFinished = false;
+      let latestFinishedRate: number | undefined;
+      let latestUploadable: boolean | undefined;
+      await worker.uploadHandler({
+        type: upload === 'submit' ? 100 : upload,
+        results: retryableResults,
+        async callback(finishedRate, uploadable) {
+          await waitForTikuAdapterBalanceRecovery();
+          latestFinishedRate = finishedRate;
+          latestUploadable = uploadable;
+          const shouldSubmit = upload === 'submit' && uploadable;
+          const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
+          $console.info(uploadMsg);
+          $message.success({ content: uploadMsg, duration: 3000 });
           await sleep(3000);
-          (frameWindow as Record<string, any>).submitCheckTimes?.();
-          const retakeRequired = detectChapterRetakePrompt();
-          if (retakeRequired) {
-            const msg = '章节测试提交后提示未达到及格线，正在使用 AI 兜底答案尝试二次改答。';
-            showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
-            $message.warn({ content: msg, duration: 0 });
-            $console.warn(msg);
-            clearChapterRetakePrompt();
-            const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });
-            const retryResults = await aiRetryWorker.doWork();
-            notifyManualAnswerRequired(retryResults);
-            logDebug('info', '动作节点诊断：AI 二次改答完成', {
-              resultCount: retryResults.length,
-              uploadMode: upload,
-              retakeRequired
-            }, undefined, { correlationId: chapterActionCorrelationId });
-            await worker.uploadHandler({
-              type: 'force',
-              results: retryResults,
-              async callback(retryFinishedRate) {
-                const retryUploadMsg = `AI 二次改答完成率 ${retryFinishedRate.toFixed(2)}% : 3秒后将再次尝试提交`;
-                $console.info(retryUploadMsg);
-                $message.success({ content: retryUploadMsg, duration: 3000 });
-                await sleep(3000);
-                (frameWindow as Record<string, any>).btnBlueSubmit?.();
-                await sleep(3000);
-                (frameWindow as Record<string, any>).submitCheckTimes?.();
-                (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
-                chapterFinished = true;
-              }
-            });
-          } else {
-            (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
-            chapterFinished = true;
-            appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);
-          }
-        } else {
-          logDebug('info', '动作节点诊断：执行保存', {
-            finishedRate,
-            uploadMode: upload,
-            shouldSubmit,
-            uploadable
-          }, undefined, { correlationId: chapterActionCorrelationId });
-          (frameWindow as Record<string, any>).alert = () => {};
-          (frameWindow as Record<string, any>).noSubmit?.();
-          chapterFinished = false;
-        }
-      }
-    });
+          await waitForTikuAdapterBalanceRecovery();
 
-    worker.emit('done');
-    return {
-      finished: chapterFinished,
-      finishedRate: latestFinishedRate,
-      uploadable: latestUploadable
-    };
+          if (shouldSubmit) {
+            logDebug('info', '动作节点诊断：执行提交', {
+              finishedRate,
+              uploadMode: upload,
+              shouldSubmit,
+              uploadable
+            }, undefined, { correlationId: chapterActionCorrelationId });
+            (frameWindow as Record<string, any>).btnBlueSubmit?.();
+            await sleep(3000);
+            (frameWindow as Record<string, any>).submitCheckTimes?.();
+            const retakeRequired = detectChapterRetakePrompt();
+            if (retakeRequired) {
+              const msg = '章节测试提交后提示未达到及格线，正在使用 AI 兜底答案尝试二次改答。';
+              showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+              $message.warn({ content: msg, duration: 0 });
+              $console.warn(msg);
+              clearChapterRetakePrompt();
+              const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });
+              const retryResults = await aiRetryWorker.doWork();
+              await waitForTikuAdapterBalanceRecovery();
+              notifyManualAnswerRequired(retryResults);
+              logDebug('info', '动作节点诊断：AI 二次改答完成', {
+                resultCount: retryResults.length,
+                uploadMode: upload,
+                retakeRequired
+              }, undefined, { correlationId: chapterActionCorrelationId });
+              await worker.uploadHandler({
+                type: 'force',
+                results: retryResults,
+                async callback(retryFinishedRate) {
+                  await waitForTikuAdapterBalanceRecovery();
+                  const retryUploadMsg = `AI 二次改答完成率 ${retryFinishedRate.toFixed(2)}% : 3秒后将再次尝试提交`;
+                  $console.info(retryUploadMsg);
+                  $message.success({ content: retryUploadMsg, duration: 3000 });
+                  await sleep(3000);
+                  await waitForTikuAdapterBalanceRecovery();
+                  (frameWindow as Record<string, any>).btnBlueSubmit?.();
+                  await sleep(3000);
+                  (frameWindow as Record<string, any>).submitCheckTimes?.();
+                  (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+                  chapterFinished = true;
+                }
+              });
+            } else {
+              (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+              chapterFinished = true;
+              appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);
+            }
+          } else {
+            logDebug('info', '动作节点诊断：执行保存', {
+              finishedRate,
+              uploadMode: upload,
+              shouldSubmit,
+              uploadable
+            }, undefined, { correlationId: chapterActionCorrelationId });
+            (frameWindow as Record<string, any>).alert = () => {};
+            (frameWindow as Record<string, any>).noSubmit?.();
+            chapterFinished = false;
+          }
+        }
+      });
+
+      worker.emit('done');
+      return {
+        finished: chapterFinished,
+        finishedRate: latestFinishedRate,
+        uploadable: latestUploadable
+      };
+    } finally {
+      clearRuntimeControls();
+    }
   },
   async readPPTWithAudio(win: Window & { swiperNext?: () => void }, attachment?: Attachment) {
     win.document.querySelectorAll('audio').forEach((audio) => {
@@ -4129,18 +4161,33 @@ function workOrExam(
     getNextButton: () => TButton | null;
     waitAfterPage: () => Promise<void>;
     advancePage: (button: TButton) => Promise<void>;
+    shouldContinue?: () => boolean;
+    waitForContinue?: () => Promise<void>;
     onNextButton?: (hasNext: boolean) => void;
   }): Promise<T[]> {
     const results: T[] = [];
-    while (options.hasCurrentPage()) {
+    while (true) {
+      await options.waitForContinue?.();
+      if (options.shouldContinue?.() === false || !options.hasCurrentPage()) {
+        break;
+      }
       results.push(...await options.runCurrentPage());
+      await options.waitForContinue?.();
+      if (options.shouldContinue?.() === false) {
+        break;
+      }
       await options.waitAfterPage();
+      await options.waitForContinue?.();
+      if (options.shouldContinue?.() === false) {
+        break;
+      }
       const nextButton = options.getNextButton();
       options.onNextButton?.(Boolean(nextButton));
       if (!nextButton) {
         break;
       }
       await options.advancePage(nextButton);
+      await options.waitForContinue?.();
     }
     return results;
   }
@@ -4470,6 +4517,7 @@ function workOrExam(
           const resolver = createDefaultQuestionResolver(ctx)[questionType];
           const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
           const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {
+            await ctx.waitForContinue?.();
             if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
               const checkedBeforeClick = isWorkOrExamChoiceChecked(option);
               let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
@@ -4478,12 +4526,14 @@ function workOrExam(
               if (!checkedBeforeClick) {
                 option.click();
                 await sleep(100);
+                await ctx.waitForContinue?.();
                 checkedAfterNativeClick = isWorkOrExamChoiceChecked(option);
                 if (checkedAfterNativeClick) {
                   appliedBy = 'native-click';
                 } else {
                   triggerSyntheticClick(option);
                   await sleep(400);
+                  await ctx.waitForContinue?.();
                   appliedBy = isWorkOrExamChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
                 }
               }
@@ -4531,6 +4581,7 @@ function workOrExam(
               for (let index = 0; index < elements.lineSelectBox.length; index++) {
                 const box = elements.lineSelectBox[index];
                 if (ans[index]) {
+                  await ctx.waitForContinue?.();
                   box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
                   await sleep(200);
                 }
@@ -4542,11 +4593,11 @@ function workOrExam(
         }
 
         if (questionType === 'fill') {
-          return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[]);
+          return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[], ctx.waitForContinue);
         }
 
         if (questionType === 'reader') {
-          return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[]);
+          return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[], ctx.waitForContinue);
         }
 
         return { finish: false };
@@ -4617,6 +4668,7 @@ function workOrExam(
   ) {
     let latestResult = initialResult;
     for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+      await waitForTikuAdapterBalanceRecovery();
       if (tikuAdapterBalanceRecoveryState.paused) break;
       logDebug('info', '动作节点诊断：未完成单题自动重试', {
         index,
@@ -4666,6 +4718,7 @@ function workOrExam(
     const liveRoots = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
     const retryableResults = results.slice();
     for (let index = 0; index < retryableResults.length; index++) {
+      await waitForTikuAdapterBalanceRecovery();
       const result = retryableResults[index];
       if (result.result?.finish) {
         continue;
@@ -4682,6 +4735,7 @@ function workOrExam(
   }
 
   async function uploadWorkOrExamResults(results: Awaited<ReturnType<typeof worker.doWork>>) {
+    await waitForTikuAdapterBalanceRecovery();
     const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);
     const uploadHandlerType = shouldAllowSubmitForPage ? 100 : upload === 'submit' ? 'save' : upload;
     const examAutoSubmitBlocked = upload === 'submit' && type === 'exam' && !enableExamAutoSubmit;
@@ -4689,6 +4743,7 @@ function workOrExam(
     $console.info(msg);
     $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
     await sleep(stopSecondWhenFinish * 1000);
+    await waitForTikuAdapterBalanceRecovery();
 
     logDebug('info', '动作节点诊断：作业/考试准备提交或保存', {
       type,
@@ -4705,6 +4760,7 @@ function workOrExam(
       type: uploadHandlerType,
       results,
       async callback(finishedRate, uploadable) {
+        await waitForTikuAdapterBalanceRecovery();
         const shouldSubmit = shouldAllowSubmitForPage && uploadable;
         const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
         $console.info(uploadMsg);
@@ -4721,6 +4777,7 @@ function workOrExam(
           shouldSubmit
         }, undefined, { correlationId: workExamCorrelationId });
         await sleep(3000);
+        await waitForTikuAdapterBalanceRecovery();
 
         if (shouldSubmit) {
           await submitWorkOrExamPage(type);
@@ -4736,8 +4793,8 @@ function workOrExam(
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
 
     workResultsMethods().setRuntimeControls?.({
-      isRunning: () => worker.isRunning,
-      isStopped: () => worker.isStop,
+      isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
+      isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => worker.emit('stop'),
       continuate: () => {
         if (tikuAdapterBalanceRecoveryState.paused) {
@@ -4781,7 +4838,6 @@ function workOrExam(
       }
     });
 
-    worker.on('done', clearRuntimeControls);
     worker.on('close', clearRuntimeControls);
     void (async () => {
       const confirmed = await confirmBeforeAutoAnswer(worker);
@@ -4797,6 +4853,7 @@ function workOrExam(
       try {
         const results = await worker.doWork();
         const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);
+        await waitForTikuAdapterBalanceRecovery();
         notifyManualAnswerRequired(retryableResults);
         workResultsMethods().refresh?.();
         logDebug('info', '动作节点诊断：作业/考试答题完成', {
@@ -4810,9 +4867,26 @@ function workOrExam(
         console.error(err);
         $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
       }
-    })();
+    })().finally(clearRuntimeControls);
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
+    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+
+    workResultsMethods().setRuntimeControls?.({
+      isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
+      isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
+      stop: () => worker.emit('stop'),
+      continuate: () => {
+        if (tikuAdapterBalanceRecoveryState.paused) {
+          void requestTikuAdapterBalanceRecovery();
+          return;
+        }
+        worker.emit('continuate');
+      },
+      canRetryQuestion: () => false,
+      retryQuestion: async () => undefined
+    });
+    worker.on('close', clearRuntimeControls);
 
     void (async () => {
       logDebug('info', '动作节点诊断：开始逐题切换答题', {
@@ -4823,6 +4897,8 @@ function workOrExam(
       const accumulatedResults = await collectStepwiseWorkResults({
         runCurrentPage: () => worker.doWork({ enable_debug: false }),
         hasCurrentPage: () => Boolean(document.querySelector<HTMLElement>('.questionLi')) && worker.isClose === false,
+        shouldContinue: () => !tikuAdapterBalanceRecoveryState.paused,
+        waitForContinue: waitForTikuAdapterBalanceRecovery,
         getNextButton: getNextBtn,
         waitAfterPage: () => sleep(1000),
         onNextButton: (hasNext) => logDebug('info', '动作节点诊断：执行下一题切换', {
@@ -4838,9 +4914,11 @@ function workOrExam(
 
       const retryCount = accumulatedResults.length;
       if (retryCount > 0) {
-        let canRetryFromFirstPage = true;
+        await waitForTikuAdapterBalanceRecovery();
+        let canRetryFromFirstPage = !tikuAdapterBalanceRecoveryState.paused;
         for (let index = retryCount - 1; index > 0; index--) {
-          if (!navigateWorkOrExamQuestion(-1)) {
+          await waitForTikuAdapterBalanceRecovery();
+          if (tikuAdapterBalanceRecoveryState.paused || !navigateWorkOrExamQuestion(-1)) {
             canRetryFromFirstPage = false;
             break;
           }
@@ -4862,7 +4940,9 @@ function workOrExam(
                 }
                 await sleep(1000);
               },
-              (result) => Boolean(result.result?.finish)
+              (result) => Boolean(result.result?.finish),
+              () => !tikuAdapterBalanceRecoveryState.paused,
+              waitForTikuAdapterBalanceRecovery
             );
             accumulatedResults.splice(0, accumulatedResults.length, ...retriedResults);
           } catch (error) {
@@ -4878,11 +4958,15 @@ function workOrExam(
         }
       }
 
+      await waitForTikuAdapterBalanceRecovery();
       notifyManualAnswerRequired(accumulatedResults);
       workResultsMethods().refresh?.();
       await uploadWorkOrExamResults(accumulatedResults);
       worker.emit('done');
-    })().finally(() => untrackTikuAdapterWorker(worker));
+    })().finally(() => {
+      untrackTikuAdapterWorker(worker);
+      clearRuntimeControls();
+    });
   }
 
   return worker;
@@ -5066,7 +5150,7 @@ async function waitForChapterQuestionTypeReadiness(
   return roots.every((root) => isChapterQuestionTypeReady(root));
 }
 
-async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[]) {
+async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLElement[], waitForContinue?: () => Promise<void>) {
   for (const answers of searchInfos.map((info) => info.results.map((res) => res.answer))) {
     let ans = answers;
 
@@ -5078,6 +5162,7 @@ async function readerAndFillHandle(searchInfos: SearchInformation[], list: HTMLE
       for (let index = 0; index < ans.length; index++) {
         const item = list[index];
         if (item) {
+          await waitForContinue?.();
           item.querySelector<HTMLElement>(`span.saveSingleSelect[data="${ans[index]}"]`)?.click();
           await sleep(200);
         }

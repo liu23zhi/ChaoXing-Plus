@@ -78,3 +78,40 @@ test('multiple choice similar matching does not select more options than returne
   assert.equal(result.finish, true);
   assert.deepEqual(selected, ['ABCDE', 'WXYZ']);
 });
+
+test('multiple choice waits before applying the next option while paused', async () => {
+  const mod = await loadResolverModule();
+  const options = [createOption('ABCDE'), createOption('WXYZ')];
+  const selected = [];
+  let paused = false;
+  let releasePause;
+  const pauseReleased = new Promise((resolve) => { releasePause = resolve; });
+  const ctx = {
+    answerSeparators: ['#'],
+    answerMatchMode: 'similar',
+    elements: { options },
+    root: {},
+    searchInfos: [],
+    type: 'multiple',
+    waitForContinue: async () => {
+      if (paused) await pauseReleased;
+    }
+  };
+
+  const work = mod.createDefaultQuestionResolver(ctx).multiple(
+    [{ name: 'fixture', results: [{ question: '题目', answer: 'ABCDE#WXYZ', extra_data: {} }] }],
+    options,
+    (_type, _answer, option) => {
+      selected.push(option.innerText);
+      paused = true;
+    }
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(selected, ['ABCDE']);
+
+  paused = false;
+  releasePause();
+  const result = await work;
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['ABCDE', 'WXYZ']);
+});

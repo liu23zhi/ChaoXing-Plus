@@ -68,6 +68,7 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
         root: questionRoot,
         elements: domSearchAll<E>(this.opts.elements, questionRoot),
         type: undefined,
+        waitForContinue: () => waitForContinuate(() => this.isStop),
         answerSeparators: this.opts.answerSeparators,
         answerMatchMode: this.opts.answerMatchMode || 'similar'
       };
@@ -186,11 +187,20 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
             await waitForContinuate(() => this.isStop);
           }
           await waitForRequested(result);
+          // A balance error can stop the worker while the search request is in
+          // flight. Re-check immediately after it completes so the resolver
+          // cannot apply an answer before the user explicitly resumes.
+          if (this.isStop) {
+            await waitForContinuate(() => this.isStop);
+          }
         } catch {
           // ignore timeout here and let resolver produce final error state
         }
 
         try {
+          if (this.isStop) {
+            await waitForContinuate(() => this.isStop);
+          }
           if (result.ctx && result.ctx.searchInfos.length !== 0) {
             if (typeof this.opts.work === 'object') {
               if (result.ctx.elements.options) {
@@ -213,6 +223,10 @@ export class OCSWorker<E extends RawElements = RawElements> extends CommonEventE
           }
         } catch (err) {
           error = (err as any)?.message || String(err);
+        }
+
+        if (this.isStop) {
+          await waitForContinuate(() => this.isStop);
         }
 
         if (!error && res && res.finish === false) {

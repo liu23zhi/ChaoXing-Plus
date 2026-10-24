@@ -140,11 +140,34 @@ test('step-by-step work processes and advances every page including the final pa
   assert.deepEqual(Array.from(results, (result) => result.page), [1, 2]);
 });
 
+test('step-by-step collection stops before checking or advancing the next page when paused', async () => {
+  const context = vm.createContext({});
+  const collectStepwiseWorkResults = await loadCxFunction('collectStepwiseWorkResults', context);
+  let pageChecks = 0;
+  let nextButtonChecks = 0;
+  let advances = 0;
+  let paused = false;
+  let pageDone = false;
+  const results = await collectStepwiseWorkResults({
+    runCurrentPage: async () => { paused = true; return [{ page: 1 }]; },
+    hasCurrentPage: () => { pageChecks++; return !pageDone; },
+    shouldContinue: () => !paused,
+    getNextButton: () => { nextButtonChecks++; return 'next'; },
+    waitAfterPage: async () => {},
+    advancePage: async () => { advances++; pageDone = true; }
+  });
+
+  assert.equal(pageChecks, 1);
+  assert.equal(nextButtonChecks, 0);
+  assert.equal(advances, 0);
+  assert.deepEqual(Array.from(results), [{ page: 1 }]);
+});
+
 test('step-by-step worker stays balance-tracked through page runs and releases after the task', async () => {
   const source = await readCxSource();
 
   assert.equal(source.includes("const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });"), true);
-  assert.equal(source.includes("})().finally(() => untrackTikuAdapterWorker(worker));"), true);
+  assert.match(source, /\}\)\(\)\.finally\(\(\) => \{\s+untrackTikuAdapterWorker\(worker\);\s+clearRuntimeControls\(\);\s+\}\);/u);
 });
 
 test('chapter, preview, and step-by-step results refresh after retries and before save or submit', async () => {
@@ -165,6 +188,86 @@ test('chapter, preview, and step-by-step results refresh after retries and befor
   assert.ok(previewRefresh < source.indexOf('await uploadWorkOrExamResults(retryableResults);', previewRetry));
   assert.ok(stepRefresh > stepRetry);
   assert.ok(stepRefresh < source.indexOf('await uploadWorkOrExamResults(accumulatedResults);', stepRetry));
+});
+
+test('balance pause guards chapter, preview, and stepwise upload plus stepwise page navigation', async () => {
+  const source = await readCxSource();
+
+  assert.match(source, /const retryableResults = await retryUnfinishedChapterQuestions\(results\);\s+await waitForTikuAdapterBalanceRecovery\(\);/u);
+  assert.match(source, /const retryableResults = await retryUnfinishedWorkOrExamQuestions\(results\);\s+await waitForTikuAdapterBalanceRecovery\(\);/u);
+  assert.match(source, /shouldContinue: \(\) => !tikuAdapterBalanceRecoveryState\.paused,/u);
+  assert.match(source, /waitForContinue: waitForTikuAdapterBalanceRecovery,/u);
+  assert.match(source, /await uploadWorkOrExamResults\(accumulatedResults\);/u);
+  assert.match(source, /async function uploadWorkOrExamResults\(results:[\s\S]*?await waitForTikuAdapterBalanceRecovery\(\);/u);
+});
+
+test('runtime controls remain available while an automatic retry is paused for balance recovery', async () => {
+  const source = await readCxSource();
+
+  assert.equal(source.match(/isRunning: \(\) => worker\.isRunning \|\| tikuAdapterBalanceRecoveryState\.paused,/gu)?.length, 3);
+  assert.equal(source.match(/isStopped: \(\) => worker\.isStop \|\| tikuAdapterBalanceRecoveryState\.paused,/gu)?.length, 3);
+  assert.doesNotMatch(source, /worker\.on\('done', clearRuntimeControls\);/u);
+});
+
+test('work and exam upload waits through a balance pause before upload and before submit or save', async () => {
+  const runScenario = async (uploadMode, pauseAtSleep) => {
+    let paused = false;
+    let sleepCalls = 0;
+    let uploadCalls = 0;
+    let submitCalls = 0;
+    let saveCalls = 0;
+    const context = vm.createContext({
+      tikuAdapterBalanceRecoveryState: { paused },
+      preview_mode: false,
+      waitForTikuAdapterBalanceRecovery: async () => {
+        while (context.tikuAdapterBalanceRecoveryState.paused) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+      },
+      upload: uploadMode,
+      type: 'work',
+      enableExamAutoSubmit: true,
+      stopSecondWhenFinish: 0,
+      worker: {
+        async uploadHandler({ callback }) {
+          uploadCalls++;
+          await callback(100, true);
+        }
+      },
+      sleep: async () => {
+        if (++sleepCalls === pauseAtSleep) {
+          context.tikuAdapterBalanceRecoveryState.paused = true;
+        }
+      },
+      $console: { info() {} },
+      $message: { info() {}, success() {} },
+      logDebug() {},
+      workExamCorrelationId: '',
+      submitWorkOrExamPage: async () => { submitCalls++; },
+      saveWorkOrExamPage: async () => { saveCalls++; }
+    });
+    const uploadWorkOrExamResults = await loadCxFunction('uploadWorkOrExamResults', context);
+    const running = uploadWorkOrExamResults([]);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(submitCalls, 0);
+    assert.equal(saveCalls, 0);
+    if (pauseAtSleep === 1) {
+      assert.equal(uploadCalls, 0, 'must not reach the upload handler while paused');
+    } else {
+      assert.equal(uploadCalls, 1, 'pause occurred inside the upload callback delay');
+    }
+
+    context.tikuAdapterBalanceRecoveryState.paused = false;
+    await running;
+    assert.equal(submitCalls, uploadMode === 'submit' ? 1 : 0);
+    assert.equal(saveCalls, uploadMode === 'save' ? 1 : 0);
+  };
+
+  for (const uploadMode of ['submit', 'save']) {
+    await runScenario(uploadMode, 1);
+    await runScenario(uploadMode, 2);
+  }
 });
 
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {

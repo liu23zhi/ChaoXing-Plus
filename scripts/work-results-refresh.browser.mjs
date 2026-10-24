@@ -31,6 +31,7 @@ test('browser panel shows the active question as searching before its answer sea
     await readDeclaration('src/core/worker/interface.ts', 'DEFAULT_WORKER_THREAD_COUNT'),
     await readDeclaration('src/core/worker/interface.ts', 'resolveWorkerThreadCount'),
     await readDeclaration('src/core/worker/worker.ts', 'OCSWorker'),
+    await readDeclaration('src/core/worker/worker.ts', 'waitForContinuate'),
     await readDeclaration('src/utils/work.ts', 'simplifyWorkResult'),
     await readDeclaration('src/projects/work-results-status.ts', 'formatWorkResultStatus'),
     `const domSearchAll = (_elements, root) => ({ title: [root.querySelector('.question-title')], options: [] });`,

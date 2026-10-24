@@ -54,3 +54,43 @@ test('already finished and empty result sets do not invoke retries', async () =>
   assert.deepEqual(await retryUnfinishedResultsInOrder([], async () => { calls++; return { finish: true }; }), []);
   assert.equal(calls, 0);
 });
+
+test('unfinished retries stop before advancing while paused and resume in order when allowed', async () => {
+  const { retryUnfinishedResultsInOrder } = await loadModule();
+  const results = [
+    { question: 'Q1', finish: false },
+    { question: 'Q2', finish: false }
+  ];
+  const events = [];
+  let shouldContinue = true;
+
+  const pausedResults = await retryUnfinishedResultsInOrder(
+    results,
+    async (index, result) => {
+      events.push(`retry:${index}`);
+      shouldContinue = false;
+      return { ...result, finish: true };
+    },
+    async (index) => { events.push(`advance:${index}`); },
+    (result) => result.finish,
+    () => shouldContinue
+  );
+
+  assert.deepEqual(events, ['retry:0']);
+  assert.deepEqual(pausedResults.map(({ finish }) => finish), [true, false]);
+
+  shouldContinue = true;
+  const resumedResults = await retryUnfinishedResultsInOrder(
+    pausedResults,
+    async (index, result) => {
+      events.push(`resume:${index}`);
+      return { ...result, finish: true };
+    },
+    async (index) => { events.push(`advance-resume:${index}`); },
+    (result) => result.finish,
+    () => shouldContinue
+  );
+
+  assert.deepEqual(events, ['retry:0', 'advance-resume:0', 'resume:1']);
+  assert.deepEqual(resumedResults.map(({ finish }) => finish), [true, true]);
+});

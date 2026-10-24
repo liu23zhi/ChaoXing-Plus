@@ -33,14 +33,15 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   const source = [
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
     await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
-    await declarations('src/core/worker/worker.ts', ['OCSWorker']),
+    await declarations('src/core/worker/worker.ts', ['OCSWorker', 'waitForContinuate']),
     await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
       'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
-    ])
+    ]),
+    await declarations('src/projects/cx.ts', ['waitForTikuAdapterBalanceRecovery'])
   ].join('\n');
   const globals = {
     setTimeout, clearTimeout, setInterval, clearInterval,
@@ -326,32 +327,67 @@ for (const mode of ['Chapter', 'Work']) {
     assert.match(results[0].error, /余额不足/);
   });
 
-  test(`${mode} does not retry while balance recovery remains paused`, async () => {
+  test(`${mode} does not retry while paused and continues only after explicit recovery`, async () => {
     const runtime = await createRuntime([
-      { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } },
+      success,
       success
-    ], 'pause', [false]);
-    const initial = await runtime.createWorker().doWork();
+    ], 'pause', [false, true]);
+    const initial = [{ result: { finish: false }, error: '余额不足' }];
+    await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
 
     assert.equal(runtime.balanceState.paused, true);
-    const results = await runtime[`retry${mode}`](initial);
+    const pendingRetry = runtime[`retry${mode}`](initial);
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
+    assert.equal(runtime.requests, 0);
+    assert.equal(runtime.modalConfirmCalls, 1);
+    assert.equal(runtime.balanceState.paused, true);
+
+    await runtime.recoverBalance();
+    const results = await pendingRetry;
     assert.equal(runtime.requests, 1);
-    assert.equal(results[0].result.finish, false);
+    assert.equal(results[0].result.finish, true);
+    assert.equal(runtime.balanceState.paused, false);
   });
 
-  test(`${mode} stops unfinished retries when balance recovery is declined`, async () => {
+  test(`${mode} pauses a repeated balance failure before the next retry`, async () => {
     const balanceFailure = { success: false, error: { code: 'INSUFFICIENT_BALANCE', message: '当前余额不足，请充值后再使用' } };
-    const runtime = await createRuntime([balanceFailure], 'pause', [true, false]);
+    const runtime = await createRuntime([balanceFailure, balanceFailure, success], 'pause', [true, false, true]);
     const initial = await runtime.createWorker().doWork();
+    const pendingRetry = runtime[`retry${mode}`](initial);
 
-    const results = await runtime[`retry${mode}`](initial);
+    await new Promise((resolve) => {
+      const waitForPrompt = () => runtime.modalConfirmCalls >= 2 ? resolve() : setTimeout(waitForPrompt, 1);
+      waitForPrompt();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const requestsWhilePaused = runtime.requests;
+    const remainedPaused = runtime.balanceState.paused;
 
-    assert.equal(runtime.requests, 2, 'the retry that encountered insufficient balance must finish before pausing');
-    assert.equal(runtime.modalConfirmCalls, 2, 'the retry must request a new confirmation');
+    await runtime.recoverBalance();
+    const results = await pendingRetry;
+
+    assert.equal(requestsWhilePaused, 2, 'the next retry must wait for explicit recovery');
+    assert.equal(remainedPaused, true);
+    assert.equal(runtime.requests, 3);
+    assert.equal(runtime.balanceState.paused, false);
+    assert.equal(results[0].result.finish, true);
+  });
+
+  test(`${mode} remains paused after declining recovery without starting another request`, async () => {
+    const runtime = await createRuntime([success], 'pause', [false, true]);
+    const initial = [{ result: { finish: false }, error: '余额不足' }];
+    await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+    const pendingRetry = runtime[`retry${mode}`](initial);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(runtime.requests, 0);
     assert.equal(runtime.balanceState.paused, true);
-    assert.equal(results[0].result.finish, false);
-    assert.match(results[0].error, /余额不足/);
+
+    await runtime.recoverBalance();
+    const results = await pendingRetry;
+    assert.equal(runtime.requests, 1);
+    assert.equal(results[0].result.finish, true);
+    assert.equal(runtime.balanceState.paused, false);
   });
 }
 
@@ -403,6 +439,90 @@ test('balance recovery pauses active workers and only continues after confirmati
   await runtime.recoverBalance();
   assert.equal(runtime.modalConfirmCalls, 2);
   assert.deepEqual(events, ['stop', 'continuate']);
+});
+
+test('an in-flight search stays paused before resolving its answer until recovery is confirmed', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, true]);
+  const root = {};
+  let releaseSearch;
+  let announceSearchStarted;
+  const searchStarted = new Promise((resolve) => { announceSearchStarted = resolve; });
+  const searchRelease = new Promise((resolve) => { releaseSearch = resolve; });
+  let resolveCalls = 0;
+  let workerCompleted = false;
+  const worker = runtime.trackTikuAdapterWorker(new runtime.OCSWorker({
+    root: [root],
+    elements: {},
+    answerer: async () => {
+      announceSearchStarted();
+      await searchRelease;
+      await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+      assert.equal(worker.isStop, true, 'the balance handler must stop the active worker');
+      return [{ name: 'Adapter', results: [{ question: 'q', answer: 'A' }] }];
+    },
+    work: async () => {
+      resolveCalls++;
+      return { finish: true };
+    }
+  }));
+
+  const work = worker.doWork().then((results) => {
+    workerCompleted = true;
+    return results;
+  });
+  await searchStarted;
+  releaseSearch();
+  await new Promise((resolve) => {
+    const waitForPrompt = () => runtime.modalConfirmCalls > 0 ? resolve() : setTimeout(waitForPrompt, 1);
+    waitForPrompt();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  assert.equal(runtime.balanceState.paused, true);
+  assert.equal(resolveCalls, 0, 'the resolver must not apply answers while paused');
+  assert.equal(workerCompleted, false, 'the worker must remain paused before completion');
+
+  await runtime.recoverBalance();
+  const results = await work;
+  assert.equal(runtime.balanceState.paused, false);
+  assert.equal(resolveCalls, 1);
+  assert.equal(results[0].result.finish, true);
+});
+
+test('a balance pause gates an answer handler that is already in progress', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, true]);
+  const root = {};
+  let announceWorkStarted;
+  const workStarted = new Promise((resolve) => { announceWorkStarted = resolve; });
+  let releaseWork;
+  const workRelease = new Promise((resolve) => { releaseWork = resolve; });
+  let resolveCalls = 0;
+  const worker = runtime.trackTikuAdapterWorker(new runtime.OCSWorker({
+    root: [root],
+    elements: {},
+    answerer: async () => [{ name: 'Adapter', results: [{ question: 'q', answer: 'A' }] }],
+    work: async (ctx) => {
+      announceWorkStarted();
+      await workRelease;
+      await ctx.waitForContinue?.();
+      resolveCalls++;
+      return { finish: true };
+    }
+  }));
+
+  const pendingWork = worker.doWork();
+  await workStarted;
+  await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'INSUFFICIENT_BALANCE: 当前余额不足' }]);
+  assert.equal(worker.isStop, true);
+
+  releaseWork();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(resolveCalls, 0, 'the in-progress handler must wait for explicit recovery');
+
+  await runtime.recoverBalance();
+  const results = await pendingWork;
+  assert.equal(resolveCalls, 1);
+  assert.equal(results[0].result.finish, true);
 });
 
 test('balance recovery keeps a paged worker tracked after an intermediate done event', async () => {
