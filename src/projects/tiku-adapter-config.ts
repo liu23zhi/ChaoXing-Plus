@@ -873,6 +873,9 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       extra: '',
       skipCache: {
         handler: `return (env) => typeof env.skipCache === 'boolean' ? env.skipCache : undefined`
+      },
+      deepThinking: {
+        handler: `return (env) => env.deepThinking === true ? true : undefined`
       }
     },
     handler: `return (res) => {

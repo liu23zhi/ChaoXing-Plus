@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import ts from '@typescript/typescript6';
 
 const execFileAsync = promisify(execFile);
 const outDir = resolve(process.cwd(), '.tmp-tests-deep-thinking-cjs');
@@ -36,15 +37,135 @@ async function loadHelperModule() {
   return require(helperModulePath);
 }
 
-test('normal search never sends deepThinking outside the seven-field search contract', async () => {
-  const mod = await loadHelperModule();
-  const wrapper = mod.createTikuAdapterAnswererWrapper({
-    baseurl: 'https://adapter.local',
-    key: 'secret'
-  });
+async function loadAnswererFactory(factoryName, dependencies) {
+  const source = await readFile(cxSourcePath, 'utf8');
+  const parsed = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
+  let factory;
+  const visit = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === factoryName) factory = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.ok(factory, `${factoryName} exists`);
+  const initializer = ts.isArrowFunction(factory.initializer) ? factory.initializer.body : factory.initializer;
+  const workerExpression = ts.isNewExpression(initializer)
+    ? initializer
+    : ts.isCallExpression(initializer) && ts.isNewExpression(initializer.arguments[0])
+      ? initializer.arguments[0]
+      : undefined;
+  assert.ok(workerExpression);
+  const answerer = workerExpression.arguments[0].properties.find((property) => property.name?.getText(parsed) === 'answerer').initializer;
+  const code = ts.transpileModule(
+    `return (workerOptions = {}) => (${answerer.getText(parsed)});`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return Function(...Object.keys(dependencies), code)(...Object.values(dependencies));
+}
 
-  assert.equal(wrapper.data.deepThinking, undefined);
-  assert.deepEqual(Object.keys(wrapper.data), ['qid', 'question', 'options', 'type', 'courseName', 'extra', 'skipCache']);
+test('normal search sends deepThinking only when enabled on async and legacy routes', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/adapter-service/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe', statusUrl: 'https://adapter.local/adapter-service/search/status?taskId=probe' });
+    }
+    if (String(url).includes('taskId=probe')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe', result: { answer: {} } });
+    }
+    requests.push({ url: String(url), body: JSON.parse(init.body) });
+    return String(url).endsWith('/search/tasks')
+      ? Response.json({ success: true, status: 'succeeded', taskId: 'search', result: { answer: {} } })
+      : Response.json({ question: '题目', answer: {} });
+  };
+
+  try {
+    for (const asyncSearch of [true, false]) {
+      const wrapper = mod.createTikuAdapterAnswererWrapper({
+        baseurl: 'https://adapter.local',
+        key: 'secret',
+        asyncSearch
+      });
+      assert.deepEqual(Object.keys(wrapper.data), [
+        'qid', 'question', 'options', 'type', 'courseName', 'extra', 'skipCache', 'deepThinking'
+      ]);
+      for (const deepThinking of [false, true]) {
+        const env = { title: '题目', type: 'single', options: 'A\nB', deepThinking };
+        const data = Object.fromEntries(Object.entries(wrapper.data).map(([key, value]) => [
+          key, typeof value === 'object' && value?.handler ? Function(value.handler)()(env) : value
+        ]));
+        await wrapper.executeRequest({ data, timeoutMs: 1000 });
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(requests.map(({ url }) => new URL(url).pathname), [
+    '/adapter-service/search/tasks', '/adapter-service/search/tasks',
+    '/adapter-service/search', '/adapter-service/search'
+  ]);
+  for (const [index, request] of requests.entries()) {
+    assert.equal(Object.hasOwn(request.body, 'deepThinking'), index % 2 === 1);
+    if (index % 2 === 1) assert.equal(request.body.deepThinking, true);
+  }
+});
+
+for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
+  test(`${factoryName} looks up answers by mode without changing skipCache`, async () => {
+    for (const [deepThinking, skipCache] of [[false, false], [false, true], [true, false]]) {
+      const cacheModes = [];
+      const requests = [];
+      const makeAnswerer = await loadAnswererFactory(factoryName, {
+        chapterTestTaskQuestionTitleTransform: (titles) => titles[0].innerText,
+        workOrExamQuestionTitleTransform: (titles) => titles[0].innerText,
+        sleep: async () => {},
+        period: 3,
+        resolveChapterQuestionType: (root) => root.questionType,
+        resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
+        resolveAnswerSearchType: (root) => root.questionType,
+        optimizationElementWithImage: (element) => element,
+        answererWrappers: [],
+        defaultAnswerWrapperHandler: async (_wrappers, request) => {
+          requests.push(request);
+          return [{ name: '题库', results: [{ answer: 'fresh' }] }];
+        },
+        withTikuAdapterAdminWarnings: (infos) => infos,
+        appendAIFallbackSearchInfos: async (infos) => infos,
+        deduplicateSearchRequest: (_key, request) => request(),
+        enableAIFallbackAnswer: false,
+        deepThinking,
+        aiFallbackFailureAction: 'skip',
+        appsMethods: () => ({
+          searchAnswerInCaches: async (_title, provider, mode) => {
+            cacheModes.push(mode);
+            return mode === 'normal'
+              ? [{ name: '本地缓存', results: [{ answer: 'cached' }] }]
+              : provider();
+          }
+        })
+      });
+      const root = { questionType: 'single' };
+      const elements = { title: [{ innerText: '同一道题' }], options: [{ innerText: 'A' }], root };
+      const infos = await makeAnswerer({ skipCache })(elements, { root, type: 'single', elements });
+      const shouldRequest = deepThinking || skipCache;
+      assert.deepEqual(cacheModes, skipCache ? [] : [deepThinking ? 'deep' : 'normal']);
+      assert.equal(requests.length, shouldRequest ? 1 : 0);
+      assert.equal(infos[0].results[0].answer, shouldRequest ? 'fresh' : 'cached');
+      if (shouldRequest) {
+        assert.equal(requests[0].deepThinking, deepThinking);
+        assert.equal(requests[0].skipCache, skipCache);
+      }
+    }
+  });
+}
+
+test('search mode uses async and sync choices while persisting the existing boolean setting', async () => {
+  const source = await readFile(commonSourcePath, 'utf8');
+  assert.match(source, /useAsyncTikuSearch:\s*true/);
+  assert.match(source, /getStudySettingValue\('useAsyncTikuSearch',\s*stored\.useAsyncTikuSearch\s*\?\?\s*true\)/);
+  assert.match(source, /useAsyncTikuSearch:\s*\{\s*label:\s*'搜题方式',[\s\S]*?options:\s*\[\s*\['true',\s*'异步'\],\s*\['false',\s*'同步'\]\s*\],[\s\S]*?defaultValue:\s*true/);
+  assert.match(source, /setStudySettingValue\(script, key, key === 'useAsyncTikuSearch' \? value === 'true' : value\)/);
 });
 
 test('AI fallback omits deepThinking by default and sends true when enabled', async () => {
@@ -133,4 +254,15 @@ test('chapter and work or exam search chains forward deep thinking to both adapt
     assert.match(block, /appendAIFallbackSearchInfos\([\s\S]{0,300}deepThinking/);
     assert.match(block, /JSON\.stringify\(\[[\s\S]{0,260}deepThinking/);
   }
+});
+
+test('completed chapter and work or exam answers persist under their search mode', async () => {
+  const source = await readFile(cxSourcePath, 'utf8');
+  const chapterStart = source.indexOf('async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions)');
+  const workStart = source.indexOf('function workOrExam(');
+  const chapterBlock = source.slice(chapterStart, workStart);
+  const workBlock = source.slice(workStart);
+  assert.match(chapterBlock, /addQuestionCacheFromWorkResult\?\.\(cacheableResults, deepThinking \? 'deep' : 'normal'\)/);
+  const workWrites = workBlock.match(/addQuestionCacheFromWorkResult\?\.\(simplifyWorkResult\(\[current\], workOrExamQuestionTitleTransform\), deepThinking \? 'deep' : 'normal'\)/g) ?? [];
+  assert.equal(workWrites.length, 2);
 });

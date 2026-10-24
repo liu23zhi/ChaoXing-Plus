@@ -67,12 +67,15 @@ type PanelPosition = {
   top: number;
 };
 
+type SearchCacheMode = 'normal' | 'deep';
+
 interface QuestionCache {
   title: string;
   answer: string;
   from?: string;
   homepage?: string;
   ai?: boolean;
+  mode?: SearchCacheMode;
 }
 
 const WORK_RESULTS_PANEL_POSITION_KEY = 'common.work-results.panel-position';
@@ -648,6 +651,14 @@ function isLocalQuestionCacheEnabled() {
   return getStudySettingValue('enableLocalQuestionCache', true);
 }
 
+function questionCacheMode(cache: QuestionCache): SearchCacheMode {
+  return cache.mode === 'deep' ? 'deep' : 'normal';
+}
+
+function answerCacheKey(title: string, mode: SearchCacheMode): string {
+  return JSON.stringify([mode, title]);
+}
+
 function addQuestionCaches(...items: QuestionCache[]) {
   for (const item of items) {
     if (!item.title.trim() || !item.answer.trim()) {
@@ -655,7 +666,9 @@ function addQuestionCaches(...items: QuestionCache[]) {
     }
 
     if (
-      state.apps.localQuestionCaches.find((cache) => cache.title === item.title && cache.answer === item.answer) === undefined
+      state.apps.localQuestionCaches.find((cache) =>
+        cache.title === item.title && cache.answer === item.answer && questionCacheMode(cache) === questionCacheMode(item)
+      ) === undefined
     ) {
       state.apps.localQuestionCaches.unshift(item);
     }
@@ -667,8 +680,10 @@ function addQuestionCaches(...items: QuestionCache[]) {
   renderWorkResultsPanel();
 }
 
-function questionCachesToSearchInfos(title: string): SearchInformation[] {
-  const matched = state.apps.localQuestionCaches.filter((cache) => cache.title.trim() === title.trim());
+function questionCachesToSearchInfos(title: string, mode: SearchCacheMode = 'normal'): SearchInformation[] {
+  const matched = state.apps.localQuestionCaches.filter((cache) =>
+    cache.title.trim() === title.trim() && questionCacheMode(cache) === mode
+  );
   return matched.map((cache) => ({
     name: `【题库缓存】${cache.from || '本地缓存'}`,
     homepage: cache.homepage,
@@ -692,7 +707,7 @@ function normalizeWorkResultsPayload(payload: unknown): SimplifyWorkResult[] {
   });
 }
 
-function resultToQuestionCaches(results: SimplifyWorkResult[]): QuestionCache[] {
+function resultToQuestionCaches(results: SimplifyWorkResult[], mode: SearchCacheMode = 'normal'): QuestionCache[] {
   return results.flatMap((result) =>
     result.searchInfos.flatMap((info) =>
       info.results
@@ -702,7 +717,8 @@ function resultToQuestionCaches(results: SimplifyWorkResult[]): QuestionCache[] 
           answer: entry[1],
           from: info.name.replace(/【题库缓存】/g, '') || '未知题库',
           homepage: info.homepage || '',
-          ai: Boolean((entry[2] as Record<string, unknown> | undefined)?.ai)
+          ai: Boolean((entry[2] as Record<string, unknown> | undefined)?.ai),
+          ...(mode === 'deep' ? { mode } : {})
         }))
     )
   );
@@ -1135,6 +1151,8 @@ function createConfigField(
       optionGrid.style.alignItems = 'stretch';
 
       optionWrap.append(selectedBadge, wrapHint);
+    } else if (key === 'useAsyncTikuSearch') {
+      optionGrid.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
     } else if (isCompactChoiceField) {
       optionGrid.style.gridTemplateColumns = '1fr';
     } else {
@@ -1146,6 +1164,7 @@ function createConfigField(
       const option = createElement('button', { text });
       option.type = 'button';
       option.title = attrs.title ? String(attrs.title) : text;
+      option.setAttribute('aria-pressed', String(selected));
       option.style.padding = '10px 12px';
       option.style.minHeight = '48px';
       option.style.borderRadius = '12px';
@@ -1163,7 +1182,7 @@ function createConfigField(
       option.style.lineHeight = '1.5';
       option.style.alignContent = 'center';
       option.onclick = () => {
-        setStudySettingValue(script, key, value);
+        setStudySettingValue(script, key, key === 'useAsyncTikuSearch' ? value === 'true' : value);
       };
       optionGrid.append(option);
     });
@@ -1457,8 +1476,12 @@ function createStudySettingsPanel() {
       defaultValue: true
     },
     useAsyncTikuSearch: {
-      label: '异步搜题',
-      attrs: { type: 'checkbox', title: '默认使用任务接口创建普通搜题并轮询结果；关闭后使用兼容旧客户端的同步接口。' },
+      label: '搜题方式',
+      attrs: { title: '异步通过任务接口轮询结果；同步使用旧版搜题接口。' },
+      options: [
+        ['true', '异步'],
+        ['false', '同步']
+      ],
       defaultValue: true
     },
     deepThinking: {
@@ -2524,47 +2547,48 @@ export const CommonProject = Project.create({
       namespace: 'common.apps',
       methods() {
         return {
-          searchAnswerInCaches<T>(title: string, provider: () => Promise<T>) {
+          searchAnswerInCaches<T>(title: string, provider: () => Promise<T>, mode: SearchCacheMode = 'normal') {
+            const cacheKey = answerCacheKey(title, mode);
             if (!isLocalQuestionCacheEnabled()) {
               return provider().then((result) => {
                 if (Array.isArray(result)) {
                   if (shouldCacheSearchInfos(result)) {
-                    answerCache.set(title, result as SearchInformation[]);
+                    answerCache.set(cacheKey, result as SearchInformation[]);
                   }
                 }
                 return result;
               });
             }
 
-            if (answerCache.has(title)) {
-              const cachedResults = answerCache.get(title);
+            if (answerCache.has(cacheKey)) {
+              const cachedResults = answerCache.get(cacheKey);
               if (cachedResults && shouldCacheSearchInfos(cachedResults)) {
                 return Promise.resolve(cachedResults as T);
               }
-              answerCache.delete(title);
+              answerCache.delete(cacheKey);
             }
 
-            const cacheResults = questionCachesToSearchInfos(title);
+            const cacheResults = questionCachesToSearchInfos(title, mode);
             if (cacheResults.length) {
-              answerCache.set(title, cacheResults);
+              answerCache.set(cacheKey, cacheResults);
               return Promise.resolve(cacheResults as T);
             }
 
             return provider().then((result) => {
               if (Array.isArray(result)) {
                 if (shouldCacheSearchInfos(result)) {
-                  answerCache.set(title, result as SearchInformation[]);
+                  answerCache.set(cacheKey, result as SearchInformation[]);
                 }
               }
               return result;
             });
           },
-          addQuestionCacheFromWorkResult(result: unknown) {
+          addQuestionCacheFromWorkResult(result: unknown, mode: SearchCacheMode = 'normal') {
             const normalized = normalizeWorkResultsPayload(result);
             if (normalized.length === 0) {
               return;
             }
-            addQuestionCaches(...resultToQuestionCaches(normalized));
+            addQuestionCaches(...resultToQuestionCaches(normalized, mode));
           },
           clearQuestionCaches() {
             state.apps.localQuestionCaches = [];

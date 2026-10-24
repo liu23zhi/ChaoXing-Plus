@@ -143,7 +143,7 @@ test('tiku adapter request payload no longer carries the removed plat field', as
   assert.equal(wrapper.data.plat, undefined);
   assert.equal(Object.prototype.hasOwnProperty.call(wrapper.data, 'plat'), false);
 
-  // 普通搜题固定使用兼容请求体中的 7 个字段。
+  // 普通搜题保留兼容字段，并按需增加深度思考参数。
   assert.deepEqual(Object.keys(wrapper.data), [
     'qid',
     'question',
@@ -151,7 +151,8 @@ test('tiku adapter request payload no longer carries the removed plat field', as
     'type',
     'courseName',
     'extra',
-    'skipCache'
+    'skipCache',
+    'deepThinking'
   ]);
 });
 

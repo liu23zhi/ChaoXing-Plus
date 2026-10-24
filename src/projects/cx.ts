@@ -42,7 +42,7 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { retryUnfinishedResultsInOrder } from '../core/worker/unfinished-retry.js';
-import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
+import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, shouldSkipCacheForManualRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
   inspectVideoLoadState,
@@ -1335,8 +1335,8 @@ function renderMethods() {
 
 function appsMethods() {
   return (CommonProject.scripts.apps.methods?.call({} as any) ?? {}) as {
-    searchAnswerInCaches?: <T>(title: string, provider: () => Promise<T>) => Promise<T>;
-    addQuestionCacheFromWorkResult?: (result: unknown) => void;
+    searchAnswerInCaches?: <T>(title: string, provider: () => Promise<T>, mode?: 'normal' | 'deep') => Promise<T>;
+    addQuestionCacheFromWorkResult?: (result: unknown, mode?: 'normal' | 'deep') => void;
   };
 }
 
@@ -3533,7 +3533,9 @@ const JobRunner = {
           };
 
           const searchInCaches = appsMethods().searchAnswerInCaches;
-          return searchInCaches && !workerOptions.skipCache ? searchInCaches(title, provider) : provider();
+          return searchInCaches && !workerOptions.skipCache
+            ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
+            : provider();
         },
         work: async (ctx) => {
           const { elements, searchInfos } = ctx;
@@ -3727,7 +3729,10 @@ const JobRunner = {
           total: roots.length,
           mode: 'chapter'
         }, undefined, { correlationId: chapterRetryCorrelationId });
-        const retryWorker = createChapterWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
+        const retryWorker = createChapterWorker([root], {
+          suppressWorkResultsPanelUpdate: true,
+          skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
+        });
         const retriedResults = await retryWorker.doWork();
         notifyManualAnswerRequired(retriedResults);
         logDebug('info', '动作节点诊断：单题重答完成', {
@@ -3909,7 +3914,7 @@ const JobRunner = {
             } else {
               (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
               chapterFinished = true;
-              appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);
+              appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults, deepThinking ? 'deep' : 'normal');
             }
           } else {
             logDebug('info', '动作节点诊断：执行保存', {
@@ -4500,7 +4505,9 @@ function workOrExam(
         };
 
         const searchInCaches = appsMethods().searchAnswerInCaches;
-        return searchInCaches && !workerOptions.skipCache ? searchInCaches(title, provider) : provider();
+        return searchInCaches && !workerOptions.skipCache
+          ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
+          : provider();
       },
       work: async (ctx) => {
         const { elements, searchInfos } = ctx;
@@ -4610,7 +4617,7 @@ function workOrExam(
             replaceCurrentWorkResults(simplified);
           }
           if (current.result?.finish) {
-            appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
+            appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform), deepThinking ? 'deep' : 'normal');
           }
           return;
         }
@@ -4639,7 +4646,7 @@ function workOrExam(
         }
 
         if (current.result?.finish) {
-          appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform));
+          appsMethods().addQuestionCacheFromWorkResult?.(simplifyWorkResult([current], workOrExamQuestionTitleTransform), deepThinking ? 'deep' : 'normal');
         }
       },
       async onResultsInitialized(res) {
@@ -4821,7 +4828,10 @@ function workOrExam(
           total: liveRoots().length,
           mode: type
         }, undefined, { correlationId: workExamCorrelationId });
-        const retryWorker = createWorkOrExamWorker([root], { suppressWorkResultsPanelUpdate: true, skipCache: true });
+        const retryWorker = createWorkOrExamWorker([root], {
+          suppressWorkResultsPanelUpdate: true,
+          skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
+        });
         const retriedResults = await retryWorker.doWork();
         notifyManualAnswerRequired(retriedResults);
         logDebug('info', '动作节点诊断：单题重答完成', {

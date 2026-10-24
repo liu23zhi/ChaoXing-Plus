@@ -17,6 +17,7 @@ const searchTimeoutPattern = /超时|timeout|abort/i;
 
 type SearchInfoCacheCandidate = {
   error?: string;
+  results?: readonly { answer?: string }[];
 };
 
 function hasNonEmptyError(message: string | undefined): boolean {
@@ -64,7 +65,8 @@ export function hasSearchError(result: RetryFailureSnapshot): boolean {
 }
 
 export function shouldCacheSearchInfos(searchInfos: readonly SearchInfoCacheCandidate[]): boolean {
-  return searchInfos.every((info) => !hasNonEmptyError(info.error));
+  return searchInfos.every((info) => !hasNonEmptyError(info.error)) &&
+    searchInfos.some((info) => (info.results ?? []).some((entry) => hasNonEmptyError(entry.answer)));
 }
 
 export function createSearchRequestDeduplicator<T>(): (key: string, provider: () => Promise<T>) => Promise<T> {
@@ -86,8 +88,22 @@ export function hasReturnedSearchAnswer(result: RetryFailureSnapshot): boolean {
 }
 
 export function shouldSkipCacheForAutomaticRetry(result: RetryFailureSnapshot): boolean | undefined {
-  if (hasSearchError(result)) {
-    return true;
-  }
+  if ((result.ctx?.searchInfos ?? []).some((info) => hasNonEmptyError(info.error))) return undefined;
   return hasReturnedSearchAnswer(result) ? true : undefined;
+}
+
+export function shouldSkipCacheForManualRetry(result?: {
+  searchInfos?: Array<{
+    error?: string;
+    results?: Array<readonly [unknown, unknown, ...unknown[]]>;
+  }>;
+}): boolean | undefined {
+  return shouldSkipCacheForAutomaticRetry({
+    ctx: {
+      searchInfos: result?.searchInfos?.map((info) => ({
+        error: info.error,
+        results: info.results?.map((entry) => ({ answer: String(entry[1] ?? '') }))
+      }))
+    }
+  });
 }

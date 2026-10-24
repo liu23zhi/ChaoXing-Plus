@@ -80,27 +80,38 @@ async function loadAnswererFactory(factoryName, dependencies) {
   return Function(...Object.keys(dependencies), code)(...Object.values(dependencies));
 }
 
-test('automatic retry bypasses cache when the search timed out', async () => {
+test('automatic retry keeps server deduplication available when the search timed out', async () => {
   const mod = helperModule;
 
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
     error: '题库请求超时，可能是题库问题，或者请检查网络或者重试。'
-  }), true);
+  }), undefined);
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
     ctx: {
       searchInfos: [{ error: 'request timeout' }]
     }
-  }), true);
+  }), undefined);
 });
 
-test('automatic retry bypasses cache after a non-timeout search error', async () => {
+test('automatic retry keeps server deduplication available after network or task errors', async () => {
   const mod = helperModule;
 
   assert.equal(mod.shouldSkipCacheForAutomaticRetry({
     ctx: {
       searchInfos: [{ error: '题库连接失败，请检查网络。' }]
     }
-  }), true);
+  }), undefined);
+  assert.equal(mod.shouldSkipCacheForAutomaticRetry({
+    error: 'Failed to fetch',
+    ctx: { searchInfos: [{ error: 'UPSTREAM_ERROR: 状态查询失败' }] }
+  }), undefined);
+  assert.equal(mod.shouldSkipCacheForAutomaticRetry({
+    result: { finish: false },
+    ctx: { searchInfos: [
+      { results: [{ answer: 'A' }] },
+      { error: 'Failed to fetch', results: [] }
+    ] }
+  }), undefined);
 });
 
 test('automatic retry keeps cache enabled when no answer is displayed', async () => {
@@ -125,13 +136,36 @@ test('automatic retry bypasses cache when a returned answer did not match', asyn
       }]
     }
   }), true);
+  assert.equal(mod.shouldSkipCacheForAutomaticRetry({
+    error: '答案未匹配',
+    result: { finish: false },
+    ctx: { searchInfos: [{ results: [{ answer: '错误答案' }] }] }
+  }), true);
 });
 
-test('search results with provider errors are never eligible for local caching', async () => {
+test('manual retry refreshes mismatched answers but preserves cache after network errors', () => {
+  const mod = helperModule;
+  assert.equal(mod.shouldSkipCacheForManualRetry({
+    searchInfos: [{ results: [['题目', '错误答案', {}]] }]
+  }), true);
+  assert.equal(mod.shouldSkipCacheForManualRetry({
+    error: 'Failed to fetch',
+    searchInfos: [{ error: 'UPSTREAM_ERROR: 状态查询失败', results: [] }]
+  }), undefined);
+  assert.equal(mod.shouldSkipCacheForManualRetry({
+    searchInfos: [{ results: [['题目', 'A', {}]] }, { error: 'Failed to fetch', results: [] }]
+  }), undefined);
+  assert.equal(mod.shouldSkipCacheForManualRetry(undefined), undefined);
+});
+
+test('local answer cache requires a usable answer and no provider errors', async () => {
   const mod = helperModule;
 
+  assert.equal(mod.shouldCacheSearchInfos([]), false);
   assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [], error: 'request failed' }]), false);
-  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [] }]), true);
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [] }]), false);
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [{ answer: '  ' }] }]), false);
+  assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [{ answer: 'A' }] }, { error: 'Failed to fetch' }]), false);
   assert.equal(mod.shouldCacheSearchInfos([{ name: '题库', results: [{ answer: 'A' }] }]), true);
 });
 

@@ -563,7 +563,7 @@ test('cx defers chapter cache writes until submit succeeds without a retake prom
   assert.equal(source.includes('onCacheableResult?: (result: SimplifyWorkResult) => void;'), true);
   assert.equal(source.includes('const cacheableResults: SimplifyWorkResult[] = [];'), true);
   assert.equal(source.includes('workerOptions.onCacheableResult?.(currentSimplified);'), true);
-  assert.equal(source.includes('appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults);'), true);
+  assert.equal(source.includes("appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults, deepThinking ? 'deep' : 'normal');"), true);
   assert.equal(source.includes('appsMethods().addQuestionCacheFromWorkResult?.(simplified.filter((_, index) => index === res.indexOf(curr)));'), false);
 });
 
