@@ -350,7 +350,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   answerSeparators: '#,|,;,；',
   answerMatchMode: 'includes',
   enableRandomFallbackAnswer: false,
-  enableAIFallbackAnswer: false,
+  enableAIFallbackAnswer: true,
   useAsyncTikuSearch: true,
   deepThinking: false,
   aiFallbackFailureAction: 'pause'
@@ -5238,7 +5238,9 @@ async function loadTyprMapping(): Promise<Record<string, number>> {
     return await request('https://cdn.ocsjs.com/resources/font/table.json', {
       type: 'fetch',
       method: 'get',
-      responseType: 'json'
+      responseType: 'json',
+      timeoutMs: 15000,
+      retry: { maxAttempts: 3, delayMs: 500 }
     });
   } catch (err) {
     $console.error('繁体字库加载失败，请刷新页面重试：', String(err));

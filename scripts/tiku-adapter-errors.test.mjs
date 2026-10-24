@@ -35,6 +35,25 @@ test('ordinary search hides upstream raw HTTP failures and never retries a 400',
   } finally { globalThis.fetch = previous; }
 });
 
+test('ordinary search retries a transient 503 before surfacing a final error', async () => {
+  const previous = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return calls === 1
+      ? Response.json({ error: { code: 'UPSTREAM_ERROR', message: raw } }, { status: 503 })
+      : Response.json({ question: 'question', answer: { answerText: 'answer' } });
+  };
+  try {
+    const result = await request(searchUrl, {
+      ...opts,
+      headers: { ...opts.headers, 'Idempotency-Key': 'same-request' }
+    });
+    assert.equal(result.answer.answerText, 'answer');
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = previous; }
+});
+
 test('fallback hides legacy raw error fields in both rendered error and stored response', async () => {
   const previous = globalThis.fetch;
   globalThis.fetch = async () => Response.json({ success: false, failureDetail: raw, error: { code: 'UPSTREAM_ERROR', message: raw } });

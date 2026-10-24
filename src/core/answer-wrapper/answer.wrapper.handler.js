@@ -1,5 +1,4 @@
 import { request } from '../utils/request';
-import { sleep } from '../../runtime/dom.js';
 export const AnswerWrapperHandlerConfig = {
     timeout_seconds: 60
 };
@@ -56,8 +55,7 @@ export async function defaultAnswerWrapperHandler(answererWrappers, env) {
                     headers: JSON.parse(JSON.stringify(headers || {})),
                     timeoutMs
                 })
-                : await Promise.race([
-                    request(url.toString(), {
+                : await request(url.toString(), {
                         method,
                         responseType: contentType,
                         data: requestData,
@@ -65,9 +63,7 @@ export async function defaultAnswerWrapperHandler(answererWrappers, env) {
                         headers: JSON.parse(JSON.stringify(headers || {})),
                         timeoutMs,
                         retry
-                    }),
-                    sleep(timeoutMs)
-                ]);
+                    });
             if (responseData === undefined) {
                 throw new Error('题库请求超时，可能是题库问题，或者请检查网络或者重试。');
             }

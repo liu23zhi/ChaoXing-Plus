@@ -19,12 +19,14 @@ export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
 export const TIKU_ADAPTER_SEARCH_TIMEOUT_SECONDS = 240;
 export const TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS = 10000;
 export const TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS = 600000;
+export const TIKU_ADAPTER_SEARCH_HEALTH_TIMEOUT_MS = 3000;
+export const TIKU_ADAPTER_SEARCH_HEALTH_DELAY_MS = 1000;
 export const TIKU_ADAPTER_AI_FALLBACK_REQUEST_TIMEOUT_MS = 180000;
 export const TIKU_ADAPTER_AI_FALLBACK_STATUS_TIMEOUT_MS = 600000;
 export const TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS = 2500;
 export const TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS = 3;
-export const TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS = 2000;
-export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1220;
+export const TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS = 500;
+export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1260;
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
@@ -69,6 +71,8 @@ export type TikuAdapterSearchTaskOptions = {
   retryAttempts?: number;
   retryDelayMs?: number;
   idempotencyKey?: string;
+  healthProbeTimeoutMs?: number;
+  healthProbeDelayMs?: number;
 };
 
 export type TikuAdapterAIFallbackRequestOptions = {
@@ -78,6 +82,7 @@ export type TikuAdapterAIFallbackRequestOptions = {
   retryAttempts?: number;
   retryDelayMs?: number;
   preferAsyncTask?: boolean;
+  idempotencyKey?: string;
 };
 
 export const DEFAULT_TIKU_BASE_URL = normalizeTikuAdapterBaseUrl(
@@ -121,6 +126,11 @@ export function createTikuAdapterSearchTaskUrl(baseurl: string): string {
   return normalized ? `${normalized}/adapter-service/search/tasks` : '';
 }
 
+export function createTikuAdapterSearchHealthUrl(baseurl: string): string {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl);
+  return normalized ? `${normalized}/adapter-service/search/health` : '';
+}
+
 export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
   if (!normalized) {
@@ -162,6 +172,7 @@ export async function requestTikuAdapterSearchTask(
   if (problem) throw new Error(problem);
 
   const phaseStartedAt = Date.now();
+  const phaseDeadlineAt = phaseStartedAt + normalizePositiveInteger(options.statusTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS);
   const requestTimeoutMs = normalizePositiveInteger(
     options.requestTimeoutMs,
     TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS
@@ -170,18 +181,39 @@ export async function requestTikuAdapterSearchTask(
   const retryAttempts = normalizePositiveInteger(options.retryAttempts, TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS);
   const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS));
   const idempotencyKey = String(options.idempotencyKey ?? createTikuAdapterIdempotencyKey()).trim();
-  const initial = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(
-    createTikuAdapterSearchTaskUrl(baseurl),
-    key,
-    {
-      method: 'POST',
-      data: payload,
-      timeoutMs: taskCreateTimeoutMs,
-      retryAttempts,
-      retryDelayMs,
-      extraHeaders: { 'Idempotency-Key': idempotencyKey }
-    }
-  );
+  const syncSearch = () => requestTikuAdapterLegacySearch(baseurl, key, payload, {
+    requestTimeoutMs,
+    retryAttempts,
+    retryDelayMs,
+    deadlineAt: phaseDeadlineAt,
+    idempotencyKey
+  });
+  try {
+    await probeTikuAdapterSearchHealth(baseurl, key, phaseDeadlineAt, options);
+  } catch (error) {
+    if (isAuthenticationError(error)) throw error;
+    return syncSearch();
+  }
+
+  let initial: TikuAdapterTaskEnvelope<Record<string, unknown>>;
+  try {
+    initial = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(
+      createTikuAdapterSearchTaskUrl(baseurl),
+      key,
+      {
+        method: 'POST',
+        data: payload,
+        timeoutMs: taskCreateTimeoutMs,
+        deadlineAt: phaseDeadlineAt,
+        retryAttempts,
+        retryDelayMs,
+        extraHeaders: { 'Idempotency-Key': idempotencyKey }
+      }
+    );
+  } catch (error) {
+    if (getHTTPStatus(error) === 404) return syncSearch();
+    throw error;
+  }
 
   if (String(initial.status ?? '').toLowerCase() === 'succeeded' && initial.result !== undefined) {
     return initial.result;
@@ -194,13 +226,14 @@ export async function requestTikuAdapterSearchTask(
     return await pollTikuAdapterSearchTask(initial, {
       statusUrlBase: createTikuAdapterSearchStatusUrl(baseurl, ''),
       pollIntervalMs: options.pollIntervalMs ?? TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS,
-      timeoutMs: Math.max(1, (options.statusTimeoutMs ?? TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS) - (Date.now() - phaseStartedAt)),
+      timeoutMs: Math.max(1, phaseDeadlineAt - Date.now()),
       maxConsecutiveFailures: options.maxConsecutiveFailures ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
       getStatus: (statusUrl, _taskId, remainingMs) => requestTikuAdapterJSON<TikuAdapterTaskEnvelope<Record<string, unknown>>>(statusUrl, key, {
         method: 'GET',
         timeoutMs: Math.min(taskCreateTimeoutMs, 10000, remainingMs),
         retryAttempts: 1,
         retryDelayMs: 0,
+        balanceScopeBaseurl: baseurl,
         deferBalanceBlockUntilPollingCompletes: true
       })
     });
@@ -211,6 +244,79 @@ export async function requestTikuAdapterSearchTask(
     }
     throw error;
   }
+}
+
+async function probeTikuAdapterSearchHealth(
+  baseurl: string,
+  key: string,
+  phaseDeadlineAt: number,
+  options: TikuAdapterSearchTaskOptions
+) {
+  const probeTimeoutMs = normalizePositiveInteger(options.healthProbeTimeoutMs, TIKU_ADAPTER_SEARCH_HEALTH_TIMEOUT_MS);
+  const probeDelayMs = Math.max(0, Math.floor(options.healthProbeDelayMs ?? TIKU_ADAPTER_SEARCH_HEALTH_DELAY_MS));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS; attempt++) {
+    const roundDeadlineAt = Math.min(phaseDeadlineAt, Date.now() + probeTimeoutMs);
+    try {
+      const probe = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope>(createTikuAdapterSearchHealthUrl(baseurl), key, {
+        method: 'GET', timeoutMs: probeTimeoutMs, deadlineAt: roundDeadlineAt,
+        retryAttempts: 1, retryDelayMs: 0
+      });
+      const taskId = String(probe?.taskId ?? '').trim();
+      const status = String(probe?.status ?? '').trim().toLowerCase();
+      const statusUrl = String(probe?.statusUrl ?? '').trim();
+      if (probe?.success !== true || status !== 'succeeded' || !taskId || !statusUrl) {
+        throw new Error('invalid async search health response');
+      }
+      const statusResponse = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope>(
+        new URL(statusUrl, `${baseurl}/`).toString(), key, {
+          method: 'GET', timeoutMs: probeTimeoutMs, deadlineAt: roundDeadlineAt,
+          retryAttempts: 1, retryDelayMs: 0, balanceScopeBaseurl: baseurl
+        }
+      );
+      const result = statusResponse?.result;
+      if (statusResponse?.success !== true || String(statusResponse.status ?? '').trim().toLowerCase() !== 'succeeded'
+        || String(statusResponse.taskId ?? '').trim() !== taskId
+        || !result || typeof result !== 'object' || !('answer' in result)
+        || !result.answer || typeof result.answer !== 'object') {
+        throw new Error('async search status health check failed');
+      }
+      return;
+    } catch (error) {
+      if (isAuthenticationError(error)) throw error;
+      lastError = error;
+      if (attempt >= TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS || Date.now() >= phaseDeadlineAt) break;
+      const retryAfterMs = getHTTPStatus(error) === 429 && error && typeof error === 'object'
+        ? (error as { retryAfterMs?: number }).retryAfterMs : undefined;
+      await sleepAIFallback(Math.min(
+        Math.max(probeDelayMs, retryAfterMs ?? 0),
+        Math.max(0, phaseDeadlineAt - Date.now())
+      ));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('async search health check failed');
+}
+
+function requestTikuAdapterLegacySearch(
+  baseurl: string,
+  key: string,
+  payload: Record<string, unknown>,
+  options: { requestTimeoutMs: number; retryAttempts: number; retryDelayMs: number; deadlineAt?: number; idempotencyKey?: string }
+) {
+  return requestTikuAdapterJSON<Record<string, unknown>>(createTikuAdapterSearchUrl(baseurl), key, {
+    method: 'POST', data: payload, timeoutMs: options.requestTimeoutMs,
+    deadlineAt: options.deadlineAt, retryAttempts: options.retryAttempts,
+    retryDelayMs: options.retryDelayMs,
+    extraHeaders: { 'Idempotency-Key': options.idempotencyKey ?? createTikuAdapterIdempotencyKey() }
+  });
+}
+
+function getHTTPStatus(error: unknown) {
+  return error && typeof error === 'object' ? (error as { status?: unknown }).status : undefined;
+}
+
+function isAuthenticationError(error: unknown) {
+  return getHTTPStatus(error) === 401 || getHTTPStatus(error) === 403;
 }
 
 export function createTikuAdapterAuthorizationHeader(key: string): string {
@@ -350,7 +456,8 @@ function normalizeAIFallbackRequestOptions(options: TikuAdapterAIFallbackRequest
     pollIntervalMs: normalizePositiveInteger(options.pollIntervalMs, TIKU_ADAPTER_AI_FALLBACK_STATUS_POLL_INTERVAL_MS),
     retryAttempts: normalizePositiveInteger(options.retryAttempts, TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS),
     retryDelayMs: Math.max(0, Math.floor(options.retryDelayMs ?? TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS)),
-    preferAsyncTask: options.preferAsyncTask ?? true
+    preferAsyncTask: options.preferAsyncTask ?? true,
+    idempotencyKey: String(options.idempotencyKey ?? createTikuAdapterIdempotencyKey()).trim()
   };
 }
 
@@ -373,15 +480,18 @@ async function resolveTikuAdapterAIFallbackResponse(
   options: ReturnType<typeof normalizeAIFallbackRequestOptions>
 ): Promise<TikuAdapterAIFallbackResult> {
   const phaseStartedAt = Date.now();
+  const phaseDeadlineAt = phaseStartedAt + options.statusTimeoutMs;
   if (options.preferAsyncTask) {
     const taskResponse = await requestTikuAdapterJSON<TikuAdapterAIFallbackResult>(createTikuAdapterAIFallbackTaskUrl(baseurl), key, {
       method: 'POST',
       data: payload,
       timeoutMs: Math.min(options.requestTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_CREATE_TIMEOUT_MS),
-      retryAttempts: 1,
-      retryDelayMs: 0
+      deadlineAt: phaseDeadlineAt,
+      retryAttempts: options.retryAttempts,
+      retryDelayMs: options.retryDelayMs,
+      extraHeaders: { 'Idempotency-Key': options.idempotencyKey }
     });
-    if (isAIFallbackPendingResponse(taskResponse)) {
+    if (shouldPollAIFallbackTask(taskResponse)) {
       return pollTikuAdapterAIFallbackStatus(baseurl, key, taskResponse, {
         ...options,
         statusTimeoutMs: Math.max(1, options.statusTimeoutMs - (Date.now() - phaseStartedAt))
@@ -394,8 +504,9 @@ async function resolveTikuAdapterAIFallbackResponse(
     method: 'POST',
     data: payload,
     timeoutMs: options.requestTimeoutMs,
-    retryAttempts: options.retryAttempts,
-    retryDelayMs: options.retryDelayMs
+    deadlineAt: phaseDeadlineAt,
+    retryAttempts: 1,
+    retryDelayMs: 0
   });
 
   if (isAIFallbackPendingResponse(directResponse)) {
@@ -433,6 +544,7 @@ async function pollTikuAdapterAIFallbackStatus(
         timeoutMs: Math.min(options.requestTimeoutMs, 10000, remainingMs),
         retryAttempts: 1,
         retryDelayMs: 0,
+        balanceScopeBaseurl: baseurl,
         deferBalanceBlockUntilPollingCompletes: true
       })
     });
@@ -491,6 +603,11 @@ function isAIFallbackPendingResponse(response: TikuAdapterAIFallbackResult | und
   return Boolean(response.taskId || response.statusUrl) && ['pending', 'running', 'processing', 'queued', 'created'].includes(status);
 }
 
+function shouldPollAIFallbackTask(response: TikuAdapterAIFallbackResult | undefined) {
+  return isAIFallbackPendingResponse(response)
+    || Boolean(response?.taskId && response?.status === 'succeeded' && !response.result && !response.error);
+}
+
 async function requestTikuAdapterJSON<T>(
   url: string,
   key: string,
@@ -498,24 +615,33 @@ async function requestTikuAdapterJSON<T>(
     method: 'GET' | 'POST';
     data?: Record<string, unknown>;
     timeoutMs: number;
+    deadlineAt?: number;
     retryAttempts: number;
     retryDelayMs: number;
     extraHeaders?: Record<string, string>;
+    balanceScopeBaseurl?: string;
     deferBalanceBlockUntilPollingCompletes?: boolean;
   }
 ): Promise<T> {
-  const identity = resolveTikuAdapterRequestIdentity(url, {
+  const requestIdentity = resolveTikuAdapterRequestIdentity(url, {
     Authorization: createTikuAdapterAuthorizationHeader(key)
   });
+  const identity = { ...requestIdentity, baseurl: options.balanceScopeBaseurl ?? requestIdentity.baseurl };
   if (isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
   }
 
   let lastError: unknown;
   const maxAttempts = Math.max(1, options.retryAttempts);
+  const requestBody = options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+      throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
+    }
+    const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error('tikuAdapter request timed out');
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), Math.min(options.timeoutMs, remainingMs));
     try {
       const response = await fetch(url, {
         method: options.method,
@@ -524,14 +650,17 @@ async function requestTikuAdapterJSON<T>(
           ...options.extraHeaders,
           ...(options.method === 'POST' ? { 'Content-Type': 'application/json' } : {})
         },
-        body: options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined,
+        body: requestBody,
         signal: controller.signal
       });
       if (!response.ok) {
         const message = await response.text();
         let responseBody: unknown = message;
         try { responseBody = JSON.parse(message); } catch { /* old versions can return plain text */ }
-        const requestError = createTikuAdapterRequestError(responseBody, response.status);
+        const requestError = createTikuAdapterRequestError(responseBody, response.status) as ReturnType<typeof createTikuAdapterRequestError> & {
+          retryAfterMs?: number;
+        };
+        requestError.retryAfterMs = readRetryAfterMs(response.headers.get('Retry-After'));
         if (requestError.code === 'INSUFFICIENT_BALANCE') {
           if (!options.deferBalanceBlockUntilPollingCompletes) {
             markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
@@ -553,12 +682,25 @@ async function requestTikuAdapterJSON<T>(
       if (attempt >= maxAttempts || !isRetryableTikuAdapterError(err)) {
         throw err;
       }
-      await sleepAIFallback(options.retryDelayMs * attempt);
+      const retryAfterMs = getHTTPStatus(err) === 429 && err && typeof err === 'object'
+        ? (err as { retryAfterMs?: number }).retryAfterMs : undefined;
+      const backoffMs = retryAfterMs ?? Math.round(options.retryDelayMs * (2 ** (attempt - 1)) * (1 + Math.random() * 0.25));
+      const budgetMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
+      if (budgetMs <= backoffMs) throw err;
+      await sleepAIFallback(backoffMs);
     } finally {
       clearTimeout(timeout);
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'tikuAdapter request failed'));
+}
+
+function readRetryAfterMs(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(value);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : undefined;
 }
 
 function createHTTPError(status: number, message: string) {
@@ -574,7 +716,7 @@ function isRetryableTikuAdapterError(err: unknown) {
   if (err && typeof err === 'object') {
     const status = (err as { status?: number }).status;
     if (typeof status === 'number') {
-      return status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+      return status === 408 || status === 425 || status === 429 || status >= 500 && status <= 599;
     }
   }
   return err instanceof Error && /network|fetch|timeout|abort|failed/i.test(err.message);
@@ -685,13 +827,14 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     headers: {
       Authorization: createTikuAdapterAuthorizationHeader(key)
     },
-    ...(config.asyncSearch === false ? {} : {
-      executeRequest: ({ data, timeoutMs }) => requestTikuAdapterSearchTask(
-        { baseurl, key },
-        data,
-        { requestTimeoutMs: timeoutMs }
-      )
-    }),
+    executeRequest: ({ data, timeoutMs }) => config.asyncSearch === false
+      ? requestTikuAdapterLegacySearch(baseurl, key, data, {
+          requestTimeoutMs: timeoutMs,
+          retryAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
+          retryDelayMs: TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS,
+          deadlineAt: Date.now() + TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS
+        })
+      : requestTikuAdapterSearchTask({ baseurl, key }, data, { requestTimeoutMs: timeoutMs }),
     timeoutSeconds: TIKU_ADAPTER_SEARCH_TIMEOUT_SECONDS,
     retry: {
       maxAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,

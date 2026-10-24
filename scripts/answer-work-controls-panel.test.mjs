@@ -166,6 +166,13 @@ test('common study panel exposes random fallback and ai fallback controls', asyn
   assert.equal(source.includes("label: 'AI 兜底失败后行为'"), true);
 });
 
+test('AI fallback defaults on while the new study setting remains authoritative', async () => {
+  const source = await readCommonSource();
+  assert.match(source, /enableAIFallbackAnswer: getStudySettingValue\('enableAIFallbackAnswer', true\)/);
+  assert.doesNotMatch(source, /enableAIFallbackAnswer: getStudySettingValue\('enableAIFallbackAnswer', stored\.enableAIFallbackAnswer/);
+  assert.match(source, /enableAIFallbackAnswer: \{[\s\S]*?defaultValue: true/);
+});
+
 test('common watches shared config attributes so the floating panel updates live across pages', async () => {
   const source = await readCommonSource();
 

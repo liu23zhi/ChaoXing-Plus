@@ -62,7 +62,9 @@ export class AnswerWrapperParser {
         const text = await request(url, {
             responseType: 'text',
             method: 'get',
-            type: 'fetch'
+            type: 'fetch',
+            timeoutMs: 15000,
+            retry: { maxAttempts: 3, delayMs: 500 }
         });
         return this.fromJSONString(text);
     }

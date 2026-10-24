@@ -129,7 +129,7 @@ test('disabling async search keeps the legacy synchronous endpoint', async () =>
   });
 
   assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search');
-  assert.equal(wrapper.executeRequest, undefined);
+  assert.equal(typeof wrapper.executeRequest, 'function');
 });
 
 // 服务端已彻底删除 plat（历史取值恒为 -1，没有任何区分度），请求侧不得再提交该字段。
@@ -166,6 +166,12 @@ test('async search submits once with idempotency, follows another-origin status 
 
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init });
+    if (String(url).endsWith('/adapter-service/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1', statusUrl: 'https://tasks.other.test/adapter-service/search/status?taskId=probe-1' });
+    }
+    if (String(url).includes('taskId=probe-1')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1', result: { answer: {} } });
+    }
     if (String(url).endsWith('/adapter-service/search/tasks')) {
       return Response.json({
         success: false,
@@ -185,14 +191,16 @@ test('async search submits once with idempotency, follows another-origin status 
     );
 
     assert.deepEqual(response, result);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].url, 'https://adapter.local/adapter-service/search/tasks');
-    assert.equal(calls[0].init.headers['Idempotency-Key'], 'stable-1');
-    assert.deepEqual(JSON.parse(calls[0].init.body), {
+    assert.equal(calls.length, 4);
+    assert.equal(calls[0].url, 'https://adapter.local/adapter-service/search/health');
+    assert.equal(calls[1].url, 'https://tasks.other.test/adapter-service/search/status?taskId=probe-1');
+    assert.equal(calls[2].url, 'https://adapter.local/adapter-service/search/tasks');
+    assert.equal(calls[2].init.headers['Idempotency-Key'], 'stable-1');
+    assert.deepEqual(JSON.parse(calls[2].init.body), {
       qid: '', question: '题目', options: [], type: 0, courseName: '', extra: ''
     });
-    assert.equal(calls[1].url, 'https://tasks.other.test/adapter-service/search/status?taskId=task-1');
-    assert.equal(calls[1].init.headers.Authorization, 'Bearer secret');
+    assert.equal(calls[3].url, 'https://tasks.other.test/adapter-service/search/status?taskId=task-1');
+    assert.equal(calls[3].init.headers.Authorization, 'Bearer secret');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -203,6 +211,12 @@ test('async ordinary search exposes only the standard insufficient-balance error
   const originalFetch = globalThis.fetch;
   let statusCalls = 0;
   globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/adapter-service/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-balance', statusUrl: 'https://balance-search.adapter.local/adapter-service/search/status?taskId=probe-balance' });
+    }
+    if (String(url).includes('taskId=probe-balance')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-balance', result: { answer: {} } });
+    }
     if (String(url).endsWith('/adapter-service/search/tasks')) {
       return Response.json({ success: false, status: 'running', taskId: 'balance-search' }, { status: 202 });
     }

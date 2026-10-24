@@ -69,3 +69,9 @@ test('runtime answer wrapper keeps the safe insufficient-balance text recognizab
   assert.match(infos[0].error, /INSUFFICIENT_BALANCE|当前(?:账号)?余额不足/u);
   assert.doesNotMatch(infos[0].error, /provider detail|internal raw/iu);
 });
+
+test('runtime answer wrapper leaves timeout ownership with the aborting request transport', async () => {
+  const source = await readFile(resolve(process.cwd(), 'src/core/answer-wrapper/answer.wrapper.handler.js'), 'utf8');
+  assert.doesNotMatch(source, /Promise\.race|sleep\(timeoutMs\)/);
+  assert.match(source, /timeoutMs,\s*retry/);
+});

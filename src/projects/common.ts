@@ -159,7 +159,7 @@ const defaultWorkOptions: CommonWorkOptions = {
   answerSeparators: '#,|,;,；',
   answerMatchMode: 'includes',
   enableRandomFallbackAnswer: false,
-  enableAIFallbackAnswer: false,
+  enableAIFallbackAnswer: true,
   useAsyncTikuSearch: true,
   deepThinking: false,
   aiFallbackFailureAction: 'pause'
@@ -272,7 +272,7 @@ function getWorkOptions(): CommonWorkOptions {
       'enableRandomFallbackAnswer',
       stored.enableRandomFallbackAnswer ?? false
     ),
-    enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', stored.enableAIFallbackAnswer ?? false),
+    enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', true),
     useAsyncTikuSearch,
     deepThinking: getStudySettingValue('deepThinking', stored.deepThinking ?? false),
     aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
@@ -1454,7 +1454,7 @@ function createStudySettingsPanel() {
     enableAIFallbackAnswer: {
       label: 'AI 兜底搜题',
       attrs: { type: 'checkbox', title: '普通题库失败后，允许调用 tikuAdapter AI fallback。' },
-      defaultValue: false
+      defaultValue: true
     },
     useAsyncTikuSearch: {
       label: '异步搜题',
@@ -1805,7 +1805,7 @@ function createWorkResultsPanel() {
     namespace: 'cx.new.study',
     cfg: {
       enableAnswer: getStudySettingValue('enableAnswer', true),
-      enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', false),
+      enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', true),
       useAsyncTikuSearch: getStudySettingValue('useAsyncTikuSearch', true),
       aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', 'pause'),
       enableExamAutoSubmit: getStudySettingValue('enableExamAutoSubmit', false),
@@ -1837,7 +1837,7 @@ function createWorkResultsPanel() {
       type: 'checkbox',
       title: '普通题库失败后，允许调用 tikuAdapter AI fallback。'
     },
-    defaultValue: false
+    defaultValue: true
   });
   aiFallbackToggleField.style.maxWidth = 'none';
 
