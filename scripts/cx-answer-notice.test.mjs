@@ -34,7 +34,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
     await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
     await declarations('src/core/worker/worker.ts', ['OCSWorker', 'waitForContinuate']),
-    await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
+    await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError', 'hasAccessTokenQuotaError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
       'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
@@ -118,15 +118,23 @@ test('worker defaults to four concurrent search requests while preserving result
   let maxActiveResolvers = 0;
   const searchOrder = [];
   const answerOrder = [];
+  let reportFirstBatchReady;
+  const firstBatchReady = new Promise(resolve => { reportFirstBatchReady = resolve; });
+  let reportFirstOtherCompleted;
+  const firstOtherCompleted = new Promise(resolve => { reportFirstOtherCompleted = resolve; });
+  const releaseSearch = [];
+  const searchGates = roots.map((_, index) => new Promise(resolve => { releaseSearch[index] = resolve; }));
   const worker = new runtime.OCSWorker({
     root: roots,
     elements: {},
     answerer: async (_elements, ctx) => {
       active += 1;
       maxActive = Math.max(maxActive, active);
-      await new Promise((resolve) => setTimeout(resolve, ctx.root.id === 0 ? 80 : 10));
+      if (active === 4) reportFirstBatchReady();
+      await searchGates[ctx.root.id];
       active -= 1;
       searchOrder.push(ctx.root.id);
+      if (ctx.root.id !== 0) reportFirstOtherCompleted();
       return [{ name: 'fixture', results: [{ question: String(ctx.root.id), answer: 'A' }] }];
     },
     work: async (ctx) => {
@@ -138,7 +146,12 @@ test('worker defaults to four concurrent search requests while preserving result
     }
   });
 
-  const results = await worker.doWork();
+  const pendingWork = worker.doWork();
+  await firstBatchReady;
+  releaseSearch[1]();
+  await firstOtherCompleted;
+  releaseSearch.forEach(release => release());
+  const results = await pendingWork;
 
   assert.equal(maxActive, 4);
   assert.notEqual(searchOrder[0], 0);
@@ -560,4 +573,38 @@ test('successful searches finish without an error', async () => {
   const results = await runtime.createWorker().doWork();
   assert.equal(results[0].result.finish, true);
   assert.equal(results[0].error, undefined);
+});
+
+
+test('ordinary Key quota rejection pauses without invoking AI or offering recharge recovery', async () => {
+  const runtime = await createRuntime([success], 'pause', [false, true]);
+  const infos = [{ name: 'Adapter', results: [], error: 'ACCESS_TOKEN_QUOTA_EXCEEDED: 访问令牌累计额度不足' }];
+  const result = await runtime.appendAIFallbackSearchInfos(infos, { enableAIFallbackAnswer: true, aiFallbackFailureAction: 'pause' }, { title: 'q', type: 'single', optionsText: 'A' });
+  assert.equal(result, infos); assert.equal(runtime.requests, 0);
+  assert.equal(runtime.balanceState.paused, true);
+  assert.match(runtime.notifications.find(([kind]) => kind === 'modal')?.[1], /Key.*额度/);
+  assert.doesNotMatch(runtime.notifications.find(([kind]) => kind === 'modal')?.[1], /充值|余额/);
+  assert.equal(await runtime.allowRetryAfterBalanceRecovery(), true);
+});
+
+test('AI Key quota error stays actionable instead of becoming generic no-answer or wallet recharge', async () => {
+  for (const action of ['pause', 'skip']) {
+    const runtime = await createRuntime([{ success: false, error: { code: 'ACCESS_TOKEN_QUOTA_EXCEEDED', message: 'Key 额度不足，请调整额度或更换 Key' } }], action, [false]);
+    const results = await runtime.createWorker().doWork();
+    assert.equal(runtime.requests, 1);
+    assert.match(results[0].error ?? results[0].ctx.searchInfos[0].error, /ACCESS_TOKEN_QUOTA_EXCEEDED/);
+    assert.doesNotMatch(results[0].error ?? results[0].ctx.searchInfos[0].error, /AI 兜底未返回可用答案/);
+    assert.equal(runtime.balanceState.paused, true);
+    assert.doesNotMatch(runtime.notifications.find(([kind]) => kind === 'modal')?.[1], /充值|余额/);
+  }
+});
+
+
+test('ordinary wrapper canonical quota text is recognized while upstream code-like wording is not', async () => {
+  const runtime = await createRuntime([success], 'pause', [false]);
+  assert.equal(await runtime.notifyBalance([{ name: 'Adapter', results: [], error: 'UPSTREAM_ERROR: ACCESS_TOKEN_QUOTA_EXCEEDED upstream text' }]), false);
+  assert.equal(runtime.balanceState.paused, false);
+  assert.equal(await runtime.notifyBalance([{ name: 'Adapter', results: [], error: '当前 Key 额度已用尽或本次请求将超额，请调整额度或更换 Key 后重试。' }]), true);
+  assert.equal(runtime.balanceState.paused, true);
+  assert.doesNotMatch(runtime.notifications.find(([kind]) => kind === 'modal')?.[1], /充值|余额/);
 });

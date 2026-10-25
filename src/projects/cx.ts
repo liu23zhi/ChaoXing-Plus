@@ -42,7 +42,7 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { retryUnfinishedResultsInOrder } from '../core/worker/unfinished-retry.js';
-import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, shouldSkipCacheForManualRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
+import { createSearchRequestDeduplicator, hasInsufficientBalanceError, hasAccessTokenQuotaError, shouldSkipCacheForAutomaticRetry, shouldSkipCacheForManualRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
   handleVisibleContentRecovery,
   inspectVideoLoadState,
@@ -1390,6 +1390,7 @@ const tikuAdapterBalanceRecoveryState = {
   workers: new Set<TikuAdapterBalanceTrackedWorker>(),
   promise: undefined as Promise<boolean> | undefined,
   paused: false,
+  reason: 'balance' as 'balance' | 'quota',
   config: undefined as ReturnType<typeof getStoredTikuAdapterConfig> | undefined
 };
 
@@ -1427,8 +1428,10 @@ async function requestTikuAdapterBalanceRecovery(
   if (!tikuAdapterBalanceRecoveryState.promise) {
     tikuAdapterBalanceRecoveryState.promise = (async () => {
       const confirmed = await $modal.confirm({
-        content: '当前账号余额不足，当前页面答题已暂停。充值完成后，请点击“已充值，继续答题”。',
-        confirmButtonText: '已充值，继续答题',
+        content: tikuAdapterBalanceRecoveryState.reason === 'quota'
+          ? '当前 Key 额度已用尽或本次请求将超额，当前页面答题已暂停。请调整额度或更换 Key 后，再确认继续。'
+          : '当前账号余额不足，当前页面答题已暂停。充值完成后，请点击“已充值，继续答题”。',
+        confirmButtonText: tikuAdapterBalanceRecoveryState.reason === 'quota' ? '已调整额度或更换 Key，继续答题' : '已充值，继续答题',
         cancelButtonText: '继续暂停'
       });
       if (!confirmed) {
@@ -1438,6 +1441,7 @@ async function requestTikuAdapterBalanceRecovery(
 
       resetTikuAdapterBalanceGuard(config);
       tikuAdapterBalanceRecoveryState.paused = false;
+      tikuAdapterBalanceRecoveryState.reason = 'balance';
       tikuAdapterBalanceRecoveryState.config = undefined;
       continueTikuAdapterWorkers();
       return true;
@@ -1518,7 +1522,9 @@ async function withTikuAdapterAdminWarnings(
 }
 
 async function notifyTikuAdapterInsufficientBalance(searchInfos: SearchInformation[]) {
-  if (!hasInsufficientBalanceError(searchInfos)) return false;
+  const insufficientBalance = hasInsufficientBalanceError(searchInfos);
+  if (!insufficientBalance && !hasAccessTokenQuotaError(searchInfos)) return false;
+  tikuAdapterBalanceRecoveryState.reason = insufficientBalance ? 'balance' : 'quota';
   const config = getStoredTikuAdapterConfig();
   tikuAdapterBalanceRecoveryState.paused = true;
   tikuAdapterBalanceRecoveryState.config = config;
@@ -1572,11 +1578,11 @@ async function appendAIFallbackSearchInfos(
     return searchInfos.concat(fallbackInfos);
   }
 
-  if (fallbackError?.code === 'INSUFFICIENT_BALANCE') {
+  if (fallbackError?.code === 'INSUFFICIENT_BALANCE' || fallbackError?.code === 'ACCESS_TOKEN_QUOTA_EXCEEDED') {
     if (workOptions.aiFallbackFailureAction === 'skip') {
       return searchInfos.concat(fallbackInfos);
     }
-    throw new Error(fallbackInfos[0]?.error || fallbackError.message || 'AI 兜底余额或令牌额度不足，请充值或调整额度后重试。');
+    throw new Error(fallbackInfos[0]?.error || fallbackError.message || 'AI 兜底请求已被账户预算限制，请处理提示后重试。');
   }
 
   return searchInfos.concat(fallbackInfos.map((info) => ({

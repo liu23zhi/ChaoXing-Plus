@@ -107,3 +107,19 @@ export function shouldSkipCacheForManualRetry(result?: {
     }
   });
 }
+
+
+export function hasAccessTokenQuotaError(value: unknown): boolean {
+  if (typeof value === 'string') {
+    // The generic wrapper retains only Error.message; accept our canonical text,
+    // not arbitrary upstream strings mentioning an exhausted quota.
+    return /^(?:ACCESS_TOKEN_QUOTA_EXCEEDED(?::|$)|当前 Key 额度已用尽或本次请求将超额[，。])/.test(value.trim());
+  }
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some(hasAccessTokenQuotaError);
+  const record = value as Record<string, any>;
+  const code = String(record.code ?? record.error?.code ?? '').trim().toUpperCase();
+  if (code) return code === 'ACCESS_TOKEN_QUOTA_EXCEEDED';
+  return hasAccessTokenQuotaError(record.error) || hasAccessTokenQuotaError(record.response?.error)
+    || hasAccessTokenQuotaError(record.ctx?.searchInfos) || hasAccessTokenQuotaError(record.searchInfos);
+}

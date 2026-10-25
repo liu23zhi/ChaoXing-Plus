@@ -7,10 +7,12 @@ import {
   claimTikuAdapterBalanceNotice as claimBalanceNotice,
   isTikuAdapterBalanceBlocked,
   isTikuAdapterInsufficientBalance,
+  isTikuAdapterQuotaExceeded,
   markTikuAdapterBalanceBlocked,
   resolveTikuAdapterRequestIdentity,
   resetTikuAdapterBalanceGuard as resetBalanceGuard,
   TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE,
+  TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE,
   TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
 } from '../core/utils/tiku-adapter-error.js';
 
@@ -30,7 +32,7 @@ export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1260;
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
-export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER' | 'INSUFFICIENT_BALANCE';
+export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER' | 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED';
 
 export type TikuAdapterAIFallbackResult = {
   success: boolean;
@@ -242,6 +244,9 @@ export async function requestTikuAdapterSearchTask(
       markTikuAdapterBalanceBlocked(baseurl, key);
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
     }
+    if (isTikuAdapterQuotaExceeded(error)) {
+      throw createTikuAdapterRequestError({ code: 'ACCESS_TOKEN_QUOTA_EXCEEDED' });
+    }
     throw error;
   }
 }
@@ -348,7 +353,7 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
     rawResponse = await resolveTikuAdapterAIFallbackResponse(baseurl, key, requestPayload, requestOptions);
   } catch (err) {
     const requestError = err instanceof Error && (err as { isTikuAdapterRequestError?: boolean }).isTikuAdapterRequestError
-      ? err as Error & { code: 'INSUFFICIENT_BALANCE' | 'UPSTREAM_ERROR'; status?: number }
+      ? err as Error & { code: 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED' | 'UPSTREAM_ERROR'; status?: number }
       : createTikuAdapterRequestError(err);
     if (requestError.code === 'INSUFFICIENT_BALANCE') {
       markTikuAdapterBalanceBlocked(baseurl, key);
@@ -407,12 +412,14 @@ function sanitizeAIFallbackResponse(response: TikuAdapterAIFallbackResult): Tiku
     };
   }
 
-  const code = error?.code === 'INSUFFICIENT_BALANCE' || error?.code === 'AI_UNAVAILABLE' || error?.code === 'NO_ANSWER' || error?.code === 'INVALID_INPUT' || error?.code === 'UNSAFE_TO_ANSWER'
+  const code = error?.code === 'INSUFFICIENT_BALANCE' || error?.code === 'ACCESS_TOKEN_QUOTA_EXCEEDED' || error?.code === 'AI_UNAVAILABLE' || error?.code === 'NO_ANSWER' || error?.code === 'INVALID_INPUT' || error?.code === 'UNSAFE_TO_ANSWER'
     ? error.code
     : 'UPSTREAM_ERROR';
   const message = code === 'INSUFFICIENT_BALANCE'
     ? TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE
-    : code === 'NO_ANSWER'
+    : code === 'ACCESS_TOKEN_QUOTA_EXCEEDED'
+      ? TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE
+      : code === 'NO_ANSWER'
       ? 'AI 兜底未返回可用答案。'
       : code === 'AI_UNAVAILABLE'
         ? 'AI 兜底暂不可用，请联系管理员。'
@@ -560,6 +567,7 @@ async function pollTikuAdapterAIFallbackStatus(
     };
   } catch (error) {
     const insufficientBalance = isInsufficientBalancePollingError(error);
+    const quotaExceeded = isTikuAdapterQuotaExceeded(error);
     if (insufficientBalance) {
       markTikuAdapterBalanceBlocked(baseurl, key);
     }
@@ -568,10 +576,11 @@ async function pollTikuAdapterAIFallbackStatus(
       status: Date.now() - startedAt >= options.statusTimeoutMs ? 'timeout' : 'failed',
       taskId,
       error: {
-        code: insufficientBalance ? 'INSUFFICIENT_BALANCE' : 'UPSTREAM_ERROR',
+        code: insufficientBalance ? 'INSUFFICIENT_BALANCE' : quotaExceeded ? 'ACCESS_TOKEN_QUOTA_EXCEEDED' : 'UPSTREAM_ERROR',
         message: insufficientBalance
           ? TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE
-          : error instanceof Error ? error.message : String(error)
+          : quotaExceeded ? TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE
+            : error instanceof Error ? error.message : String(error)
       }
     };
   }
@@ -627,7 +636,9 @@ async function requestTikuAdapterJSON<T>(
     Authorization: createTikuAdapterAuthorizationHeader(key)
   });
   const identity = { ...requestIdentity, baseurl: options.balanceScopeBaseurl ?? requestIdentity.baseurl };
-  if (isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+  // Polling an existing task only delivers its original result; it creates no new fee.
+  const existingTaskDelivery = options.method === 'GET' && options.deferBalanceBlockUntilPollingCompletes === true;
+  if (!existingTaskDelivery && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
   }
 
@@ -635,7 +646,9 @@ async function requestTikuAdapterJSON<T>(
   const maxAttempts = Math.max(1, options.retryAttempts);
   const requestBody = options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+    // A transport retry replays the same server idempotency key/body, never a replacement operation.
+    const sameOperationRetry = attempt > 1 && Boolean(options.extraHeaders?.['Idempotency-Key']?.trim());
+    if (!existingTaskDelivery && !sameOperationRetry && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
     }
     const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
@@ -710,6 +723,7 @@ function createHTTPError(status: number, message: string) {
 }
 
 function isRetryableTikuAdapterError(err: unknown) {
+  if (isTikuAdapterQuotaExceeded(err) || isInsufficientBalancePollingError(err)) return false;
   if (err instanceof DOMException && err.name === 'AbortError') {
     return true;
   }
