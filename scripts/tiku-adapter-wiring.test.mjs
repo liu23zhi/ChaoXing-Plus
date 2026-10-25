@@ -75,13 +75,6 @@ test('common panel uses the error summary block for top-level errors and wraps a
   assert.equal(source.includes('applyQuestionTextWrapStyle(link);'), true);
 });
 
-test('common panel applies the shared wrap style to cache source metadata in both panels', async () => {
-  const source = await readFile(commonPath, 'utf8');
-
-  assert.equal(source.includes("const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });"), true);
-  assert.equal(source.includes('applyQuestionTextWrapStyle(meta);'), true);
-});
-
 test('common settings build answerer wrappers from stored tiku adapter config', async () => {
   const source = await readFile(commonPath, 'utf8');
 

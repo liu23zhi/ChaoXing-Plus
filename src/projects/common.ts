@@ -2196,23 +2196,19 @@ function createWorkResultsPanel() {
       item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
 
       const title = createElement('div', { text: cache.title || '未识别题目' });
+      title.style.fontSize = '13px';
       title.style.fontWeight = '700';
       title.style.wordBreak = 'break-word';
       title.style.color = panelPinkTheme.text;
       title.style.lineHeight = '1.6';
 
-      const answer = createElement('div', { text: cache.answer || '空答案' });
+      const answer = createElement('div', { text: `答案：${cache.answer || '空答案'}` });
+      answer.style.fontSize = '12px';
       answer.style.marginTop = '6px';
       answer.style.wordBreak = 'break-word';
       answer.style.color = panelPinkTheme.text;
 
-      const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });
-      meta.style.fontSize = '12px';
-      meta.style.color = panelPinkTheme.muted;
-      meta.style.marginTop = '6px';
-      applyQuestionTextWrapStyle(meta);
-
-      item.append(title, answer, meta);
+      item.append(title, answer);
       cacheList.append(item);
     });
 
@@ -2297,22 +2293,18 @@ function createAppsPanel() {
     item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
 
     const title = createElement('div', { text: cache.title || '未识别题目' });
+    title.style.fontSize = '13px';
     title.style.fontWeight = '600';
     title.style.wordBreak = 'break-word';
     title.style.color = panelPinkTheme.text;
 
-    const answer = createElement('div', { text: cache.answer || '空答案' });
+    const answer = createElement('div', { text: `答案：${cache.answer || '空答案'}` });
+    answer.style.fontSize = '12px';
     answer.style.marginTop = '6px';
     answer.style.wordBreak = 'break-word';
     answer.style.color = panelPinkTheme.text;
 
-    const meta = createElement('div', { text: `来源：${cache.from || '未知题库'}` });
-    meta.style.fontSize = '12px';
-    meta.style.color = panelPinkTheme.muted;
-    meta.style.marginTop = '6px';
-    applyQuestionTextWrapStyle(meta);
-
-    item.append(title, answer, meta);
+    item.append(title, answer);
 
     if (cache.homepage) {
       const link = document.createElement('a');
