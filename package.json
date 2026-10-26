@@ -13,7 +13,7 @@
     "@types/md5": "^2.3.5",
     "@types/node": "^26.6.5",
     "@typescript/typescript6": "^6.0.2",
-    "puppeteer": "^25.14.0",
+    "puppeteer": "^25.16.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   },
