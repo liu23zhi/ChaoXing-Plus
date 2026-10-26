@@ -131,10 +131,33 @@ function createSwal() {
 test('panel root creation claims a top-window lock before appending', async () => {
   const source = await readFile(panelRuntimePath, 'utf8');
 
-  assert.equal(source.includes('function claimTopWindowPanelOwnership()'), true);
-  assert.equal(source.includes('topRoot.dataset.chaoxingPlusPanelOwner = ownerFrameHref;'), true);
-  assert.equal(source.includes('if (ownerFrameHref !== window.location.href) {'), true);
+  assert.equal(source.includes('function isTopFrame()'), true);
+  assert.equal(source.includes('if (!isTopFrame()) {'), true);
+  assert.equal(source.includes('topRoot.dataset.chaoxingPlusPanelOwner = window.location.href;'), true);
+  assert.equal(source.includes('return ownerFrameHref === window.location.href;'), true);
   assert.equal(source.includes("root.dataset.chaoxingPlusLockedOut = 'true';"), true);
+});
+
+test('非顶层 frame 不会抢占面板所有权（进入答题后 about:blank iframe 不再隐藏顶层面板）', async () => {
+  const source = await readFile(panelRuntimePath, 'utf8');
+
+  // 子 frame 必须在任何 owner 写入之前直接返回 false。
+  const claimStart = source.indexOf('function claimTopWindowPanelOwnership()');
+  const childGuard = source.indexOf('if (!isTopFrame()) {', claimStart);
+  const ownerWrite = source.indexOf('topRoot.dataset.chaoxingPlusPanelOwner', claimStart);
+  assert.notEqual(claimStart, -1);
+  assert.notEqual(childGuard, -1);
+  assert.notEqual(ownerWrite, -1);
+  assert.equal(childGuard < ownerWrite, true);
+});
+
+test('顶层 frame 面板被页面替换 body 后会重新挂载', async () => {
+  const source = await readFile(panelRuntimePath, 'utf8');
+
+  assert.equal(source.includes('function ensureTopPanelKeepAlive('), true);
+  assert.equal(source.includes('ensureTopPanelKeepAlive(root);'), true);
+  assert.equal(source.includes('if (root.isConnected) {'), true);
+  assert.equal(source.includes('parent.appendChild(root);'), true);
 });
 
 test('panel root creation appends to body with documentElement fallback', async () => {
@@ -183,7 +206,7 @@ test('modal alerts claim the top z-index and the last paint slot so they cover t
   assert.equal(modalSource.includes('pinSwalHostToPaintTop(targetDocument, host);'), true);
 });
 
-test('nested same-origin alerts target the top document while the top Swal alias is unavailable', async () => {
+test('nested same-origin alerts use the top runtime and target the top document', async () => {
   const { topWindow, childWindow } = createFramePair();
   const topDocument = createModalDocument();
   const childDocument = createModalDocument();
@@ -197,6 +220,18 @@ test('nested same-origin alerts target the top document while the top Swal alias
   const calls = [...topSwal.calls, ...childSwal.calls];
   assert.equal(calls.length, 1);
   assert.equal(calls[0].target, topDocument.target);
+  assert.equal(topSwal.calls.length, 1);
+  assert.equal(childSwal.calls.length, 0);
+});
+
+test('top frame publishes its bundled Swal runtime when the shared alias is missing', async () => {
+  const { topWindow } = createFramePair();
+  const topDocument = createModalDocument();
+  const topSwal = createSwal();
+
+  await loadModalRuntime(topWindow, topDocument, topSwal.runtime);
+
+  assert.equal(topWindow.__chaoxing_plus_swal__, topSwal.runtime);
 });
 
 test('nested alerts reuse a callable top Swal runtime without initializing in the child realm', async () => {

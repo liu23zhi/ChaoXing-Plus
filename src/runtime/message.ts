@@ -146,6 +146,9 @@ function isSwalBridgeOptions(options: unknown): options is SwalFireOptions {
 function installSwalBridge() {
   if (window.top !== window) return;
   const owner = window as unknown as SwalOwnerWindow;
+  if (!isSwalRuntime(owner[swalAliasKey])) {
+    owner[swalAliasKey] = Swal;
+  }
   if (typeof owner[swalFireKey] === 'function') return;
   owner[swalFireKey] = fireLocalSwal;
   window.addEventListener('message', (event: MessageEvent) => {

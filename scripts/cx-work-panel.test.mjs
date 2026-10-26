@@ -167,7 +167,8 @@ test('step-by-step worker stays balance-tracked through page runs and releases a
   const source = await readCxSource();
 
   assert.equal(source.includes("const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });"), true);
-  assert.match(source, /\}\)\(\)\.finally\(\(\) => \{\s+untrackTikuAdapterWorker\(worker\);\s+clearRuntimeControls\(\);\s+\}\);/u);
+  assert.match(source, /stepwiseTaskActive = false;\s+untrackTikuAdapterWorker\(worker\);/u);
+  assert.doesNotMatch(source, /untrackTikuAdapterWorker\(worker\);\s+clearRuntimeControls\(\);\s+\}\);/u);
 });
 
 test('chapter, preview, and step-by-step results refresh after retries and before save or submit', async () => {

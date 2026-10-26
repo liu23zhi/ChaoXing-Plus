@@ -51,20 +51,42 @@ function readSharedBootstrapValue<T>(key: string): T | undefined {
   }
 }
 
-function readLocal<T>(key: string, fallback: T): T {
-  const raw = localStorage.getItem(key);
+interface LocalReadResult<T> {
+  value: T;
+  storageUnavailable: boolean;
+}
+
+function readLocal<T>(key: string, fallback: T): LocalReadResult<T> {
+  let raw: string | null | undefined;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    // Windows 端会注入 about:blank/srcdoc 等不透明 origin 的 frame，访问 localStorage 会抛 SecurityError。
+    raw = undefined;
+  }
+  if (raw === undefined) {
+    const bootstrapValue = readSharedBootstrapValue<T>(key);
+    return {
+      value: bootstrapValue === undefined ? fallback : bootstrapValue,
+      storageUnavailable: true
+    };
+  }
   if (raw === null) {
     const bootstrapValue = readSharedBootstrapValue<T>(key);
     if (bootstrapValue !== undefined) {
-      localStorage.setItem(key, JSON.stringify(bootstrapValue));
-      return bootstrapValue;
+      try {
+        localStorage.setItem(key, JSON.stringify(bootstrapValue));
+      } catch {
+        // 不透明 origin 无法持久化，退回内存值即可。
+      }
+      return { value: bootstrapValue, storageUnavailable: false };
     }
-    return fallback;
+    return { value: fallback, storageUnavailable: false };
   }
   try {
-    return JSON.parse(raw) as T;
+    return { value: JSON.parse(raw) as T, storageUnavailable: false };
   } catch {
-    return fallback;
+    return { value: fallback, storageUnavailable: false };
   }
 }
 
@@ -89,7 +111,11 @@ function hydrateSharedRuntimeValues(detail: unknown) {
     }
 
     writeMemory(key, value);
-    localStorage.setItem(key, serialized);
+    try {
+      localStorage.setItem(key, serialized);
+    } catch {
+      // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值与属性镜像。
+    }
     try {
       document.documentElement?.setAttribute(getSharedAttributeName(key), serialized);
     } catch {
@@ -133,15 +159,27 @@ try {
 
 export const runtimeStore = {
   get<T>(key: string, fallback: T): T {
-    return writeMemory(key, readLocal(key, fallback));
+    const result = readLocal(key, fallback);
+    if (result.storageUnavailable && memoryStore.has(key)) {
+      return memoryStore.get(key) as T;
+    }
+    return writeMemory(key, result.value);
   },
   set<T>(key: string, value: T): void {
     writeMemory(key, value);
-    localStorage.setItem(key, JSON.stringify(value));
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值。
+    }
     emitSharedRuntimeSync(key, value);
   },
   remove(key: string): void {
     memoryStore.delete(key);
-    localStorage.removeItem(key);
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // ignore opaque origin storage failures
+    }
   }
 };

@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "node build.mjs --watch",
     "build": "node build.mjs",
+    "build:windows": "node build.windows.mjs",
+    "windows": "node windows/host/main.mjs",
+    "windows:self-check": "node windows/host/main.mjs --self-check",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

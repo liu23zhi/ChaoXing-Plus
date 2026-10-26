@@ -1,7 +1,19 @@
 import type { ScriptPanel } from './types.js';
 
+function isTopFrame() {
+  try {
+    return window.self === window.top;
+  } catch {
+    return false;
+  }
+}
+
 function claimTopWindowPanelOwnership() {
-  let ownerFrameHref = '';
+  // 非顶层 frame 绝不占用顶层面板所有权：答题页会在 about:blank iframe 里注入业务脚本，
+  // 若子 frame 先把 owner 写成自己的 URL，顶层面板会因 owner 不匹配被隐藏（进入答题后面板消失）。
+  if (!isTopFrame()) {
+    return false;
+  }
 
   try {
     const topRoot = window.top?.document.documentElement;
@@ -9,20 +21,43 @@ function claimTopWindowPanelOwnership() {
       return true;
     }
 
-    ownerFrameHref = topRoot.dataset.chaoxingPlusPanelOwner || '';
+    const ownerFrameHref = topRoot.dataset.chaoxingPlusPanelOwner || '';
     if (!ownerFrameHref) {
-      ownerFrameHref = window.location.href;
-      topRoot.dataset.chaoxingPlusPanelOwner = ownerFrameHref;
+      topRoot.dataset.chaoxingPlusPanelOwner = window.location.href;
+      return true;
     }
 
-    if (ownerFrameHref !== window.location.href) {
-      return false;
-    }
+    return ownerFrameHref === window.location.href;
   } catch {
-    return window.self === window.top;
+    return true;
+  }
+}
+
+// 考试答题页/SPA 可能会替换 body 内容，把已挂载的面板节点从 DOM 移除。
+// 顶层面板被移除时自动重新挂载，保证进入答题后仍然可见。
+function ensureTopPanelKeepAlive(root: HTMLElement) {
+  if (!isTopFrame()) {
+    return;
   }
 
-  return true;
+  try {
+    const observer = new MutationObserver(() => {
+      try {
+        if (root.isConnected) {
+          return;
+        }
+        const parent = document.body || document.documentElement;
+        if (parent) {
+          parent.appendChild(root);
+        }
+      } catch {
+        // ignore remount failures
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  } catch {
+    // ignore MutationObserver failures
+  }
 }
 
 export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel {
@@ -39,9 +74,10 @@ export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel
     root.style.maxHeight = '80vh';
     root.style.overflow = 'auto';
     root.dataset.chaoxingPlusTheme = 'pink';
-    root.style.background = 'linear-gradient(145deg, rgba(255, 240, 247, 0.98) 0%, rgba(255, 250, 253, 0.96) 48%, rgba(255, 236, 244, 0.98) 100%)';
+    // 不透明底色 + 紧凑阴影：半透明 + 大半径阴影在 CEF75/软件渲染下会在面板周围形成模糊光晕。
+    root.style.background = 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)';
     root.style.border = '1px solid rgba(244, 114, 182, 0.30)';
-    root.style.boxShadow = '0 24px 70px rgba(190, 24, 93, 0.20), 0 8px 24px rgba(251, 113, 133, 0.14)';
+    root.style.boxShadow = '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)';
     root.style.borderRadius = '24px';
     root.style.padding = '12px';
     if (!claimTopWindowPanelOwnership()) {
@@ -49,6 +85,7 @@ export function createPanelRoot(id = 'chaoxing-plus-runtime-panel'): ScriptPanel
       root.dataset.chaoxingPlusLockedOut = 'true';
     }
     (document.body || document.documentElement).appendChild(root);
+    ensureTopPanelKeepAlive(root);
   }
 
   const lockWrapper = document.createElement('div');

@@ -1,7 +1,9 @@
 node_modules/
 dist/
+dist-windows/
 .tmp-tests/
 .tmp-tests-*/
+windows/data/
 *.log
 .DS_Store
 /.history

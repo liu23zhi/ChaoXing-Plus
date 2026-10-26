@@ -843,7 +843,9 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     data: {
       qid: '',
       question: {
-        handler: `return (env) => String(env.title ?? '').trim()`
+        // 内置 handler 是运行期用 Function(...) 求值的字符串，不经过构建期转译；
+        // 目标 Windows 客户端是 CEF/Chromium 75（不支持 ?. 与 ??），因此这里保持 ES2019 语法。
+        handler: `return (env) => { const title = env.title == null ? '' : env.title; return String(title).trim(); }`
       },
       options: {
         // 抓取页面选项时会把富文本编辑器（UEditor）与 jQuery 初始化源码一起带进来：线上实测一次请求 55 条 options 里绝大多数是源码。
@@ -853,11 +855,11 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
         // 或是以 ASCII 分号 `;` 结尾的 JS 语句行（截断后的片段如 `wordNum = "";` 会绕过前几条规则，而选项文本不会以 `;` 收尾）；
         // 正常选项是自然语言或公式，不会以这些 token 开头或收尾，也不会只由符号组成，因此不会被误删。
         // 结果按首次出现顺序去重；若过滤后一条不剩（整题选项恰好长得像代码），回退为原始列表，绝不返回空数组。
-        handler: `return (env) => { const raw = String(env.options ?? '').split(/\\n+/).map((item) => item.trim()).filter(Boolean); const isNoise = (item) => /function\\s*[$\\w]*\\s*\\(|=>|\\$\\(|\\.parent\\(|\\.find\\(|\\.removeClass\\(|\\.addClass\\(|\\.css\\(|UEDITOR_CONFIG|\\.edui-|addListener\\(|contentChange|;$/.test(item) || /^(var|let|const|if|else|window\\.|document\\.|editor\\d*\\.|\\$\\.|\\/\\/|\\/\\*|\\} else|\\.\\w+\\()/.test(item) || !/[\\p{L}\\p{N}]/u.test(item); const kept = []; for (const item of raw) { if (!isNoise(item) && !kept.includes(item)) kept.push(item); } return kept.length > 0 ? kept : raw; }`
+        handler: `return (env) => { const raw = String(env.options == null ? '' : env.options).split(/\\n+/).map((item) => item.trim()).filter(Boolean); const isNoise = (item) => /function\\s*[$\\w]*\\s*\\(|=>|\\$\\(|\\.parent\\(|\\.find\\(|\\.removeClass\\(|\\.addClass\\(|\\.css\\(|UEDITOR_CONFIG|\\.edui-|addListener\\(|contentChange|;$/.test(item) || /^(var|let|const|if|else|window\\.|document\\.|editor\\d*\\.|\\$\\.|\\/\\/|\\/\\*|\\} else|\\.\\w+\\()/.test(item) || !/[\\p{L}\\p{N}]/u.test(item); const kept = []; for (const item of raw) { if (!isNoise(item) && !kept.includes(item)) kept.push(item); } return kept.length > 0 ? kept : raw; }`
       },
       type: {
         handler: `return (env) => {
-          const value = String(env.type ?? 'unknown');
+          const value = String(env.type == null ? 'unknown' : env.type);
           return value === 'single'
             ? 0
             : value === 'multiple'
@@ -879,34 +881,36 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       }
     },
     handler: `return (res) => {
-      const question = typeof res?.question === 'string' ? res.question : '';
-      const isChoiceType = res?.type === 0 || res?.type === 1;
-      const answerKeyText = typeof res?.answer?.answerKeyText === 'string' ? res.answer.answerKeyText.trim() : '';
+      const data = res == null ? {} : res;
+      const answer = data.answer == null ? {} : data.answer;
+      const question = typeof data.question === 'string' ? data.question : '';
+      const isChoiceType = data.type === 0 || data.type === 1;
+      const answerKeyText = typeof answer.answerKeyText === 'string' ? answer.answerKeyText.trim() : '';
       if (isChoiceType && answerKeyText) {
         return [question, answerKeyText, { source: 'tikuAdapter' }];
       }
 
-      const answerIndex = Array.isArray(res?.answer?.answerIndex)
-        ? res.answer.answerIndex.filter((item) => Number.isInteger(item) && item >= 0)
+      const answerIndex = Array.isArray(answer.answerIndex)
+        ? answer.answerIndex.filter((item) => Number.isInteger(item) && item >= 0)
         : [];
       if (isChoiceType && answerIndex.length > 0) {
         return [question, answerIndex.map((index) => String.fromCharCode(index + 65)).join(''), { source: 'tikuAdapter' }];
       }
 
-      const answerText = typeof res?.answer?.answerText === 'string' ? res.answer.answerText.trim() : '';
+      const answerText = typeof answer.answerText === 'string' ? answer.answerText.trim() : '';
       if (answerText) {
         return [question, answerText, { source: 'tikuAdapter' }];
       }
 
-      const bestAnswer = Array.isArray(res?.answer?.bestAnswer)
-        ? res.answer.bestAnswer.map((item) => String(item).trim()).filter(Boolean)
+      const bestAnswer = Array.isArray(answer.bestAnswer)
+        ? answer.bestAnswer.map((item) => String(item).trim()).filter(Boolean)
         : [];
       if (bestAnswer.length > 0) {
         return [question, bestAnswer.join('#'), { source: 'tikuAdapter' }];
       }
 
-      const firstAllAnswer = Array.isArray(res?.answer?.allAnswer)
-        ? res.answer.allAnswer.find((item) => Array.isArray(item) && item.map((value) => String(value).trim()).filter(Boolean).length > 0)
+      const firstAllAnswer = Array.isArray(answer.allAnswer)
+        ? answer.allAnswer.find((item) => Array.isArray(item) && item.map((value) => String(value).trim()).filter(Boolean).length > 0)
         : undefined;
       if (firstAllAnswer) {
         return [question, firstAllAnswer.join('#'), { source: 'tikuAdapter' }];

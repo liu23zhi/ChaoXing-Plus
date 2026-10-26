@@ -116,7 +116,7 @@ test('top-owned runtime works without the asynchronous vendor alias and covers t
     await installRuntime(frame);
     await startAlert(frame);
     await page.waitForSelector('.swal2-confirm', { visible: true });
-    assert.equal(await page.evaluate(() => typeof window.__chaoxing_plus_swal__), 'undefined');
+    assert.equal(await page.evaluate(() => typeof window.__chaoxing_plus_swal__), 'function');
     const covered = await page.evaluate(() => {
       const button = document.querySelector('.swal2-confirm');
       const rect = button.getBoundingClientRect();

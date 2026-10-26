@@ -22,12 +22,12 @@ test('cx registers runtime stop continue and retry controls with the common work
   assert.equal(source.includes('void requestTikuAdapterBalanceRecovery();'), true);
   assert.equal(source.includes('workResultsMethods().refresh?.();'), true);
   assert.equal(source.includes('retryQuestion: async (index) =>'), true);
-  assert.equal(source.includes('canRetryQuestion: (index) => Boolean(roots[index]) && !tikuAdapterBalanceRecoveryState.paused'), true);
-  assert.equal(source.includes('canRetryQuestion: (index) => Boolean(liveRoots()[index]) && !tikuAdapterBalanceRecoveryState.paused'), true);
-  assert.equal(source.match(/if \(!\(await allowTikuAdapterRetryAfterBalanceRecovery\(\)\)\)/g)?.length, 2);
+  assert.equal(source.includes('canRetryQuestion: (index) => Boolean(roots[index]) && !taskBusy && !uploadInProgress && !tikuAdapterBalanceRecoveryState.paused'), true);
+  assert.equal(source.includes('canRetryQuestion: (index) =>'), true);
+  assert.equal(source.match(/if \(!\(await allowTikuAdapterRetryAfterBalanceRecovery\(\)\)\)/g)?.length, 3);
   assert.equal(source.includes("worker.on('done', clearRuntimeControls);"), false);
   assert.equal(source.includes("worker.on('close', clearRuntimeControls);"), true);
-  assert.equal(source.includes('})().finally(clearRuntimeControls);'), true);
+  assert.equal(source.includes('})().finally(clearRuntimeControls);'), false);
 });
 
 test('search defaults to four concurrent workers across shared and Chaoxing entry points', async () => {

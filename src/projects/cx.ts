@@ -56,6 +56,130 @@ import {
 
 let topWindow: Window = window.top ?? window;
 
+function isWindowsHostRuntime() {
+  try {
+    return Boolean((window as unknown as { __CX_WIN_HOST__?: unknown }).__CX_WIN_HOST__);
+  } catch {
+    return false;
+  }
+}
+
+function getWindowsRuntimeSetting<T>(name: string, fallback: T): T {
+  return isWindowsHostRuntime()
+    ? runtimeStore.get(`common.settings.windows-${name}`, fallback)
+    : fallback;
+}
+
+type WindowsAnswerShortcut = {
+  key: string;
+  ctrl: boolean;
+  alt: boolean;
+  shift: boolean;
+  meta: boolean;
+};
+
+function normalizeWindowsAnswerKey(value: unknown): WindowsAnswerShortcut {
+  const parts = String(value || 'F8')
+    .split('+')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  const aliases: Record<string, keyof Pick<WindowsAnswerShortcut, 'ctrl' | 'alt' | 'shift' | 'meta'>> = {
+    ctrl: 'ctrl',
+    control: 'ctrl',
+    alt: 'alt',
+    shift: 'shift',
+    meta: 'meta',
+    win: 'meta',
+    windows: 'meta',
+    command: 'meta'
+  };
+  const shortcut: WindowsAnswerShortcut = {
+    key: 'F8',
+    ctrl: false,
+    alt: false,
+    shift: false,
+    meta: false
+  };
+  parts.forEach((part) => {
+    const modifier = aliases[part];
+    if (modifier) {
+      shortcut[modifier] = true;
+      return;
+    }
+    shortcut.key = part === 'space' ? ' ' : part === 'esc' ? 'escape' : part;
+  });
+  return shortcut;
+}
+
+function matchesWindowsAnswerKey(event: KeyboardEvent, configuredKey: unknown) {
+  if (event.repeat) return false;
+  const shortcut = normalizeWindowsAnswerKey(configuredKey);
+  const eventKey = String(event.key || '').toLowerCase();
+  return eventKey === shortcut.key
+    && event.ctrlKey === shortcut.ctrl
+    && event.altKey === shortcut.alt
+    && event.shiftKey === shortcut.shift
+    && event.metaKey === shortcut.meta;
+}
+
+function formatWindowsAnswerKey(value: unknown) {
+  return String(value || 'F8').split('+').map((part) => part.trim()).filter(Boolean).join('+');
+}
+
+function isWindowsManualAnswerMode() {
+  return isWindowsHostRuntime() && getWindowsRuntimeSetting<'manual' | 'auto'>('answer-mode', 'auto') === 'manual';
+}
+
+function createWindowsManualAnswerGate(targetDocuments: Document[]) {
+  if (!isWindowsManualAnswerMode()) return undefined;
+
+  const configuredKey = getWindowsRuntimeSetting('answer-key', 'F8');
+  const keyLabel = formatWindowsAnswerKey(configuredKey);
+  const rawThreadCount = Number.parseInt(String(getWindowsRuntimeSetting('answer-threads', 4)), 10);
+  const triggerCount = Number.isFinite(rawThreadCount)
+    ? Math.max(1, Math.min(4, rawThreadCount))
+    : DEFAULT_WORKER_THREAD_COUNT;
+  const waiters: Array<() => void> = [];
+  let pendingTokens = 0;
+  const documents = [...new Set(targetDocuments.filter(Boolean))];
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (!matchesWindowsAnswerKey(event, configuredKey)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const count = Math.min(triggerCount + pendingTokens, waiters.length);
+    pendingTokens = triggerCount + pendingTokens - count;
+    for (let index = 0; index < count; index += 1) {
+      waiters.shift()?.();
+    }
+    showTopCenterNotice(
+      count > 0
+        ? `已触发 ${count} 道题；继续答题请按 ${keyLabel}。`
+        : `已预授权 ${triggerCount} 道题；继续答题请按 ${keyLabel}。`,
+      { duration: 1800 }
+    );
+  };
+
+  documents.forEach((targetDocument) => targetDocument.addEventListener('keydown', onKeyDown, true));
+  showTopCenterNotice(`手动答题已就绪，按 ${keyLabel} 触发 ${triggerCount} 道题。`, { duration: 0 });
+
+  return {
+    wait() {
+      return new Promise<void>((resolve) => {
+        if (pendingTokens > 0) {
+          pendingTokens -= 1;
+          resolve();
+          return;
+        }
+        waiters.push(resolve);
+      });
+    },
+    close() {
+      documents.forEach((targetDocument) => targetDocument.removeEventListener('keydown', onKeyDown, true));
+      clearTopCenterNotice();
+    }
+  };
+}
+
 try {
   const unsafeTop = topWindow as Window & Record<string, any>;
   unsafeTop.typrMapping = unsafeTop.typrMapping || undefined;
@@ -1469,6 +1593,11 @@ async function waitForTikuAdapterBalanceRecovery() {
 }
 
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
+  if (isWindowsManualAnswerMode()) return true;
+  if (getWindowsRuntimeSetting<boolean>('show-answer-dialog', true) === false) {
+    return true;
+  }
+
   const result = await $modal.confirm({
     content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
     confirmButtonText: '立即自动答题',
@@ -3468,6 +3597,8 @@ const JobRunner = {
         .trim();
     };
 
+    const manualAnswerGate = createWindowsManualAnswerGate([frameDocument, document]);
+
     const deduplicateSearchRequest = createSearchRequestDeduplicator<SearchInformation[]>();
     const createChapterWorker = (
       questionRoots: HTMLElement[],
@@ -3490,7 +3621,7 @@ const JobRunner = {
         thread: thread ?? DEFAULT_WORKER_THREAD_COUNT,
         answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
         answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
-        answerer: (elements, ctx) => {
+        answerer: async (elements, ctx) => {
           const title = chapterTestTaskQuestionTitleTransform(elements.title);
           if (!title) {
             throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
@@ -3532,6 +3663,7 @@ const JobRunner = {
             return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
           };
 
+          if (typeof manualAnswerGate !== 'undefined') await manualAnswerGate?.wait();
           const searchInCaches = appsMethods().searchAnswerInCaches;
           return searchInCaches && !workerOptions.skipCache
             ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
@@ -3695,6 +3827,8 @@ const JobRunner = {
       }
     });
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    let taskBusy = true;
+    let uploadInProgress = false;
 
     workResultsMethods().setRuntimeControls?.({
       isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
@@ -3707,7 +3841,7 @@ const JobRunner = {
         }
         worker.emit('continuate');
       },
-      canRetryQuestion: (index) => Boolean(roots[index]) && !tikuAdapterBalanceRecoveryState.paused,
+      canRetryQuestion: (index) => Boolean(roots[index]) && !taskBusy && !uploadInProgress && !tikuAdapterBalanceRecoveryState.paused,
       retryQuestion: async (index) => {
         const root = roots[index];
         if (!root) {
@@ -3719,6 +3853,7 @@ const JobRunner = {
         }
 
         resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
+        workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
 
         const chapterRetryCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
           targetJobId: frame.getAttribute('jobid') ?? frame.getAttribute('data') ?? '',
@@ -3808,6 +3943,7 @@ const JobRunner = {
     }
 
     async function retryUnfinishedChapterQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+      if (typeof isWindowsManualAnswerMode === 'function' && isWindowsManualAnswerMode()) return results;
       const retryableResults = results.slice();
       for (let index = 0; index < retryableResults.length; index++) {
         await waitForTikuAdapterBalanceRecovery();
@@ -3831,30 +3967,37 @@ const JobRunner = {
 
     try {
       const results = await worker.doWork();
-      const retryableResults = await retryUnfinishedChapterQuestions(results);
-      await waitForTikuAdapterBalanceRecovery();
-      notifyManualAnswerRequired(retryableResults);
-      workResultsMethods().refresh?.();
-      logDebug('info', '动作节点诊断：答题结果已生成', {
-        resultCount: retryableResults.length,
-        uploadMode: upload,
-        stopSecondWhenFinish
-      }, undefined, { correlationId: chapterActionCorrelationId });
-      const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
-      $console.info(msg);
-      $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
-      await sleep(stopSecondWhenFinish * 1000);
-      await waitForTikuAdapterBalanceRecovery();
+        const retryableResults = await retryUnfinishedChapterQuestions(results);
+        await waitForTikuAdapterBalanceRecovery();
+        notifyManualAnswerRequired(retryableResults);
+        workResultsMethods().refresh?.();
+        if (isWindowsManualAnswerMode()) {
+          $message.info({ content: '手动答题已完成；为避免误操作，本次不会自动保存或提交。', duration: 5000 });
+          worker.emit('done');
+          return { finished: false };
+        }
+        logDebug('info', '动作节点诊断：答题结果已生成', {
+          resultCount: retryableResults.length,
+          uploadMode: upload,
+          stopSecondWhenFinish
+        }, undefined, { correlationId: chapterActionCorrelationId });
+        const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
+        uploadInProgress = true;
+        $console.info(msg);
+        $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
+        await sleep(stopSecondWhenFinish * 1000);
+        await waitForTikuAdapterBalanceRecovery();
 
-      logDebug('info', '动作节点诊断：准备提交或保存', {
-        resultCount: retryableResults.length,
-        uploadMode: upload,
-        stopSecondWhenFinish
-      }, undefined, { correlationId: chapterActionCorrelationId });
-      let chapterFinished = false;
-      let latestFinishedRate: number | undefined;
-      let latestUploadable: boolean | undefined;
-      await worker.uploadHandler({
+        logDebug('info', '动作节点诊断：准备提交或保存', {
+          resultCount: retryableResults.length,
+          uploadMode: upload,
+          stopSecondWhenFinish
+        }, undefined, { correlationId: chapterActionCorrelationId });
+        let chapterFinished = false;
+        let latestFinishedRate: number | undefined;
+        let latestUploadable: boolean | undefined;
+        try {
+          await worker.uploadHandler({
         type: upload === 'submit' ? 100 : upload,
         results: retryableResults,
         async callback(finishedRate, uploadable) {
@@ -3928,16 +4071,21 @@ const JobRunner = {
             chapterFinished = false;
           }
         }
-      });
+          });
+        } finally {
+          uploadInProgress = false;
+        }
 
-      worker.emit('done');
-      return {
-        finished: chapterFinished,
-        finishedRate: latestFinishedRate,
-        uploadable: latestUploadable
-      };
+        worker.emit('done');
+        return {
+          finished: chapterFinished,
+          finishedRate: latestFinishedRate,
+          uploadable: latestUploadable
+        };
     } finally {
-      clearRuntimeControls();
+      manualAnswerGate?.close();
+      taskBusy = false;
+      workResultsMethods().refresh?.();
     }
   },
   async readPPTWithAudio(win: Window & { swiperNext?: () => void }, attachment?: Attachment) {
@@ -3994,6 +4142,7 @@ function workOrExam(
     targetJobId: type,
     jobName: preview_mode ? `${type}-preview` : `${type}-step-by-step`
   });
+  const manualAnswerGate = createWindowsManualAnswerGate([document]);
   $message.info(`开始${type === 'work' ? '作业' : '考试'}`);
 
   if (preview_mode) {
@@ -4461,7 +4610,7 @@ function workOrExam(
       thread: thread ?? DEFAULT_WORKER_THREAD_COUNT,
       answerSeparators: answerSeparators.split(',').map((s) => s.trim()),
       answerMatchMode: answerMatchMode === 'includes' ? 'similar' : answerMatchMode,
-      answerer: (elements, ctx) => {
+      answerer: async (elements, ctx) => {
         if (!elements.title) {
           throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
         }
@@ -4504,6 +4653,7 @@ function workOrExam(
           return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
         };
 
+        if (typeof manualAnswerGate !== 'undefined') await manualAnswerGate?.wait();
         const searchInCaches = appsMethods().searchAnswerInCaches;
         return searchInCaches && !workerOptions.skipCache
           ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
@@ -4722,6 +4872,7 @@ function workOrExam(
   }
 
   async function retryUnfinishedWorkOrExamQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+    if (typeof isWindowsManualAnswerMode === 'function' && isWindowsManualAnswerMode()) return results;
     const liveRoots = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
     const retryableResults = results.slice();
     for (let index = 0; index < retryableResults.length; index++) {
@@ -4798,6 +4949,9 @@ function workOrExam(
   if (preview_mode) {
     const liveRoots = () => Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    let taskBusy = true;
+    let uploadInProgress = false;
+    let retryInFlight = false;
 
     workResultsMethods().setRuntimeControls?.({
       isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
@@ -4810,48 +4964,58 @@ function workOrExam(
         }
         worker.emit('continuate');
       },
-      canRetryQuestion: (index) => Boolean(liveRoots()[index]) && !tikuAdapterBalanceRecoveryState.paused,
+      canRetryQuestion: (index) => Boolean(liveRoots()[index]) && !taskBusy && !uploadInProgress && !retryInFlight && !tikuAdapterBalanceRecoveryState.paused,
       retryQuestion: async (index) => {
+        if (retryInFlight) {
+          return undefined;
+        }
         const root = liveRoots()[index];
         if (!root) {
           return undefined;
         }
 
-        if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
-          return undefined;
+        retryInFlight = true;
+        try {
+          if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
+            return undefined;
+          }
+
+          resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
+          workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
+
+          logDebug('info', '动作节点诊断：开始单题重答', {
+            index,
+            total: liveRoots().length,
+            mode: type
+          }, undefined, { correlationId: workExamCorrelationId });
+          const retryWorker = createWorkOrExamWorker([root], {
+            suppressWorkResultsPanelUpdate: true,
+            skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
+          });
+          const retriedResults = await retryWorker.doWork();
+          notifyManualAnswerRequired(retriedResults);
+          logDebug('info', '动作节点诊断：单题重答完成', {
+            index,
+            total: liveRoots().length,
+            resultCount: retriedResults.length,
+            mode: type
+          }, undefined, { correlationId: workExamCorrelationId });
+          return {
+            ...simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0],
+            manual: false,
+            retrying: false
+          };
+        } finally {
+          retryInFlight = false;
         }
-
-        resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
-
-        logDebug('info', '动作节点诊断：开始单题重答', {
-          index,
-          total: liveRoots().length,
-          mode: type
-        }, undefined, { correlationId: workExamCorrelationId });
-        const retryWorker = createWorkOrExamWorker([root], {
-          suppressWorkResultsPanelUpdate: true,
-          skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
-        });
-        const retriedResults = await retryWorker.doWork();
-        notifyManualAnswerRequired(retriedResults);
-        logDebug('info', '动作节点诊断：单题重答完成', {
-          index,
-          total: liveRoots().length,
-          resultCount: retriedResults.length,
-          mode: type
-        }, undefined, { correlationId: workExamCorrelationId });
-        return {
-          ...simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0],
-          manual: false,
-          retrying: false
-        };
       }
     });
 
     worker.on('close', clearRuntimeControls);
     void (async () => {
-      const confirmed = await confirmBeforeAutoAnswer(worker);
+      const confirmed = isWindowsHostRuntime() ? await confirmBeforeAutoAnswer(worker) : true;
       if (!confirmed) {
+        clearRuntimeControls();
         return;
       }
 
@@ -4866,21 +5030,163 @@ function workOrExam(
         await waitForTikuAdapterBalanceRecovery();
         notifyManualAnswerRequired(retryableResults);
         workResultsMethods().refresh?.();
+        if (isWindowsManualAnswerMode()) {
+          $message.info({ content: '手动答题已完成；为避免误操作，本次不会自动保存或提交。', duration: 5000 });
+          worker.emit('done');
+          return;
+        }
         logDebug('info', '动作节点诊断：作业/考试答题完成', {
           type,
           preview_mode,
           questionCount: liveRoots().length
         }, undefined, { correlationId: workExamCorrelationId });
-        await uploadWorkOrExamResults(retryableResults);
+        uploadInProgress = true;
+        try {
+          await uploadWorkOrExamResults(retryableResults);
+        } finally {
+          uploadInProgress = false;
+        }
         worker.emit('done');
       } catch (err) {
         console.error(err);
         $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
       }
-    })().finally(clearRuntimeControls);
+    })().finally(() => {
+      manualAnswerGate?.close();
+      taskBusy = false;
+      workResultsMethods().refresh?.();
+    });
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
     const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    let stepwiseCurrentIndex = 0;
+    let stepwiseTaskActive = true;
+    let stepwiseUploadInProgress = false;
+    let stepwiseRetryInFlight = false;
+    let stepwiseNavigationLost = false;
+
+    const getStepwiseResults = () => workResultsMethods().getResults?.() ?? [];
+    const getStepwiseQuestionTitle = (root: HTMLElement | null) => root
+      ? workOrExamQuestionTitleTransform(Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector)))
+      : '';
+    const resolveStepwiseCurrentIndex = (results: SimplifyWorkResult[]) => {
+      const boundedIndex = Math.min(Math.max(stepwiseCurrentIndex, 0), Math.max(results.length - 1, 0));
+      const currentTitle = getStepwiseQuestionTitle(document.querySelector<HTMLElement>('.questionLi'));
+      if (!currentTitle || results[boundedIndex]?.question === currentTitle) {
+        stepwiseCurrentIndex = boundedIndex;
+        return stepwiseCurrentIndex;
+      }
+
+      const matchingIndexes = results.reduce<number[]>((matches, result, index) => {
+        if (result.question === currentTitle) {
+          matches.push(index);
+        }
+        return matches;
+      }, []);
+      if (matchingIndexes.length === 1) {
+        stepwiseCurrentIndex = matchingIndexes[0];
+      } else {
+        stepwiseNavigationLost = true;
+      }
+      return stepwiseCurrentIndex;
+    };
+
+    const validateStepwisePage = (results: SimplifyWorkResult[], index: number) => {
+      const expectedTitle = results[index]?.question;
+      const actualTitle = getStepwiseQuestionTitle(document.querySelector<HTMLElement>('.questionLi'));
+      if (expectedTitle && actualTitle && expectedTitle !== actualTitle) {
+        stepwiseNavigationLost = true;
+        return false;
+      }
+      return true;
+    };
+
+    const retryStepwiseQuestion = async (index: number) => {
+      if (stepwiseRetryInFlight || stepwiseNavigationLost) {
+        return undefined;
+      }
+
+      const results = getStepwiseResults();
+      const initialResult = results[index];
+      if (!initialResult) {
+        return undefined;
+      }
+
+      stepwiseRetryInFlight = true;
+      const originalIndex = resolveStepwiseCurrentIndex(results);
+      const direction: -1 | 1 = index >= originalIndex ? 1 : -1;
+      let moved = 0;
+
+      try {
+        while (stepwiseCurrentIndex !== index) {
+          if (!navigateWorkOrExamQuestion(direction)) {
+            throw new Error('未找到作业/考试题目切换控件，无法定位待重答题目。');
+          }
+          await sleep(1000);
+          stepwiseCurrentIndex += direction;
+          moved++;
+          if (!validateStepwisePage(results, stepwiseCurrentIndex)) {
+            throw new Error('切换后题目与重答结果不匹配，已取消本次重答。');
+          }
+        }
+
+        const root = document.querySelector<HTMLElement>('.questionLi');
+        const currentTitle = getStepwiseQuestionTitle(root);
+        if (!root || (currentTitle && initialResult.question && currentTitle !== initialResult.question)) {
+          throw new Error('切换后题目与重答结果不匹配，已取消本次重答。');
+        }
+
+        if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
+          return undefined;
+        }
+
+        resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
+        workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
+        const retryWorker = createWorkOrExamWorker([root], {
+          suppressWorkResultsPanelUpdate: true,
+          skipCache: shouldSkipCacheForManualRetry(initialResult)
+        });
+        const retriedResults = await retryWorker.doWork();
+        notifyManualAnswerRequired(retriedResults);
+        const retried = simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0];
+        if (!retried) {
+          workResultsMethods().patchResult?.(index, { retrying: false });
+          return undefined;
+        }
+
+        const result = {
+          ...retried,
+          manual: false,
+          retrying: false
+        };
+        workResultsMethods().patchResult?.(index, result);
+        return result;
+      } finally {
+        let restored = true;
+        while (moved > 0) {
+          const restoreDirection: -1 | 1 = direction === 1 ? -1 : 1;
+          if (!navigateWorkOrExamQuestion(restoreDirection)) {
+            restored = false;
+            break;
+          }
+          await sleep(1000);
+          stepwiseCurrentIndex += restoreDirection;
+          moved--;
+          if (!validateStepwisePage(results, stepwiseCurrentIndex)) {
+            restored = false;
+            break;
+          }
+        }
+        if (restored) {
+          stepwiseCurrentIndex = originalIndex;
+          stepwiseNavigationLost = false;
+        } else {
+          stepwiseNavigationLost = true;
+          stepwiseCurrentIndex = resolveStepwiseCurrentIndex(results);
+        }
+        stepwiseRetryInFlight = false;
+      }
+    };
 
     workResultsMethods().setRuntimeControls?.({
       isRunning: () => worker.isRunning || tikuAdapterBalanceRecoveryState.paused,
@@ -4893,12 +5199,15 @@ function workOrExam(
         }
         worker.emit('continuate');
       },
-      canRetryQuestion: () => false,
-      retryQuestion: async () => undefined
+      canRetryQuestion: (index) => Boolean(workResultsMethods().getResults?.()?.[index]) && !stepwiseTaskActive && !stepwiseUploadInProgress && !stepwiseRetryInFlight && !stepwiseNavigationLost && !tikuAdapterBalanceRecoveryState.paused,
+      retryQuestion: retryStepwiseQuestion
     });
     worker.on('close', clearRuntimeControls);
 
     void (async () => {
+      const confirmed = isWindowsHostRuntime() ? await confirmBeforeAutoAnswer(worker) : true;
+      if (!confirmed) return;
+
       logDebug('info', '动作节点诊断：开始逐题切换答题', {
         type,
         preview_mode,
@@ -4923,6 +5232,7 @@ function workOrExam(
       });
 
       const retryCount = accumulatedResults.length;
+      stepwiseCurrentIndex = Math.max(retryCount - 1, 0);
       if (retryCount > 0) {
         await waitForTikuAdapterBalanceRecovery();
         let canRetryFromFirstPage = !tikuAdapterBalanceRecoveryState.paused;
@@ -4933,6 +5243,7 @@ function workOrExam(
             break;
           }
           await sleep(1000);
+          stepwiseCurrentIndex--;
         }
         if (canRetryFromFirstPage) {
           try {
@@ -4949,6 +5260,7 @@ function workOrExam(
                   throw new Error('未找到作业/考试下一题控件，无法继续未完成题重答。');
                 }
                 await sleep(1000);
+                stepwiseCurrentIndex++;
               },
               (result) => Boolean(result.result?.finish),
               () => !tikuAdapterBalanceRecoveryState.paused,
@@ -4971,11 +5283,23 @@ function workOrExam(
       await waitForTikuAdapterBalanceRecovery();
       notifyManualAnswerRequired(accumulatedResults);
       workResultsMethods().refresh?.();
-      await uploadWorkOrExamResults(accumulatedResults);
+      if (isWindowsManualAnswerMode()) {
+        $message.info({ content: '手动答题已完成；为避免误操作，本次不会自动保存或提交。', duration: 5000 });
+        worker.emit('done');
+        return;
+      }
+      stepwiseUploadInProgress = true;
+      try {
+        await uploadWorkOrExamResults(accumulatedResults);
+      } finally {
+        stepwiseUploadInProgress = false;
+      }
       worker.emit('done');
     })().finally(() => {
+      manualAnswerGate?.close();
+      stepwiseTaskActive = false;
       untrackTikuAdapterWorker(worker);
-      clearRuntimeControls();
+      workResultsMethods().refresh?.();
     });
   }
 

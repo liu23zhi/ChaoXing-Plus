@@ -9,7 +9,7 @@ import {
   toggleWorkResultsPanelCollapsed,
   formatEnabledStudyTaskCapabilitySummary
 } from './study-panel-state.js';
-import { shouldShowFloatingPanel } from './panel-visibility.js';
+import { shouldShowFloatingPanel, isWindowsExamRelatedUrl } from './panel-visibility.js';
 import {
   createHighPlaybackRateWarningState,
   warnOnHighPlaybackRate
@@ -79,6 +79,11 @@ interface QuestionCache {
 }
 
 const WORK_RESULTS_PANEL_POSITION_KEY = 'common.work-results.panel-position';
+const WINDOWS_PANEL_ENABLED_KEY = 'common.settings.windows-panel-enabled';
+const WINDOWS_PANEL_COLLAPSED_KEY = 'common.settings.windows-panel-collapsed';
+const WINDOWS_PANEL_TOP_KEY = 'common.settings.windows-panel-top';
+const WINDOWS_PANEL_RIGHT_KEY = 'common.settings.windows-panel-right';
+const WINDOWS_PANEL_WIDTH_KEY = 'common.settings.windows-panel-width';
 
 const WORK_OPTIONS_KEY = 'common.settings.work-options';
 const WORK_RESULTS_KEY = 'common.work-results.results';
@@ -135,18 +140,20 @@ const panelPinkTheme = {
   primaryDeep: '#be185d',
   primarySoft: 'rgba(244, 114, 182, 0.14)',
   primaryGradient: 'linear-gradient(135deg, #db2777 0%, #f472b6 55%, #fb7185 100%)',
-  shellGradient: 'linear-gradient(145deg, rgba(255, 240, 247, 0.98) 0%, rgba(255, 250, 253, 0.96) 48%, rgba(255, 236, 244, 0.98) 100%)',
-  heroGradient: 'radial-gradient(circle at 18% 0%, rgba(251, 207, 232, 0.82) 0%, transparent 32%), linear-gradient(135deg, rgba(255, 241, 248, 0.98) 0%, rgba(255, 247, 252, 0.98) 54%, rgba(255, 228, 235, 0.96) 100%)',
-  sectionGradient: 'linear-gradient(180deg, rgba(255,255,255,0.78) 0%, rgba(255, 241, 248, 0.82) 100%)',
-  surface: 'rgba(255, 250, 253, 0.92)',
-  surfaceStrong: 'rgba(255,255,255,0.96)',
+  // Windows / CEF75 与软件渲染环境下，半透明底色 + backdrop-filter + 大半径阴影会让悬浮窗周围
+  // 出现模糊光晕；这里统一改成不透明底色 + 紧凑阴影，保证面板边缘与页面内容清晰。
+  shellGradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
+  heroGradient: 'radial-gradient(circle at 18% 0%, rgba(251, 207, 232, 0.82) 0%, transparent 32%), linear-gradient(135deg, #fff1f8 0%, #fff7fc 54%, #ffe4eb 100%)',
+  sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #fff1f8 100%)',
+  surface: '#fffafd',
+  surfaceStrong: '#ffffff',
   border: 'rgba(244, 114, 182, 0.24)',
   borderStrong: 'rgba(219, 39, 119, 0.34)',
   text: '#831843',
   muted: '#9d174d',
-  shadow: '0 18px 48px rgba(190, 24, 93, 0.12)',
-  heroShadow: '0 20px 54px rgba(190, 24, 93, 0.16), inset 0 1px 0 rgba(255,255,255,0.72)',
-  shellShadow: '0 24px 70px rgba(190, 24, 93, 0.20), 0 8px 24px rgba(251, 113, 133, 0.14)'
+  shadow: '0 8px 20px rgba(190, 24, 93, 0.10)',
+  heroShadow: '0 8px 22px rgba(190, 24, 93, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
+  shellShadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)'
 };
 
 const defaultWorkOptions: CommonWorkOptions = {
@@ -173,6 +180,15 @@ const highPlaybackRateWarningState = createHighPlaybackRateWarningState();
 
 function canShowFloatingPanel() {
   try {
+    // Windows 端只服务考试/答题场景：登录页、课程页、跳转页不创建面板，
+    // 避免跨页面跳转时面板反复消失/出现。扩展端没有 __CX_WIN_HOST__，行为不变。
+    if (isWindowsHostRuntime() && runtimeStore.get<boolean>(WINDOWS_PANEL_ENABLED_KEY, true) === false) {
+      return false;
+    }
+    if (isWindowsHostRuntime() && !isWindowsExamRelatedUrl(window.location.href)) {
+      return false;
+    }
+
     return shouldShowFloatingPanel({
       selfWindow: window.self,
       topWindow: window.top,
@@ -195,19 +211,63 @@ function parseStoredValue<T>(raw: string | null, fallback: T): T {
   }
 }
 
+function isWindowsHostRuntime() {
+  try {
+    return Boolean((window as unknown as { __CX_WIN_HOST__?: unknown }).__CX_WIN_HOST__);
+  } catch {
+    return false;
+  }
+}
+
+function resolveInitialWorkResultsPanelUiState() {
+  const ui = createDefaultWorkResultsPanelUiState();
+  // Windows 端默认折叠面板；Chrome 扩展不注入 __CX_WIN_HOST__，保持原有默认展开行为。
+  if (isWindowsHostRuntime()) {
+    // bootstrap 提前挂载的折叠壳被点击时，业务加载后直接展开，避免用户点击被丢弃。
+    const shellExpandRequested = Boolean(
+      (window as unknown as { __CX_WIN_SHELL_EXPAND_REQUESTED__?: unknown }).__CX_WIN_SHELL_EXPAND_REQUESTED__
+    );
+    ui.collapsed = !shellExpandRequested;
+    if (!shellExpandRequested) {
+      ui.collapsed = runtimeStore.get(WINDOWS_PANEL_COLLAPSED_KEY, true);
+    }
+  }
+  return ui;
+}
+
+function resolveInitialWindowsPanelPosition(): PanelPosition {
+  const stored = runtimeStore.get(WORK_RESULTS_PANEL_POSITION_KEY, { right: 16, top: 16 } as PanelPosition);
+  if (!isWindowsHostRuntime()) return stored;
+  const readNumber = (key: string, fallback: number) => {
+    const value = Number(runtimeStore.get(key, fallback));
+    return Number.isFinite(value) ? Math.max(0, value) : fallback;
+  };
+  return {
+    right: readNumber(WINDOWS_PANEL_RIGHT_KEY, stored.right),
+    top: readNumber(WINDOWS_PANEL_TOP_KEY, stored.top)
+  };
+}
+
+function resolveInitialWindowsPanelWidth() {
+  if (!isWindowsHostRuntime()) return 460;
+  const width = Number(runtimeStore.get(WINDOWS_PANEL_WIDTH_KEY, 460));
+  return Number.isFinite(width) ? Math.min(800, Math.max(320, width)) : 460;
+}
+
 const state = {
   panels: {
     workResults: undefined as ScriptPanel | undefined,
     apps: undefined as ScriptPanel | undefined
   },
-  workResultsPanelPosition: runtimeStore.get(WORK_RESULTS_PANEL_POSITION_KEY, { right: 16, top: 16 } as PanelPosition),
+  workResultsPanelPosition: resolveInitialWindowsPanelPosition(),
+  workResultsPanelWidth: resolveInitialWindowsPanelWidth(),
   workResults: {
     results: runtimeStore.get(WORK_RESULTS_KEY, [] as SimplifyWorkResult[]),
     currentResultIndex: 0,
     type: runtimeStore.get(WORK_RESULTS_VIEW_KEY, 'numbers' as WorkResultsView),
     questionPositionSyncHandlerType: undefined as QuestionPositionSyncHandlerType | undefined,
     runtimeControls: undefined as WorkResultsRuntimeControls | undefined,
-    ui: createDefaultWorkResultsPanelUiState()
+    ui: resolveInitialWorkResultsPanelUiState()
   },
   apps: {
     localQuestionCaches: runtimeStore.get(QUESTION_CACHE_KEY, [] as QuestionCache[])
@@ -267,6 +327,12 @@ function getWorkOptions(): CommonWorkOptions {
 
   return {
     ...stored,
+    thread: (() => {
+      const configuredThreads = Number.parseInt(String(runtimeStore.get('common.settings.windows-answer-threads', stored.thread)), 10);
+      return Number.isFinite(configuredThreads)
+        ? Math.max(1, Math.min(4, configuredThreads))
+        : stored.thread;
+    })(),
     upload: getStudySettingValue('upload', 'submit'),
     enableExamAutoSubmit: getStudySettingValue('enableExamAutoSubmit', stored.enableExamAutoSubmit ?? false),
     enableDebugLogPanel: getStudySettingValue('enableDebugLogPanel', stored.enableDebugLogPanel ?? false),
@@ -347,12 +413,40 @@ function saveWorkResultsPanelPosition(position: PanelPosition) {
   runtimeStore.set(WORK_RESULTS_PANEL_POSITION_KEY, position);
 }
 
+function getDevicePixelRatio() {
+  const ratio = window.devicePixelRatio;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+}
+
+// 面板是 fixed 定位：位置必须落在设备像素网格上，否则在 125%/150% 缩放的 Windows 客户端里
+// 会因亚像素定位导致文字/边框发虚（拖动后尤其明显）。
+function snapToDevicePixel(value: number) {
+  const ratio = getDevicePixelRatio();
+  return Math.round(value * ratio) / ratio;
+}
+
+// 外宽也必须落在设备像素网格上：右侧位置对齐后，若宽度是小数设备像素，
+// 左边缘仍会亚像素发虚（125%/150% 缩放下 490 CSS px = 612.5 设备像素）。
+function snapPanelOuterWidth(element: HTMLElement) {
+  const ratio = getDevicePixelRatio();
+  const rect = element.getBoundingClientRect();
+  if (!rect.width) {
+    return;
+  }
+  const snappedWidth = Math.round(rect.width * ratio) / ratio;
+  if (Math.abs(snappedWidth - rect.width) <= 0.01) {
+    return;
+  }
+  element.style.boxSizing = 'border-box';
+  element.style.width = `${snappedWidth}px`;
+}
+
 function clampPanelPosition(position: PanelPosition, width = 460) {
   const maxTop = Math.max(window.innerHeight - 120, 16);
   const maxRight = Math.max(window.innerWidth - 120, 16);
   return {
-    top: Math.min(Math.max(position.top, 16), maxTop),
-    right: Math.min(Math.max(position.right, 16), maxRight + Math.max(width - 120, 0))
+    top: snapToDevicePixel(Math.min(Math.max(position.top, 16), maxTop)),
+    right: snapToDevicePixel(Math.min(Math.max(position.right, 16), maxRight + Math.max(width - 120, 0)))
   };
 }
 
@@ -375,9 +469,8 @@ function bindPanelDrag(panel: ScriptPanel, kind: 'workResults' | 'apps') {
   handle.style.position = 'sticky';
   handle.style.top = '-14px';
   handle.style.zIndex = '3';
-  handle.style.background = 'rgba(255, 245, 250, 0.96)';
-  handle.style.backdropFilter = 'blur(12px)';
-  handle.style.boxShadow = '0 10px 24px rgba(190, 24, 93, 0.08)';
+  handle.style.background = '#fff5fa';
+  handle.style.boxShadow = '0 6px 16px rgba(190, 24, 93, 0.08)';
 
   const rootWithHeaderState = root as HTMLElement & {
     __cxHeaderHandle?: HTMLElement;
@@ -1540,17 +1633,22 @@ function createStudySettingsPanel() {
   container.style.display = 'grid';
   container.style.gap = '12px';
 
+  // Windows 端只保留考试/答题相关设置；扩展端保持完整学习设置。
+  const windowsExamOnly = isWindowsHostRuntime();
+
   const header = createElement('div');
   header.style.display = 'grid';
   header.style.gap = '6px';
 
-  const title = createElement('div', { text: '学习设置' });
+  const title = createElement('div', { text: windowsExamOnly ? '考试设置' : '学习设置' });
   title.style.fontSize = '15px';
   title.style.fontWeight = '800';
   title.style.color = panelPinkTheme.text;
 
   const description = createElement('div', {
-    text: '这里的设置会直接作用于当前学习流程。'
+    text: windowsExamOnly
+      ? '仅保留考试答题相关的设置。'
+      : '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
   description.style.color = panelPinkTheme.muted;
@@ -1646,6 +1744,15 @@ function createStudySettingsPanel() {
     return section;
   };
 
+  if (windowsExamOnly) {
+    container.append(
+      createSettingsGroup('AI 搜题', '深度思考会增加等待时间，且费用可能更高；默认关闭。', aiSearchKeys),
+      createSettingsGroup('考试与诊断', '控制考试自动交卷权限。', ['enableExamAutoSubmit']),
+      createSettingsGroup('题库缓存', '控制是否优先使用本地缓存命中题目答案。', cacheKeys)
+    );
+    return container;
+  }
+
   container.append(
     createSettingsGroup('媒体控制', '控制播放相关行为，修改后会尽量立即作用到当前媒体。', mediaKeys),
     createSettingsGroup('学习流程', '控制章节完成后的跳转与复习策略。', progressKeys),
@@ -1685,7 +1792,9 @@ function createTikuAdapterConfigSection() {
   title.style.color = panelPinkTheme.text;
 
   const description = createElement('div', {
-    text: '这里的设置会直接作用于当前学习流程。'
+    text: isWindowsHostRuntime()
+      ? '用于考试答题的题库适配器配置。'
+      : '这里的设置会直接作用于当前学习流程。'
   });
   description.style.fontSize = '12px';
   description.style.color = panelPinkTheme.muted;
@@ -1775,6 +1884,9 @@ function createWorkResultsPanel() {
   container.style.display = 'grid';
   container.style.gap = '14px';
 
+  // Windows 端只保留考试/答题相关功能；扩展端保持完整面板。
+  const windowsExamOnly = isWindowsHostRuntime();
+
   const stats = getWorkResultStats();
 
   const hero = createElement('div');
@@ -1797,7 +1909,7 @@ function createWorkResultsPanel() {
   titleGroup.style.display = 'grid';
   titleGroup.style.gap = '6px';
 
-  const heroTitle = createElement('div', { text: '答题结果与学习控制' });
+  const heroTitle = createElement('div', { text: windowsExamOnly ? '考试答题助手' : '答题结果与学习控制' });
   heroTitle.style.fontSize = '17px';
   heroTitle.style.fontWeight = '800';
   heroTitle.style.color = panelPinkTheme.text;
@@ -1933,8 +2045,15 @@ function createWorkResultsPanel() {
   localQuestionCacheToggleField.style.maxWidth = 'none';
 
   aiAnswerRow.append(answerToggleField, aiFallbackToggleField);
-  actionModeRow.append(aiFallbackFailureActionField, uploadModeField);
-  examAndDebugRow.append(examAutoSubmitToggleField, debugLogPanelToggleField, localQuestionCacheToggleField);
+  if (windowsExamOnly) {
+    // “完成后动作（提交/保存）”属于课程任务流程，考试面板不需要。
+    actionModeRow.append(aiFallbackFailureActionField);
+    // “日志窗口”属于调试能力，考试面板不展示。
+    examAndDebugRow.append(examAutoSubmitToggleField, localQuestionCacheToggleField);
+  } else {
+    actionModeRow.append(aiFallbackFailureActionField, uploadModeField);
+    examAndDebugRow.append(examAutoSubmitToggleField, debugLogPanelToggleField, localQuestionCacheToggleField);
+  }
 
   const heroActions = createElement('div');
   heroActions.style.display = 'flex';
@@ -2215,7 +2334,10 @@ function createWorkResultsPanel() {
     cacheSection.append(cacheList);
   }
 
-  container.append(cacheSection);
+  if (!windowsExamOnly) {
+    container.append(cacheSection);
+  }
+
   container.append(createStudySettingsPanel());
   return container;
 }
@@ -2338,7 +2460,7 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
 
   panel.root.style.position = 'fixed';
   if (kind === 'workResults') {
-    const position = clampPanelPosition(state.workResultsPanelPosition, 460);
+    const position = clampPanelPosition(state.workResultsPanelPosition, state.workResultsPanelWidth);
     panel.root.style.right = `${position.right}px`;
     panel.root.style.top = `${position.top}px`;
   } else {
@@ -2346,14 +2468,15 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
     panel.root.style.top = '108px';
   }
   panel.root.style.zIndex = kind === 'workResults' ? '2147483645' : '2147483644';
-  panel.root.style.width = kind === 'workResults' ? '460px' : '360px';
+  panel.root.style.width = kind === 'workResults' ? `${state.workResultsPanelWidth}px` : '360px';
   panel.root.style.maxHeight = kind === 'workResults' ? '76vh' : '50vh';
   panel.root.style.overflow = 'auto';
   panel.root.style.overscrollBehavior = 'contain';
   panel.root.style.scrollbarGutter = 'stable';
   panel.root.dataset.chaoxingPlusTheme = 'pink';
   panel.root.style.background = panelPinkTheme.shellGradient;
-  panel.root.style.backdropFilter = 'blur(14px)';
+  // 不使用 backdrop-filter：它会把面板背后的页面内容整体模糊，在 CEF75 上体验尤差。
+  panel.root.style.backdropFilter = 'none';
   panel.root.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
   panel.root.style.boxShadow = panelPinkTheme.shellShadow;
   panel.root.style.borderRadius = kind === 'workResults' ? '24px' : '18px';
@@ -2361,6 +2484,7 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
   panel.configsContainer.style.display = '';
   panel.body.style.display = '';
   bindPanelDrag(panel, kind);
+  snapPanelOuterWidth(panel.root);
 }
 
 function highlightPanel(panel: ScriptPanel | undefined) {

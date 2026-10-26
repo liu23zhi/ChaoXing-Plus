@@ -1,0 +1,23 @@
+{
+  "clientPath": "",
+  "port": 0,
+  "expectedBrowser": "Chrome/",
+  "stopClientOnExit": false,
+  "injectBlankFrames": true,
+  "captureConsole": true,
+  "dpiAwareness": "",
+  "settings": {
+    "common.settings.extension-enabled": true,
+    "common.settings.windows-panel-enabled": true,
+    "common.settings.windows-panel-collapsed": true,
+    "common.settings.windows-answer-mode": "auto",
+    "common.settings.windows-answer-key": "F8",
+    "common.settings.windows-show-answer-dialog": true,
+    "common.settings.windows-log-enabled": true,
+    "common.settings.windows-log-enabled": true,
+    "common.settings.windows-answer-threads": 4,
+    "common.settings.windows-panel-top": 16,
+    "common.settings.windows-panel-right": 16,
+    "common.settings.windows-panel-width": 460
+  }
+}
