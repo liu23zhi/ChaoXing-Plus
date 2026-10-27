@@ -208,6 +208,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
                           WCHAR *error, DWORD errorCap) {
     int i; const WCHAR *raw;
     if (!o || argc < 0 || !argv) { cx_error(error, errorCap, L"invalid command line"); return FALSE; }
+    o->commandLineLayer = TRUE;
     for (i = 0; i < argc; i++) {
         const WCHAR *a = argv[i];
         if (!a) continue;
@@ -235,9 +236,9 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--select-client")) { o->selectClient = TRUE; o->selectClientSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
         if (cx_streq(a, L"--scan-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->scanMode, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_scan_mode(o->scanMode)) { cx_error(error, errorCap, L"invalid --scan-mode"); return FALSE; } o->scanModeSet = TRUE; o->scanAll = cx_streq(o->scanMode, L"all"); o->scanAllSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
         if (cx_streq(a, L"--scan-all")) { o->scanAll = TRUE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"fallback-all"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-scan-all")) { o->scanAll = FALSE; o->scanAllSet = TRUE; continue; }
-        if (cx_streq(a, L"--rescan")) { o->rescan = TRUE; o->rescanSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-scan-cache")) { o->noScanCache = TRUE; o->noScanCacheSet = TRUE; continue; }
+        if (cx_streq(a, L"--no-scan-all")) { o->scanAll = FALSE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"common"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(a, L"--rescan")) { o->rescan = TRUE; o->rescanSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(a, L"--no-scan-cache")) { o->noScanCache = TRUE; o->noScanCacheSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
         if (cx_streq(a, L"--ui")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->ui, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_ui(o->ui)) { cx_error(error, errorCap, L"invalid --ui"); return FALSE; } o->uiSet = TRUE; continue; }
         if (cx_streq(a, L"--data-dir")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->dataDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->dataDirSet = TRUE; continue; }
         if (cx_streq(a, L"--expected-browser")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->expectedBrowser, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->expectedBrowserSet = TRUE; continue; }
@@ -299,6 +300,9 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (a[0] == L'-') { cx_error(error, errorCap, L"unknown command line option"); return FALSE; }
         cx_error(error, errorCap, L"unexpected positional argument"); return FALSE;
     }
+    o->sourceLayerCount++;
+    if (o->clientPathSet) o->clientPathSource = o->sourceLayerCount;
+    if (o->uiSet) o->uiSource = o->sourceLayerCount;
     return TRUE;
 }
 
@@ -524,15 +528,33 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
 
 BOOL cx_options_apply_json_utf8(CX_OPTIONS *o, const char *json, int length,
                                 WCHAR *error, DWORD errorCap) {
-    JT *tokens; int count;
+    JT *tokens; CX_OPTIONS *layer; int count; BOOL ok;
     if (!o || !json || length < 0 || length > CX_OPTIONS_JSON_CAP - 1) { cx_error(error, errorCap, L"JSON is missing or too large"); return FALSE; }
     tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * 1024);
     if (!tokens) { cx_error(error, errorCap, L"out of memory while parsing JSON"); return FALSE; }
     count = jparse(json, length, tokens, 1024);
     if (count < 1) { cx_error(error, errorCap, L"invalid JSON"); HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
     if (!cx_reject_unknown_top(json, tokens, 0, error, errorCap)) { HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
-    if (!cx_options_apply_object(o, json, tokens, 0, error, errorCap)) { HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
-    HeapFree(GetProcessHeap(), 0, tokens); return TRUE;
+    layer = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*layer));
+    if (!layer) { HeapFree(GetProcessHeap(), 0, tokens); cx_error(error, errorCap, L"out of memory while applying JSON"); return FALSE; }
+    cx_options_init(layer);
+    ok = cx_options_apply_object(layer, json, tokens, 0, error, errorCap);
+    if (ok) {
+        layer->sourceLayerCount = 1;
+        if (layer->clientPathSet) layer->clientPathSource = 1;
+        if (layer->uiSet) layer->uiSource = 1;
+        if (layer->scanModeSet || layer->scanAllSet) {
+            if (layer->scanModeSet) layer->scanAll = cx_streq(layer->scanMode, L"all");
+            else cx_wcopy(layer->scanMode, CX_OPTIONS_SHORT_CAP, layer->scanAll ? L"fallback-all" : L"common");
+            layer->scanModeSet = TRUE; layer->scanAllSet = TRUE;
+            layer->scanClients = TRUE; layer->scanClientsSet = TRUE;
+        }
+        if (layer->clientFirst || layer->selectClient || layer->listClients || layer->rescan || layer->noScanCache) {
+            layer->scanClients = TRUE; layer->scanClientsSet = TRUE;
+        }
+        ok = cx_options_merge(o, layer, error, errorCap);
+    }
+    HeapFree(GetProcessHeap(), 0, layer); HeapFree(GetProcessHeap(), 0, tokens); return ok;
 }
 
 BOOL cx_options_load_file(CX_OPTIONS *o, const WCHAR *path,
@@ -583,7 +605,31 @@ static void cx_copy_field(WCHAR *dst, int cap, const WCHAR *src) { (void)cx_wcop
 
 BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
                       WCHAR *error, DWORD errorCap) {
+    DWORD offset;
+    BOOL cliSelection, cliScan;
     if (!destination || !layer) { cx_error(error, errorCap, L"invalid options merge"); return FALSE; }
+    offset = destination->sourceLayerCount;
+    cliSelection = layer->commandLineLayer && (layer->clientPathSet || layer->clientIndexSet || layer->clientFirstSet || layer->listClientsSet || layer->selectClientSet);
+    cliScan = layer->commandLineLayer && (layer->scanClientsSet || layer->scanModeSet || layer->rescanSet || layer->noScanCacheSet || (layer->uiSet && !cx_streq(layer->ui, L"auto")));
+    if (cliSelection) {
+        destination->clientPathSet = FALSE; destination->clientPath[0] = 0;
+        destination->clientPathSuppressedByUi = FALSE; destination->clientPathSource = 0;
+        destination->clientIndexSet = FALSE; destination->clientIndex = 0;
+        destination->clientFirstSet = FALSE; destination->clientFirst = FALSE;
+        destination->listClientsSet = FALSE; destination->listClients = FALSE;
+        destination->selectClientSet = FALSE; destination->selectClient = FALSE;
+        if (layer->clientPathSet) {
+            destination->scanClientsSet = FALSE; destination->scanClients = FALSE;
+            destination->scanModeSet = FALSE; destination->scanAllSet = FALSE; destination->scanAll = FALSE;
+            cx_wcopy(destination->scanMode, CX_OPTIONS_SHORT_CAP, L"fallback-all");
+            destination->rescan = FALSE; destination->rescanSet = FALSE;
+            destination->noScanCache = FALSE; destination->noScanCacheSet = FALSE;
+        }
+    }
+    if (cliScan && !layer->clientPathSet) {
+        destination->clientPathSet = FALSE; destination->clientPath[0] = 0;
+        destination->clientPathSuppressedByUi = FALSE; destination->clientPathSource = 0;
+    }
     CX_COPY_IF(configPathSet, configPath, CX_OPTIONS_PATH_CAP);
     CX_COPY_IF(dataDirSet, dataDir, CX_OPTIONS_PATH_CAP);
     CX_COPY_IF(clientPathSet, clientPath, CX_OPTIONS_PATH_CAP);
@@ -596,6 +642,9 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_COPY_IF(injectStrategySet, injectStrategy, CX_OPTIONS_SHORT_CAP);
     CX_COPY_IF(scanModeSet, scanMode, CX_OPTIONS_SHORT_CAP);
     CX_COPY_IF(uiSet, ui, CX_OPTIONS_SHORT_CAP);
+    if (layer->clientPathSet) { destination->clientPathSource = offset + (layer->clientPathSource ? layer->clientPathSource : 1); destination->clientPathSuppressedByUi = FALSE; }
+    if (layer->uiSet) destination->uiSource = offset + (layer->uiSource ? layer->uiSource : 1);
+    destination->sourceLayerCount = offset + (layer->sourceLayerCount ? layer->sourceLayerCount : 1);
     CX_BOOL_IF(clientFirstSet, clientFirst); CX_BOOL_IF(scanClientsSet, scanClients);
     CX_BOOL_IF(listClientsSet, listClients); CX_BOOL_IF(selectClientSet, selectClient);
     CX_BOOL_IF(scanAllSet, scanAll); CX_BOOL_IF(rescanSet, rescan); CX_BOOL_IF(noScanCacheSet, noScanCache);
@@ -636,13 +685,19 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
+    if (o->clientPathSuppressedByUi) { o->clientPathSet = TRUE; o->clientPathSuppressedByUi = FALSE; }
+    if (o->clientPathSet && !o->clientPath[0]) o->clientPathSet = FALSE;
+    /* Defer UI suppression until the final layer, preserving the path if a later auto overrides it. */
+    if (o->clientPathSet && !cx_streq(o->ui, L"auto") && o->uiSource > o->clientPathSource) { o->clientPathSet = FALSE; o->clientPathSuppressedByUi = TRUE; }
     if (!o->retainData || o->deleteConfig || o->selfCheck) {
         cx_error(error, errorCap, L"data cleanup and self-check are not supported by native host; use the Node host for these options");
         return FALSE;
     }
     if (!cx_valid_mode(o->executionModeNormal ? L"normal" : L"unsupported") || !cx_valid_scan_mode(o->scanMode) || !cx_valid_ui(o->ui) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid execution, scan, UI or injection mode"); return FALSE; }
-    if (o->clientPathSet && (o->clientIndexSet || o->clientFirstSet || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client path conflicts with client selection flags"); return FALSE; }
-    if (o->clientIndexSet && o->clientFirstSet) { cx_error(error, errorCap, L"client index conflicts with client-first"); return FALSE; }
+    if (o->clientIndexSet && o->clientIndex < 1) { cx_error(error, errorCap, L"client-index must be a positive integer"); return FALSE; }
+    if (o->clientPathSet && (o->scanClients || o->clientIndexSet || o->clientFirst || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client path conflicts with scanning or client selection flags"); return FALSE; }
+    if (o->clientIndexSet && (o->clientFirst || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client index conflicts with other selection flags"); return FALSE; }
+    if ((o->clientFirst && (o->selectClient || o->listClients)) || (o->selectClient && o->listClients)) { cx_error(error, errorCap, L"client selection flags conflict"); return FALSE; }
     if (o->panelTop < 0 || o->panelTop > 10000 || o->panelRight < 0 || o->panelRight > 10000 || o->panelWidth < 320 || o->panelWidth > 800) { cx_error(error, errorCap, L"panel dimensions are outside their allowed range"); return FALSE; }
     if (o->answerThreads < 1 || o->answerThreads > 4 || o->answerCountdown < 0 || o->answerCountdown > 3600 || o->answerRetry < 0 || o->answerRetry > 20) { cx_error(error, errorCap, L"answer settings are outside their allowed range"); return FALSE; }
     if (o->injectRetries < 0 || o->injectRetries > 5 || o->debugTimeoutMs < 1000 || o->debugTimeoutMs > 120000 || o->targetPollIntervalMs < 250 || o->targetPollIntervalMs > 10000 || o->bundleTimeoutMs < 1000 || o->bundleTimeoutMs > 300000 || o->port < 0 || o->port > 65535) { cx_error(error, errorCap, L"host settings are outside their allowed range"); return FALSE; }

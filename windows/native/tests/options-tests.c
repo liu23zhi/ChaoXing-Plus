@@ -2,6 +2,7 @@
 
 static CX_OPTIONS baseOptions;
 static CX_OPTIONS cliOptions;
+static CX_OPTIONS layerOptions;
 static WCHAR errorText[512];
 static char settingsJson[CX_OPTIONS_JSON_CAP];
 static int failures;
@@ -115,9 +116,79 @@ static void test_selection_conflicts(void) {
     check(!cx_options_parse_cli(&baseOptions, 3, arguments, errorText, 512) || !cx_options_finalize(&baseOptions, errorText, 512), "client path conflicts with client-first");
 }
 
+static void test_scan_aliases(void) {
+    WCHAR *disabled[] = { L"--no-scan-all" };
+    WCHAR *enabled[] = { L"--scan-all" };
+    WCHAR *lastDisabled[] = { L"--scan-mode", L"all", L"--no-scan-all" };
+    WCHAR *lastEnabled[] = { L"--no-scan-all", L"--scan-all" };
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 1, disabled, errorText, 512) && wide_equal(baseOptions.scanMode, L"common") && baseOptions.scanClients, "no-scan-all changes the actual scan mode to common");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 1, enabled, errorText, 512) && wide_equal(baseOptions.scanMode, L"fallback-all"), "scan-all selects fallback-all");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 3, lastDisabled, errorText, 512) && wide_equal(baseOptions.scanMode, L"common"), "last scan alias wins after scan-mode");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 2, lastEnabled, errorText, 512) && wide_equal(baseOptions.scanMode, L"fallback-all"), "last scan-all wins after no-scan-all");
+    reset();
+    check(apply("{\"scanAll\":false}") && wide_equal(baseOptions.scanMode, L"common") && baseOptions.scanClients, "JSON scanAll false selects common scanning");
+    reset();
+    check(apply("{\"scanAll\":true,\"scanMode\":\"all\"}") && wide_equal(baseOptions.scanMode, L"all"), "explicit JSON scanMode takes precedence over its alias");
+}
+
+static void test_selection_layer_priority(void) {
+    WCHAR *first[] = { L"--client-first" };
+    WCHAR *index[] = { L"--client-index", L"2" };
+    WCHAR *list[] = { L"--list-clients" };
+    WCHAR *select[] = { L"--select-client" };
+    WCHAR *scan[] = { L"--scan-mode", L"common" };
+    WCHAR *rescan[] = { L"--rescan" };
+    WCHAR *noCache[] = { L"--no-scan-cache" };
+    WCHAR *gui[] = { L"--ui", L"gui" };
+    WCHAR *cli[] = { L"--ui", L"cli" };
+    WCHAR **arguments[] = { first, index, list, select, scan, rescan, noCache, gui, cli };
+    int counts[] = { 1, 2, 1, 1, 2, 1, 1, 2, 2 };
+    const char *names[] = { "CLI client-first overrides configured path", "CLI client-index overrides configured path", "CLI list-clients overrides configured path", "CLI select-client overrides configured path", "CLI scan-mode overrides configured path", "CLI rescan overrides configured path", "CLI no-scan-cache overrides configured path", "CLI gui overrides configured path", "CLI cli overrides configured path" };
+    WCHAR *direct[] = { L"--client", L"D:\\Explicit\\CXExam.exe", L"--ui", L"gui" };
+    WCHAR *conflictScan[] = { L"--client", L"D:\\Exam\\CXExam.exe", L"--scan-mode", L"common" };
+    WCHAR *conflictRescan[] = { L"--client", L"D:\\Exam\\CXExam.exe", L"--rescan" };
+    WCHAR *conflictCache[] = { L"--client", L"D:\\Exam\\CXExam.exe", L"--no-scan-cache" };
+    int i;
+    for (i = 0; i < 9; ++i) {
+        reset();
+        check(apply("{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\"}") && cx_options_parse_cli(&cliOptions, counts[i], arguments[i], errorText, 512) && cx_options_merge(&baseOptions, &cliOptions, errorText, 512) && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.clientPathSet, names[i]);
+    }
+    reset();
+    check(apply("{\"clientFirst\":true,\"scanMode\":\"all\"}") && cx_options_parse_cli(&cliOptions, 4, direct, errorText, 512) && cx_options_merge(&baseOptions, &cliOptions, errorText, 512) && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.clientPathSet && wide_equal(baseOptions.clientPath, L"D:\\Explicit\\CXExam.exe") && !baseOptions.scanClients, "CLI direct path overrides lower selection flags and scanning");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 4, conflictScan, errorText, 512) && !cx_options_finalize(&baseOptions, errorText, 512), "same CLI layer path and scan mode remain a conflict");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 3, conflictRescan, errorText, 512) && !cx_options_finalize(&baseOptions, errorText, 512), "same CLI layer path and rescan remain a conflict");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 3, conflictCache, errorText, 512) && !cx_options_finalize(&baseOptions, errorText, 512), "same CLI layer path and no-scan-cache remain a conflict");
+    reset();
+    check(apply("{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\"}") && apply("{\"ui\":\"gui\"}") && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.clientPathSet, "higher JSON gui selects instead of using a lower path");
+    reset();
+    check(apply("{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\"}") && apply("{\"ui\":\"gui\"}") && apply("{\"ui\":\"auto\"}") && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.clientPathSet, "higher JSON auto preserves the original path after gui");
+    reset();
+    check(apply("{\"ui\":\"gui\",\"clientPath\":\"D:\\\\Same\\\\CXExam.exe\"}") && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.clientPathSet, "JSON path at the same UI layer wins");
+    reset();
+    check(apply("{\"ui\":\"gui\"}") && apply("{\"clientPath\":\"D:\\\\Later\\\\CXExam.exe\"}") && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.clientPathSet, "higher JSON path wins over lower UI");
+    reset();
+    cx_options_init(&layerOptions);
+    check(apply("{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\"}") && cx_options_apply_json_utf8(&layerOptions, "{\"ui\":\"cli\"}", 12, errorText, 512) && cx_options_merge(&baseOptions, &layerOptions, errorText, 512) && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.clientPathSet, "separately parsed JSON UI layer overrides a lower path");
+    reset();
+    check(apply("{\"clientPath\":\"\",\"scanMode\":\"common\"}") && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.clientPathSet, "empty JSON client path does not conflict with scanning");
+    reset();
+    check(apply("{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\"}") && apply("{\"clientPath\":\"\",\"scanMode\":\"common\"}") && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.clientPathSet && !baseOptions.clientPath[0], "higher empty JSON path clears an earlier configured path");
+    reset();
+    check(apply("{\"clientIndex\":0}") && !cx_options_finalize(&baseOptions, errorText, 512), "zero JSON client index is rejected before launch");
+    reset();
+    check(apply("{\"clientIndex\":-1}") && !cx_options_finalize(&baseOptions, errorText, 512), "negative JSON client index is rejected before launch");
+}
+
 void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_shortcuts();
-    test_invalid_inputs(); test_selection_conflicts();
+    test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;
     ExitProcess(failures ? 1 : 0);

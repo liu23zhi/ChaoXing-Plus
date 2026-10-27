@@ -132,6 +132,12 @@ typedef struct CX_OPTIONS {
     BOOL capabilities;
     BOOL printEffectiveConfig;
     BOOL selfCheck;
+    /* Resolve path/UI precedence only after the complete configuration is merged. */
+    BOOL commandLineLayer;
+    BOOL clientPathSuppressedByUi;
+    DWORD sourceLayerCount;
+    DWORD clientPathSource;
+    DWORD uiSource;
 } CX_OPTIONS;
 
 void cx_options_init(CX_OPTIONS *options);
