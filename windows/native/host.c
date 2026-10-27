@@ -174,18 +174,31 @@ static BOOL h_inject_source(NET_WS *ws, DWORD id, const char *source, DWORD leng
 static BOOL h_inject_runtime(NET_WS *ws, DWORD id, const char *source, DWORD length, WCHAR *error, DWORD errorCap) {
     return h_send_eval(ws, id, source, length, error, errorCap);
 }
-static BOOL h_inject_asset(NET_WS *ws, DWORD id, const WCHAR *strategy, const char *source, DWORD length, WCHAR *error, DWORD errorCap) {
-    WCHAR firstError[HOST_ERROR_CAP];
-    if (h_equal(strategy ? strategy : L"hybrid", L"runtime")) return h_inject_runtime(ws, id, source, length, error, errorCap);
-    if (h_equal(strategy ? strategy : L"hybrid", L"script")) {
-        if (h_inject_source(ws, id, source, length, error, errorCap)) return TRUE;
-        h_copy(firstError, HOST_ERROR_CAP, error);
-        return h_inject_runtime(ws, id + 1000, source, length, error, errorCap) || (h_error(error, errorCap, firstError), FALSE);
+static BOOL h_inject_asset(NET_WS *ws, DWORD *nextId, const WCHAR *strategy, DWORD retries,
+                           const char *source, DWORD length, WCHAR *error, DWORD errorCap) {
+    WCHAR lastError[HOST_ERROR_CAP];
+    BOOL scriptFirst = h_equal(strategy ? strategy : L"hybrid", L"script");
+    BOOL runtimeOnly = h_equal(strategy ? strategy : L"hybrid", L"runtime");
+    DWORD attempt;
+    h_error(lastError, HOST_ERROR_CAP, L"injection failed");
+    for (attempt = 0; attempt <= retries; ++attempt) {
+        if (runtimeOnly) {
+            if (h_inject_runtime(ws, (*nextId)++, source, length, error, errorCap)) return TRUE;
+            h_copy(lastError, HOST_ERROR_CAP, error);
+        } else if (scriptFirst) {
+            if (h_inject_source(ws, (*nextId)++, source, length, error, errorCap)) return TRUE;
+            h_copy(lastError, HOST_ERROR_CAP, error);
+            if (h_inject_runtime(ws, (*nextId)++, source, length, error, errorCap)) return TRUE;
+            h_copy(lastError, HOST_ERROR_CAP, error);
+        } else {
+            if (h_inject_runtime(ws, (*nextId)++, source, length, error, errorCap)) return TRUE;
+            h_copy(lastError, HOST_ERROR_CAP, error);
+            if (h_inject_source(ws, (*nextId)++, source, length, error, errorCap)) return TRUE;
+            h_copy(lastError, HOST_ERROR_CAP, error);
+        }
+        if (attempt < retries) Sleep(100 * (attempt + 1));
     }
-    if (h_inject_runtime(ws, id, source, length, error, errorCap)) return TRUE;
-    h_copy(firstError, HOST_ERROR_CAP, error);
-    if (h_inject_source(ws, id + 1000, source, length, error, errorCap)) return TRUE;
-    h_copy(error, errorCap, firstError);
+    h_copy(error, errorCap, lastError);
     return FALSE;
 }
 static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
@@ -199,7 +212,7 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     return FALSE;
 }
 static BOOL h_run(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD errorCap) {
-    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; DWORD index, pid = 0; HANDLE client = NULL; USHORT port; char *body = NULL, *bootstrap = NULL, *bundle = NULL, *config = NULL; DWORD bodyLength, bootstrapLength, bundleLength, configLength; char url[HOST_URL_CAP]; NET_WS *ws = NULL; WCHAR *assetDir = NULL, *path = NULL; BOOL ok = FALSE, ownerReady = FALSE; int i;
+    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; DWORD index, pid = 0, nextId = 2; HANDLE client = NULL; USHORT port; char *body = NULL, *bootstrap = NULL, *bundle = NULL, *config = NULL; DWORD bodyLength, bootstrapLength, bundleLength, configLength; char url[HOST_URL_CAP]; NET_WS *ws = NULL; WCHAR *assetDir = NULL, *path = NULL; BOOL ok = FALSE, ownerReady = FALSE; int i;
     assetDir = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)HOST_PATH_CAP * sizeof(WCHAR));
     path = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)HOST_PATH_CAP * sizeof(WCHAR));
     if (!assetDir || !path) { h_error(error, errorCap, L"out of memory allocating native paths"); goto done; }
@@ -229,7 +242,7 @@ static BOOL h_run(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD
     if (options->assetsDirSet) { /* caller supplied a directory */ } else { WCHAR *slash = assetDir + h_wlen(assetDir); while (slash > assetDir && slash[-1] != L'\\' && slash[-1] != L'/') --slash; *slash = 0; }
     if (!h_make_path(path, HOST_PATH_CAP, assetDir, L"windows-bootstrap.js") || !h_file_read(path, &bootstrap, &bootstrapLength, error, errorCap)) goto done;
     if (!h_make_path(path, HOST_PATH_CAP, assetDir, L"chaoxing-plus.windows.js") || !h_file_read(path, &bundle, &bundleLength, error, errorCap)) goto done;
-    if (!h_inject_asset(ws, 2, options->injectStrategy, bootstrap, bootstrapLength, error, errorCap) || !h_inject_asset(ws, 3, options->injectStrategy, bundle, bundleLength, error, errorCap)) goto done;
+    if (!h_inject_asset(ws, &nextId, options->injectStrategy, (DWORD)options->injectRetries, bootstrap, bootstrapLength, error, errorCap) || !h_inject_asset(ws, &nextId, options->injectStrategy, (DWORD)options->injectRetries, bundle, bundleLength, error, errorCap)) goto done;
     ok = TRUE;
 done:
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");

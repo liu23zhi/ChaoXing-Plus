@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [switch]$SkipAssetCopy
+    [switch]$SkipAssetCopy,
+    [switch]$BuildTests
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
@@ -34,6 +35,15 @@ try {
     $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
     & $linker @linkArgs @objects kernel32.lib user32.lib shell32.lib gdi32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
+    if ($BuildTests) {
+        $testObject = Join-Path $build 'injection-tests.obj'
+        & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
+        if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
+        $testObjects = @('memory','json','process','discovery','options') | ForEach-Object { Join-Path $build ($_ + '.obj') }
+        $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' }
+        & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject kernel32.lib user32.lib shell32.lib gdi32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+        if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }
+    }
 } finally { $env:Path = $originalPath }
 if (-not $SkipAssetCopy) {
     $assetSources = @(

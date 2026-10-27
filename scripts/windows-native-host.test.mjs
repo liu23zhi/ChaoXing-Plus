@@ -35,6 +35,16 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(build, /SkipAssetCopy/);
 });
 
+test('compiled native injection honors strategy order, retry limits and unique request IDs', {
+  skip: !process.env.CX_NATIVE_INJECTION_EXE
+}, () => {
+  const result = spawnSync(process.env.CX_NATIVE_INJECTION_EXE, [], {
+    encoding: 'utf8', timeout: 10_000, windowsHide: true
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /NATIVE INJECTION TESTS PASS/);
+});
+
 test('native host build output is not treated as a checked-in artifact', async () => {
   const ignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
   assert.match(ignore, /\.tmp-native-host/);
