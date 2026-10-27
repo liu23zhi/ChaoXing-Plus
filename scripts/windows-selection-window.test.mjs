@@ -70,9 +70,7 @@ function createFakeWindowDependencies(outputValue) {
   const execFileImpl = async (command, args, options) => {
     calls.push({ command, args, options });
     if (outputValue instanceof Error) throw outputValue;
-    const outputPath = args[args.indexOf('-OutputPath') + 1];
-    files.set(outputPath, JSON.stringify(outputValue));
-    return { stdout: '', stderr: '' };
+    return { stdout: JSON.stringify(outputValue), stderr: '' };
   };
   return { fsImpl, execFileImpl, files, calls };
 }
@@ -90,8 +88,9 @@ test('showClientSelectionWindow 通过 PowerShell 进程契约解析选中结果
   const args = deps.calls[0].args;
   assert.equal(args.includes('-STA'), true);
   assert.equal(args.includes('-Probe'), false);
-  const inputPath = args[args.indexOf('-InputPath') + 1];
-  const payload = JSON.parse(deps.files.get(inputPath));
+  assert.equal(args.includes('-InputPath'), false);
+  assert.equal(args.includes('-OutputPath'), false);
+  const payload = JSON.parse(deps.calls[0].options.input);
   assert.equal(payload.candidates[0].path, 'D:\\Exam\\CXExam.exe');
   assert.match(payload.candidates[0].display, /^\[ 1 \] D:\\Exam\\CXExam\.exe（x86）$/u);
   assert.equal(payload.title, '超星学习助手 - 选择考试客户端');
@@ -111,7 +110,64 @@ test('showClientSelectionWindow 返回取消，并在 PowerShell 失败时标记
   assert.equal(unavailable.status, 'unavailable');
   assert.match(unavailable.reason, /ENOENT/u);
 
-  assert.equal((await showClientSelectionWindow({ candidates: [], ...createFakeWindowDependencies({}) })).status, 'unavailable');
+  const emptyDeps = createFakeWindowDependencies({ path: 'C:\\Manual\\CXExam.exe', manual: true });
+  assert.equal((await showClientSelectionWindow({ candidates: [], ...emptyDeps })).status, 'selected');
+  assert.equal(emptyDeps.calls.length, 1);
+});
+
+test('选择窗口使用标准输入输出传递推荐序号，避免创建临时业务文件', async () => {
+  const deps = createFakeWindowDependencies({ cancelled: true });
+  await showClientSelectionWindow({
+    candidates: [{ path: 'C:\\Exam64\\CXExam.exe', machine: 'x64' }, { path: 'D:\\Exam32\\CXExam.exe', machine: 'x86' }],
+    preferredIndex: 1,
+    ...deps,
+    fsImpl: new Proxy({}, { get() { throw new Error('must not access filesystem'); } })
+  });
+  const payload = JSON.parse(deps.calls[0].options.input);
+  assert.equal(payload.preferredIndex, 1);
+});
+
+test('选择窗口保留跨 stdout/stderr 数据块的 UTF-8 中文路径与错误', async () => {
+  const moduleUrl = new URL('../windows/host/selection-window.mjs', import.meta.url).href;
+  const selectedPath = 'D:\\考试客户端\\CXExam.exe';
+  const failureReason = '考试客户端选择失败';
+  for (const errorOutput of [false, true]) {
+    const source = `
+      import { mock } from 'node:test';
+      import { EventEmitter } from 'node:events';
+      const bytes = Buffer.from(${JSON.stringify(errorOutput ? failureReason : JSON.stringify({ path: selectedPath, cancelled: false }))}, 'utf8');
+      const boundary = bytes.findIndex((value) => value > 127) + 1;
+      mock.module('node:child_process', { namedExports: { spawn() {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.stdin = new EventEmitter();
+        child.kill = () => {};
+        child.stdin.end = () => queueMicrotask(() => {
+          const output = child.${errorOutput ? 'stderr' : 'stdout'};
+          output.emit('data', bytes.subarray(0, boundary));
+          output.emit('data', bytes.subarray(boundary));
+          child.emit('close', ${errorOutput ? 1 : 0});
+        });
+        return child;
+      } } });
+      const { showClientSelectionWindow } = await import(${JSON.stringify(moduleUrl)});
+      process.stdout.write(JSON.stringify(await showClientSelectionWindow({ candidates: [] })));
+    `;
+    const result = await new Promise((resolveResult, rejectResult) => {
+      const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source], { windowsHide: true });
+      const stdout = [], stderr = [];
+      child.stdout.on('data', (chunk) => stdout.push(chunk));
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      child.on('error', rejectResult);
+      child.on('close', (code) => {
+        if (code !== 0) rejectResult(new Error(Buffer.concat(stderr).toString('utf8')));
+        else resolveResult(JSON.parse(Buffer.concat(stdout).toString('utf8')));
+      });
+    });
+    if (errorOutput) assert.deepEqual(result, { status: 'unavailable', reason: failureReason });
+    else assert.equal(result.path, selectedPath);
+  }
 });
 
 test('probeClientSelectionWindow 可构建 WinForms 窗口控件（Windows 冒烟）', { skip: process.platform !== 'win32' }, async () => {
@@ -132,6 +188,11 @@ test('真实原生选择窗口可显示并按定时器关闭', { skip: !interact
   });
   assert.deepEqual(result, { status: 'cancelled', autoClosed: true });
   assert.ok(Date.now() - started < 30000);
+
+  const emptyStarted = Date.now();
+  const emptyResult = await showClientSelectionWindow({ candidates: [], autoCloseMs: 900, timeoutMs: 60000 });
+  assert.deepEqual(emptyResult, { status: 'cancelled', autoClosed: true });
+  assert.ok(Date.now() - emptyStarted >= 700);
 });
 
 function runHost(args, env = {}) {
@@ -160,7 +221,7 @@ function runHost(args, env = {}) {
 
 test('宿主 --ui gui / --select-client 已接入原生选择窗口（自动关闭冒烟）', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
   const env = { CXPLUS_SELECTION_AUTO_CLOSE_MS: '900' };
-  for (const args of [['--ui', 'gui', '--no-elevate', '--no-log'], ['--select-client', '--no-elevate', '--no-log']]) {
+  for (const args of [['--ui', 'gui', '--no-elevate', '--no-log', '--no-disk-write'], ['--select-client', '--no-elevate', '--no-log', '--no-disk-write']]) {
     const result = await runHost(args, env);
     const output = `${result.stdout}\n${result.stderr}`;
     assert.equal(result.code, 3, output);

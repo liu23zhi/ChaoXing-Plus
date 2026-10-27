@@ -1,13 +1,44 @@
-import { execFile } from 'node:child_process';
-import { promises as fs } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
 export const defaultSelectionWindowScript = fileURLToPath(new URL('./selection-window.ps1', import.meta.url));
 export const WINDOW_TIMEOUT_MS = 5 * 60 * 1000;
+
+function runPowerShell(command, args, { input, timeout, maxBuffer, windowsHide }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', settled = false, stdoutBytes = 0, stderrBytes = 0;
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve({ stdout, stderr });
+    };
+    const timer = setTimeout(() => { child.kill(); finish(new Error('selection-window-timeout')); }, timeout);
+    child.on('error', finish);
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      stdout += stdoutDecoder.write(chunk);
+      if (stdoutBytes > maxBuffer) { child.kill(); finish(new Error('selection-window-output-too-large')); }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderrBytes += chunk.length;
+      stderr += stderrDecoder.write(chunk);
+      if (stderrBytes > maxBuffer) { child.kill(); finish(new Error('selection-window-error-too-large')); }
+    });
+    child.on('close', (code) => {
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
+      finish(code === 0 ? null : new Error(stderr.trim() || `selection-window-exit-${code}`));
+    });
+    child.stdin.end(input, 'utf8');
+  });
+}
 
 export function isNativeSelectionWindowSupported(platform = process.platform) {
   return platform === 'win32';
@@ -64,12 +95,9 @@ async function invokeSelectionWindow({
   labels = WINDOW_LABELS,
   timeoutMs = WINDOW_TIMEOUT_MS,
   scriptPath = defaultSelectionWindowScript,
-  execFileImpl = execFileAsync,
-  fsImpl = fs
+  preferredIndex = 0,
+  execFileImpl = runPowerShell
 }) {
-  const directory = await fsImpl.mkdtemp(path.join(os.tmpdir(), 'cxplus-selection-'));
-  const inputPath = path.join(directory, 'input.json');
-  const outputPath = path.join(directory, 'output.json');
   try {
     const payload = {
       title: title || labels.title,
@@ -79,36 +107,28 @@ async function invokeSelectionWindow({
       cancelButtonText: labels.cancelButtonText,
       fontName: labels.fontName,
       messages: labels.messages,
+      preferredIndex,
       candidates: (candidates || []).map((candidate, index) => ({
         path: String(candidate?.path || ''),
         machine: String(candidate?.machine || 'unknown'),
         display: `[ ${index + 1} ] ${String(candidate?.path || '')}（${String(candidate?.machine || 'unknown')}）`
       }))
     };
-    await fsImpl.writeFile(inputPath, JSON.stringify(payload), 'utf8');
     const args = [
       '-NoProfile',
       '-NonInteractive',
       '-STA',
       '-ExecutionPolicy', 'Bypass',
-      '-File', scriptPath,
-      '-InputPath', inputPath,
-      '-OutputPath', outputPath
+      '-File', scriptPath
     ];
     if (probe) args.push('-Probe');
     if (Number.isInteger(autoCloseMs) && autoCloseMs > 0) args.push('-AutoCloseMs', String(autoCloseMs));
-    await execFileImpl('powershell.exe', args, { windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 });
-    let text = '';
-    try {
-      text = await fsImpl.readFile(outputPath, 'utf8');
-    } catch {
-      return { status: 'unavailable', reason: 'missing-output-file' };
-    }
-    return { status: 'ok', raw: JSON.parse(String(text).replace(/^\uFEFF/u, '')) };
+    const result = await execFileImpl('powershell.exe', args, {
+      input: JSON.stringify(payload), windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024
+    });
+    return { status: 'ok', raw: JSON.parse(String(result.stdout || '').replace(/^\uFEFF/u, '')) };
   } catch (error) {
     return { status: 'unavailable', reason: error && error.message ? error.message : String(error) };
-  } finally {
-    await fsImpl.rm(directory, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -117,7 +137,7 @@ export async function showClientSelectionWindow(options = {}) {
   if (!isNativeSelectionWindowSupported()) {
     return { status: 'unavailable', reason: 'not-windows' };
   }
-  if (!Array.isArray(options.candidates) || options.candidates.length === 0) {
+  if (!Array.isArray(options.candidates)) {
     return { status: 'unavailable', reason: 'no-candidates' };
   }
   const invoked = await invokeSelectionWindow({ ...options, probe: false });

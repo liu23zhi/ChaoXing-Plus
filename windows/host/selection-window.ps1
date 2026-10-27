@@ -1,20 +1,21 @@
 param(
-  [Parameter(Mandatory = $true)][string]$InputPath,
-  [Parameter(Mandatory = $true)][string]$OutputPath,
   [switch]$Probe,
   [int]$AutoCloseMs = 0
 )
 
 # NOTE: Keep this script pure ASCII. Windows PowerShell 5.1 decodes .ps1 files that
 # have no BOM using the OEM code page, so non-ASCII literals would corrupt parsing.
-# All user-visible text is passed in the UTF-8 JSON input file instead.
+# All user-visible text is passed over UTF-8 JSON stdin instead.
 
 $ErrorActionPreference = 'Stop'
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
 
 function Write-ResultFile {
   param([hashtable]$Payload)
   $json = $Payload | ConvertTo-Json -Compress
-  [System.IO.File]::WriteAllText($OutputPath, $json, [System.Text.Encoding]::UTF8)
+  [Console]::Out.WriteLine($json)
 }
 
 function Get-Text {
@@ -31,18 +32,18 @@ try {
   exit 3
 }
 
-# Render at system DPI to keep the window sharp at 125%/150%. Failure is non-fatal.
+try {
+  $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+} catch {
+  Write-ResultFile @{ cancelled = $true; error = "invalid-input: $($_.Exception.Message)" }
+  exit 4
+}
+
+# Render at system DPI to keep the native chooser sharp on scaled displays.
 try {
   Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
   [void][Win32Dpi.DpiAwareness]::SetProcessDPIAware()
 } catch {
-}
-
-try {
-  $payload = Get-Content -LiteralPath $InputPath -Raw -Encoding UTF8 | ConvertFrom-Json
-} catch {
-  Write-ResultFile @{ cancelled = $true; error = "invalid-input: $($_.Exception.Message)" }
-  exit 4
 }
 
 $candidates = @($payload.candidates)
@@ -89,9 +90,17 @@ function New-SelectionForm {
   for ($index = 0; $index -lt $candidates.Count; $index += 1) {
     $candidate = $candidates[$index]
     $display = Get-Text $candidate.display ("[ {0} ] {1}" -f ($index + 1), [string]$candidate.path)
+    try {
+      $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo([string]$candidate.path).FileVersion
+      if ($version) { $display = $display + ' | ' + $version }
+    } catch {}
     [void]$list.Items.Add($display)
   }
-  if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+  if ($list.Items.Count -gt 0) {
+    $preferred = [int]$payload.preferredIndex
+    if ($preferred -lt 0 -or $preferred -ge $list.Items.Count) { $preferred = 0 }
+    $list.SelectedIndex = $preferred
+  }
   $form.Controls.Add($list)
 
   $buttons = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -106,6 +115,7 @@ function New-SelectionForm {
   $ok.Width = 150
   $ok.Height = 32
   $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $ok.Enabled = ($list.Items.Count -gt 0)
 
   $browse = New-Object System.Windows.Forms.Button
   $browse.Text = $browseText

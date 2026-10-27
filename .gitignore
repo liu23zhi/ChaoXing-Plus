@@ -3,6 +3,9 @@ dist/
 dist-windows/
 .tmp-tests/
 .tmp-tests-*/
+.tmp-native-host/
+.tmp-native-discovery/
+windows/native/build/
 windows/data/
 *.log
 .DS_Store

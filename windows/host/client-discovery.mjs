@@ -24,6 +24,8 @@ export const DEFAULT_SKIP_DIRECTORY_NAMES = new Set([
 // Full-disk fallback callers can opt into an unbounded traversal explicitly.
 export const COMMON_SCAN_MAX_DEPTH = 1;
 export const FULL_SCAN_MAX_DEPTH = Number.MAX_SAFE_INTEGER;
+export const CLIENT_SCAN_CACHE_VERSION = 1;
+export const DEFAULT_CLIENT_SCAN_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export function findPreferredClientIndex(candidates) {
   return Array.isArray(candidates) ? candidates.findIndex((candidate) => candidate?.machine === 0x014c) : -1;
@@ -31,6 +33,122 @@ export function findPreferredClientIndex(candidates) {
 
 export function isCxExamExecutablePath(value) {
   return windowsPath.basename(String(value || '').replace(/\//gu, '\\')).toLowerCase() === 'cxexam.exe';
+}
+
+/**
+ * Resolve an explicit client target. A target may be CXExam.exe itself or an
+ * installation directory containing CXExam.exe at its root/first child level.
+ */
+export async function resolveExplicitClientPath(value, {
+  fsProvider = fs,
+  peMachineReader = readPeMachine
+} = {}) {
+  const input = String(value || '').trim();
+  if (!input) return '';
+  if (isCxExamExecutablePath(input)) return input;
+  let stat;
+  try {
+    stat = await fsProvider.stat(input);
+  } catch {
+    return input;
+  }
+  const isDir = typeof stat?.isDirectory === 'function' ? stat.isDirectory() : stat?.directory === true;
+  if (!isDir) return input;
+  const candidates = [];
+  const addCandidate = async (candidatePath, name) => {
+    if (!isCxExamExecutablePath(name)) return;
+    try {
+      const candidateStat = typeof fsProvider.lstat === 'function'
+        ? await fsProvider.lstat(candidatePath)
+        : await fsProvider.stat(candidatePath);
+      if (typeof candidateStat?.isSymbolicLink === 'function' && candidateStat.isSymbolicLink()) return;
+      if (typeof candidateStat?.isFile === 'function' && !candidateStat.isFile()) return;
+      const machine = await peMachineReader(candidatePath);
+      if (machine === 0x014c || machine === 0x8664) candidates.push({ path: candidatePath, name, machine });
+    } catch {
+      // Ignore inaccessible or invalid candidates and let the caller report no match.
+    }
+  };
+  await addCandidate(path.join(input, 'CXExam.exe'), 'CXExam.exe');
+  let entries = [];
+  try {
+    entries = await fsProvider.readdir(input, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  const children = entries.slice().sort((left, right) => String(left?.name || '').toLowerCase().localeCompare(String(right?.name || '').toLowerCase()));
+  for (const entry of children) {
+    if (!entry || typeof entry.name !== 'string' || isSymbolicLink(entry)) continue;
+    if (!isDirectory(entry)) continue;
+    await addCandidate(path.join(input, entry.name, 'CXExam.exe'), 'CXExam.exe');
+  }
+  candidates.sort((left, right) => {
+    if (left.machine !== right.machine) return left.machine === 0x014c ? -1 : 1;
+    return comparePaths(left.path, right.path);
+  });
+  return candidates[0]?.path || '';
+}
+
+function normalizeCachedCandidate(value) {
+  if (!value || typeof value !== 'object' || typeof value.path !== 'string' || !isCxExamExecutablePath(value.path)) return null;
+  const machine = Number(value.machine);
+  if (machine !== 0x014c && machine !== 0x8664) return null;
+  const normalizedPath = normalizeWindowsPath(value.path);
+  if (!normalizedPath) return null;
+  return { path: normalizedPath, name: path.win32.basename(normalizedPath), machine };
+}
+
+async function readClientScanCache(cachePath, { scanMode, requireComplete = false, fsProvider, peMachineReader, cacheFs = fs, cacheTtlMs = DEFAULT_CLIENT_SCAN_CACHE_TTL_MS } = {}) {
+  if (!cachePath || !cacheFs || typeof cacheFs.readFile !== 'function') return null;
+  let parsed;
+  try {
+    const text = await cacheFs.readFile(cachePath, 'utf8');
+    parsed = JSON.parse(String(text).replace(/^\uFEFF/u, ''));
+  } catch {
+    return null;
+  }
+  if (!parsed || parsed.version !== CLIENT_SCAN_CACHE_VERSION || parsed.scanMode !== scanMode) return null;
+  // fallback/all 缓存只能来自完整递归扫描；常规零深度结果不足以证明没有深层客户端。
+  if (scanMode !== 'common' && parsed.source !== 'full') return null;
+  if (requireComplete && parsed.complete !== true) return null;
+  if (!Number.isFinite(parsed.createdAt) || Date.now() - parsed.createdAt > cacheTtlMs || Date.now() - parsed.createdAt < 0) return null;
+  if (!Array.isArray(parsed.candidates) || parsed.candidates.length === 0) return null;
+
+  const candidates = [];
+  for (const raw of parsed.candidates) {
+    const candidate = normalizeCachedCandidate(raw);
+    if (!candidate) return null;
+    try {
+      const stat = typeof fsProvider.lstat === 'function'
+        ? await fsProvider.lstat(candidate.path)
+        : await fsProvider.stat(candidate.path);
+      if (typeof stat?.isSymbolicLink === 'function' && stat.isSymbolicLink()) return null;
+      if (typeof stat?.isFile === 'function' && !stat.isFile()) return null;
+      const machine = await peMachineReader(candidate.path);
+      if (machine !== candidate.machine || (machine !== 0x014c && machine !== 0x8664)) return null;
+    } catch {
+      return null;
+    }
+    candidates.push(candidate);
+  }
+  const unique = new Map(candidates.map((candidate) => [pathKey(candidate.path), candidate]));
+  const result = [...unique.values()];
+  return parsed.source === 'full' ? result : result.sort(compareCommonCandidates);
+}
+
+async function writeClientScanCache(cachePath, { scanMode, source, complete, candidates, cacheFs = fs } = {}) {
+  if (!cachePath || !cacheFs || typeof cacheFs.writeFile !== 'function' || typeof cacheFs.mkdir !== 'function') return;
+  const directory = path.dirname(cachePath);
+  const payload = {
+    version: CLIENT_SCAN_CACHE_VERSION,
+    createdAt: Date.now(),
+    scanMode,
+    source,
+    complete: complete === true,
+    candidates: candidates.map(({ path: candidatePath, name, machine }) => ({ path: candidatePath, name, machine }))
+  };
+  await cacheFs.mkdir(directory, { recursive: true });
+  await cacheFs.writeFile(cachePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 }
 
 function normalizeWindowsPath(value) {
@@ -48,6 +166,11 @@ function comparePaths(left, right) {
   const a = pathKey(left);
   const b = pathKey(right);
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareCommonCandidates(left, right) {
+  if (left.machine !== right.machine) return left.machine === 0x014c ? -1 : 1;
+  return comparePaths(left.path, right.path);
 }
 
 function isDirectory(entry) {
@@ -102,15 +225,40 @@ async function getFixedDriveLetters() {
   return /^[A-Z]$/u.test(systemDrive) ? [systemDrive] : [];
 }
 
+async function getCurrentUserDesktopRoot() {
+  if (process.platform !== 'win32') return '';
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine([Environment]::GetFolderPath('Desktop'))"
+    ], { windowsHide: true, timeout: 5000, maxBuffer: 64 * 1024, encoding: 'utf8' });
+    return String(stdout || '').replace(/^\uFEFF/u, '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export async function getDefaultDiscoveryRoots({
   env = process.env,
   fsProvider = fs,
+  desktopRootProvider = getCurrentUserDesktopRoot,
   driveLetters,
   includeDriveRoots = true
 } = {}) {
   const profile = env.USERPROFILE || (env.HOMEDRIVE && env.HOMEPATH ? `${env.HOMEDRIVE}${env.HOMEPATH}` : '');
+  let desktopRoot = '';
+  try {
+    desktopRoot = normalizeWindowsPath(await desktopRootProvider({ env, fsProvider }));
+  } catch {
+    // Keep conventional Desktop discovery available when the Known Folder query fails.
+  }
+  if (!desktopRoot || !(await isExistingDirectory(desktopRoot, fsProvider))) {
+    desktopRoot = profile ? windowsPath.join(profile, 'Desktop') : '';
+  }
   const candidates = [
-    profile ? windowsPath.join(profile, 'Desktop') : '',
+    desktopRoot,
     env.OneDrive ? windowsPath.join(env.OneDrive, 'Desktop') : '',
     env.OneDriveConsumer ? windowsPath.join(env.OneDriveConsumer, 'Desktop') : '',
     env.ProgramFiles || '',
@@ -254,13 +402,39 @@ export async function discoverClientExecutables({
 
 export async function discoverClientCandidates({
   scanMode = 'fallback-all',
+  desktopRootProvider,
   commonRootProvider = (options) => getDefaultDiscoveryRoots({ ...options, includeDriveRoots: false }),
   driveRootProvider = getDefaultDriveRoots,
   fsProvider = fs,
   peMachineReader = readPeMachine,
   stopOnMachine = 0x014c,
-  onFullScan = () => {}
+  onFullScan = () => {},
+  cachePath = '',
+  noScanCache = false,
+  noDiskWrite = false,
+  cacheFs = fs,
+  cacheTtlMs = DEFAULT_CLIENT_SCAN_CACHE_TTL_MS,
+  onCacheEvent = () => {},
+  forceRescan = false
 } = {}) {
+  const cacheEnabled = Boolean(cachePath) && !noScanCache && !noDiskWrite;
+  if (cacheEnabled && !forceRescan) {
+    const cachedCandidates = await readClientScanCache(cachePath, {
+      scanMode,
+      requireComplete: stopOnMachine === null,
+      fsProvider,
+      peMachineReader,
+      cacheFs,
+      cacheTtlMs
+    });
+    if (cachedCandidates) {
+      onCacheEvent({ type: 'hit', path: cachePath, count: cachedCandidates.length });
+      const selected = cachedCandidates.find((item) => item.machine === 0x014c) || cachedCandidates[0] || null;
+      return { candidates: cachedCandidates, source: 'cache', selected };
+    }
+    onCacheEvent({ type: 'miss', path: cachePath });
+  }
+  let result;
   if (scanMode === 'all') {
     const driveRoots = await driveRootProvider({ fsProvider });
     onFullScan();
@@ -272,48 +446,58 @@ export async function discoverClientCandidates({
       fsProvider,
       peMachineReader
     });
-    return { candidates, source: 'full', selected: candidates.find((item) => item.machine === 0x014c) || candidates[0] || null };
+    result = { candidates, source: 'full', selected: candidates.find((item) => item.machine === 0x014c) || candidates[0] || null };
+  } else {
+    const commonRoots = await commonRootProvider({ fsProvider, desktopRootProvider });
+    const commonCandidates = await discoverClientExecutables({
+      roots: commonRoots,
+      scanMode: 'common',
+      fsProvider,
+      peMachineReader
+    });
+    const driveRoots = await driveRootProvider({ fsProvider });
+    const driveCandidates = await discoverClientExecutables({
+      roots: driveRoots,
+      scanMode: 'common',
+      fsProvider,
+      peMachineReader
+    });
+    const commonPaths = new Set();
+    const candidates = [...commonCandidates, ...driveCandidates]
+      .filter((item) => {
+        const key = pathKey(item.path);
+        if (commonPaths.has(key)) return false;
+        commonPaths.add(key);
+        return true;
+      })
+      .sort(compareCommonCandidates);
+
+    if (candidates.length > 0 || scanMode === 'common') {
+      const selected = candidates.find((item) => item.machine === 0x014c) || candidates[0] || null;
+      result = { candidates, source: 'common', selected };
+    } else {
+      onFullScan();
+      const fullCandidates = await discoverClientExecutables({
+        roots: driveRoots,
+        scanMode: 'fallback-all',
+        preserveOrder: true,
+        stopOnMachine,
+        fsProvider,
+        peMachineReader
+      });
+      const selected = fullCandidates.find((item) => item.machine === 0x014c) || fullCandidates[0] || null;
+      result = { candidates: fullCandidates, source: 'full', selected };
+    }
   }
-
-  const commonRoots = await commonRootProvider({ fsProvider });
-  const commonCandidates = await discoverClientExecutables({
-    roots: commonRoots,
-    scanMode: 'common',
-    fsProvider,
-    peMachineReader
-  });
-  const driveRoots = await driveRootProvider({ fsProvider });
-  const driveCandidates = await discoverClientExecutables({
-    roots: driveRoots,
-    scanMode: 'common',
-    fsProvider,
-    peMachineReader
-  });
-  const commonPaths = new Set();
-  const candidates = [...commonCandidates, ...driveCandidates]
-    .filter((item) => {
-      const key = pathKey(item.path);
-      if (commonPaths.has(key)) return false;
-      commonPaths.add(key);
-      return true;
-    })
-    .sort((left, right) => comparePaths(left.path, right.path));
-
-  if (candidates.length > 0 || scanMode === 'common') {
-    const selected = candidates.find((item) => item.machine === 0x014c) || candidates[0] || null;
-    return { candidates, source: 'common', selected };
+  const cacheComplete = stopOnMachine === null && (scanMode === 'common' || result.source === 'full');
+  if (cacheEnabled && result.candidates.length > 0 && (result.source !== 'full' || cacheComplete)) {
+    try {
+      await writeClientScanCache(cachePath, { scanMode, source: result.source, complete: cacheComplete, candidates: result.candidates, cacheFs });
+      onCacheEvent({ type: 'write', path: cachePath, count: result.candidates.length });
+    } catch (error) {
+      onCacheEvent({ type: 'write-error', path: cachePath, error });
+    }
   }
-
-  onFullScan();
-  const fullCandidates = await discoverClientExecutables({
-    roots: driveRoots,
-    scanMode: 'fallback-all',
-    preserveOrder: true,
-    stopOnMachine,
-    fsProvider,
-    peMachineReader
-  });
-  const selected = fullCandidates.find((item) => item.machine === 0x014c) || fullCandidates[0] || null;
-  return { candidates: fullCandidates, source: 'full', selected };
+  return result;
 }
 
