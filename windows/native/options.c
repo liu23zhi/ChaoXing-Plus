@@ -1,5 +1,6 @@
 #include "options.h"
 #include "json.h"
+#include "config-store.h"
 
 static int cx_wlen(const WCHAR *s) { int n = 0; if (!s) return 0; while (s[n]) n++; return n; }
 static BOOL cx_wcopy(WCHAR *dst, int cap, const WCHAR *src) {
@@ -58,16 +59,6 @@ static BOOL cx_json_wstr(const char *s, const JT *t, int value,
                          WCHAR *out, int cap) {
     return value >= 0 && jwstr(s, t, value, out, cap);
 }
-static BOOL cx_prefix(const char *value, const char *prefix) {
-    int i = 0;
-    if (!value || !prefix) return FALSE;
-    while (prefix[i]) {
-        if (value[i] != prefix[i]) return FALSE;
-        i++;
-    }
-    return TRUE;
-}
-
 static BOOL cx_valid_mode(const WCHAR *value) {
     return cx_streq(value, L"normal");
 }
@@ -351,48 +342,38 @@ static BOOL cx_json_execution_mode(const char *s, const JT *t, int object,
     }
     return TRUE;
 }
-static BOOL cx_shared_key(const char *s, const JT *t, int key) {
-    char name[CX_OPTIONS_SHORT_CAP * 4];
-    if (key < 0 || t[key].type != 's' || !jstr(s, t, key, name, sizeof(name))) return FALSE;
-    if (lstrcmpA(name, "common.apps.question-caches") == 0) return TRUE;
-    return cx_prefix(name, "common.settings.") ||
-           cx_prefix(name, "cx.new.study.") ||
-           cx_prefix(name, "cx.new.work.") ||
-           cx_prefix(name, "cx.new.auto-read.") ||
-           cx_prefix(name, "cx.new.study-dispatcher.");
+static BOOL cx_merge_shared_settings(CX_OPTIONS *o, const char *patch, DWORD patchLength,
+                                     WCHAR *error, DWORD errorCap) {
+    char *base, *merged; DWORD length = 0, previous = o->sharedSettingsLength; BOOL ok;
+    if (previous > CX_OPTIONS_JSON_CAP - 3) {
+        cx_error(error, errorCap, L"shared settings are too large"); return FALSE;
+    }
+    base = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)previous + 3);
+    merged = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
+    if (!base || !merged) {
+        if (base) HeapFree(GetProcessHeap(), 0, base);
+        if (merged) HeapFree(GetProcessHeap(), 0, merged);
+        cx_error(error, errorCap, L"out of memory while merging shared settings"); return FALSE;
+    }
+    base[0] = '{'; CopyMemory(base + 1, o->sharedSettingsJson, previous);
+    base[previous + 1] = '}'; base[previous + 2] = 0;
+    ok = cx_config_merge_settings(base, previous + 2, patch, patchLength,
+        merged, CX_OPTIONS_JSON_CAP, &length, error, errorCap);
+    if (ok) {
+        length -= 2;
+        CopyMemory(o->sharedSettingsJson, merged + 1, length);
+        o->sharedSettingsJson[length] = 0; o->sharedSettingsLength = length;
+        if (length) o->sharedSettingsSet = TRUE;
+    }
+    HeapFree(GetProcessHeap(), 0, base); HeapFree(GetProcessHeap(), 0, merged);
+    return ok;
 }
 static BOOL cx_append_shared_settings(CX_OPTIONS *o, const char *s,
                                       const JT *t, int object,
                                       WCHAR *error, DWORD errorCap) {
-    int i, value, keyStart, keyEnd, valueStart, valueEnd;
-    int rawValueStart, rawValueEnd;
-    DWORD n = o->sharedSettingsLength;
     if (!o || object < 0 || t[object].type != '{') return TRUE;
-    for (i = object + 1; i < t[object].next;) {
-        value = i + 1;
-        if (!cx_shared_key(s, t, i)) { i = t[value].next; continue; }
-        keyStart = t[i].start - 1; keyEnd = t[i].end + 1;
-        valueStart = t[value].start; valueEnd = t[value].end;
-        rawValueStart = valueStart; rawValueEnd = valueEnd;
-        if (t[value].type == 's') {
-            rawValueStart--;
-            rawValueEnd++;
-        }
-        if (keyStart < 0 || rawValueStart < keyStart || rawValueEnd < rawValueStart) {
-            i = t[value].next; continue;
-        }
-        if (n && n < CX_OPTIONS_JSON_CAP - 1) o->sharedSettingsJson[n++] = ',';
-        if (n + (DWORD)(keyEnd - keyStart) + (DWORD)(rawValueEnd - rawValueStart) + 1 >= CX_OPTIONS_JSON_CAP) {
-            cx_error(error, errorCap, L"shared settings are too large"); return FALSE;
-        }
-        while (keyStart < keyEnd) o->sharedSettingsJson[n++] = s[keyStart++];
-        o->sharedSettingsJson[n++] = ':';
-        while (rawValueStart < rawValueEnd) o->sharedSettingsJson[n++] = s[rawValueStart++];
-        o->sharedSettingsSet = TRUE;
-        i = t[value].next;
-    }
-    o->sharedSettingsLength = n; o->sharedSettingsJson[n] = 0;
-    return TRUE;
+    return cx_merge_shared_settings(o, s + t[object].start,
+        (DWORD)(t[object].end - t[object].start), error, errorCap);
 }
 static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
     static const char *known[] = {
@@ -608,6 +589,18 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     DWORD offset;
     BOOL cliSelection, cliScan;
     if (!destination || !layer) { cx_error(error, errorCap, L"invalid options merge"); return FALSE; }
+    /* Perform the only fallible merge before changing any options fields. */
+    if (layer->sharedSettingsSet) {
+        char *patch; DWORD length = layer->sharedSettingsLength; BOOL ok;
+        if (length > CX_OPTIONS_JSON_CAP - 3) { cx_error(error, errorCap, L"shared settings are too large"); return FALSE; }
+        patch = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)length + 3);
+        if (!patch) { cx_error(error, errorCap, L"out of memory while merging shared settings"); return FALSE; }
+        patch[0] = '{'; CopyMemory(patch + 1, layer->sharedSettingsJson, length);
+        patch[length + 1] = '}'; patch[length + 2] = 0;
+        ok = cx_merge_shared_settings(destination, patch, length + 2, error, errorCap);
+        HeapFree(GetProcessHeap(), 0, patch);
+        if (!ok) return FALSE;
+    }
     offset = destination->sourceLayerCount;
     cliSelection = layer->commandLineLayer && (layer->clientPathSet || layer->clientIndexSet || layer->clientFirstSet || layer->listClientsSet || layer->selectClientSet);
     cliScan = layer->commandLineLayer && (layer->scanClientsSet || layer->scanModeSet || layer->rescanSet || layer->noScanCacheSet || (layer->uiSet && !cx_streq(layer->ui, L"auto")));
@@ -662,19 +655,6 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_BOOL_IF(portSet, port); CX_BOOL_IF(attachPortSet, attachPort); CX_BOOL_IF(durationSet, durationMs);
     if (layer->executionModeSet) { destination->executionModeNormal = layer->executionModeNormal; destination->executionModeSet = TRUE; }
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
-    if (layer->sharedSettingsSet) {
-        DWORD n = destination->sharedSettingsLength;
-        DWORD add = layer->sharedSettingsLength;
-        if (add && n && n < CX_OPTIONS_JSON_CAP - 1) destination->sharedSettingsJson[n++] = ',';
-        if (n + add >= CX_OPTIONS_JSON_CAP) { cx_error(error, errorCap, L"shared settings are too large"); return FALSE; }
-        if (add) {
-            CopyMemory(destination->sharedSettingsJson + n, layer->sharedSettingsJson, add);
-            n += add;
-            destination->sharedSettingsJson[n] = 0;
-            destination->sharedSettingsLength = n;
-            destination->sharedSettingsSet = TRUE;
-        }
-    }
     destination->help = layer->help; destination->capabilities = layer->capabilities;
     destination->printEffectiveConfig = layer->printEffectiveConfig; destination->selfCheck = layer->selfCheck;
     if (layer->optionsJsonSet) { destination->optionsJsonSet = TRUE; destination->optionsJsonFile = layer->optionsJsonFile; destination->optionsJsonLength = layer->optionsJsonLength; cx_scopy(destination->optionsJson, CX_OPTIONS_JSON_CAP, layer->optionsJson, (int)layer->optionsJsonLength); cx_copy_field(destination->optionsJsonPath, CX_OPTIONS_PATH_CAP, layer->optionsJsonPath); }

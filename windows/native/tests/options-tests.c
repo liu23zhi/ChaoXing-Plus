@@ -1,4 +1,5 @@
 #include "../options.h"
+#include "../json.h"
 
 static CX_OPTIONS baseOptions;
 static CX_OPTIONS cliOptions;
@@ -84,6 +85,78 @@ static void test_shared_settings(void) {
     check(text_contains(settingsJson, "\"common.settings.extension-enabled\":false"), "extension enabled setting survives");
     reset();
     check(!apply("{\"log\":\"true\"}"), "JSON string boolean is rejected");
+}
+
+static void large_settings_layer(char *out, const char *key, char fill, DWORD count, BOOL duplicate) {
+    DWORD used;
+    lstrcpyA(out, "{\"settings\":{\"common.settings.keep\":17,");
+    if (duplicate) lstrcatA(out, "\"common.settings.big\":0,");
+    lstrcatA(out, "\""); lstrcatA(out, key); lstrcatA(out, "\":\"");
+    used = (DWORD)text_length(out); FillMemory(out + used, count, fill);
+    used += count; out[used] = 0; lstrcatA(out, "\"}}");
+}
+static BOOL shared_large_value(const CX_OPTIONS *options, const char *key, char fill, DWORD count) {
+    char *object = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
+    JT *tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * 64);
+    int value, keep; DWORD i; BOOL ok = FALSE;
+    if (!object || !tokens) ExitProcess(3);
+    if (options->sharedSettingsLength > CX_OPTIONS_JSON_CAP - 3) goto done;
+    object[0] = '{'; CopyMemory(object + 1, options->sharedSettingsJson, options->sharedSettingsLength);
+    object[options->sharedSettingsLength + 1] = '}'; object[options->sharedSettingsLength + 2] = 0;
+    if (jparse(object, (int)options->sharedSettingsLength + 2, tokens, 64) < 1 || tokens[0].count != 4) goto done;
+    value = jkey(object, tokens, 0, key); keep = jkey(object, tokens, 0, "common.settings.keep");
+    if (value < 0 || tokens[value].type != 's' || (DWORD)(tokens[value].end - tokens[value].start) != count
+        || jint(object, tokens, keep, -1) != 17) goto done;
+    for (i = 0; i < count; ++i) if (object[tokens[value].start + i] != fill) goto done;
+    ok = TRUE;
+done:
+    HeapFree(GetProcessHeap(), 0, object); HeapFree(GetProcessHeap(), 0, tokens); return ok;
+}
+static BOOL bytes_equal(const void *left, const void *right, DWORD length) {
+    const BYTE *a = (const BYTE *)left, *b = (const BYTE *)right; DWORD i;
+    for (i = 0; i < length; ++i) if (a[i] != b[i]) return FALSE;
+    return TRUE;
+}
+static void test_bounded_shared_merges(void) {
+    const DWORD count = 34 * 1024;
+    char *json = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
+    CX_OPTIONS *before = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(CX_OPTIONS));
+    DWORD previous, i; BOOL ok;
+    if (!json || !before) ExitProcess(3);
+    reset();
+    large_settings_layer(json, "common.settings.big", 'a', count, TRUE);
+    check(apply(json) && shared_large_value(&baseOptions, "common.settings.big", 'a', count),
+        "one JSON layer deduplicates a repeated key before retaining its 34KiB final value");
+    reset(); cx_options_init(&layerOptions);
+    large_settings_layer(json, "common.settings.big", 'a', count, FALSE);
+    check(apply(json), "first 34KiB shared settings layer parses");
+    large_settings_layer(json, "\\u0063ommon.settings.big", 'b', count, FALSE);
+    check(cx_options_apply_json_utf8(&layerOptions, json, text_length(json), errorText, 512),
+        "escaped duplicate 34KiB shared settings layer parses");
+    check(cx_options_merge(&baseOptions, &layerOptions, errorText, 512)
+        && shared_large_value(&baseOptions, "common.settings.big", 'b', count),
+        "separate 34KiB layers keep the last decoded value and other existing keys");
+    previous = baseOptions.sharedSettingsLength; ok = TRUE;
+    for (i = 0; i < 12 && ok; ++i) ok = cx_options_merge(&baseOptions, &layerOptions, errorText, 512)
+        && baseOptions.sharedSettingsLength == previous && shared_large_value(&baseOptions, "common.settings.big", 'b', count);
+    check(ok && i == 12, "repeated options merges never append duplicate 34KiB values");
+    reset();
+    large_settings_layer(json, "common.settings.big", 'a', count, FALSE); apply(json);
+    large_settings_layer(json, "common.settings.big", 'b', count, FALSE);
+    check(apply(json) && shared_large_value(&baseOptions, "common.settings.big", 'b', count),
+        "applying another JSON layer replaces a large shared value without temporary duplication");
+    cx_options_init(&layerOptions);
+    large_settings_layer(json, "common.settings.different", 'c', count, FALSE);
+    ok = cx_options_apply_json_utf8(&layerOptions, json, text_length(json), errorText, 512);
+    layerOptions.panelWidthSet = TRUE; layerOptions.panelWidth = 600;
+    CopyMemory(before, &baseOptions, sizeof(CX_OPTIONS));
+    check(ok && !cx_options_merge(&baseOptions, &layerOptions, errorText, 512)
+        && errorText[0] && bytes_equal(before, &baseOptions, sizeof(CX_OPTIONS)),
+        "unique large values over the limit reject the entire merge without partial options changes");
+    CopyMemory(before, &baseOptions, sizeof(CX_OPTIONS));
+    check(!apply(json) && errorText[0] && bytes_equal(before, &baseOptions, sizeof(CX_OPTIONS)),
+        "unique large JSON layer overflow leaves previous shared settings untouched");
+    HeapFree(GetProcessHeap(), 0, before); HeapFree(GetProcessHeap(), 0, json);
 }
 
 static void test_shortcuts(void) {
@@ -187,7 +260,7 @@ static void test_selection_layer_priority(void) {
 }
 
 void WINAPI WinMainCRTStartup(void) {
-    test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_shortcuts();
+    test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;
