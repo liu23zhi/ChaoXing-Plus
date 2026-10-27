@@ -42,7 +42,7 @@ $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
 & $resourceCompiler /nologo ('/i' + $scriptRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $scriptRoot))
-$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','host')
+$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','host')
 foreach ($source in $sources) {
     & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $scriptRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
@@ -68,9 +68,10 @@ try {
             @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() },
             @{ Name = 'session-tests'; Entry = 'SessionTestMain'; Objects = @('memory','json','session'); Resources = @() },
             @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @() },
-            @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() }
-            @{ Name = 'audit-tests'; Entry = 'AuditTestMain'; Objects = @('memory','audit'); Resources = @() }
-            @{ Name = 'config-store-tests'; Entry = 'ConfigStoreTestMain'; Objects = @('memory','json','config-store'); Resources = @() }
+            @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'audit-tests'; Entry = 'AuditTestMain'; Objects = @('memory','audit'); Resources = @() },
+            @{ Name = 'config-store-tests'; Entry = 'ConfigStoreTestMain'; Objects = @('memory','json','config-store'); Resources = @() },
+            @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() }
         )) {
             $testObject = Join-Path $build ($test.Name + '.obj')
             & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot ('tests\' + $test.Name + '.c'))
