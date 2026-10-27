@@ -60,7 +60,19 @@ export const RENDER_DIAGNOSTICS_EXPRESSION = `(() => {
         style: pickStyle(element)
       };
     };
-    const panels = Array.from(document.querySelectorAll('[id^="panel-"], [data-chaoxing-plus-theme="pink"]'));
+    let panelDiagnosticsEnabled = true;
+    try {
+      const host = window.__CX_WIN_HOST__;
+      const hostConfig = host && typeof host.getConfig === 'function' ? host.getConfig() : null;
+      if (hostConfig && hostConfig['common.settings.windows-panel-enabled'] === false) {
+        panelDiagnosticsEnabled = false;
+      }
+    } catch (error) {
+      panelDiagnosticsEnabled = true;
+    }
+    const panels = panelDiagnosticsEnabled
+      ? Array.from(document.querySelectorAll('[id^="panel-"], [data-chaoxing-plus-theme="pink"]'))
+      : [];
     const topPanel = panels.find((node) => node.getBoundingClientRect().top >= 0) || panels[0] || null;
     const supports = (property, value) => {
       try { return !!(window.CSS && CSS.supports && CSS.supports(property, value)); } catch (error) { return false; }
@@ -99,8 +111,9 @@ export const RENDER_DIAGNOSTICS_EXPRESSION = `(() => {
         devicePixelContentBox: supports('width', '1px')
       },
       panelCount: panels.length,
+      panelDiagnosticsEnabled,
       topPanel: describeElement(topPanel),
-      themePanel: describeElement(document.querySelector('[data-chaoxing-plus-theme="pink"]')),
+      themePanel: describeElement(panelDiagnosticsEnabled ? document.querySelector('[data-chaoxing-plus-theme="pink"]') : null),
       searchInfosDefined: !!(window.customElements && customElements.get && customElements.get('search-infos')),
       readyState: document.readyState
     });
@@ -109,25 +122,25 @@ export const RENDER_DIAGNOSTICS_EXPRESSION = `(() => {
   }
 })()`;
 
-export function summarizeRenderDiagnostics(sample) {
+export function summarizeRenderDiagnostics(sample, { includePanel = true } = {}) {
   if (!sample || typeof sample !== 'object') return 'no sample';
   if (sample.error) return `error=${sample.error}`;
-  const panel = sample.topPanel || sample.themePanel;
-  const style = panel && panel.style ? panel.style : {};
-  const rect = panel && panel.rect ? panel.rect : null;
-  const devicePixels = panel && panel.devicePixels ? panel.devicePixels : null;
   const parts = [
     `dpr=${sample.devicePixelRatio}`,
-    `viewport=${sample.innerWidth}x${sample.innerHeight}`,
-    `backdropFilter=${sample.supports ? sample.supports.backdropFilter : '?'}`,
-    `panels=${sample.panelCount}`
+    `viewport=${sample.innerWidth}x${sample.innerHeight}`
   ];
-  if (rect) {
-    parts.push(`panel=${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.width)}x${Math.round(rect.height)}`);
-    parts.push(`panelDpr=[${devicePixels ? devicePixels.x.toFixed(2) : '?'},${devicePixels ? devicePixels.y.toFixed(2) : '?'}]`);
-    parts.push(`fractional=${devicePixels ? devicePixels.fractional : '?'}`);
-  }
-  if (style) {
+  if (includePanel) {
+    const panel = sample.topPanel || sample.themePanel;
+    const style = panel && panel.style ? panel.style : {};
+    const rect = panel && panel.rect ? panel.rect : null;
+    const devicePixels = panel && panel.devicePixels ? panel.devicePixels : null;
+    parts.push(`backdropFilter=${sample.supports ? sample.supports.backdropFilter : '?'}`);
+    parts.push(`panels=${sample.panelCount}`);
+    if (rect) {
+      parts.push(`panel=${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.width)}x${Math.round(rect.height)}`);
+      parts.push(`panelDpr=[${devicePixels ? devicePixels.x.toFixed(2) : '?'},${devicePixels ? devicePixels.y.toFixed(2) : '?'}]`);
+      parts.push(`fractional=${devicePixels ? devicePixels.fractional : '?'}`);
+    }
     parts.push(`shadow=${style.boxShadow ? style.boxShadow.slice(0, 80) : 'none'}`);
     parts.push(`backdrop=${style.backdropFilter || 'none'}`);
     parts.push(`zoom=${style.zoom || 'normal'}`);

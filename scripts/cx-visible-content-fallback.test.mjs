@@ -462,7 +462,7 @@ test('cx chapter test does not auto-submit when finished rate is zero and upload
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('async callback(finishedRate, uploadable) {'), true);
-  assert.equal(source.includes("const shouldSubmit = upload === 'submit' && uploadable;"), true);
+  assert.equal(source.includes("const shouldSubmit = autoSubmitEnabled && upload === 'submit' && uploadable;"), true);
   assert.equal(source.includes("const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;"), true);
   assert.equal(source.includes('(frameWindow as Record<string, any>).noSubmit?.();'), true);
 });

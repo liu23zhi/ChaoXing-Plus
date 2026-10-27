@@ -68,15 +68,18 @@ test('cx retries unfinished question roots before uploading instead of refreshin
   assert.equal(source.includes('location.reload()'), false);
 });
 
-test('cx retries each unfinished automatic answer up to three attempts', async () => {
+test('cx uses the configured unfinished-answer retry count with a default of three', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 
-  assert.equal(source.includes('const unfinishedQuestionRetryAttempts = 3;'), true);
+  assert.equal(source.includes('const defaultUnfinishedQuestionRetryAttempts = 3;'), true);
+  assert.equal(source.includes("getWindowsRuntimeSetting('answer-retry', defaultUnfinishedQuestionRetryAttempts)"), true);
+  assert.equal(source.includes('return Math.max(0, Math.min(20, configured));'), true);
   assert.equal(source.includes('async function retryUnfinishedChapterQuestionAtIndex('), true);
   assert.equal(source.includes('async function retryUnfinishedWorkOrExamQuestionAtIndex('), true);
-  assert.equal(source.includes('for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {'), true);
+  assert.equal(source.includes('const maxAttempts = getUnfinishedQuestionRetryAttempts();'), true);
+  assert.equal(source.includes('for (let attempt = 1; attempt <= maxAttempts; attempt++) {'), true);
   assert.equal(source.includes('attempt,'), true);
-  assert.equal(source.includes('maxAttempts: unfinishedQuestionRetryAttempts'), true);
+  assert.equal(source.includes('maxAttempts,'), true);
   assert.equal(source.includes('if (retried?.result?.finish) {'), true);
   assert.equal(source.includes('break;'), true);
 });
@@ -111,7 +114,9 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   const messageSource = await readFile(messagePath, 'utf8');
 
   assert.equal(source.includes('async function confirmBeforeAutoAnswer('), true);
-  assert.equal(source.includes("timer: 5000"), true);
+  assert.equal(source.includes("getWindowsRuntimeSetting('answer-countdown', 5)"), true);
+  assert.equal(source.includes("timer: countdown > 0 ? countdown * 1000 : undefined"), true);
+  assert.equal(source.includes('defaultConfirmed: countdown > 0'), true);
   assert.equal(source.includes("confirmButtonText: '立即自动答题'"), true);
   assert.equal(source.includes("cancelButtonText: '手动答题'"), true);
   assert.equal(source.includes("worker.emit('stop')"), true);
@@ -123,4 +128,17 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   assert.equal(source.includes('if (saveButton instanceof HTMLElement) {'), true);
   assert.equal(messageSource.includes('defaultConfirmed?: boolean;'), true);
   assert.equal(messageSource.includes('return result.isConfirmed || (defaultConfirmed && result.dismiss === Swal.DismissReason.timer);'), true);
+});
+
+test('Windows no-auto-submit prevents both chapter and work/exam submit actions', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+  const chapterStart = source.indexOf('const effectiveUpload = !autoSubmitEnabled && upload === \'submit\' ? \'save\' : upload;');
+  const chapterEnd = source.indexOf('async function findWorkOrExamRuntimeWindow', chapterStart);
+  const chapterFlow = source.slice(chapterStart, chapterEnd);
+
+  assert.equal(source.includes("getWindowsRuntimeSetting<boolean>('auto-submit', true) !== false"), true);
+  assert.equal(source.includes('const shouldSubmit = autoSubmitEnabled && upload === \'submit\' && uploadable;'), true);
+  assert.match(source, /const shouldAllowSubmitForPage = upload === 'submit'\s+&& autoSubmitEnabled/);
+  assert.match(source, /if \(shouldSubmit\) \{\s+await submitWorkOrExamPage\(type\);/);
+  assert.match(chapterFlow, /if \(autoSubmitEnabled\) \{[\s\S]*?btnBlueSubmit\?\.\(\);[\s\S]*?\} else \{[\s\S]*?noSubmit\?\.\(\);/);
 });

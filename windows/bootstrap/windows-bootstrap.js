@@ -448,7 +448,7 @@
   // 面板生命周期观测（仅顶层 frame）：面板被页面 SPA 移除、或面板 owner 变化时上报宿主，
   // 用于诊断“进入答题后面板消失”。不修改 DOM。
   function installPanelLifecycleObserver() {
-    if (!isTopWindow()) {
+    if (!isTopWindow() || !isPanelEnabled()) {
       return;
     }
     var lastCount = -1;

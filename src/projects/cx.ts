@@ -502,7 +502,17 @@ const debugLogPanelMessageNamespace = 'chaoxing-plus:debug-log-panel';
 const debugLogPanelOwnerTokenKey = '__chaoxing_plus_debug_log_panel_owner_token__';
 const debugLogPanelSeenMessageIdsKey = '__chaoxing_plus_debug_log_panel_seen_message_ids__';
 const debugLogPanelZIndex = 2147483643;
-const unfinishedQuestionRetryAttempts = 3;
+const defaultUnfinishedQuestionRetryAttempts = 3;
+
+function getUnfinishedQuestionRetryAttempts() {
+  const configured = Number(getWindowsRuntimeSetting('answer-retry', defaultUnfinishedQuestionRetryAttempts));
+  if (!Number.isInteger(configured)) return defaultUnfinishedQuestionRetryAttempts;
+  return Math.max(0, Math.min(20, configured));
+}
+
+function isWindowsAutoSubmitEnabled() {
+  return !isWindowsHostRuntime() || getWindowsRuntimeSetting<boolean>('auto-submit', true) !== false;
+}
 const debugLogPanelLevelRank: Record<DebugLogLevel, number> = {
   debug: 0,
   info: 1,
@@ -1598,13 +1608,17 @@ async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continu
     return true;
   }
 
+  const rawCountdown = Number(getWindowsRuntimeSetting('answer-countdown', 5));
+  const countdown = Number.isFinite(rawCountdown) ? Math.max(0, Math.min(3600, rawCountdown)) : 5;
+  const countdownLabel = countdown === 0 ? '点击“立即自动答题”后' : `${countdown} 秒后`;
+
   const result = await $modal.confirm({
-    content: '5 秒后将默认开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。',
+    content: `${countdownLabel}开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。`,
     confirmButtonText: '立即自动答题',
     cancelButtonText: '手动答题',
-    timer: 5000,
-    timerProgressBar: true,
-    defaultConfirmed: true
+    timer: countdown > 0 ? countdown * 1000 : undefined,
+    timerProgressBar: countdown > 0,
+    defaultConfirmed: countdown > 0
   });
 
   if (!result) {
@@ -3894,7 +3908,8 @@ const JobRunner = {
       }
 
       let latestResult = initialResult;
-      for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+      const maxAttempts = getUnfinishedQuestionRetryAttempts();
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         await waitForTikuAdapterBalanceRecovery();
         if (tikuAdapterBalanceRecoveryState.paused) break;
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
@@ -3902,7 +3917,7 @@ const JobRunner = {
           total: roots.length,
           mode: 'chapter',
           attempt,
-          maxAttempts: unfinishedQuestionRetryAttempts,
+          maxAttempts,
           error: latestResult.error ?? ''
         }, undefined, { correlationId: chapterActionCorrelationId });
         workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
@@ -3996,15 +4011,17 @@ const JobRunner = {
         let chapterFinished = false;
         let latestFinishedRate: number | undefined;
         let latestUploadable: boolean | undefined;
+        const autoSubmitEnabled = isWindowsAutoSubmitEnabled();
+        const effectiveUpload = !autoSubmitEnabled && upload === 'submit' ? 'save' : upload;
         try {
           await worker.uploadHandler({
-        type: upload === 'submit' ? 100 : upload,
+        type: effectiveUpload === 'submit' ? 100 : effectiveUpload,
         results: retryableResults,
         async callback(finishedRate, uploadable) {
           await waitForTikuAdapterBalanceRecovery();
           latestFinishedRate = finishedRate;
           latestUploadable = uploadable;
-          const shouldSubmit = upload === 'submit' && uploadable;
+          const shouldSubmit = autoSubmitEnabled && upload === 'submit' && uploadable;
           const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;
           $console.info(uploadMsg);
           $message.success({ content: uploadMsg, duration: 3000 });
@@ -4047,11 +4064,17 @@ const JobRunner = {
                   $message.success({ content: retryUploadMsg, duration: 3000 });
                   await sleep(3000);
                   await waitForTikuAdapterBalanceRecovery();
-                  (frameWindow as Record<string, any>).btnBlueSubmit?.();
-                  await sleep(3000);
-                  (frameWindow as Record<string, any>).submitCheckTimes?.();
-                  (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
-                  chapterFinished = true;
+                  if (autoSubmitEnabled) {
+                    (frameWindow as Record<string, any>).btnBlueSubmit?.();
+                    await sleep(3000);
+                    (frameWindow as Record<string, any>).submitCheckTimes?.();
+                    (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
+                    chapterFinished = true;
+                  } else {
+                    (frameWindow as Record<string, any>).alert = () => {};
+                    (frameWindow as Record<string, any>).noSubmit?.();
+                    chapterFinished = false;
+                  }
                 }
               });
             } else {
@@ -4824,7 +4847,8 @@ function workOrExam(
     initialResult: Awaited<ReturnType<typeof worker.doWork>>[number]
   ) {
     let latestResult = initialResult;
-    for (let attempt = 1; attempt <= unfinishedQuestionRetryAttempts; attempt++) {
+    const maxAttempts = getUnfinishedQuestionRetryAttempts();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await waitForTikuAdapterBalanceRecovery();
       if (tikuAdapterBalanceRecoveryState.paused) break;
       logDebug('info', '动作节点诊断：未完成单题自动重试', {
@@ -4832,7 +4856,7 @@ function workOrExam(
         total,
         mode: type,
         attempt,
-        maxAttempts: unfinishedQuestionRetryAttempts,
+        maxAttempts,
         error: latestResult.error ?? ''
       }, undefined, { correlationId: workExamCorrelationId });
       workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
@@ -4894,7 +4918,10 @@ function workOrExam(
 
   async function uploadWorkOrExamResults(results: Awaited<ReturnType<typeof worker.doWork>>) {
     await waitForTikuAdapterBalanceRecovery();
-    const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);
+    const autoSubmitEnabled = isWindowsAutoSubmitEnabled();
+    const shouldAllowSubmitForPage = upload === 'submit'
+      && autoSubmitEnabled
+      && (type !== 'exam' || enableExamAutoSubmit);
     const uploadHandlerType = shouldAllowSubmitForPage ? 100 : upload === 'submit' ? 'save' : upload;
     const examAutoSubmitBlocked = upload === 'submit' && type === 'exam' && !enableExamAutoSubmit;
     const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
@@ -4908,6 +4935,7 @@ function workOrExam(
       preview_mode,
       resultCount: results.length,
       uploadMode: upload,
+      autoSubmitEnabled,
       uploadHandlerType,
       enableExamAutoSubmit,
       examAutoSubmitBlocked,
@@ -4927,6 +4955,7 @@ function workOrExam(
           type,
           preview_mode,
           uploadMode: upload,
+          autoSubmitEnabled,
           uploadHandlerType,
           enableExamAutoSubmit,
           examAutoSubmitBlocked,

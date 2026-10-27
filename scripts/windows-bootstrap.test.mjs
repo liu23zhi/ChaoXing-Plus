@@ -313,6 +313,7 @@ test('bootstrap 在宿主关闭 Windows 面板时不挂载面板壳', async () =
 
   assert.equal(harness.document.getElementById('panel-common-work-results'), null);
   assert.equal(harness.parseMessages().some((message) => message.kind === 'panel-shell'), false);
+  assert.equal(harness.parseMessages().some((message) => message.kind === 'panel-state'), false);
 });
 
 test('bootstrap 折叠壳使用启动参数提供的面板位置和宽度', async () => {

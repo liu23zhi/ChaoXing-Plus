@@ -12,6 +12,7 @@ import {
   describeMachine,
   getListenerOwnerPid,
   isElevated,
+  isSupportedClientMachine,
   killProcessTree,
   listProcessIdsByName,
   readPeMachine,
@@ -23,9 +24,13 @@ import {
   spawnClient,
   waitForDebugEndpoint
 } from './launch.mjs';
-import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY } from './config.mjs';
-import { applyHostOptionsToConfig, parseHostArgs } from './options.mjs';
-import { discoverClientExecutables, findPreferredClientIndex } from './client-discovery.mjs';
+import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, mergeHostConfigLayers } from './config.mjs';
+import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseClientSelectionInput, parseHostArgs, validateSupportedJsonOptions } from './options.mjs';
+import {
+  discoverClientCandidates,
+  findPreferredClientIndex,
+  isCxExamExecutablePath
+} from './client-discovery.mjs';
 import {
   RENDER_DIAGNOSTICS_EXPRESSION,
   collectSystemProbe,
@@ -46,11 +51,20 @@ function usage() {
     '用法：node windows/host/main.mjs [选项]',
     '',
     '  --config <path>      配置文件路径（默认 windows/data/config.json）',
+    '  --options-json <json|@file> 合并 JSON 对象或 JSON 文件；独立 CLI 参数优先',
+    '  --data-dir <path>    宿主默认配置、日志和诊断数据目录',
+    '  --no-disk-write      不写宿主配置、日志、诊断、报告或扫描缓存',
     '  --client <path>      覆盖配置中的客户端 exe 路径（也可作为手动选择）',
-    '  --scan-clients       扫描桌面、Program Files 和各磁盘根目录的 CXExam.exe',
+    '  --scan-clients       扫描桌面、Program Files 等常见根目录（根目录及一级子目录）',
+    '  --scan-mode <mode>   common、fallback-all 或 all；默认常规无结果才全盘递归',
+    '  --scan-all           启用常规无结果后的全盘回退（等价 fallback-all）',
+    '  --client-first       选择扫描结果中的首个推荐客户端（x86 优先）',
+    '  --ui <mode>          auto 或 cli；gui 尚未实现',
     '  --list-clients       扫描并列出候选客户端后退出',
     '  --select-client      扫描后交互选择客户端',
     '  --client-index <n>   启动扫描结果中的第 n 个客户端（从 1 开始）',
+    '  --rescan             忽略配置客户端路径并重新扫描（当前无扫描缓存）',
+    '  --no-scan-cache      禁止扫描缓存（当前宿主尚无扫描缓存）',
     '  --port <n>           固定调试端口（0 = 自动选择可绑定端口）',
     '  --assets <dir>       注入资源目录（默认 dist-windows）',
     '  --duration <ms>      运行指定毫秒后自动退出（测试用）',
@@ -70,13 +84,19 @@ function usage() {
     '  --panel-top <px>     面板距窗口顶部距离（0-10000）',
     '  --panel-right <px>   面板距窗口右侧距离（0-10000）',
     '  --panel-width <px>   面板宽度（320-800）',
+    '  --panel-theme <name> 主题名称（当前保留内置主题）',
     '  --answer-mode <mode> auto 自动答题，manual 按键逐题触发',
     '  --answer-key <keys>  手动模式组合键，例如 Ctrl+Shift+A（默认 F8）',
     '  --show-answer-dialog/--hide-answer-dialog  是否显示自动答题确认弹窗',
     '  --answer-threads <n> 答题并发线程，范围 1-4',
+    '  --answer-countdown <sec> 自动答题倒计时（0-3600，默认 5）',
+    '  --answer-retry <n>   单题重试次数（0-20）',
+    '  --no-auto-submit     不自动提交',
     '  --log/--no-log       是否写入宿主日志文件',
-    '  --execution-mode normal 仅支持普通可审计启动；memory/delete-suspend 被拒绝',
-    '  --quiet              减少控制台输出'
+    '  --diagnose/--no-diagnose 开启或关闭页面与窗口渲染诊断',
+    '  --diagnostics-dir <path> 诊断输出目录',
+    '  --execution-mode normal 仅支持普通运行；内存/删除挂起和清理/自毁参数会报错',
+    '  --quiet              减少控制台输出，不保证屏蔽参数错误或系统提示'
   ].join('\n');
 }
 
@@ -150,13 +170,45 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function assertSupportedClientMachine(machine) {
+  if (isSupportedClientMachine(machine)) return;
+  if (machine === 0x8664) {
+    throw new Error('x64 CXExam.exe 需要 64 位 Windows；当前环境只能运行 x86 客户端');
+  }
+  throw new Error(`不支持的 CXExam.exe 架构：${describeMachine(machine)}`);
+}
+
+async function readOptionalJson(filePath, label, { allowMissing = true } = {}) {
+  try {
+    const text = await fs.readFile(filePath, 'utf8');
+    const value = JSON.parse(text.replace(/^\uFEFF/u, ''));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('顶层必须是 JSON 对象');
+    }
+    return value;
+  } catch (error) {
+    if (error && error.code === 'ENOENT' && allowMissing) return {};
+    throw new Error(`${label} 无法读取或不是合法 JSON：${filePath}：${error.message}`);
+  }
+}
+
 async function resolveClientSelection(options, config, logger) {
-  if (!options.scanClients && options.clientIndex === null && !options.selectClient && config.clientPath) {
+  if (options.clientPath) return config.clientPath;
+  if (!options.scanClients && options.clientIndex === null && !options.selectClient && !options.clientFirst && options.ui !== 'cli' && config.clientPath) {
     return config.clientPath;
   }
 
-  logger.info('[client] 正在扫描可访问的本地磁盘与常见安装目录');
-  const candidates = await discoverClientExecutables();
+  logger.info('[client] 正在扫描常见安装目录（根目录及一级子目录）');
+  const scanMode = options.scanMode === 'all' ? 'all' : options.scanMode;
+  const willPrompt = options.selectClient
+    || (options.clientIndex === null && !options.clientFirst && options.ui === 'cli')
+    || (options.clientIndex === null && !options.clientFirst && options.ui === 'auto' && process.stdin.isTTY);
+  const scanResult = await discoverClientCandidates({
+    scanMode,
+    stopOnMachine: options.listClients || willPrompt || options.clientIndex !== null ? null : 0x014c,
+    onFullScan: () => logger.info('[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描')
+  });
+  const candidates = scanResult.candidates;
   if (candidates.length === 0) {
     throw new Error('未扫描到可用的 CXExam.exe，请使用 --client <path> 手动指定');
   }
@@ -176,24 +228,35 @@ async function resolveClientSelection(options, config, logger) {
   let selectedIndex = options.clientIndex === null
     ? (preferredIndex >= 0 ? preferredIndex : 0)
     : options.clientIndex - 1;
-  if (options.selectClient) {
+  let selectedManualPath = '';
+  if (willPrompt) {
     const input = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      const answer = await input.question(`请选择客户端编号（1-${candidates.length}，默认 ${selectedIndex + 1}）：`);
+      const answer = await input.question(`请选择客户端编号（1-${candidates.length}，默认 ${selectedIndex + 1}），或输入 CXExam.exe 路径：`);
       if (answer.trim()) {
-        selectedIndex = Number.parseInt(answer.trim(), 10) - 1;
+        const selection = parseClientSelectionInput(answer, selectedIndex);
+        selectedIndex = selection.index;
+        if (selection.path) selectedManualPath = path.resolve(selection.path);
       }
     } finally {
       input.close();
     }
   }
 
+  if (selectedManualPath) {
+    if (!isCxExamExecutablePath(selectedManualPath)) {
+      throw new Error('手动选择的文件名必须是 CXExam.exe');
+    }
+    const machine = await readPeMachine(selectedManualPath);
+    if (machine === null) throw new Error(`手动选择的文件不是有效 PE 文件：${selectedManualPath}`);
+    assertSupportedClientMachine(machine);
+    logger.info(`[client] 使用手动路径：${selectedManualPath}`);
+    return selectedManualPath;
+  }
   if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= candidates.length) {
     throw new Error(`客户端编号无效：${selectedIndex + 1}，可选范围为 1-${candidates.length}`);
   }
-  if (candidates[selectedIndex].machine !== 0x014c) {
-    throw new Error(`所选客户端不是 x86（检测到 ${describeMachine(candidates[selectedIndex].machine)}）。当前 CEF 75 宿主只支持 x86 CXExam.exe`);
-  }
+  assertSupportedClientMachine(candidates[selectedIndex].machine);
   return candidates[selectedIndex].path;
 }
 
@@ -230,7 +293,7 @@ async function runSelfCheck(options, logger) {
     warnings.push(`缺少 SweetAlert2 样式：${stylePath}`);
   }
 
-  const configPath = options.configPath || defaultConfigPath(repositoryRoot);
+  const configPath = resolveHostConfigPath(options);
   let config = null;
   try {
     const text = await fs.readFile(configPath, 'utf8');
@@ -244,7 +307,7 @@ async function runSelfCheck(options, logger) {
     try {
       const machine = await readPeMachine(configuredClient);
       add('客户端 PE 可读', Boolean(machine), configureMachineDetail(machine));
-      add('客户端为 x86', machine === 0x014c, describeMachine(machine));
+      add('客户端架构可运行', isSupportedClientMachine(machine), describeMachine(machine));
     } catch (error) {
       add('客户端 PE 可读', false, `${configuredClient}: ${error.message}`);
     }
@@ -270,6 +333,12 @@ async function runSelfCheck(options, logger) {
 
 function configureMachineDetail(machine) {
   return machine == null ? '不是 PE 文件或读取失败' : describeMachine(machine);
+}
+
+function resolveHostConfigPath(options) {
+  if (options.configPath) return path.resolve(options.configPath);
+  if (options.dataDirExplicit) return path.join(path.resolve(options.dataDir), 'config.json');
+  return defaultConfigPath(repositoryRoot);
 }
 
 async function resolvePort(config, options, logger) {
@@ -319,6 +388,14 @@ async function main() {
   let options;
   try {
     options = parseHostArgs(process.argv.slice(2));
+    const optionJson = options.optionsJsonFile
+      ? await readOptionalJson(path.resolve(options.optionsJsonFile), '--options-json 配置', { allowMissing: false })
+      : (options.optionsJson ? JSON.parse(options.optionsJson) : null);
+    if (optionJson) {
+      validateSupportedJsonOptions(optionJson, '--options-json');
+      options = applyOptionsJsonToOptions(options, optionJson);
+      options.optionsJsonObject = optionJson;
+    }
   } catch (error) {
     console.error(`[windows-host] 参数错误：${error.message}\n${usage()}`);
     process.exitCode = 2;
@@ -329,36 +406,71 @@ async function main() {
     return;
   }
 
+  const dataDirectory = options.dataDirExplicit
+    ? path.resolve(options.dataDir)
+    : path.join(repositoryRoot, 'windows', 'data');
   const logger = createLogger({ quiet: options.quiet });
   let configStoreForCleanup = null;
   let cleanupAfterStartupFailure = null;
 
   try {
     if (options.selfCheck) {
-      if (options.logFileEnabled !== false && process.env.CXPLUS_NO_LOG_FILE !== '1') {
-        await logger.attachFile(path.join(repositoryRoot, 'windows', 'data', 'logs', `host-${Date.now()}.log`));
+      if (!options.noDiskWrite && options.logFileEnabled !== false && process.env.CXPLUS_NO_LOG_FILE !== '1') {
+        await logger.attachFile(path.join(dataDirectory, 'logs', `host-${Date.now()}.log`));
       }
       const result = await runSelfCheck(options, logger);
-      if (options.reportPath) await writeReport(options.reportPath, result.report, logger);
+      if (!options.noDiskWrite && options.reportPath) await writeReport(options.reportPath, result.report, logger);
       process.exitCode = result.ok ? 0 : 1;
       return;
     }
 
-    const configPath = options.configPath || defaultConfigPath(repositoryRoot);
-    if (options.attachPort) {
-      await fs.mkdir(path.dirname(configPath), { recursive: true });
-    } else {
-      await ensureConfigFile(repositoryRoot, configPath, (message) => logger.info(message));
+    const configPath = resolveHostConfigPath(options);
+    const appConfigPath = path.join(repositoryRoot, 'chaoxing-plus.json');
+    const defaultConfigPathname = defaultConfigPath(repositoryRoot);
+    const defaultHostConfig = options.configPath
+      ? await readOptionalJson(defaultConfigPathname, '默认宿主配置')
+      : null;
+    const appConfig = await readOptionalJson(appConfigPath, '同目录配置');
+    let selectedConfig = {};
+    validateSupportedJsonOptions(appConfig, '同目录配置');
+    if (defaultHostConfig) validateSupportedJsonOptions(defaultHostConfig, '默认宿主配置');
+    if (options.configPath) {
+      selectedConfig = await readOptionalJson(configPath, '--config 配置');
+      validateSupportedJsonOptions(selectedConfig, '--config 配置');
     }
-    const configStore = createConfigStore(configPath, { logger: (message) => logger.info(message) });
+    let selectedConfigCreated = false;
+    if (!options.noDiskWrite && options.attachPort) {
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+    } else if (!options.noDiskWrite) {
+      selectedConfigCreated = await ensureConfigFile(repositoryRoot, configPath, (message) => logger.info(message));
+    }
+    if (options.configPath && selectedConfigCreated) {
+      selectedConfig = await readOptionalJson(configPath, '--config 配置', { allowMissing: false });
+      validateSupportedJsonOptions(selectedConfig, '--config 配置');
+    }
+    const configStore = createConfigStore(configPath, {
+      logger: (message) => logger.info(message),
+      persistEnabled: !options.noDiskWrite
+    });
     configStoreForCleanup = configStore;
     await configStore.load();
+    const inlineConfig = options.optionsJsonObject || {};
+    const mergedConfig = mergeHostConfigLayers({
+      defaultHostConfig,
+      appConfig,
+      selectedConfig: options.configPath ? selectedConfig : {},
+      loadedConfig: configStore.config,
+      inlineConfig
+    });
+    configStore.replaceFromDisk(mergedConfig);
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
     const configuredLogging = config.settings['common.settings.windows-log-enabled'] !== false;
-    const loggingEnabled = options.logFileEnabled === undefined ? configuredLogging : options.logFileEnabled;
+    const loggingEnabled = options.noDiskWrite
+      ? false
+      : (options.logFileEnabled === undefined ? configuredLogging : options.logFileEnabled);
     if (loggingEnabled && process.env.CXPLUS_NO_LOG_FILE !== '1') {
-      await logger.attachFile(path.join(repositoryRoot, 'windows', 'data', 'logs', `host-${Date.now()}.log`));
+      await logger.attachFile(path.join(dataDirectory, 'logs', `host-${Date.now()}.log`));
     }
     if (options.clientPath) config.clientPath = path.resolve(options.clientPath);
     if (options.stopClientOnExit) config.stopClientOnExit = true;
@@ -379,8 +491,10 @@ async function main() {
     const instanceToken = `${Date.now()}-${process.pid}`;
     const diagnosticsStamp = new Date().toISOString().replace(/[:.]/g, '-');
     const diagnosticsDirectory = options.diagnosticsDir
-      || path.join(repositoryRoot, 'windows', 'data', 'diagnostics', diagnosticsStamp);
-    const diagnosticsEnabled = loggingEnabled && (options.diagnose === true || (!options.attachPort && !options.noDiagnose));
+      || path.join(dataDirectory, 'diagnostics', diagnosticsStamp);
+    const diagnosticsEnabled = !options.noDiskWrite
+      && (options.diagnose === true || (!options.attachPort && !options.noDiagnose));
+    const panelDiagnosticsEnabled = config.settings['common.settings.windows-panel-enabled'] !== false;
     const sessions = new Map();
     const report = {
       mode: options.attachPort ? 'attach' : 'launch',
@@ -408,8 +522,10 @@ async function main() {
       }
     };
     if (diagnosticsEnabled) {
-      logger.info(`[diagnostics] 渲染诊断已开启：DPI/窗口/面板样式/截图将写入 ${diagnosticsDirectory}`);
-      logger.info('[diagnostics] 若仍是“悬浮窗附近模糊”，运行后请把 render-diagnostics*.json/png 与日志一起反馈');
+      logger.info(`[diagnostics] 渲染诊断已开启：${panelDiagnosticsEnabled ? 'DPI/窗口/面板样式/截图' : 'DPI/窗口/截图'}将写入 ${diagnosticsDirectory}`);
+      if (panelDiagnosticsEnabled) {
+        logger.info('[diagnostics] 若仍是“悬浮窗附近模糊”，运行后请把 render-diagnostics*.json/png 与日志一起反馈');
+      }
     }
 
     let clientChild = null;
@@ -447,7 +563,7 @@ async function main() {
       if (diagnosticsDone) {
         await Promise.race([diagnosticsDone, sleep(4000)]).catch(() => {});
       }
-      if (report.diagnostics.enabled) {
+      if (report.diagnostics.enabled && !options.noDiskWrite) {
         await writeDiagnosticsFile(report.diagnostics.directory, report.diagnostics, (message) => logger.info(message));
       }
       if (clientChild && (forceStopClient || config.stopClientOnExit || options.stopClientOnExit)) {
@@ -455,7 +571,7 @@ async function main() {
       }
       report.finishedAt = nowIso();
       await configStore.close();
-      await writeReport(options.reportPath, report, logger);
+      if (!options.noDiskWrite) await writeReport(options.reportPath, report, logger);
       await logger.close();
       // CLI 安全兜底：CDP/WebSocket 关闭握手异常时避免进程挂住（unref 不阻止正常退出）。
       const forceExitTimer = setTimeout(() => process.exit(process.exitCode ?? 0), 2000);
@@ -483,9 +599,10 @@ async function main() {
 
       const clientPath = config.clientPath;
       if (!clientPath) throw new Error(`配置文件缺少 clientPath：${configPath}`);
+      if (!isCxExamExecutablePath(clientPath)) throw new Error('客户端文件名必须是 CXExam.exe');
       const machine = await readPeMachine(clientPath);
       if (machine === null) throw new Error(`客户端不是有效 PE 文件：${clientPath}`);
-      if (machine !== 0x014c) throw new Error(`客户端不是 x86（检测到 ${describeMachine(machine)}），与目标 CEF 版本不匹配`);
+      assertSupportedClientMachine(machine);
       logger.info(`[launch] 客户端：${clientPath}（${describeMachine(machine)}）`);
 
       const running = await listProcessIdsByName(path.basename(clientPath));
@@ -709,7 +826,7 @@ async function main() {
             contextId,
             sample
           });
-          logger.info(`[diagnostics] 采样 #${index + 1}：${summarizeRenderDiagnostics(sample)}`);
+          logger.info(`[diagnostics] 采样 #${index + 1}：${summarizeRenderDiagnostics(sample, { includePanel: panelDiagnosticsEnabled })}`);
           if (index === 0) {
             const screenshot = await session.captureScreenshot();
             const savedPath = await writeScreenshot(
@@ -726,12 +843,16 @@ async function main() {
         const validSample = state.samples
           .map((entry) => entry.sample)
           .find((item) => item && !item.error) || null;
-        state.pageDiagnosis = evaluatePageDiagnosis(validSample);
-        for (const finding of state.pageDiagnosis.findings) {
-          logger.warn(`[diagnostics] 页面可疑项 ${finding.code}：${finding.detail}`);
-        }
-        if (!state.pageDiagnosis.findings.length) {
-          logger.info('[diagnostics] 页面采样未发现面板亚像素定位 / backdrop 模糊 / transform 缩放问题');
+        state.pageDiagnosis = panelDiagnosticsEnabled
+          ? evaluatePageDiagnosis(validSample)
+          : { status: 'disabled', findings: [] };
+        if (panelDiagnosticsEnabled) {
+          for (const finding of state.pageDiagnosis.findings) {
+            logger.warn(`[diagnostics] 页面可疑项 ${finding.code}：${finding.detail}`);
+          }
+          if (!state.pageDiagnosis.findings.length) {
+            logger.info('[diagnostics] 页面采样未发现面板亚像素定位 / backdrop 模糊 / transform 缩放问题');
+          }
         }
         await writeDiagnosticsFile(diagnosticsDirectory, state, (message) => logger.info(message));
       })().catch((error) => logger.warn(`[diagnostics] 渲染诊断任务失败：${error.message}`));

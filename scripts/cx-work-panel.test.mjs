@@ -211,10 +211,11 @@ test('runtime controls remain available while an automatic retry is paused for b
 });
 
 test('work and exam upload waits through a balance pause before upload and before submit or save', async () => {
-  const runScenario = async (uploadMode, pauseAtSleep) => {
+  const runScenario = async (uploadMode, pauseAtSleep, autoSubmitEnabled = true) => {
     let paused = false;
     let sleepCalls = 0;
     let uploadCalls = 0;
+    let uploadType;
     let submitCalls = 0;
     let saveCalls = 0;
     const context = vm.createContext({
@@ -228,10 +229,12 @@ test('work and exam upload waits through a balance pause before upload and befor
       upload: uploadMode,
       type: 'work',
       enableExamAutoSubmit: true,
+      isWindowsAutoSubmitEnabled: () => autoSubmitEnabled,
       stopSecondWhenFinish: 0,
       worker: {
-        async uploadHandler({ callback }) {
+        async uploadHandler({ type: requestedType, callback }) {
           uploadCalls++;
+          uploadType = requestedType;
           await callback(100, true);
         }
       },
@@ -250,25 +253,30 @@ test('work and exam upload waits through a balance pause before upload and befor
     const uploadWorkOrExamResults = await loadCxFunction('uploadWorkOrExamResults', context);
     const running = uploadWorkOrExamResults([]);
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(submitCalls, 0);
-    assert.equal(saveCalls, 0);
-    if (pauseAtSleep === 1) {
-      assert.equal(uploadCalls, 0, 'must not reach the upload handler while paused');
-    } else {
-      assert.equal(uploadCalls, 1, 'pause occurred inside the upload callback delay');
+    if (pauseAtSleep > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(submitCalls, 0);
+      assert.equal(saveCalls, 0);
+      if (pauseAtSleep === 1) {
+        assert.equal(uploadCalls, 0, 'must not reach the upload handler while paused');
+      } else {
+        assert.equal(uploadCalls, 1, 'pause occurred inside the upload callback delay');
+      }
     }
 
     context.tikuAdapterBalanceRecoveryState.paused = false;
     await running;
-    assert.equal(submitCalls, uploadMode === 'submit' ? 1 : 0);
-    assert.equal(saveCalls, uploadMode === 'save' ? 1 : 0);
+    const shouldSubmit = uploadMode === 'submit' && autoSubmitEnabled;
+    assert.equal(submitCalls, shouldSubmit ? 1 : 0);
+    assert.equal(saveCalls, uploadMode === 'save' || (uploadMode === 'submit' && !autoSubmitEnabled) ? 1 : 0);
+    assert.equal(uploadType, shouldSubmit ? 100 : uploadMode === 'submit' ? 'save' : 'save');
   };
 
   for (const uploadMode of ['submit', 'save']) {
     await runScenario(uploadMode, 1);
     await runScenario(uploadMode, 2);
   }
+  await runScenario('submit', 0, false);
 });
 
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {
@@ -297,7 +305,7 @@ test('workOrExam auto uploads work and exam results after answering', async () =
   const source = await readCxSource();
 
   assert.equal(source.includes('async function uploadWorkOrExamResults(results:'), true);
-  assert.equal(source.includes("const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);"), true);
+  assert.match(source, /const shouldAllowSubmitForPage = upload === 'submit'\s+&& autoSubmitEnabled\s+&& \(type !== 'exam' \|\| enableExamAutoSubmit\);/u);
   assert.equal(source.includes("const uploadHandlerType = shouldAllowSubmitForPage ? 100 : upload === 'submit' ? 'save' : upload;"), true);
   assert.equal(source.includes('type: uploadHandlerType,'), true);
   assert.equal(source.includes('const shouldSubmit = shouldAllowSubmitForPage && uploadable;'), true);
@@ -315,7 +323,7 @@ test('workOrExam gates exam auto-submit behind the panel switch', async () => {
   const source = await readCxSource();
 
   assert.equal(source.includes('enableExamAutoSubmit,'), true);
-  assert.equal(source.includes("const shouldAllowSubmitForPage = upload === 'submit' && (type !== 'exam' || enableExamAutoSubmit);"), true);
+  assert.match(source, /const shouldAllowSubmitForPage = upload === 'submit'\s+&& autoSubmitEnabled\s+&& \(type !== 'exam' \|\| enableExamAutoSubmit\);/u);
   assert.equal(source.includes("const uploadHandlerType = shouldAllowSubmitForPage ? 100 : upload === 'submit' ? 'save' : upload;"), true);
   assert.equal(source.includes("const examAutoSubmitBlocked = upload === 'submit' && type === 'exam' && !enableExamAutoSubmit;"), true);
   assert.equal(source.includes('enableExamAutoSubmit,'), true);

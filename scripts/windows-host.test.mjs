@@ -13,12 +13,15 @@ import {
   canBindPort,
   chooseBindablePort,
   describeMachine,
+  isSupportedClientMachine,
   parsePeMachine,
   sanitizeUrl
 } from '../windows/host/launch.mjs';
 import {
   createConfigStore,
   isSharedStoreKey,
+  mergeConfigLayers,
+  mergeHostConfigLayers,
   normalizeConfig,
   pickSharedValues
 } from '../windows/host/config.mjs';
@@ -309,6 +312,19 @@ test('config 只持久化共享键并保留默认结构', async () => {
   await fs.rm(directory, { recursive: true, force: true });
 });
 
+test('no-disk-write 配置存储只在内存中更新', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-config-memory-'));
+  const filePath = path.join(directory, 'config.json');
+  const store = createConfigStore(filePath, { persistEnabled: false });
+  await store.load();
+  assert.equal(store.updateFromPage({ 'common.settings.a': 1 }), true);
+  await store.flush();
+  await assert.rejects(() => fs.access(filePath), { code: 'ENOENT' });
+  assert.equal(store.config.settings['common.settings.a'], 1);
+  await store.close();
+  await fs.rm(directory, { recursive: true, force: true });
+});
+
 test('config 工具函数覆盖共享键过滤与归一化', () => {
   assert.equal(isSharedStoreKey('common.settings.x'), true);
   assert.equal(isSharedStoreKey('common.apps.question-caches'), true);
@@ -323,6 +339,29 @@ test('config 工具函数覆盖共享键过滤与归一化', () => {
   assert.equal(normalized.dpiAwareness, '');
   assert.equal(normalizeConfig({ dpiAwareness: 'system' }).dpiAwareness, 'system');
   assert.equal(normalizeConfig({ dpiAwareness: 'invalid' }).dpiAwareness, '');
+});
+
+test('config layers apply later values and keep only shared settings', () => {
+  const merged = mergeConfigLayers(
+    { clientPath: 'default.exe', settings: { 'common.settings.a': 1, 'other.key': 1 } },
+    { clientPath: 'override.exe', settings: { 'common.settings.a': 2, 'other.key': 2 } }
+  );
+  assert.equal(merged.clientPath, 'override.exe');
+  assert.equal(merged.settings['common.settings.a'], 2);
+  assert.equal(merged.settings['other.key'], undefined);
+});
+
+test('宿主分层配置使用稀疏文件值，避免归一化默认值覆盖低优先级层', () => {
+  const merged = mergeHostConfigLayers({
+    defaultHostConfig: { clientPath: 'C:/default/CXExam.exe', port: 5000 },
+    appConfig: { clientPath: 'D:/app/CXExam.exe' },
+    selectedConfig: { settings: { 'common.settings.windows-panel-enabled': false } },
+    loadedConfig: normalizeConfig({ clientPath: '' }),
+    inlineConfig: {}
+  });
+  assert.equal(merged.clientPath, 'D:/app/CXExam.exe');
+  assert.equal(merged.port, 5000);
+  assert.equal(merged.settings['common.settings.windows-panel-enabled'], false);
 });
 
 test('launch 工具函数：PE 解析、URL 脱敏、端口选择', async () => {
@@ -347,6 +386,14 @@ test('launch 工具函数：PE 解析、URL 脱敏、端口选择', async () => 
   const chosen = await chooseBindablePort([busyPort, 0]);
   assert.equal(chosen.port, 0);
   await new Promise((resolve) => busy.close(resolve));
+});
+
+test('客户端架构兼容 x86 Windows 和 x64 Windows 的可运行范围', () => {
+  assert.equal(isSupportedClientMachine(0x014c, { platform: 'win32', arch: 'ia32', env: { PROCESSOR_ARCHITECTURE: 'x86' } }), true);
+  assert.equal(isSupportedClientMachine(0x8664, { platform: 'win32', arch: 'ia32', env: { PROCESSOR_ARCHITECTURE: 'x86' } }), false);
+  assert.equal(isSupportedClientMachine(0x8664, { platform: 'win32', arch: 'ia32', env: { PROCESSOR_ARCHITECTURE: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' } }), true);
+  assert.equal(isSupportedClientMachine(0x8664, { platform: 'win32', arch: 'x64', env: {} }), true);
+  assert.equal(isSupportedClientMachine(0xaa64, { platform: 'win32', arch: 'arm64', env: { PROCESSOR_ARCHITECTURE: 'ARM64' } }), false);
 });
 
 test('CDP 客户端可以连接 mock 端点并收到执行上下文事件', async () => {
@@ -476,6 +523,60 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
   }
 });
 
+test('宿主 --no-disk-write 禁止配置、日志、诊断和报告输出', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-no-disk-write-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  const dataDirectory = path.join(directory, 'data');
+  const diagnosticsDir = path.join(directory, 'diagnostics');
+  const reportPath = path.join(directory, 'report.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
+  });
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port),
+      '--assets', assetsDir,
+      '--config', configPath,
+      '--data-dir', dataDirectory,
+      '--diagnostics-dir', diagnosticsDir,
+      '--report', reportPath,
+      '--log',
+      '--diagnose',
+      '--no-disk-write',
+      '--duration', '2500',
+      '--quiet'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
+    assert.equal(result.code, 0, `宿主退出码 ${result.code}\n${result.stdout}\n${result.stderr}`);
+    for (const outputPath of [configPath, dataDirectory, diagnosticsDir, reportPath]) {
+      await assert.rejects(fs.access(outputPath), { code: 'ENOENT' });
+    }
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('显式指定但不存在的 options-json 文件会在启动前报错', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-options-json-'));
+  const missingOptionsPath = path.join(directory, 'missing-options.json');
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--options-json', `@${missingOptionsPath}`,
+      '--quiet'
+    ]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /--options-json 配置\s+无法读取/u);
+    assert.match(result.stderr, /ENOENT/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('宿主 --diagnose 会采集渲染诊断并写入诊断文件', async () => {
   const mock = await startMockCdp();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-diagnostics-'));
@@ -498,7 +599,7 @@ test('宿主 --diagnose 会采集渲染诊断并写入诊断文件', async () =>
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
-      '--duration', '8000',
+      '--duration', '15000',
       '--report', reportPath,
       '--diagnose',
       '--diagnostics-dir', diagnosticsDir,

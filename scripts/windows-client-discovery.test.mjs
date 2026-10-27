@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SKIP_DIRECTORY_NAMES,
   discoverClientExecutables,
+  discoverClientCandidates,
   findPreferredClientIndex,
-  getDefaultDiscoveryRoots
+  isCxExamExecutablePath,
+  getDefaultDiscoveryRoots,
+  getDefaultDriveRoots
 } from '../windows/host/client-discovery.mjs';
 
 function createTree(entries, validExecutables = new Map()) {
@@ -78,6 +81,123 @@ test('discoverClientExecutables recursively finds valid CXExam.exe files, dedupl
   assert.equal(DEFAULT_SKIP_DIRECTORY_NAMES.has('windows'), true);
 });
 
+test('common scan defaults to the root and one direct child level', async () => {
+  const tree = createTree({
+    'C:\\Desktop': [{ name: 'level1', directory: true }],
+    'C:\\Desktop\\level1': [
+      { name: 'CXExam.exe' },
+      { name: 'level2', directory: true }
+    ],
+    'C:\\Desktop\\level1\\level2': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['C:\\Desktop\\level1\\CXExam.exe', 0x014c],
+    ['C:\\Desktop\\level1\\level2\\CXExam.exe', 0x8664]
+  ]));
+
+  const results = await discoverClientExecutables({
+    roots: ['C:\\Desktop'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader
+  });
+
+  assert.deepEqual(results.map((item) => item.path), ['C:\\Desktop\\level1\\CXExam.exe']);
+});
+
+test('full scan mode remains recursive and can stop at the first compatible machine', async () => {
+  const tree = createTree({
+    'C:\\Disk': [{ name: 'level1', directory: true }],
+    'C:\\Disk\\level1': [{ name: 'level2', directory: true }],
+    'C:\\Disk\\level1\\level2': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['C:\\Disk\\level1\\level2\\CXExam.exe', 0x014c]
+  ]));
+
+  const results = await discoverClientExecutables({
+    roots: ['C:\\Disk'],
+    scanMode: 'fallback-all',
+    stopOnMachine: 0x014c,
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader
+  });
+
+  assert.deepEqual(results.map((item) => item.path), ['C:\\Disk\\level1\\level2\\CXExam.exe']);
+});
+
+test('full scan selection keeps the complete candidate list when the caller needs an index', async () => {
+  const tree = createTree({
+    'C:\\Disk': [{ name: 'a', directory: true }, { name: 'b', directory: true }],
+    'C:\\Disk\\a': [{ name: 'CXExam.exe' }],
+    'C:\\Disk\\b': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['C:\\Disk\\a\\CXExam.exe', 0x014c],
+    ['C:\\Disk\\b\\CXExam.exe', 0x8664]
+  ]));
+
+  const result = await discoverClientCandidates({
+    scanMode: 'all',
+    stopOnMachine: null,
+    commonRootProvider: async () => [],
+    driveRootProvider: async () => ['C:\\Disk'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader
+  });
+
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), [
+    'C:\\Disk\\a\\CXExam.exe',
+    'C:\\Disk\\b\\CXExam.exe'
+  ]);
+  assert.equal(result.selected.path, 'C:\\Disk\\a\\CXExam.exe');
+});
+
+test('conventional disk root and one direct child are common candidates; a common x64 prevents recursive fallback', async () => {
+  const tree = createTree({
+    'C:\\': [{ name: 'CXExam.exe' }, { name: 'Games', directory: true }],
+    'C:\\Games': [{ name: 'CXExam.exe' }, { name: 'deep', directory: true }],
+    'C:\\Games\\deep': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['C:\\CXExam.exe', 0x8664],
+    ['C:\\Games\\CXExam.exe', 0x014c],
+    ['C:\\Games\\deep\\CXExam.exe', 0x014c]
+  ]));
+  let fullScanCalls = 0;
+  const result = await discoverClientCandidates({
+    scanMode: 'fallback-all',
+    commonRootProvider: async () => [],
+    driveRootProvider: async () => ['C:\\'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    onFullScan: () => { fullScanCalls += 1; }
+  });
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), ['C:\\CXExam.exe', 'C:\\Games\\CXExam.exe']);
+  assert.equal(result.candidates[0].machine, 0x8664);
+  assert.equal(fullScanCalls, 0);
+});
+
+test('fallback scan retains the first x64 and stops at the first x86 in encounter order', async () => {
+  const tree = createTree({
+    'D:\\': [{ name: 'z', directory: true }, { name: 'a', directory: true }],
+    'D:\\a': [{ name: 'nested', directory: true }],
+    'D:\\z': [{ name: 'nested', directory: true }],
+    'D:\\a\\nested': [{ name: 'CXExam.exe' }],
+    'D:\\z\\nested': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['D:\\a\\nested\\CXExam.exe', 0x8664],
+    ['D:\\z\\nested\\CXExam.exe', 0x014c]
+  ]));
+  let fullScanCalls = 0;
+  const result = await discoverClientCandidates({
+    scanMode: 'fallback-all',
+    commonRootProvider: async () => [],
+    driveRootProvider: async () => ['D:\\'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    onFullScan: () => { fullScanCalls += 1; }
+  });
+  assert.equal(fullScanCalls, 1);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), ['D:\\a\\nested\\CXExam.exe', 'D:\\z\\nested\\CXExam.exe']);
+  assert.equal(result.selected.path, 'D:\\z\\nested\\CXExam.exe');
+});
+
 test('discoverClientExecutables tolerates inaccessible folders and enforces maxDepth', async () => {
   const tree = createTree({
     'D:\\root': [{ name: 'level1', directory: true }],
@@ -146,6 +266,32 @@ test('getDefaultDiscoveryRoots uses conventional Windows locations and existing 
   ]);
 });
 
+test('common roots can exclude fixed-disk roots so fallback remains explicit', async () => {
+  const existing = new Set(['C:\\Users\\Test\\Desktop', 'C:\\Program Files', 'C:\\']);
+  const fsProvider = {
+    async stat(directory) {
+      if (!existing.has(directory)) throw new Error('missing');
+      return { isDirectory: () => true };
+    }
+  };
+  const commonRoots = await getDefaultDiscoveryRoots({
+    env: {
+      USERPROFILE: 'C:\\Users\\Test',
+      ProgramFiles: 'C:\\Program Files',
+      SystemDrive: 'C:'
+    },
+    fsProvider,
+    driveLetters: ['C'] ,
+    includeDriveRoots: false
+  });
+  assert.deepEqual(commonRoots, ['C:\\Users\\Test\\Desktop', 'C:\\Program Files']);
+  assert.deepEqual(await getDefaultDriveRoots({
+    env: { SystemDrive: 'C:' },
+    fsProvider,
+    driveLetters: ['C']
+  }), ['C:\\']);
+});
+
 test('default candidate selection prefers compatible x86 clients without hiding x64 discoveries', () => {
   const candidates = [
     { path: 'C:\\Exam64\\CXExam.exe', machine: 0x8664 },
@@ -153,6 +299,12 @@ test('default candidate selection prefers compatible x86 clients without hiding 
   ];
   assert.equal(findPreferredClientIndex(candidates), 1);
   assert.equal(candidates.length, 2);
+});
+
+test('manual client selection accepts CXExam.exe path separators but rejects unrelated executables', () => {
+  assert.equal(isCxExamExecutablePath('D:\\Exam Files\\CXExam.exe'), true);
+  assert.equal(isCxExamExecutablePath('D:/Exam Files/cxexam.EXE'), true);
+  assert.equal(isCxExamExecutablePath('D:\\Exam Files\\Other.exe'), false);
 });
 
 test('AppData and ProgramData are not excluded from recursive discovery', () => {

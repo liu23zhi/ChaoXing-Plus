@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
   applyHostOptionsToConfig,
+  applyOptionsJsonToOptions,
+  parseClientSelectionInput,
   normalizeAnswerThreads,
-  parseHostArgs
+  parseOptionsJson,
+  parseHostArgs,
+  validateSupportedJsonOptions
 } from '../windows/host/options.mjs';
 
 test('Windows 宿主参数解析覆盖客户端选择、面板、答题、日志和线程', () => {
@@ -51,12 +55,162 @@ test('Windows 宿主参数支持脚本指定路径和自动答题', () => {
   assert.equal(options.panelEnabled, true);
 });
 
+test('扫描参数保留常规一级扫描与显式全盘回退语义', () => {
+  const common = parseHostArgs(['--scan-mode', 'common', '--client-first', '--ui', 'cli']);
+  assert.equal(common.scanMode, 'common');
+  assert.equal(common.clientFirst, true);
+  assert.equal(common.ui, 'cli');
+  assert.equal(common.scanAll, false);
+
+  const fallback = parseHostArgs(['--scan-mode', 'fallback-all', '--scan-all']);
+  assert.equal(fallback.scanMode, 'fallback-all');
+  assert.equal(fallback.scanAll, true);
+
+  assert.equal(parseHostArgs(['--scan-mode', 'all', '--scan-all']).scanMode, 'fallback-all');
+  assert.equal(parseHostArgs(['--scan-mode', 'fallback-all', '--no-scan-all']).scanMode, 'common');
+});
+
+test('配置与数据参数解析并应用 no-disk-write 覆盖规则', () => {
+  const options = parseHostArgs([
+    '--options-json', '{"answerMode":"manual"}',
+    '--data-dir', 'C:\\Temp\\cx-data',
+    '--no-disk-write',
+    '--panel-theme', 'pink',
+    '--answer-countdown', '12',
+    '--answer-retry', '3',
+    '--no-auto-submit'
+  ]);
+  assert.equal(options.optionsJson, '{"answerMode":"manual"}');
+  assert.equal(options.dataDir, 'C:\\Temp\\cx-data');
+  assert.equal(options.noDiskWrite, true);
+  assert.equal(options.logFileEnabled, false);
+  assert.equal(options.noDiagnose, true);
+  assert.equal(options.retainData, true);
+  assert.equal(options.panelTheme, 'pink');
+  assert.equal(options.answerCountdown, 12);
+  assert.equal(options.answerRetry, 3);
+  assert.equal(options.autoSubmit, false);
+  assert.equal(options.noScanCache, true);
+  assert.equal(options.diagnose, false);
+  assert.equal(options.reportPath, '');
+  assert.deepEqual(parseOptionsJson('@C:\\Temp\\options.json'), { filePath: 'C:\\Temp\\options.json' });
+});
+
+test('答题设置由宿主配置同步到页面，未指定的开关不覆盖现有值', () => {
+  const defaults = parseHostArgs([]);
+  assert.equal(defaults.autoSubmit, undefined);
+
+  const options = parseHostArgs([
+    '--answer-countdown', '0',
+    '--answer-retry', '0',
+    '--no-auto-submit'
+  ]);
+  const config = applyHostOptionsToConfig({ settings: { 'common.settings.windows-auto-submit': true } }, options);
+  assert.deepEqual(config.settings, {
+    'common.settings.windows-auto-submit': false,
+    'common.settings.windows-answer-countdown': 0,
+    'common.settings.windows-answer-retry': 0
+  });
+});
+
+test('options-json 覆盖默认值但不覆盖独立命令行参数', () => {
+  const parsed = parseHostArgs(['--answer-threads', '2']);
+  const merged = applyOptionsJsonToOptions(parsed, {
+    scanMode: 'common',
+    answerThreads: 4,
+    panel: false,
+    noDiskWrite: true
+  });
+  assert.equal(merged.scanMode, 'common');
+  assert.equal(merged.answerThreads, 2);
+  assert.equal(merged.panelEnabled, false);
+  assert.equal(merged.noDiskWrite, true);
+  assert.equal(merged.logFileEnabled, false);
+  assert.equal(merged.noScanCache, true);
+});
+
+test('no-diagnose CLI 开关覆盖 options-json，且禁用的 JSON 能力显式报错', () => {
+  const parsed = parseHostArgs(['--options-json', '{"diagnose":true}', '--no-diagnose']);
+  const merged = applyOptionsJsonToOptions(parsed, { diagnose: true });
+  assert.equal(merged.diagnose, false);
+  assert.equal(merged.noDiagnose, true);
+  assert.equal(parseHostArgs(['--diagnose', '--no-diagnose']).diagnose, false);
+  assert.equal(parseHostArgs(['--no-diagnose', '--diagnose']).diagnose, true);
+
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { executionMode: 'memory' }), /尚未实现/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { wipeOwnedFilesOnStart: true }), /尚未实现/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { settings: { selfDestructOnFullscreenExit: true } }), /尚未实现/u);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /尚未实现/u);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-execution-mode': 'memory' } }), /尚未实现/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { retainData: false }), /数据清理/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { configPath: 'C:\\override.json' }), /--config/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { panel: 'false' }), /布尔值/u);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { scanAll: true }).scanMode, 'fallback-all');
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs(['--scan-mode', 'common']), { scanAll: true }).scanMode, 'common');
+});
+
+test('当前未实现的图形选择和数据清理参数明确拒绝', () => {
+  assert.throws(() => parseHostArgs(['--ui', 'gui']), /尚未实现/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { ui: 'gui' }), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--retain-data']), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--no-retain-data']), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--delete-config']), /尚未实现/u);
+});
+
+test('文档中的普通启动示例参数均可通过宿主解析器', () => {
+  const examples = [
+    ['--scan-mode', 'fallback-all', '--client-first', '--execution-mode', 'normal', '--no-disk-write', '--no-log', '--quiet', '--no-panel', '--answer-mode', 'manual', '--answer-key', 'Ctrl+Alt+Shift+S', '--answer-threads', '1', '--hide-answer-dialog'],
+    ['--scan-mode', 'fallback-all', '--select-client', '--panel', '--panel-expanded', '--panel-top', '24', '--panel-right', '24', '--panel-width', '520', '--answer-mode', 'auto', '--answer-countdown', '5', '--answer-threads', '4', '--show-answer-dialog', '--log', '--diagnose'],
+    ['--client', 'D:\\Exam\\CXExam.exe', '--data-dir', 'D:\\CXPlusData', '--panel', '--panel-width', '520', '--log'],
+    ['--scan-mode', 'common', '--list-clients', '--no-log', '--quiet'],
+    ['--scan-mode', 'all', '--list-clients', '--no-log'],
+    ['--config', '.\\chaoxing-plus.json', '--panel'],
+    ['--options-json', '{"panel":true,"panelTop":24,"panelWidth":520}']
+  ];
+  for (const args of examples) assert.doesNotThrow(() => parseHostArgs(args));
+});
+
+test('客户端选择参数互斥时在启动前报错', () => {
+  assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--client-first']), /不能与/u);
+  assert.throws(() => parseHostArgs(['--client-index', '1', '--select-client']), /不能与/u);
+});
+
+test('终端客户端选择输入支持序号或带引号的手动路径', () => {
+  assert.deepEqual(parseClientSelectionInput('2', 0), { index: 1, path: '' });
+  assert.deepEqual(parseClientSelectionInput('', 2), { index: 2, path: '' });
+  assert.deepEqual(parseClientSelectionInput('"D:\\Exam Files\\CXExam.exe"', 0), { index: 0, path: 'D:\\Exam Files\\CXExam.exe' });
+  assert.deepEqual(parseClientSelectionInput("'D:\\Exam Files\\CXExam.exe'", 0), { index: 0, path: 'D:\\Exam Files\\CXExam.exe' });
+});
+
+test('未实现的清理、自毁和隐蔽执行参数全部显式拒绝', () => {
+  for (const argument of [
+    '--memory-exec',
+    '--delete-suspend',
+    '--wipe-owned-files-on-start',
+    '--wipe-failure-policy',
+    '--wipe-runtime-retry',
+    '--self-destruct-key',
+    '--self-destruct-on-fullscreen-exit'
+  ]) {
+    assert.throws(() => parseHostArgs([argument]), /尚未实现/u);
+  }
+});
+
 test('答题线程限制为 1 到 4', () => {
-  assert.equal(normalizeAnswerThreads(0), 1);
+  assert.throws(() => normalizeAnswerThreads(0), /1 到 4/u);
   assert.equal(normalizeAnswerThreads(1), 1);
   assert.equal(normalizeAnswerThreads(4), 4);
-  assert.equal(normalizeAnswerThreads(9), 4);
-  assert.equal(normalizeAnswerThreads('bad'), 1);
+  assert.throws(() => normalizeAnswerThreads(9), /1 到 4/u);
+  assert.throws(() => normalizeAnswerThreads('4.5'), /1 到 4/u);
+  assert.throws(() => normalizeAnswerThreads(true), /1 到 4/u);
+  assert.throws(() => normalizeAnswerThreads(null), /1 到 4/u);
+  assert.throws(() => parseHostArgs(['--answer-threads', '2.5']), /1 到 4/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { answerThreads: 0 }), /1 到 4/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { answerThreads: true }), /1 到 4/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { answerRetry: true }), /整数/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { answerCountdown: false }), /整数/u);
+  assert.throws(() => parseHostArgs(['--answer-countdown', '1.5']), /整数/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { answerCountdown: 1.5 }), /整数/u);
 });
 
 test('宿主参数写入共享配置，供 bootstrap 和业务 runtime 使用', () => {
@@ -87,10 +241,10 @@ test('宿主参数写入共享配置，供 bootstrap 和业务 runtime 使用', 
 });
 
 test('内存执行、删除挂起和自毁参数显式拒绝，不静默降级为普通运行', () => {
-  assert.throws(() => parseHostArgs(['--execution-mode', 'memory']), /不支持|normal/u);
-  assert.throws(() => parseHostArgs(['--execution-mode', 'delete-suspend']), /不支持|normal/u);
-  assert.throws(() => parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X']), /不支持/u);
-  assert.throws(() => parseHostArgs(['--self-destruct-on-fullscreen-exit']), /不支持/u);
+  assert.throws(() => parseHostArgs(['--execution-mode', 'memory']), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--execution-mode', 'delete-suspend']), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X']), /尚未实现/u);
+  assert.throws(() => parseHostArgs(['--self-destruct-on-fullscreen-exit']), /尚未实现/u);
 });
 
 test('attach 参数与快捷键不合法时直接报错，不得落入普通启动流程', () => {

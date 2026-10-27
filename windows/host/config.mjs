@@ -64,7 +64,28 @@ export function normalizeConfig(raw) {
   return normalized;
 }
 
-export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250 } = {}) {
+export function mergeConfigLayers(...layers) {
+  const merged = {};
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object' || Array.isArray(layer)) continue;
+    Object.assign(merged, layer);
+    if (layer.settings && typeof layer.settings === 'object' && !Array.isArray(layer.settings)) {
+      merged.settings = { ...(merged.settings || {}), ...pickSharedValues(layer.settings) };
+    }
+  }
+  return normalizeConfig(merged);
+}
+
+export function mergeHostConfigLayers({ defaultHostConfig, appConfig, selectedConfig, loadedConfig, inlineConfig }) {
+  return mergeConfigLayers(
+    defaultHostConfig || loadedConfig,
+    appConfig,
+    selectedConfig,
+    inlineConfig
+  );
+}
+
+export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250, persistEnabled = true } = {}) {
   let config = normalizeConfig(undefined);
   let revision = 0;
   let timer = null;
@@ -97,7 +118,7 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
   }
 
   function schedulePersist() {
-    if (closed) return;
+    if (closed || !persistEnabled) return;
     pending = true;
     if (timer) return;
     timer = setTimeout(() => {
@@ -155,7 +176,7 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
         clearTimeout(timer);
         timer = null;
       }
-      if (pending) await persist();
+      if (pending && persistEnabled) await persist();
     },
     watch({ onChange, intervalMs = 1500 } = {}) {
       watchFile(filePath, { interval: intervalMs }, async (current) => {

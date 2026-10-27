@@ -24,12 +24,13 @@ async function declarations(path, names) {
   return found.join('\n').replace(/^export /gm, '');
 }
 
-async function createRuntime(responses, action = 'pause', modalConfirmResponses = [true]) {
+async function createRuntime(responses, action = 'pause', modalConfirmResponses = [true], answerRetry) {
   const notifications = [];
   const root = {};
   let requests = 0;
   let modalConfirmCalls = 0;
   let panelRefreshes = 0;
+  let configuredAnswerRetry = answerRetry;
   const source = [
     await declarations('src/core/utils/event.ts', ['CommonEventEmitter']),
     await declarations('src/core/worker/interface.ts', ['DEFAULT_WORKER_THREAD_COUNT', 'resolveWorkerThreadCount']),
@@ -37,7 +38,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     await declarations('src/projects/cx-retry-cache.ts', ['hasInsufficientBalanceError']),
     await declarations('src/projects/cx.ts', [
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
-      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'unfinishedQuestionRetryAttempts',
+      'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'defaultUnfinishedQuestionRetryAttempts', 'getUnfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
       'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
     ]),
@@ -48,6 +49,9 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
     domSearchAll: () => ({ title: [{}], options: [{}] }),
     AnswerWrapperHandlerConfig: { timeout_seconds: 1 },
     getStoredTikuAdapterConfig: () => ({}),
+    getWindowsRuntimeSetting: (name, fallback) => name === 'answer-retry' && configuredAnswerRetry !== undefined
+      ? configuredAnswerRetry
+      : fallback,
     resetTikuAdapterBalanceGuard: () => {},
     requestTikuAdapterAIFallback: async () => {
       const response = responses[Math.min(requests++, responses.length - 1)];
@@ -75,7 +79,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInContext(code, context);
   const runtime = vm.runInContext(`({
-    OCSWorker, resolveWorkerThreadCount, appendAIFallbackSearchInfos,
+    OCSWorker, resolveWorkerThreadCount, appendAIFallbackSearchInfos, getUnfinishedQuestionRetryAttempts,
     notify: typeof notifyManualAnswerRequired === 'function' ? notifyManualAnswerRequired : undefined,
     notifyBalance: typeof notifyTikuAdapterInsufficientBalance === 'function' ? notifyTikuAdapterInsufficientBalance : undefined,
     recoverBalance: typeof requestTikuAdapterBalanceRecovery === 'function' ? requestTikuAdapterBalanceRecovery : undefined,
@@ -95,7 +99,15 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   });
   context.createChapterWorker = createWorker;
   context.createWorkOrExamWorker = createWorker;
-  return { ...runtime, createWorker, notifications, get requests() { return requests; }, get modalConfirmCalls() { return modalConfirmCalls; }, get panelRefreshes() { return panelRefreshes; } };
+  return {
+    ...runtime,
+    createWorker,
+    notifications,
+    setAnswerRetry(value) { configuredAnswerRetry = value; },
+    get requests() { return requests; },
+    get modalConfirmCalls() { return modalConfirmCalls; },
+    get panelRefreshes() { return panelRefreshes; }
+  };
 }
 
 const failure = { success: false, error: { code: 'NO_ANSWER' } };
@@ -155,6 +167,20 @@ test('worker thread count defaults to four and normalizes invalid values', async
   assert.equal(runtime.resolveWorkerThreadCount(-2), 1);
   assert.equal(runtime.resolveWorkerThreadCount(2.9), 2);
   assert.equal(runtime.resolveWorkerThreadCount(Number.NaN), 4);
+});
+
+test('configured unfinished-answer retries are respected, including zero retries', async () => {
+  const oneRetry = await createRuntime([failure], 'pause', [true], 1);
+  assert.equal(oneRetry.getUnfinishedQuestionRetryAttempts(), 1);
+  const initialWithRetry = await oneRetry.createWorker().doWork();
+  await oneRetry.retryChapter(initialWithRetry);
+  assert.equal(oneRetry.requests, 2, 'one initial request plus one retry');
+
+  const noRetries = await createRuntime([failure], 'pause', [true], 0);
+  assert.equal(noRetries.getUnfinishedQuestionRetryAttempts(), 0);
+  const initialWithoutRetry = await noRetries.createWorker().doWork();
+  await noRetries.retryChapter(initialWithoutRetry);
+  assert.equal(noRetries.requests, 1, 'zero means no additional retry');
 });
 
 test('worker publishes every question before searching, then reports searching, search completion, and answer completion', async () => {

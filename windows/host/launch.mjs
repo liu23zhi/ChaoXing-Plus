@@ -90,6 +90,17 @@ export function describeMachine(machine) {
   return machine == null ? 'unknown' : `0x${machine.toString(16)}`;
 }
 
+export function isSupportedClientMachine(machine, {
+  platform = process.platform,
+  arch = process.arch,
+  env = process.env
+} = {}) {
+  if (machine === 0x014c) return true;
+  if (machine !== 0x8664 || platform !== 'win32') return false;
+  const windowsArchitecture = `${env.PROCESSOR_ARCHITEW6432 || ''} ${env.PROCESSOR_ARCHITECTURE || ''}`;
+  return arch === 'x64' || arch === 'arm64' || /\b(?:AMD64|ARM64)\b/iu.test(windowsArchitecture);
+}
+
 export async function listProcessIdsByName(imageName) {
   const baseName = String(imageName || '').replace(/\.exe$/i, '');
   if (!baseName) return [];
