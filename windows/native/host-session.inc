@@ -19,9 +19,11 @@ static BOOL h_send_command(H_NATIVE_PAGE *page, const char *method, const char *
 }
 
 static void h_page_close(H_NATIVE_PAGE *page) {
+    h_sample_page(page);
     if (page->state) cx_session_free(page->state);
     if (page->ws) net_ws_close(page->ws);
     page->state = NULL; page->ws = NULL;
+    h_zero(&page->reported, sizeof(page->reported));
     if (h_current_page == page) { h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0; }
 }
 
@@ -31,6 +33,7 @@ static BOOL h_endpoint_owned(USHORT port, const CX_OPTIONS *options, WCHAR *erro
     if (!h_client_pid) { h_error(error, errorCap, L"CDP endpoint has no owned client process"); return FALSE; }
     if (!proc_port_owner(port, h_client_pid, &owner, error, errorCap)) return FALSE;
     if (!owner) { h_error(error, errorCap, L"CDP listener ownership could not be verified"); return FALSE; }
+    h_report.ownershipVerified = TRUE;
     return TRUE;
 }
 
@@ -39,6 +42,7 @@ static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *opti
     char *reply = NULL, *params = NULL;
     DWORD length = 0, at = 0, size = trampolineLength * 6 + 64;
     BOOL ok = FALSE;
+    if (!h_operation_active()) return FALSE;
     if (!h_endpoint_owned(port, options, error, errorCap)) { h_page_close(page); return FALSE; }
     page->ws = net_ws_open(port, page->websocket, error, errorCap);
     if (!page->ws) return FALSE;
@@ -49,6 +53,7 @@ static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *opti
     if (!h_send_command(page, "Page.enable", NULL, NULL, NULL, error, errorCap)) goto done;
     if (h_send_command(page, "Page.getFrameTree", NULL, &reply, &length, error, errorCap)) {
         cx_session_frame_tree(page->state, reply, length);
+        h_sample_page(page);
         net_free(reply); reply = NULL;
     }
     if (!h_send_command(page, "Runtime.enable", NULL, NULL, NULL, error, errorCap)) goto done;
@@ -57,11 +62,17 @@ static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *opti
     if (!h_append_bytes(params, size, &at, "{\"source\":", 10)
         || !h_json_quote(params, size, &at, trampoline, trampolineLength)
         || !h_append_bytes(params, size, &at, "}", 1)) goto done;
-    if (!h_send_command(page, "Page.addScriptToEvaluateOnNewDocument", params, NULL, NULL, error, errorCap) && !options->quiet)
-        h_print(L"New-document registration unavailable; retaining context and top-frame fallback.\r\n");
+    if (!h_send_command(page, "Page.addScriptToEvaluateOnNewDocument", params, NULL, NULL, error, errorCap))
+        h_audit_event("warn", "session", "New-document registration unavailable; retaining context and top-frame fallback");
     page->ensureAt = GetTickCount() + 2500; page->ensurePending = TRUE;
     page->retryAt = 0;
     ok = h_operation_active();
+    if (ok) {
+        ++h_report.pageSessions;
+        if (page->openedBefore) ++h_report.reconnects;
+        h_audit_event("info", "session", page->openedBefore ? "CDP page reconnected" : "CDP page connected");
+        page->openedBefore = TRUE;
+    }
 done:
     if (reply) net_free(reply);
     if (params) HeapFree(GetProcessHeap(), 0, params);
@@ -102,7 +113,7 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
     if (page->ensurePending && (LONG)(GetTickCount() - page->ensureAt) >= 0) {
         page->ensurePending = FALSE; cx_session_request_top_ensure(page->state);
     }
-    for (i = 0; i < 32 && cx_session_next(page->state, &task); ++i) {
+    for (i = 0; i < 32 && h_operation_active() && cx_session_next(page->state, &task); ++i) {
         h_current_task = task; h_task_pending = TRUE; h_current_context = task.contextId;
         if (task.type == CX_SESSION_TASK_BOOTSTRAP) {
             success = h_set_page_config(page->ws, &page->nextId, options, style, styleLength, FALSE, error, errorCap)
@@ -112,7 +123,13 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
         } else {
             success = h_inject_asset(page->ws, &page->nextId, options->injectStrategy, (DWORD)options->injectRetries, bundle, bundleLength, error, errorCap);
         }
-        if (cx_session_complete(page->state, &task, success) && success && task.type == CX_SESSION_TASK_BUNDLE) ++h_bundles_completed;
+        /* A normal stop can cancel a valid in-flight task without failing it. */
+        if ((success || h_operation_active()) && cx_session_complete(page->state, &task, success)) {
+            if (success && task.type == CX_SESSION_TASK_BUNDLE) ++h_bundles_completed;
+            h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap",
+                success ? "Injection acknowledged" : "Injection failed");
+        }
+        h_sample_page(page);
         h_task_pending = FALSE;
         if (!h_operation_active()) break;
     }
@@ -146,6 +163,7 @@ static BOOL h_targets_refresh(H_NATIVE_PAGE *pages, USHORT port, const CX_OPTION
     int token, count, idToken, urlToken, wsToken;
     BOOL ok = FALSE;
     H_NATIVE_PAGE *entry = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE));
+    if (!h_operation_active()) goto done;
     if (!h_endpoint_owned(port, options, error, errorCap)) {
         for (i = 0; i < HOST_MAX_PAGES; ++i) h_page_close(&pages[i]);
         goto done;
@@ -157,6 +175,7 @@ static BOOL h_targets_refresh(H_NATIVE_PAGE *pages, USHORT port, const CX_OPTION
     if (count < 1 || tokens[0].type != '[') goto done;
     for (i = 0; i < HOST_MAX_PAGES; ++i) pages[i].seen = FALSE;
     for (token = 1; token < count; token = tokens[token].next) {
+        if (!h_operation_active()) goto done;
         if (tokens[token].type != '{' || !jeq(body, tokens, jkey(body, tokens, token, "type"), "page")) continue;
         idToken = jkey(body, tokens, token, "id"); urlToken = jkey(body, tokens, token, "url"); wsToken = jkey(body, tokens, token, "webSocketDebuggerUrl");
         if (!jstr(body, tokens, idToken, entry->id, sizeof(entry->id))
@@ -173,8 +192,10 @@ static BOOL h_targets_refresh(H_NATIVE_PAGE *pages, USHORT port, const CX_OPTION
         pages[slot].seen = TRUE;
         if (!pages[slot].ws && (!pages[slot].retryAt || (LONG)(GetTickCount() - pages[slot].retryAt) >= 0)) {
             if (!h_page_open(&pages[slot], port, options, trampoline, trampolineLength, error, errorCap)) {
+                if (!h_operation_active()) goto done;
                 pages[slot].retryAt = GetTickCount() + 1000;
-                if (!options->quiet) { h_print(L"[session] connect failed: "); h_print(error); h_print(L"\r\n"); }
+                ++h_report.errors;
+                h_audit_event("warn", "session", "CDP connection failed; retry scheduled");
             }
         }
     }
@@ -197,13 +218,14 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
     wrapped = h_bundle_source(bundle, bundleLength, &wrappedLength);
     if (!pages || !wrapped) { h_error(error, errorCap, L"out of memory allocating native sessions"); goto done; }
+    h_report.stopReason = "endpoint-unavailable";
     h_command_timeout = (DWORD)options->bundleTimeoutMs;
     while (h_operation_active() && GetTickCount() - waitStart < (DWORD)options->debugTimeoutMs) {
         if (h_endpoint_owned(port, options, error, errorCap)
             && net_http_get(port, "/json/version", &body, &length, error, errorCap)) {
             ready = h_browser_matches(body, length, options->expectedBrowser);
             net_free(body); body = NULL;
-            if (!ready) { h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
+            if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
             break;
         }
         Sleep(100);
@@ -218,6 +240,9 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
         }
         for (i = 0; i < HOST_MAX_PAGES && h_operation_active(); ++i) if (pages[i].ws) {
             if (!h_page_pump(&pages[i], options, bootstrap, bootstrapLength, wrapped, wrappedLength, style, styleLength, error, errorCap)) {
+                if (!h_operation_active()) break;
+                ++h_report.errors;
+                h_audit_event("warn", "session", "CDP connection closed; retry scheduled");
                 h_page_close(&pages[i]); pages[i].retryAt = GetTickCount() + 250;
             }
         }
@@ -225,9 +250,16 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
         Sleep(20);
     } while (h_operation_active());
     ok = !options->extensionEnabled || h_bundles_completed > 0;
+    h_report.stopReason = h_duration && GetTickCount() - h_started >= h_duration ? "duration" : "client-exit";
     if (!ok) h_error(error, errorCap, L"native session ended without any completed business injection");
 done:
-    if (pages) { for (i = 0; i < HOST_MAX_PAGES; ++i) h_page_close(&pages[i]); HeapFree(GetProcessHeap(), 0, pages); }
+    h_report.contexts = 0;
+    if (pages) {
+        /* Gauge at stop, before close frees live contexts; execution totals are cumulative. */
+        for (i = 0; i < HOST_MAX_PAGES; ++i) if (pages[i].state) h_report.contexts += cx_session_stats(pages[i].state)->contexts;
+        for (i = 0; i < HOST_MAX_PAGES; ++i) h_page_close(&pages[i]);
+        HeapFree(GetProcessHeap(), 0, pages);
+    }
     if (wrapped) HeapFree(GetProcessHeap(), 0, wrapped);
     if (body) net_free(body);
     h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0;

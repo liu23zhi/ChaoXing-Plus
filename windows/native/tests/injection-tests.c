@@ -18,6 +18,8 @@ static DWORD scriptReplyMode;
 static BOOL emitRequest;
 static BOOL targetFixture, ownerAllowed, mockClientAlive;
 static DWORD ownerChecks, httpCalls, openCalls, closeCalls, fakeTick;
+static DWORD cancelReadMode;
+static BOOL multipleTargets;
 
 DWORD WINAPI test_tick_count(void) { return fakeTick; }
 BOOL test_proc_alive(DWORD pid) { (void)pid; return mockClientAlive; }
@@ -84,7 +86,11 @@ int net_ws_read(NET_WS *ws, char **text, DWORD *length, WCHAR *error, DWORD cap)
     return 1;
 }
 int net_ws_read_timeout(NET_WS *ws, char **text, DWORD *length, DWORD timeout, WCHAR *error, DWORD cap) {
-    (void)timeout;
+    if (cancelReadMode && ((cancelReadMode <= 2 && timeout) || (cancelReadMode > 2 && !timeout))) {
+        if (cancelReadMode & 1) fakeTick = h_started + h_duration;
+        else mockClientAlive = FALSE;
+        return timeout ? 0 : -1;
+    }
     return net_ws_read(ws, text, length, error, cap);
 }
 
@@ -96,15 +102,66 @@ NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD cap) {
 }
 void net_ws_close(NET_WS *ws) { (void)ws; ++closeCalls; }
 BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length, WCHAR *error, DWORD cap) {
-    const char fixture[] = "[{\"id\":\"owned-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/owned-page\"}]";
-    (void)port; (void)path; (void)error; (void)cap;
+    const char *fixture = lstrcmpA(path, "/json/version") == 0 ? "{\"Browser\":\"Chrome/75.0.3770.100\"}"
+        : multipleTargets
+            ? "[{\"id\":\"first-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/first\"},{\"id\":\"second-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/second\"}]"
+            : "[{\"id\":\"owned-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/owned-page\"}]";
+    (void)port; (void)error; (void)cap;
     ++httpCalls;
     if (!targetFixture) return FALSE;
-    *length = sizeof(fixture) - 1;
-    *body = (char *)HeapAlloc(GetProcessHeap(), 0, sizeof(fixture));
+    *length = (DWORD)h_len(fixture);
+    *body = (char *)HeapAlloc(GetProcessHeap(), 0, *length + 1);
     if (!*body) return FALSE;
-    CopyMemory(*body, fixture, sizeof(fixture));
+    CopyMemory(*body, fixture, *length + 1);
     return TRUE;
+}
+
+static void prepare_stop_fixture(DWORD mode) {
+    cx_options_init(&h_base_options);
+    h_base_options.quiet = TRUE;
+    targetFixture = TRUE; ownerAllowed = TRUE; mockClientAlive = TRUE;
+    ownerChecks = httpCalls = openCalls = closeCalls = calls = failures = 0;
+    h_zero(&h_report, sizeof(h_report));
+    h_client_pid = 123; h_started = 1000; h_duration = 100; fakeTick = 1000;
+    h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0;
+    cancelReadMode = mode; multipleTargets = FALSE;
+}
+
+static void test_normal_stop_cancellation(void) {
+    const char created[] = "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"id\":1,\"origin\":\"https://a.chaoxing.com\",\"auxData\":{\"isDefault\":true,\"frameId\":\"top\"}}}}";
+    H_NATIVE_PAGE *pages;
+    WCHAR error[HOST_ERROR_CAP];
+    DWORD mode;
+    BOOL pumped, watched;
+    for (mode = 1; mode <= 2; ++mode) {
+        prepare_stop_fixture(mode);
+        pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
+        if (!pages) { check("stop fixture allocation", FALSE); return; }
+        pages[0].state = cx_session_create("https://a.chaoxing.com/exam-ans/", TRUE, TRUE);
+        if (!pages[0].state) { HeapFree(GetProcessHeap(), 0, pages); check("stop session allocation", FALSE); return; }
+        pages[0].ws = (NET_WS *)1; pages[0].nextId = 1;
+        cx_session_feed(pages[0].state, created, sizeof(created) - 1);
+        pumped = h_page_pump(&pages[0], &h_base_options, "true;", 5, "true;", 5, "body{}", 6, error, HOST_ERROR_CAP);
+        check(mode == 1 ? "duration cancellation does not count an injection error" : "client exit cancellation does not count an injection error",
+            pumped && calls == 1 && cx_session_stats(pages[0].state)->errors == 0 && h_report.errors == 0 && !h_task_pending);
+        h_page_close(&pages[0]); HeapFree(GetProcessHeap(), 0, pages);
+
+        prepare_stop_fixture(mode); multipleTargets = TRUE;
+        pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
+        if (!pages) { check("cancelled targets allocation", FALSE); return; }
+        h_targets_refresh(pages, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+        check(mode == 1 ? "duration cancellation stops target opens without errors or retries" : "client exit cancellation stops target opens without errors or retries",
+            openCalls == 1 && calls == 1 && h_report.errors == 0 && !pages[0].retryAt && !pages[1].retryAt);
+        h_page_close(&pages[0]); h_page_close(&pages[1]); HeapFree(GetProcessHeap(), 0, pages);
+    }
+    for (mode = 3; mode <= 4; ++mode) {
+        prepare_stop_fixture(mode); h_base_options.extensionEnabled = FALSE;
+        watched = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+        check(mode == 3 ? "duration read closure does not count a transport error" : "client exit read closure does not count a transport error",
+            watched && h_report.errors == 0 && openCalls == 1 && closeCalls == 1);
+    }
+    cancelReadMode = 0; multipleTargets = FALSE; targetFixture = FALSE;
+    h_client_pid = 0; h_duration = 0; h_current_page = NULL; h_task_pending = FALSE;
 }
 
 static void test_owned_target_refresh(void) {
@@ -209,6 +266,7 @@ void __stdcall InjectionTestMain(void) {
     check("script exception falls back to runtime", run_replies(L"script", 0, 0, 3, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     test_owned_target_refresh();
+    test_normal_stop_cancellation();
     {
         WCHAR error[HOST_ERROR_CAP];
         DWORD before = calls, i;

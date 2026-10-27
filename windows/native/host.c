@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "session.h"
 #include "selection.h"
+#include "audit.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
@@ -31,6 +32,8 @@ typedef struct H_NATIVE_PAGE {
     DWORD retryAt;
     BOOL ensurePending;
     BOOL seen;
+    BOOL openedBefore;
+    CX_SESSION_STATS reported;
 } H_NATIVE_PAGE;
 
 static H_NATIVE_PAGE *h_current_page;
@@ -41,6 +44,10 @@ static DWORD h_command_timeout = 10000;
 static DWORD h_client_pid, h_started, h_duration;
 static DWORD h_bundles_completed;
 static int h_exit_code;
+static CX_AUDIT *h_audit;
+static CX_AUDIT_REPORT h_report;
+static BOOL h_capture_console;
+static BOOL h_quiet;
 
 /* Keep the large fixed-size option/path buffers out of the 1 MiB Windows
    thread stack.  The native host deliberately has no CRT startup, so this
@@ -49,10 +56,14 @@ static CX_OPTIONS h_base_options;
 static CX_OPTIONS h_cli_options;
 static CX_OPTIONS h_config_options;
 static CX_OPTIONS h_json_options;
+static CX_OPTIONS h_audit_options;
 static WCHAR h_main_error[HOST_ERROR_CAP];
 static WCHAR h_exe_path[HOST_PATH_CAP];
 static char h_settings[CX_OPTIONS_JSON_CAP];
 static WCHAR h_selected_path[HOST_PATH_CAP];
+static JT h_event_tokens[HOST_REPLY_TOKENS];
+static JT h_page_message_tokens[64];
+static char h_page_message[16384];
 
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
@@ -97,24 +108,66 @@ static void h_print_utf8(const char *text) {
 static BOOL h_equal(const WCHAR *a, const WCHAR *b) {
     int i = 0; if (!a || !b) return FALSE; while (a[i] && b[i] && a[i] == b[i]) ++i; return a[i] == 0 && b[i] == 0;
 }
+static void h_audit_event(const char *level, const char *event, const char *message) {
+    WCHAR error[256];
+    if (h_audit && !cx_audit_log(h_audit, level, event, message, error, 256) && !h_quiet)
+        h_print(L"[audit] File logging failed; continuing without the log file.\r\n");
+}
+static void h_sample_page(H_NATIVE_PAGE *page) {
+    const CX_SESSION_STATS *stats = page->state ? cx_session_stats(page->state) : NULL;
+    if (!stats) return;
+    h_report.bootstraps += stats->bootstraps - page->reported.bootstraps;
+    h_report.bundles += stats->bundles - page->reported.bundles;
+    h_report.errors += stats->errors - page->reported.errors;
+    page->reported = *stats;
+}
+static void h_audit_page_message(const char *json, const JT *tokens, int params) {
+    const char prefix[] = "__CX_WIN_MSG__";
+    int args = jkey(json, tokens, params, "args"), arg, i, length;
+    if (args < 0 || tokens[args].type != '[') return;
+    for (arg = args + 1; arg < tokens[args].next; arg = tokens[arg].next) {
+        if (!jeq(json, tokens, jkey(json, tokens, arg, "type"), "string")
+            || !jstr(json, tokens, jkey(json, tokens, arg, "value"), h_page_message, sizeof(h_page_message))) continue;
+        for (i = 0; prefix[i] && h_page_message[i] == prefix[i]; ++i) { }
+        if (prefix[i]) continue;
+        length = h_len(h_page_message + i);
+        if (jparse(h_page_message + i, length, h_page_message_tokens, 64) > 0
+            && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "bootstrap-error")) {
+            ++h_report.errors;
+            h_audit_event("warn", "bootstrap", "Bootstrap reported an error; detail omitted");
+        }
+        return;
+    }
+}
 static BOOL h_operation_active(void) {
     if (h_client_pid && !proc_alive(h_client_pid)) return FALSE;
     if (h_duration && GetTickCount() - h_started >= h_duration) return FALSE;
     return !h_task_pending || !h_current_page || cx_session_task_active(h_current_page->state, &h_current_task);
 }
 static void h_dispatch_event(const char *json, DWORD length) {
-    JT tokens[64];
-    int params, frame;
+    JT *tokens = h_event_tokens;
+    int params, frame, method;
     if (!h_current_page || !h_current_page->state) return;
     cx_session_feed(h_current_page->state, json, length);
-    if (jparse(json, (int)length, tokens, 64) > 0
-        && jeq(json, tokens, jkey(json, tokens, 0, "method"), "Page.frameNavigated")) {
+    h_sample_page(h_current_page);
+    if (jparse(json, (int)length, tokens, HOST_REPLY_TOKENS) <= 0) return;
+    method = jkey(json, tokens, 0, "method");
+    if (jeq(json, tokens, method, "Page.frameNavigated")) {
         params = jkey(json, tokens, 0, "params");
         frame = jkey(json, tokens, params, "frame");
         if (frame >= 0 && jkey(json, tokens, frame, "parentId") < 0) {
             h_current_page->ensureAt = GetTickCount() + 2500;
             h_current_page->ensurePending = TRUE;
+            h_audit_event("info", "nav", "Top document navigated");
         }
+    } else if (h_capture_console && jeq(json, tokens, method, "Runtime.exceptionThrown")) {
+        ++h_report.errors;
+        h_audit_event("warn", "page", "Page exception observed; page text omitted");
+    } else if (jeq(json, tokens, method, "Runtime.consoleAPICalled")) {
+        params = jkey(json, tokens, 0, "params");
+        h_audit_page_message(json, tokens, params);
+        if (h_capture_console && jeq(json, tokens, jkey(json, tokens, params, "type"), "error"))
+            h_audit_event("warn", "page", "Console error observed; page text omitted");
     }
 }
 static BOOL h_append_bytes(char *out, DWORD cap, DWORD *at, const char *text, DWORD length) {
@@ -345,7 +398,27 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     char *bootstrap = NULL, *bundle = NULL, *style = NULL, *trampoline = NULL;
     DWORD bootstrapLength, bundleLength, styleLength, trampolineLength;
     BOOL ok = FALSE;
+    DWORD runStarted = GetTickCount();
+    WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
+    h_zero(&h_report, sizeof(h_report)); h_exit_code = 0;
+    h_capture_console = options->captureConsole; h_quiet = options->quiet;
+    h_report.attached = options->attachPortSet;
+    h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
+    h_report.stopReason = "discovery-failed";
+    if (!options->listClients || options->reportPath[0]) {
+        const CX_OPTIONS *auditOptions = options;
+        if (options->listClients) {
+            h_audit_options = *options;
+            h_audit_options.logFileEnabled = FALSE;
+            h_audit_options.quiet = TRUE;
+            auditOptions = &h_audit_options;
+        }
+        h_audit = cx_audit_create(auditOptions, auditError, 256);
+        if (!h_audit) { h_error(error, errorCap, L"cannot allocate native audit state"); goto done; }
+        if (auditError[0]) h_audit_event("warn", "audit", "Some file output is unavailable; continuing");
+        h_audit_event("info", "start", "Native host started");
+    }
     h_client_pid = 0; h_duration = 0; h_bundles_completed = 0;
     if (!options->attachPortSet) {
         discover.mode = h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL);
@@ -354,11 +427,13 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         if (!cx_discovery_scan(&discover, &result, error, errorCap)) goto done;
         if (options->listClients) {
             for (i = 0; i < result.count; ++i) { h_print(result.items[i].path); h_print(L"\r\n"); }
-            ok = TRUE; goto done;
+            h_report.stopReason = "list-clients"; ok = TRUE; goto done;
         }
-        if (!result.count && options->quiet && options->clientFirst) { ok = TRUE; goto done; }
-        if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) ok = TRUE; goto done; }
+        if (!result.count && options->quiet && options->clientFirst) { h_report.stopReason = "no-client"; ok = TRUE; goto done; }
+        h_report.stopReason = "selection-failed";
+        if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) { h_report.stopReason = "cancelled"; ok = TRUE; } goto done; }
     }
+    h_report.stopReason = "assets-failed";
     if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
         || !cx_asset_load(L"chaoxing-plus.windows.js", options->assetsDirSet ? options->assetsDir : NULL, &bundle, &bundleLength, error, errorCap)
         || !cx_asset_load(L"sweetalert2.min.css", options->assetsDirSet ? options->assetsDir : NULL, &style, &styleLength, error, errorCap)
@@ -367,19 +442,34 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
+        h_report.stopReason = "launch-failed";
         if (!h_choose_port(options, &port)) { h_error(error, errorCap, L"no usable loopback CDP port"); goto done; }
         if (!proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap)) goto done;
     }
+    h_report.clientPid = h_client_pid; h_report.port = port;
+    h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
     ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
 done:
+    h_report.success = ok && h_exit_code == 0;
+    if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }
+    else h_audit_event("info", "stop", h_report.stopReason);
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");
     if (bootstrap) HeapFree(GetProcessHeap(), 0, bootstrap); if (bundle) HeapFree(GetProcessHeap(), 0, bundle); if (style) HeapFree(GetProcessHeap(), 0, style); if (trampoline) HeapFree(GetProcessHeap(), 0, trampoline);
     if (client) {
         if (!ok || options->stopClientOnExit) { proc_stop_owned(h_client_pid); WaitForSingleObject(client, 5000); }
         CloseHandle(client);
     }
-    cx_discovery_free(&result); return ok;
+    cx_discovery_free(&result);
+    h_report.durationMs = GetTickCount() - runStarted;
+    if (h_audit) {
+        if (!cx_audit_write_report(h_audit, &h_report, auditError, 256)) {
+            h_audit_event("error", "report", "Run report could not be written; execution result retained");
+            if (options->listClients && !options->quiet) h_print(L"[report] Run report could not be written.\r\n");
+        }
+        cx_audit_close(h_audit); h_audit = NULL;
+    }
+    return ok;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
     LPWSTR *argv; int argc; BOOL ok; WSADATA data; (void)instance; (void)previous; (void)commandLine; (void)show;
@@ -410,10 +500,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --debug-timeout <1000-120000 ms> --bundle-timeout <1000-300000 ms>\n"
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
             "运行: --execution-mode normal --port <0-65535> --stop-client-on-exit\n"
-            "  --no-disk-write --quiet --duration <ms, 0=不限时>\n"
+            "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
+            "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
+            "  --capture-console|--no-capture-console（只记录页面错误事件，不保存页面文本）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
             "状态: --help --capabilities\n"
-            "尚未提供: 配置热重载、文件日志/报告/渲染诊断；请使用 Node 宿主获得这些能力。\n"
+            "尚未提供: 配置持久化/热重载及渲染诊断；请使用 Node 宿主获得这些能力。\n"
             "内存执行、删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
         return 0;
     }
@@ -421,7 +513,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":false,\"fileLogging\":false,\"renderDiagnostics\":false,"
+            "\"maxPageSessions\":16,\"configReload\":false,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }

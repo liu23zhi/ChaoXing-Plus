@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,7 +56,7 @@ test('native host build output is not treated as a checked-in artifact', async (
 test('compiled native common discovery does not crash while reading default environment roots', {
   skip: !process.env.CX_NATIVE_HOST_EXE
 }, () => {
-  const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, ['--list-clients', '--scan-mode', 'common', '--quiet'], {
+  const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, ['--list-clients', '--scan-mode', 'common', '--quiet', '--no-disk-write'], {
     encoding: 'utf8', timeout: 20_000, windowsHide: true
   });
   assert.ok([0, 1].includes(result.status), `unexpected exit ${result.status}: ${result.stdout}\n${result.stderr}`);
@@ -99,7 +100,8 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.navigation, true);
   assert.equal(nativeCapabilities.targetReconnect, true);
   assert.equal(nativeCapabilities.configReload, false);
-  assert.equal(nativeCapabilities.fileLogging, false);
+  assert.equal(nativeCapabilities.fileLogging, true);
+  assert.equal(nativeCapabilities.runReport, true);
 
   const config = run('--print-effective-config', '--no-disk-write');
   assert.equal(config.status, 0, config.stderr || `config exited with ${config.status}`);
@@ -117,5 +119,59 @@ test('native host CLI writes help and machine-readable output to redirected stdo
     const result = run('--print-effective-config', ...args);
     assert.equal(result.status, 2, `${args.join(' ')} must fail before launching a client`);
     assert.match(result.stdout, /not supported by native host/);
+  }
+});
+
+test('compiled native listing writes only an explicitly requested report', {
+  skip: !process.env.CX_NATIVE_HOST_EXE
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-native-list-audit-'));
+  try {
+    const run = (...args) => spawnSync(process.env.CX_NATIVE_HOST_EXE, [
+      '--list-clients', '--scan-mode', 'common', '--quiet', ...args
+    ], { cwd: directory, encoding: 'utf8', timeout: 20_000, windowsHide: true });
+    const plain = run();
+    assert.equal(plain.status, 0, plain.stdout + plain.stderr);
+    assert.deepEqual(await fs.readdir(directory), [], 'pure listing must not create default logs');
+
+    const before = Date.now();
+    const reported = run('--report', 'scan-report.json');
+    const after = Date.now();
+    assert.equal(reported.status, 0, reported.stdout + reported.stderr);
+    assert.equal(reported.stdout, plain.stdout, 'audit events must not pollute the candidate list');
+    assert.deepEqual(await fs.readdir(directory), ['scan-report.json']);
+    const report = JSON.parse(await fs.readFile(path.join(directory, 'scan-report.json'), 'utf8'));
+    assert.equal(report.stopReason, 'list-clients');
+    assert.equal(report.success, true);
+    assert.equal(report.clientPid, 0);
+    assert.equal(report.totals.errors, 0);
+    assert.ok(Date.parse(report.startedAt) >= before && Date.parse(report.finishedAt) <= after);
+    assert.ok(Math.abs(Date.parse(report.finishedAt) - Date.parse(report.startedAt) - report.durationMs) < 100);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('compiled native startup failure retains its exit code and a redacted report', {
+  skip: !process.env.CX_NATIVE_HOST_EXE
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-native-failure-audit-'));
+  try {
+    const privatePath = path.join(directory, 'private-client-canary', 'CXExam.exe');
+    const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, [
+      '--client', privatePath, '--no-log', '--quiet', '--report', 'failure-report.json'
+    ], { cwd: directory, encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(result.stdout + result.stderr, '');
+    assert.deepEqual(await fs.readdir(directory), ['failure-report.json']);
+    const text = await fs.readFile(path.join(directory, 'failure-report.json'), 'utf8');
+    const report = JSON.parse(text);
+    assert.equal(report.stopReason, 'discovery-failed');
+    assert.equal(report.success, false);
+    assert.equal(report.clientPid, 0);
+    assert.equal(report.totals.errors, 1);
+    assert.doesNotMatch(text, /private-client-canary/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
