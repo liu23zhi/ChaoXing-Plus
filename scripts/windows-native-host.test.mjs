@@ -52,7 +52,7 @@ test('native host CLI writes help and machine-readable output to redirected stdo
 
   const help = run('--help');
   assert.equal(help.status, 0, help.stderr || `help exited with ${help.status}`);
-  assert.match(help.stdout, /chaoxing_plus native host/);
+  assert.match(help.stdout, /超星学习助手 Windows 宿主/);
 
   const capabilities = run('--capabilities');
   assert.equal(capabilities.status, 0, capabilities.stderr || `capabilities exited with ${capabilities.status}`);
