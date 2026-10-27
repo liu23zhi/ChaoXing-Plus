@@ -1,7 +1,7 @@
 const ANSWER_MODES = new Set(['manual', 'auto']);
+const INJECT_STRATEGIES = new Set(['hybrid', 'runtime', 'script']);
 
-// 第一阶段未实现能力的机器可读 schema / capability 标记。
-// 宿主只做“显式拒绝 + 帮助/报告展示”，绝不静默降级为普通运行。
+// 第一阶段只提供普通运行；以下能力保留参数设计，运行入口一律拒绝。
 export const UNSUPPORTED_CAPABILITIES = Object.freeze({
   implemented: false,
   reason: '第一阶段仅支持普通可审计运行；以下参数会显式报错，不会静默降级',
@@ -11,6 +11,7 @@ export const UNSUPPORTED_CAPABILITIES = Object.freeze({
     unsupportedValues: Object.freeze(['memory', 'delete-suspend'])
   }),
   startupWipe: Object.freeze({
+    implemented: false,
     flags: Object.freeze([
       '--wipe-owned-files-on-start',
       '--wipe-failure-policy',
@@ -44,7 +45,7 @@ export function describeUnsupportedCapabilities() {
     `execution: 仅支持 ${UNSUPPORTED_CAPABILITIES.executionModes.supported.join('/')}；`
       + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues.join('/')} 与 `
       + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedFlags.join('/')} 未实现`,
-    `startup-wipe: 未实现（策略 ${UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies.join('|')}，`
+    `startup-wipe: 尚未实现（策略 ${UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies.join('|')}，`
       + `重试 ${UNSUPPORTED_CAPABILITIES.startupWipe.retries.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retries.max}，`
       + `间隔 ${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.max}ms）`,
     `self-destruct: 未实现（可重复快捷键、延迟 ${UNSUPPORTED_CAPABILITIES.selfDestruct.delayMs.default}ms、默认需确认）`
@@ -87,6 +88,13 @@ export function parseClientSelectionInput(value, defaultIndex) {
 function readAnswerMode(value) {
   if (!ANSWER_MODES.has(value)) {
     throw new Error(`参数 --answer-mode 只支持 manual 或 auto，当前为 ${value}`);
+  }
+  return value;
+}
+
+function readInjectStrategy(value, name = '--inject-strategy') {
+  if (!INJECT_STRATEGIES.has(value)) {
+    throw new Error(`参数 ${name} 只支持 hybrid、runtime 或 script，当前为 ${value}`);
   }
   return value;
 }
@@ -146,7 +154,9 @@ function readAnswerKey(value) {
 }
 
 function rejectUnsupportedExecutionOption(argument) {
-  throw new Error(`参数 ${argument} 当前 Windows 宿主尚未实现；请使用已支持的普通运行参数`);
+  const error = new Error(`参数 ${argument} 当前 Windows 宿主尚未实现；请使用已支持的普通运行参数`);
+  error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
+  throw error;
 }
 
 export function validateSupportedJsonOptions(value, source = 'options-json') {
@@ -159,8 +169,12 @@ export function validateSupportedJsonOptions(value, source = 'options-json') {
         .replace(/^common\.settings\.windows-/iu, '')
         .replace(/[-_]/gu, '')
         .toLowerCase();
-      if (unsupportedKey.test(normalizedKey) && child !== false && !(normalizedKey === 'executionmode' && child === 'normal')) {
-        throw new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
+      if (unsupportedKey.test(normalizedKey)
+        && (normalizedKey.startsWith('wipe') || child !== false)
+        && !(normalizedKey === 'executionmode' && child === 'normal')) {
+        const error = new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
+        error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
+        throw error;
       }
       visit(child, fullKey);
     }
@@ -203,6 +217,14 @@ const JSON_OPTION_KEYS = {
   rescan: 'rescan',
   noScanCache: 'noScanCache',
   dataDir: 'dataDir',
+  expectedBrowser: 'expectedBrowser',
+  injectStrategy: 'injectStrategy',
+  injectRetries: 'injectRetries',
+  injectBlankFrames: 'injectBlankFrames',
+  captureConsole: 'captureConsole',
+  debugEndpointTimeoutMs: 'debugEndpointTimeoutMs',
+  targetPollIntervalMs: 'targetPollIntervalMs',
+  bundleTimeoutMs: 'bundleTimeoutMs',
   noDiskWrite: 'noDiskWrite',
   retainData: 'retainData',
   deleteConfig: 'deleteConfig',
@@ -220,6 +242,12 @@ const JSON_OPTION_KEYS = {
   answerCountdown: 'answerCountdown',
   answerRetry: 'answerRetry',
   autoSubmit: 'autoSubmit',
+  wipeOwnedFilesOnStart: 'wipeOwnedFilesOnStart',
+  wipeFailurePolicy: 'wipeFailurePolicy',
+  wipeRetries: 'wipeRetries',
+  wipeRetryDelayMs: 'wipeRetryDelayMs',
+  wipeRuntimeRetry: 'wipeRuntimeRetry',
+  wipeRuntimeIntervalSec: 'wipeRuntimeIntervalSec',
   log: 'logFileEnabled',
   logFileEnabled: 'logFileEnabled',
   quiet: 'quiet',
@@ -234,9 +262,13 @@ const JSON_OPTION_KEYS = {
 
 const CLI_OPTION_KEYS = {
   '--client': 'clientPath', '--client-index': 'clientIndex', '--client-first': 'clientFirst',
-  '--list-clients': 'listClients', '--select-client': 'selectClient', '--scan-mode': 'scanMode',
+  '--scan-clients': 'scanClients', '--list-clients': 'listClients', '--select-client': 'selectClient', '--scan-mode': 'scanMode',
   '--scan-all': 'scanMode', '--no-scan-all': 'scanMode', '--ui': 'ui', '--rescan': 'rescan',
   '--no-scan-cache': 'noScanCache', '--config': 'configPath', '--data-dir': 'dataDir',
+  '--expected-browser': 'expectedBrowser', '--inject-blank-frames': 'injectBlankFrames', '--no-inject-blank-frames': 'injectBlankFrames',
+  '--capture-console': 'captureConsole', '--no-capture-console': 'captureConsole', '--debug-timeout': 'debugEndpointTimeoutMs',
+  '--target-poll-interval': 'targetPollIntervalMs', '--bundle-timeout': 'bundleTimeoutMs',
+  '--inject-strategy': 'injectStrategy', '--inject-retries': 'injectRetries',
   '--no-disk-write': 'noDiskWrite', '--retain-data': 'retainData', '--no-retain-data': 'retainData',
   '--delete-config': 'deleteConfig', '--panel': 'panelEnabled', '--no-panel': 'panelEnabled',
   '--panel-collapsed': 'panelCollapsed', '--panel-expanded': 'panelCollapsed', '--panel-top': 'panelTop',
@@ -244,12 +276,16 @@ const CLI_OPTION_KEYS = {
   '--answer-mode': 'answerMode', '--answer-key': 'answerKey', '--show-answer-dialog': 'showAnswerDialog',
   '--hide-answer-dialog': 'showAnswerDialog', '--answer-threads': 'answerThreads',
   '--answer-countdown': 'answerCountdown', '--answer-retry': 'answerRetry', '--no-auto-submit': 'autoSubmit',
+  '--wipe-owned-files-on-start': 'wipeOwnedFilesOnStart', '--wipe-failure-policy': 'wipeFailurePolicy',
+  '--wipe-retries': 'wipeRetries', '--wipe-retry-delay': 'wipeRetryDelayMs',
+  '--wipe-runtime-retry': 'wipeRuntimeRetry', '--no-wipe-runtime-retry': 'wipeRuntimeRetry',
+  '--wipe-runtime-interval': 'wipeRuntimeIntervalSec',
   '--log': 'logFileEnabled', '--no-log': 'logFileEnabled', '--quiet': 'quiet', '--diagnose': 'diagnose',
   '--no-diagnose': 'diagnose', '--diagnostics-dir': 'diagnosticsDir', '--report': 'reportPath',
   '--stop-client-on-exit': 'stopClientOnExit', '--dpi-aware': 'dpiAware'
 };
 
-export function applyOptionsJsonToOptions(options, value) {
+export function applyOptionsJsonToOptions(options, value, { deferValidation = false } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return options;
   rejectUnsupportedJsonOptions(value);
   if (Object.prototype.hasOwnProperty.call(value, 'configPath')) {
@@ -258,9 +294,12 @@ export function applyOptionsJsonToOptions(options, value) {
   const next = { ...options };
   const cliKeys = options.cliOptionKeys || new Set();
   const selectedByCli = ['clientPath', 'clientIndex', 'clientFirst', 'listClients', 'selectClient'].find((key) => cliKeys.has(key));
+  const scanSelectionByCli = ['scanClients', 'scanMode', 'rescan', 'noScanCache'].some((key) => cliKeys.has(key));
   const selectionKeys = new Set(['clientPath', 'clientIndex', 'clientFirst', 'listClients', 'selectClient']);
   for (const [jsonKey, optionKey] of Object.entries(JSON_OPTION_KEYS)) {
-    if (selectedByCli && (selectionKeys.has(optionKey) || (selectedByCli === 'clientPath' && ['scanMode', 'scanAll'].includes(optionKey)))) continue;
+    if (selectedByCli && selectionKeys.has(optionKey)) continue;
+    if (scanSelectionByCli && optionKey === 'clientPath') continue;
+    if (selectedByCli === 'clientPath' && ['scanMode', 'scanAll'].includes(optionKey)) continue;
     if (!Object.prototype.hasOwnProperty.call(value, jsonKey) || cliKeys.has(optionKey)) continue;
     const raw = value[jsonKey];
     switch (optionKey) {
@@ -278,6 +317,8 @@ export function applyOptionsJsonToOptions(options, value) {
         next.scanClients = true;
         break;
       case 'answerMode': next.answerMode = readAnswerMode(raw); break;
+      case 'injectStrategy': next.injectStrategy = readInjectStrategy(readString(raw, jsonKey), `options-json.${jsonKey}`); break;
+      case 'injectRetries': next.injectRetries = readBoundedInteger(raw, 'options-json.injectRetries', 0, 5); break;
       case 'answerKey': next.answerKey = readAnswerKey(readString(raw, jsonKey)); break;
       case 'diagnose':
         next.diagnose = jsonKey === 'noDiagnose' ? !readBoolean(raw, jsonKey) : readBoolean(raw, jsonKey);
@@ -289,6 +330,17 @@ export function applyOptionsJsonToOptions(options, value) {
       case 'answerThreads': next.answerThreads = normalizeAnswerThreads(raw); break;
       case 'answerCountdown': next.answerCountdown = readBoundedInteger(raw, 'options-json.answerCountdown', 0, 3600); break;
       case 'answerRetry': next.answerRetry = readBoundedInteger(raw, 'options-json.answerRetry', 0, 20); break;
+      case 'wipeFailurePolicy':
+        if (!['retry', 'background', 'ignore', 'abort'].includes(raw)) throw new Error('options-json 的 wipeFailurePolicy 无效');
+        next.wipeFailurePolicy = raw;
+        break;
+      case 'wipeRetries': next.wipeRetries = readBoundedInteger(raw, 'options-json.wipeRetries', 1, 20); break;
+      case 'wipeRetryDelayMs': next.wipeRetryDelayMs = readBoundedInteger(raw, 'options-json.wipeRetryDelayMs', 50, 5000); break;
+      case 'wipeRuntimeIntervalSec': next.wipeRuntimeIntervalSec = readBoundedInteger(raw, 'options-json.wipeRuntimeIntervalSec', 1, 86400); break;
+      case 'debugEndpointTimeoutMs': next.debugEndpointTimeoutMs = readBoundedInteger(raw, 'options-json.debugEndpointTimeoutMs', 1000, 120000); break;
+      case 'targetPollIntervalMs': next.targetPollIntervalMs = readBoundedInteger(raw, 'options-json.targetPollIntervalMs', 250, 10000); break;
+      case 'bundleTimeoutMs': next.bundleTimeoutMs = readBoundedInteger(raw, 'options-json.bundleTimeoutMs', 1000, 300000); break;
+      case 'expectedBrowser': next.expectedBrowser = readString(raw, jsonKey); break;
       case 'clientPath': next.clientPath = readString(raw, jsonKey); break;
       case 'clientIndex': next.clientIndex = readBoundedInteger(raw, jsonKey, 1, Number.MAX_SAFE_INTEGER); break;
       case 'ui':
@@ -315,14 +367,23 @@ export function applyOptionsJsonToOptions(options, value) {
       case 'dpiAware':
       case 'autoSubmit':
       case 'logFileEnabled':
+      case 'wipeOwnedFilesOnStart':
+      case 'wipeRuntimeRetry':
+      case 'injectBlankFrames':
+      case 'captureConsole':
         next[optionKey] = readBoolean(raw, jsonKey);
-        if (optionKey === 'rescan') next.scanClients = raw;
+        if ((optionKey === 'rescan' || optionKey === 'noScanCache') && raw) next.scanClients = true;
         break;
       default:
         if (['panelTop', 'panelRight', 'panelWidth'].includes(optionKey)) break;
         next[optionKey] = raw;
     }
   }
+  return deferValidation ? next : finalizeHostOptions(next);
+}
+
+function finalizeHostOptions(options) {
+  const next = { ...options };
   if (next.noDiskWrite) {
     next.logFileEnabled = false;
     next.noDiagnose = true;
@@ -332,7 +393,56 @@ export function applyOptionsJsonToOptions(options, value) {
   }
   validateClientSelectionOptions(next);
   validateDataLifecycleOptions(next);
+  validateWipeOptions(next);
   return next;
+}
+
+const CONFIG_SETTING_OPTION_KEYS = {
+  'common.settings.windows-panel-enabled': 'panelEnabled',
+  'common.settings.windows-panel-collapsed': 'panelCollapsed',
+  'common.settings.windows-panel-top': 'panelTop',
+  'common.settings.windows-panel-right': 'panelRight',
+  'common.settings.windows-panel-width': 'panelWidth',
+  'common.settings.windows-panel-theme': 'panelTheme',
+  'common.settings.windows-answer-mode': 'answerMode',
+  'common.settings.windows-answer-key': 'answerKey',
+  'common.settings.windows-show-answer-dialog': 'showAnswerDialog',
+  'common.settings.windows-answer-threads': 'answerThreads',
+  'common.settings.windows-answer-countdown': 'answerCountdown',
+  'common.settings.windows-answer-retry': 'answerRetry',
+  'common.settings.windows-auto-submit': 'autoSubmit',
+  'common.settings.windows-log-enabled': 'logFileEnabled',
+  'common.settings.windows-no-disk-write': 'noDiskWrite',
+  'common.settings.windows-wipe-owned-files-on-start': 'wipeOwnedFilesOnStart',
+  'common.settings.windows-wipe-failure-policy': 'wipeFailurePolicy',
+  'common.settings.windows-wipe-retries': 'wipeRetries',
+  'common.settings.windows-wipe-retry-delay-ms': 'wipeRetryDelayMs',
+  'common.settings.windows-wipe-runtime-retry': 'wipeRuntimeRetry',
+  'common.settings.windows-wipe-runtime-interval-sec': 'wipeRuntimeIntervalSec'
+};
+
+function configLayerToOptions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  for (const key of Object.keys(JSON_OPTION_KEYS)) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) result[key] = value[key];
+  }
+  const settings = value.settings;
+  if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+    for (const [key, optionKey] of Object.entries(CONFIG_SETTING_OPTION_KEYS)) {
+      if (Object.prototype.hasOwnProperty.call(settings, key)) result[optionKey] = settings[key];
+    }
+  }
+  return result;
+}
+
+export function applyHostOptionLayers(options, ...layers) {
+  let next = options;
+  for (const layer of layers) {
+    const values = configLayerToOptions(layer);
+    if (Object.keys(values).length > 0) next = applyOptionsJsonToOptions(next, values, { deferValidation: true });
+  }
+  return finalizeHostOptions(next);
 }
 
 function validateDataLifecycleOptions(options) {
@@ -344,7 +454,31 @@ function validateDataLifecycleOptions(options) {
   }
 }
 
+function validateWipeOptions(options) {
+  if (!['retry', 'background', 'ignore', 'abort'].includes(options.wipeFailurePolicy || 'retry')) {
+    throw new Error('--wipe-failure-policy 只支持 retry、background、ignore 或 abort');
+  }
+  const retries = options.wipeRetries === undefined ? 5 : options.wipeRetries;
+  if (!Number.isInteger(retries) || retries < 1 || retries > 20) {
+    throw new Error('--wipe-retries 必须是 1 到 20 之间的整数');
+  }
+  const delay = options.wipeRetryDelayMs === undefined ? 200 : options.wipeRetryDelayMs;
+  if (!Number.isInteger(delay) || delay < 50 || delay > 5000) {
+    throw new Error('--wipe-retry-delay 必须是 50 到 5000 之间的整数');
+  }
+  const interval = options.wipeRuntimeIntervalSec === undefined ? 30 : options.wipeRuntimeIntervalSec;
+  if (!Number.isInteger(interval) || interval < 1 || interval > 86400) {
+    throw new Error('--wipe-runtime-interval 必须是 1 到 86400 之间的整数');
+  }
+  if (options.wipeRuntimeRetry !== undefined && typeof options.wipeRuntimeRetry !== 'boolean') {
+    throw new Error('--wipe-runtime-retry 必须是布尔值');
+  }
+}
+
 function validateClientSelectionOptions(options) {
+  if (options.clientPath && options.scanClients) {
+    throw new Error('--client 不能与扫描参数（--scan-clients、--scan-mode 或 --rescan）同时使用');
+  }
   if (options.clientPath && (options.clientIndex !== null && options.clientIndex !== undefined || options.clientFirst || options.selectClient || options.listClients)) {
     throw new Error('--client 不能与 --client-index、--client-first、--select-client 或 --list-clients 同时使用');
   }
@@ -375,6 +509,14 @@ export function parseHostArgs(argv) {
     scanAll: false,
     ui: 'auto',
     dataDir: '.data',
+    expectedBrowser: 'Chrome/',
+    injectBlankFrames: true,
+    captureConsole: true,
+    injectStrategy: 'hybrid',
+    injectRetries: 2,
+    debugEndpointTimeoutMs: 30000,
+    targetPollIntervalMs: 1000,
+    bundleTimeoutMs: 120000,
     dataDirExplicit: false,
     noDiskWrite: false,
     retainData: true,
@@ -407,6 +549,12 @@ export function parseHostArgs(argv) {
     answerCountdown: undefined,
     answerRetry: undefined,
     autoSubmit: undefined,
+    wipeOwnedFilesOnStart: false,
+    wipeFailurePolicy: 'retry',
+    wipeRetries: 5,
+    wipeRetryDelayMs: 200,
+    wipeRuntimeRetry: true,
+    wipeRuntimeIntervalSec: 30,
     executionMode: 'normal',
     help: false,
     capabilities: false
@@ -455,8 +603,18 @@ export function parseHostArgs(argv) {
         break;
       }
       case '--rescan': options.rescan = true; options.scanClients = true; break;
-      case '--no-scan-cache': options.noScanCache = true; break;
+      case '--no-scan-cache': options.noScanCache = true; options.scanClients = true; break;
       case '--data-dir': options.dataDir = readValue(argv, index, argument); options.dataDirExplicit = true; index += 1; break;
+      case '--expected-browser': options.expectedBrowser = readValue(argv, index, argument); index += 1; break;
+      case '--inject-blank-frames': options.injectBlankFrames = true; break;
+      case '--no-inject-blank-frames': options.injectBlankFrames = false; break;
+      case '--capture-console': options.captureConsole = true; break;
+      case '--no-capture-console': options.captureConsole = false; break;
+      case '--inject-strategy': options.injectStrategy = readInjectStrategy(readValue(argv, index, argument), argument); index += 1; break;
+      case '--inject-retries': options.injectRetries = readBoundedInteger(readValue(argv, index, argument), argument, 0, 5); index += 1; break;
+      case '--debug-timeout': options.debugEndpointTimeoutMs = readBoundedInteger(readValue(argv, index, argument), argument, 1000, 120000); index += 1; break;
+      case '--target-poll-interval': options.targetPollIntervalMs = readBoundedInteger(readValue(argv, index, argument), argument, 250, 10000); index += 1; break;
+      case '--bundle-timeout': options.bundleTimeoutMs = readBoundedInteger(readValue(argv, index, argument), argument, 1000, 300000); index += 1; break;
       case '--no-disk-write': options.noDiskWrite = true; options.logFileEnabled = false; options.noDiagnose = true; options.reportPath = ''; break;
       case '--retain-data':
         options.retainData = true;
@@ -506,10 +664,6 @@ export function parseHostArgs(argv) {
         index += 1;
         break;
       }
-      case '--self-destruct-key':
-      case '--self-destruct-on-fullscreen-exit':
-      case '--self-destruct-delay':
-      case '--no-self-destruct-confirm':
       case '--wipe-owned-files-on-start':
       case '--wipe-failure-policy':
       case '--wipe-retries':
@@ -517,6 +671,10 @@ export function parseHostArgs(argv) {
       case '--wipe-runtime-retry':
       case '--no-wipe-runtime-retry':
       case '--wipe-runtime-interval':
+      case '--self-destruct-key':
+      case '--self-destruct-on-fullscreen-exit':
+      case '--self-destruct-delay':
+      case '--no-self-destruct-confirm':
       case '--memory-exec':
       case '--delete-suspend':
         rejectUnsupportedExecutionOption(argument);
@@ -528,6 +686,7 @@ export function parseHostArgs(argv) {
   options.cliOptionKeys = new Set(argv.map((argument) => CLI_OPTION_KEYS[argument]).filter(Boolean));
   validateClientSelectionOptions(options);
   validateDataLifecycleOptions(options);
+  validateWipeOptions(options);
   if (options.noDiskWrite) {
     options.logFileEnabled = false;
     options.noDiagnose = true;
@@ -540,6 +699,19 @@ export function parseHostArgs(argv) {
 
 export function applyHostOptionsToConfig(config, options) {
   const next = config && typeof config === 'object' ? config : {};
+  const topLevelValues = [
+    'expectedBrowser',
+    'injectBlankFrames',
+    'captureConsole',
+    'injectStrategy',
+    'injectRetries',
+    'debugEndpointTimeoutMs',
+    'targetPollIntervalMs',
+    'bundleTimeoutMs'
+  ];
+  for (const key of topLevelValues) {
+    if (options?.[key] !== undefined && options?.[key] !== '') next[key] = options[key];
+  }
   next.settings = { ...(next.settings && typeof next.settings === 'object' ? next.settings : {}) };
   const values = {
     panelEnabled: 'common.settings.windows-panel-enabled',

@@ -43,7 +43,7 @@ function sanitizeForLog(url, maxLength = 220) {
 }
 
 export class PageSession {
-  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, logger, onConfigSync, onBundleInjected }) {
+  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected }) {
     this.port = port;
     this.target = target;
     this.assets = assets;
@@ -51,6 +51,9 @@ export class PageSession {
     this.instanceToken = instanceToken;
     this.injectBlankFrames = injectBlankFrames;
     this.captureConsole = captureConsole;
+    this.injectStrategy = ['hybrid', 'runtime', 'script'].includes(injectStrategy) ? injectStrategy : 'hybrid';
+    this.injectRetries = Number.isInteger(injectRetries) ? Math.max(0, Math.min(5, injectRetries)) : 2;
+    this.bundleTimeoutMs = Number.isInteger(bundleTimeoutMs) ? bundleTimeoutMs : 120000;
     this.logger = logger;
     this.onConfigSync = onConfigSync;
     this.onBundleInjected = onBundleInjected;
@@ -62,6 +65,7 @@ export class PageSession {
     this.bootstrapped = new Set();
     this.readyContexts = new Set();
     this.bundleLoaded = new Set();
+    this.bundlePending = new Map();
     this.rescanTimer = null;
     this.topEnsureTimer = null;
     this.closed = false;
@@ -77,7 +81,12 @@ export class PageSession {
   }
 
   async open() {
-    this.connection = await CdpConnection.open(this.target.webSocketDebuggerUrl);
+    const connection = await CdpConnection.open(this.target.webSocketDebuggerUrl);
+    if (this.closed) {
+      connection.close();
+      throw Object.assign(new Error('注入会话已关闭，取消迟到的 CDP 连接'), { code: 'CX_INJECTION_CANCELLED' });
+    }
+    this.connection = connection;
     this.connection.onEvent((message) => {
       void this.handleEvent(message);
     });
@@ -85,10 +94,23 @@ export class PageSession {
     await this.connection.send('Page.enable');
     await this.refreshFrameTree();
     await this.connection.send('Runtime.enable');
-    const registration = await this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
-      source: this.assets.trampoline
-    });
-    this.scriptIdentifier = registration && registration.identifier ? registration.identifier : null;
+    const assertRegistrationActive = () => {
+      if (this.closed || connection.closed) {
+        throw Object.assign(new Error('注入会话或调试连接已关闭，取消新文档脚本注册'), { code: 'CX_INJECTION_CANCELLED' });
+      }
+    };
+    try {
+      const registration = await this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: this.assets.trampoline
+      });
+      assertRegistrationActive();
+      this.scriptIdentifier = registration && registration.identifier ? registration.identifier : null;
+    } catch (error) {
+      assertRegistrationActive();
+      if (error.code === 'CX_INJECTION_CANCELLED') throw error;
+      this.logger.warn(`[session] 新文档脚本注册失败，已降级为当前上下文注入与顶层补注入：${error.message}`);
+    }
+    this.scheduleTopFrameEnsure();
     this.logger.info(`[session] 已连接 target ${this.target.id} ${this.target.url || ''}`);
     return this;
   }
@@ -163,6 +185,7 @@ export class PageSession {
     if (this.closed || !message) return;
     if (message.method === 'cx.disconnected') {
       this.logger.warn(`[session] target ${this.target.id} 调试连接已断开`);
+      this.close();
       return;
     }
     const params = message.params || {};
@@ -170,14 +193,26 @@ export class PageSession {
       const context = params.context || {};
       const auxData = context.auxData || {};
       if (context.id > 0 && auxData.isDefault === true) {
-        this.contexts.set(context.id, {
-          frameId: auxData.frameId || '',
-          origin: context.origin || ''
-        });
+        if (!this.contexts.has(context.id)) {
+          this.contexts.set(context.id, {
+            frameId: auxData.frameId || '',
+            origin: context.origin || ''
+          });
+        }
         this.stats.contexts = this.contexts.size;
         this.logger.info(`[context] id=${context.id} frame=${auxData.frameId || ''} origin=${context.origin || ''}`);
         await this.injectBootstrap(context.id);
       }
+      return;
+    }
+    if (message.method === 'Runtime.executionContextDestroyed') {
+      const contextId = params.executionContextId;
+      this.contexts.delete(contextId);
+      this.bootstrapped.delete(contextId);
+      this.readyContexts.delete(contextId);
+      this.bundleLoaded.delete(contextId);
+      this.bundlePending.delete(contextId);
+      this.stats.contexts = this.contexts.size;
       return;
     }
     if (message.method === 'Runtime.executionContextsCleared') {
@@ -185,6 +220,8 @@ export class PageSession {
       this.bootstrapped.clear();
       this.readyContexts.clear();
       this.bundleLoaded.clear();
+      this.bundlePending.clear();
+      this.stats.contexts = 0;
       return;
     }
     if (message.method === 'Page.frameNavigated') {
@@ -193,6 +230,7 @@ export class PageSession {
         this.frameUrls.set(frame.id, frame.url || '');
       }
       if (!frame.parentId) {
+        this.topFrameId = frame.id || this.topFrameId;
         this.logger.info(`[nav] 顶层导航：${sanitizeForLog(frame.url || '')}`);
         this.scheduleTopFrameEnsure();
       }
@@ -305,17 +343,75 @@ export class PageSession {
     return response;
   }
 
+  async injectViaScriptElement(contextId, source, label, { timeoutMs = 60000 } = {}) {
+    const marker = `__CX_WIN_SCRIPT_INJECT_ERROR_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const markerJson = JSON.stringify(marker);
+    const sourceJson = JSON.stringify(String(source || ''));
+    const expression = `(function(){var marker=${markerJson};var source=${sourceJson};var script=document.createElement('script');var parent=document.head||document.documentElement||document.body;if(!parent){throw new Error('document 没有可用的 script 挂载节点');}script.onerror=function(){window[marker]='脚本元素加载失败（可能被页面 CSP 阻止）';};script.textContent='try{\\n'+source+'\\n;window['+JSON.stringify(marker)+']="__CX_WIN_SCRIPT_INJECT_OK__";\\n}catch(error){window['+JSON.stringify(marker)+']=(error&&error.stack)||String(error);}';parent.appendChild(script);if(script.parentNode){script.parentNode.removeChild(script);}var result=window[marker]||'';try{delete window[marker];}catch(e){window[marker]=undefined;}if(result !== "__CX_WIN_SCRIPT_INJECT_OK__"){return {ok:false,error:String(result||'script 执行失败或被页面策略阻止')};}return {ok:true};})()`;
+    const result = await this.evaluateReturnByValue(contextId, expression, { timeoutMs });
+    if (result.exception) {
+      const detail = result.exception.exception && result.exception.exception.description
+        ? result.exception.exception.description
+        : result.exception.text || 'unknown exception';
+      throw new Error(`${label}（script）：${String(detail).split('\n')[0]}`);
+    }
+    if (!result.value || result.value.ok !== true) {
+      throw new Error(`${label}（script）：${result.value && result.value.error ? result.value.error : 'script 执行失败'}`);
+    }
+    return result;
+  }
+
+  async injectSource(contextId, source, label, { timeoutMs = 60000 } = {}) {
+    const context = this.contexts.get(contextId);
+    const assertActive = () => {
+      if (this.closed || this.contexts.get(contextId) !== context) {
+        throw Object.assign(new Error('注入会话已关闭或执行上下文已销毁'), { code: 'CX_INJECTION_CANCELLED' });
+      }
+    };
+    const runtime = () => this.evaluateOrThrow(contextId, source, label, { timeoutMs });
+    const script = () => this.injectViaScriptElement(contextId, source, label, { timeoutMs });
+    const methods = this.injectStrategy === 'runtime'
+      ? [runtime]
+      : this.injectStrategy === 'script'
+        ? [script, runtime]
+        : [runtime, script];
+    let lastError = null;
+    for (let attempt = 0; attempt <= this.injectRetries; attempt += 1) {
+      for (const method of methods) {
+        assertActive();
+        try {
+          const result = await method();
+          assertActive();
+          return result;
+        } catch (error) {
+          assertActive();
+          lastError = error;
+          if (methods.length > 1) {
+            this.logger.warn(`[inject] ${label} ${this.injectStrategy} 路径失败，尝试下一路径：${error.message}`);
+          }
+        }
+      }
+      if (attempt < this.injectRetries) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000, 100 * (attempt + 1))));
+      }
+    }
+    throw lastError || new Error(`${label} 执行失败`);
+  }
+
   async injectBootstrap(contextId) {
     if (this.bootstrapped.has(contextId) || this.closed) return;
     this.bootstrapped.add(contextId);
+    const context = this.contexts.get(contextId);
     const configJson = JSON.stringify(this.configStore.settingsSnapshot());
     const prefix = `window.__CX_WIN_CONFIG_JSON__=${configJson};`
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
-      await this.evaluateOrThrow(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败');
+      await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败');
+      if (this.closed || this.contexts.get(contextId) !== context) return;
       this.stats.bootstraps += 1;
     } catch (error) {
+      if (error.code === 'CX_INJECTION_CANCELLED') return;
       this.bootstrapped.delete(contextId);
       this.recordError(`注入 bootstrap 失败 context=${contextId}：${error.message}`);
     }
@@ -323,6 +419,7 @@ export class PageSession {
 
   async injectBundle(contextId) {
     if (this.closed || this.bundleLoaded.has(contextId)) return;
+    if (this.bundlePending.has(contextId)) return this.bundlePending.get(contextId);
     if (!this.configStore.isEnabled()) return;
     if (!this.shouldInjectBundle(contextId)) {
       this.logger.info(`[session] 跳过非超星页面注入 context=${contextId} url=${this.frameUrlForContext(contextId) || 'about:blank'}`);
@@ -330,20 +427,29 @@ export class PageSession {
     }
     const version = this.assets.version ? JSON.stringify(this.assets.version) : '"dev"';
     const suffix = `\n;window.__CX_WIN_BUNDLE_LOADED__=true;window.__CX_WIN_BUNDLE_VERSION__=${version};`;
-    try {
-      await this.evaluateOrThrow(contextId, this.assets.bundle + suffix, '业务 bundle 执行失败', { timeoutMs: 120000 });
-      this.bundleLoaded.add(contextId);
-      this.stats.bundles += 1;
-      this.logger.info(`[inject] 已注入业务 bundle：context=${contextId} url=${this.frameUrlForContext(contextId) || 'about:blank'}`);
-      this.onBundleInjected?.(contextId, this.frameUrlForContext(contextId));
-    } catch (error) {
-      const message = String(error.message || error);
-      // 导航过程中上下文被销毁是正常时序，不计入错误。
-      if (/Cannot find context/i.test(message)) {
-        this.logger.info(`[session] 上下文已随导航销毁，跳过 bundle：context=${contextId}`);
-        return;
+    const injection = (async () => {
+      try {
+        await this.injectSource(contextId, this.assets.bundle + suffix, '业务 bundle 执行失败', { timeoutMs: this.bundleTimeoutMs });
+        this.bundleLoaded.add(contextId);
+        this.stats.bundles += 1;
+        this.logger.info(`[inject] 已注入业务 bundle：context=${contextId} url=${this.frameUrlForContext(contextId) || 'about:blank'}`);
+        this.onBundleInjected?.(contextId, this.frameUrlForContext(contextId));
+      } catch (error) {
+        if (error.code === 'CX_INJECTION_CANCELLED') return;
+        const message = String(error.message || error);
+        // 导航过程中上下文被销毁是正常时序，不计入错误。
+        if (/Cannot find context/i.test(message)) {
+          this.logger.info(`[session] 上下文已随导航销毁，跳过 bundle：context=${contextId}`);
+          return;
+        }
+        this.recordError(`注入业务 bundle 失败 context=${contextId}：${message}`);
       }
-      this.recordError(`注入业务 bundle 失败 context=${contextId}：${message}`);
+    })();
+    this.bundlePending.set(contextId, injection);
+    try {
+      await injection;
+    } finally {
+      if (this.bundlePending.get(contextId) === injection) this.bundlePending.delete(contextId);
     }
   }
 
@@ -412,8 +518,8 @@ export class PageSession {
 
   async broadcastConfig() {
     if (this.closed || !this.connection || this.connection.closed) return;
-    const settingsJson = JSON.stringify(this.configStore.settingsSnapshot());
-    const expression = `try{window.__CX_WIN_ON_CONFIG__ && window.__CX_WIN_ON_CONFIG__(${settingsJson});}catch(e){}`;
+    const payloadJson = JSON.stringify({ kind: 'config', values: this.configStore.settingsSnapshot() });
+    const expression = `try{window.__CX_WIN_ON_CONFIG__ && window.__CX_WIN_ON_CONFIG__(${payloadJson});}catch(e){}`;
     for (const contextId of [...this.bootstrapped]) {
       try {
         await this.evaluate(contextId, expression, { timeoutMs: 10000 });

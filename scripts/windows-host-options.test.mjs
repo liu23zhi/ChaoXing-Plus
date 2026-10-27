@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyHostOptionsToConfig,
+  applyHostOptionLayers,
   applyOptionsJsonToOptions,
   describeUnsupportedCapabilities,
   parseClientSelectionInput,
@@ -57,6 +58,49 @@ test('Windows 宿主参数支持脚本指定路径和自动答题', () => {
   assert.equal(options.panelEnabled, true);
 });
 
+test('注入链路参数可由 CLI/JSON 配置，并校验启动超时范围', () => {
+  const options = parseHostArgs([
+    '--expected-browser', 'Chrome/75',
+    '--no-inject-blank-frames',
+    '--no-capture-console',
+    '--inject-strategy', 'script',
+    '--inject-retries', '4',
+    '--debug-timeout', '45000',
+    '--target-poll-interval', '1500',
+    '--bundle-timeout', '90000'
+  ]);
+  assert.equal(options.expectedBrowser, 'Chrome/75');
+  assert.equal(options.injectBlankFrames, false);
+  assert.equal(options.captureConsole, false);
+  assert.equal(options.injectStrategy, 'script');
+  assert.equal(options.injectRetries, 4);
+  assert.equal(options.debugEndpointTimeoutMs, 45000);
+  assert.equal(options.targetPollIntervalMs, 1500);
+  assert.equal(options.bundleTimeoutMs, 90000);
+
+  const merged = applyOptionsJsonToOptions(parseHostArgs([]), {
+    expectedBrowser: 'Chrome/',
+    injectBlankFrames: false,
+    captureConsole: false,
+    injectStrategy: 'runtime',
+    injectRetries: 1,
+    debugEndpointTimeoutMs: 60000,
+    targetPollIntervalMs: 2000,
+    bundleTimeoutMs: 100000
+  });
+  assert.equal(merged.injectBlankFrames, false);
+  assert.equal(merged.captureConsole, false);
+  assert.equal(merged.injectStrategy, 'runtime');
+  assert.equal(merged.injectRetries, 1);
+  assert.equal(merged.debugEndpointTimeoutMs, 60000);
+  assert.equal(merged.targetPollIntervalMs, 2000);
+  assert.equal(merged.bundleTimeoutMs, 100000);
+  assert.throws(() => parseHostArgs(['--debug-timeout', '100']), /1000 到 120000/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { bundleTimeoutMs: 100 }), /1000 到 300000/u);
+  assert.throws(() => parseHostArgs(['--inject-strategy', 'unknown']), /hybrid、runtime 或 script/u);
+  assert.throws(() => parseHostArgs(['--inject-retries', '6']), /0 到 5/u);
+});
+
 test('扫描参数保留常规一级扫描与显式全盘回退语义', () => {
   const common = parseHostArgs(['--scan-mode', 'common', '--client-first', '--ui', 'cli']);
   assert.equal(common.scanMode, 'common');
@@ -70,6 +114,35 @@ test('扫描参数保留常规一级扫描与显式全盘回退语义', () => {
 
   assert.equal(parseHostArgs(['--scan-mode', 'all', '--scan-all']).scanMode, 'fallback-all');
   assert.equal(parseHostArgs(['--scan-mode', 'fallback-all', '--no-scan-all']).scanMode, 'common');
+});
+
+test('分层参数在全部覆盖后才校验跨字段约束和无磁盘写入规则', () => {
+  const options = applyHostOptionLayers(parseHostArgs(['--config', 'example.json']),
+    { deleteConfig: true, noDiskWrite: true },
+    { deleteConfig: false, noDiskWrite: false, log: true, diagnose: true, report: 'report.json' });
+  assert.equal(options.deleteConfig, false);
+  assert.equal(options.noDiskWrite, false);
+  assert.equal(options.logFileEnabled, true);
+  assert.equal(options.diagnose, true);
+  assert.equal(options.noDiagnose, false);
+  assert.equal(options.reportPath, 'report.json');
+  assert.equal(options.noScanCache, parseHostArgs([]).noScanCache);
+
+  const finalNoDisk = applyHostOptionLayers(parseHostArgs([]),
+    { noDiskWrite: false, log: true }, { noDiskWrite: true });
+  assert.equal(finalNoDisk.logFileEnabled, false);
+  assert.equal(finalNoDisk.noScanCache, true);
+  assert.throws(() => applyHostOptionLayers(parseHostArgs(['--config', 'example.json']),
+    { deleteConfig: true }, { noDiskWrite: true }), /不能同时使用/u);
+});
+
+test('低优先级关闭缓存开关不能取消 CLI 的重新扫描', () => {
+  const options = applyHostOptionLayers(parseHostArgs(['--rescan']), {
+    clientPath: 'C:\\Exam\\CXExam.exe', noScanCache: false
+  });
+  assert.equal(options.rescan, true);
+  assert.equal(options.scanClients, true);
+  assert.equal(options.clientPath, '');
 });
 
 test('配置与数据参数解析并应用 no-disk-write 覆盖规则', () => {
@@ -131,6 +204,61 @@ test('options-json 覆盖默认值但不覆盖独立命令行参数', () => {
   assert.equal(merged.noScanCache, true);
 });
 
+test('CLI 扫描选择会忽略配置层的 clientPath，但显式 --client 仍保持互斥', () => {
+  const rescan = applyHostOptionLayers(parseHostArgs(['--rescan']), {
+    clientPath: 'C:\\Configured\\CXExam.exe',
+    scanMode: 'common',
+    clientFirst: true
+  });
+  assert.equal(rescan.clientPath, '');
+  assert.equal(rescan.rescan, true);
+  assert.equal(rescan.scanClients, true);
+  assert.equal(rescan.clientFirst, true);
+
+  const scanClients = applyHostOptionLayers(parseHostArgs(['--scan-clients']), {
+    clientPath: 'C:\\Configured\\CXExam.exe'
+  });
+  assert.equal(scanClients.clientPath, '');
+  assert.equal(scanClients.scanClients, true);
+
+  const indexed = applyHostOptionLayers(parseHostArgs(['--client-index', '2']), {
+    clientPath: 'C:\\Configured\\CXExam.exe'
+  });
+  assert.equal(indexed.clientPath, '');
+  assert.equal(indexed.clientIndex, 2);
+
+  assert.throws(() => parseHostArgs(['--client', 'C:\\Explicit\\CXExam.exe', '--scan-clients']), /扫描参数/u);
+});
+
+test('启动配置逐层应用 options 字段，优先级为默认、同目录、--config、内联 JSON、CLI', () => {
+  const options = parseHostArgs(['--no-log']);
+  const merged = applyHostOptionLayers(options,
+    { scanMode: 'common', log: true, answerThreads: 1 },
+    { scanMode: 'fallback-all', answerThreads: 2 },
+    { scanMode: 'all', answerThreads: 3 },
+    { scanMode: 'common', answerThreads: 4 }
+  );
+  assert.equal(merged.scanMode, 'common');
+  assert.equal(merged.answerThreads, 4);
+  assert.equal(merged.logFileEnabled, false);
+  assert.equal(merged.scanClients, true);
+});
+
+test('配置层 no-disk-write 强制覆盖日志、诊断、报告与扫描缓存', () => {
+  const merged = applyHostOptionLayers(parseHostArgs([]), {
+    noDiskWrite: true,
+    log: true,
+    diagnose: true,
+    report: 'report.json'
+  });
+  assert.equal(merged.noDiskWrite, true);
+  assert.equal(merged.logFileEnabled, false);
+  assert.equal(merged.diagnose, false);
+  assert.equal(merged.noDiagnose, true);
+  assert.equal(merged.reportPath, '');
+  assert.equal(merged.noScanCache, true);
+});
+
 test('no-diagnose CLI 开关覆盖 options-json，且禁用的 JSON 能力显式报错', () => {
   const parsed = parseHostArgs(['--options-json', '{"diagnose":true}', '--no-diagnose']);
   const merged = applyOptionsJsonToOptions(parsed, { diagnose: true });
@@ -174,6 +302,7 @@ test('数据保留和删除外部配置参数按方案解析，删除外部配�
 test('未实现能力暴露机器可读 schema / capability 标记', () => {
   assert.equal(parseHostArgs(['--capabilities']).capabilities, true);
   assert.equal(UNSUPPORTED_CAPABILITIES.implemented, false);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.implemented, false);
   assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal']);
   assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues], ['memory', 'delete-suspend']);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.min, 1);
@@ -207,6 +336,18 @@ test('文档中的普通启动示例参数均可通过宿主解析器', () => {
 test('客户端选择参数互斥时在启动前报错', () => {
   assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--client-first']), /不能与/u);
   assert.throws(() => parseHostArgs(['--client-index', '1', '--select-client']), /不能与/u);
+  assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--scan-clients']), /扫描参数/u);
+  assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--scan-mode', 'common']), /扫描参数/u);
+  assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--rescan']), /扫描参数/u);
+  assert.throws(() => parseHostArgs(['--client', 'C:\\CXExam.exe', '--no-scan-cache']), /扫描参数/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), {
+    clientPath: 'C:\\CXExam.exe',
+    scanMode: 'common'
+  }), /扫描参数/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), {
+    clientPath: 'C:\\CXExam.exe',
+    noScanCache: true
+  }), /扫描参数/u);
 });
 
 test('终端客户端选择输入支持序号或带引号的手动路径', () => {
@@ -216,17 +357,40 @@ test('终端客户端选择输入支持序号或带引号的手动路径', () =>
   assert.deepEqual(parseClientSelectionInput("'D:\\Exam Files\\CXExam.exe'", 0), { index: 0, path: 'D:\\Exam Files\\CXExam.exe' });
 });
 
-test('未实现的清理、自毁和隐蔽执行参数全部显式拒绝', () => {
+test('第一阶段启动清理、自毁和内存执行的 CLI 参数都显式拒绝', () => {
   for (const argument of [
-    '--memory-exec',
-    '--delete-suspend',
     '--wipe-owned-files-on-start',
     '--wipe-failure-policy',
+    '--wipe-retries',
+    '--wipe-retry-delay',
     '--wipe-runtime-retry',
+    '--no-wipe-runtime-retry',
+    '--wipe-runtime-interval',
+    '--memory-exec',
+    '--delete-suspend',
     '--self-destruct-key',
-    '--self-destruct-on-fullscreen-exit'
+    '--self-destruct-on-fullscreen-exit',
+    '--self-destruct-delay',
+    '--no-self-destruct-confirm'
   ]) {
     assert.throws(() => parseHostArgs([argument]), /尚未实现/u);
+  }
+});
+
+test('第一阶段所有配置层的启动清理参数都显式拒绝，包括关闭值', () => {
+  for (const values of [
+    { wipeOwnedFilesOnStart: true },
+    { wipeOwnedFilesOnStart: false },
+    { wipeFailurePolicy: 'retry' },
+    { wipeRetries: 5 },
+    { wipeRetryDelayMs: 200 },
+    { wipeRuntimeRetry: false },
+    { wipeRuntimeIntervalSec: 30 },
+    { settings: { 'common.settings.windows-wipe-runtime-retry': false } }
+  ]) {
+    assert.throws(() => validateSupportedJsonOptions(values), /尚未实现/u);
+    assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), values), /尚未实现/u);
+    assert.throws(() => applyHostOptionLayers(parseHostArgs([]), values), /尚未实现/u);
   }
 });
 

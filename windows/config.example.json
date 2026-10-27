@@ -5,6 +5,11 @@
   "stopClientOnExit": false,
   "injectBlankFrames": true,
   "captureConsole": true,
+  "injectStrategy": "hybrid",
+  "injectRetries": 2,
+  "debugEndpointTimeoutMs": 30000,
+  "targetPollIntervalMs": 1000,
+  "bundleTimeoutMs": 120000,
   "dpiAwareness": "",
   "settings": {
     "common.settings.extension-enabled": true,

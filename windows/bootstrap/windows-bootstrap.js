@@ -29,6 +29,8 @@
   var SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
   var ENABLED_KEY = 'common.settings.extension-enabled';
   var PANEL_ENABLED_KEY = 'common.settings.windows-panel-enabled';
+  var NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
+  var noDiskWriteEnabled = false;
   var SHARED_STORE_PREFIXES = [
     'common.settings.',
     'cx.new.study.',
@@ -119,6 +121,9 @@
   }
 
   function writeLocalStorage(values) {
+    if (noDiskWriteEnabled) {
+      return;
+    }
     try {
       if (!win.localStorage) {
         return;
@@ -566,6 +571,7 @@
       var wasEnabled = isEnabled();
       var wasPanelEnabled = isPanelEnabled();
       config = merge(config, payload.values || {});
+      noDiskWriteEnabled = config[NO_DISK_WRITE_KEY] === true;
       applySharedValues(payload.values || {}, true);
       if (wasEnabled !== isEnabled() || wasPanelEnabled !== isPanelEnabled()) {
         // 与扩展行为一致：总开关变化后顶层刷新，让业务脚本按新状态重新注入。
@@ -605,6 +611,7 @@
   } catch (error) {
     config = {};
   }
+  noDiskWriteEnabled = config[NO_DISK_WRITE_KEY] === true;
 
   var instance = '';
   try {
@@ -618,6 +625,14 @@
 
   try {
     if (win[MARK_KEY] === markValue) {
+      // 宿主重连会更新快照，复用原配置桥同步其闭包，避免重复安装监听和面板。
+      try {
+        if (typeof win.__CX_WIN_ON_CONFIG__ === 'function') {
+          win.__CX_WIN_ON_CONFIG__({ kind: 'config', values: config });
+        }
+      } catch (error) {
+        send('bootstrap-error', { stage: 'rehydrate-config', message: String((error && error.message) || error) });
+      }
       return;
     }
     win[MARK_KEY] = markValue;

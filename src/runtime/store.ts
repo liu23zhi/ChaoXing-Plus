@@ -1,4 +1,5 @@
 const memoryStore = new Map<string, unknown>();
+const memoryRemovedKeys = new Set<string>();
 
 const SHARED_STORE_PREFIXES = [
   'common.settings.',
@@ -16,6 +17,15 @@ const SHARED_STORE_EXACT_KEYS = new Set([
 
 const SHARED_STORE_HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
 const SHARED_STORE_SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
+const WINDOWS_NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
+
+function isWindowsHostRuntime() {
+  try {
+    return Boolean((window as unknown as { __CX_WIN_HOST__?: unknown }).__CX_WIN_HOST__);
+  } catch {
+    return false;
+  }
+}
 
 function shouldShareStoreKey(key: string) {
   return SHARED_STORE_EXCLUDED_KEYS.has(key) === false
@@ -51,12 +61,39 @@ function readSharedBootstrapValue<T>(key: string): T | undefined {
   }
 }
 
+function isWindowsNoDiskWrite() {
+  if (!isWindowsHostRuntime()) {
+    return false;
+  }
+  if (memoryStore.has(WINDOWS_NO_DISK_WRITE_KEY)) {
+    return memoryStore.get(WINDOWS_NO_DISK_WRITE_KEY) === true;
+  }
+
+  const bootstrapValue = readSharedBootstrapValue<boolean>(WINDOWS_NO_DISK_WRITE_KEY);
+  if (bootstrapValue !== undefined) {
+    writeMemory(WINDOWS_NO_DISK_WRITE_KEY, bootstrapValue);
+    return bootstrapValue === true;
+  }
+
+  try {
+    const raw = localStorage.getItem(WINDOWS_NO_DISK_WRITE_KEY);
+    if (raw !== null) {
+      const storedValue = JSON.parse(raw) as unknown;
+      writeMemory(WINDOWS_NO_DISK_WRITE_KEY, storedValue);
+      return storedValue === true;
+    }
+  } catch {
+    // Opaque origins may not expose localStorage.
+  }
+  return false;
+}
+
 interface LocalReadResult<T> {
   value: T;
   storageUnavailable: boolean;
 }
 
-function readLocal<T>(key: string, fallback: T): LocalReadResult<T> {
+function readLocal<T>(key: string, fallback: T, persistBootstrapValue = true): LocalReadResult<T> {
   let raw: string | null | undefined;
   try {
     raw = localStorage.getItem(key);
@@ -74,10 +111,12 @@ function readLocal<T>(key: string, fallback: T): LocalReadResult<T> {
   if (raw === null) {
     const bootstrapValue = readSharedBootstrapValue<T>(key);
     if (bootstrapValue !== undefined) {
-      try {
-        localStorage.setItem(key, JSON.stringify(bootstrapValue));
-      } catch {
-        // 不透明 origin 无法持久化，退回内存值即可。
+      if (persistBootstrapValue) {
+        try {
+          localStorage.setItem(key, JSON.stringify(bootstrapValue));
+        } catch {
+          // 不透明 origin 无法持久化，退回内存值即可。
+        }
       }
       return { value: bootstrapValue, storageUnavailable: false };
     }
@@ -91,6 +130,7 @@ function readLocal<T>(key: string, fallback: T): LocalReadResult<T> {
 }
 
 function writeMemory<T>(key: string, value: T) {
+  memoryRemovedKeys.delete(key);
   memoryStore.set(key, value);
   return value;
 }
@@ -100,7 +140,13 @@ function hydrateSharedRuntimeValues(detail: unknown) {
     return;
   }
 
-  for (const [key, value] of Object.entries(detail as Record<string, unknown>)) {
+  const values = detail as Record<string, unknown>;
+  if (isWindowsHostRuntime() && Object.prototype.hasOwnProperty.call(values, WINDOWS_NO_DISK_WRITE_KEY)) {
+    // Determine the write policy before hydrating any other key in this payload.
+    writeMemory(WINDOWS_NO_DISK_WRITE_KEY, values[WINDOWS_NO_DISK_WRITE_KEY]);
+  }
+
+  for (const [key, value] of Object.entries(values)) {
     if (!shouldShareStoreKey(key)) {
       continue;
     }
@@ -111,10 +157,12 @@ function hydrateSharedRuntimeValues(detail: unknown) {
     }
 
     writeMemory(key, value);
-    try {
-      localStorage.setItem(key, serialized);
-    } catch {
-      // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值与属性镜像。
+    if (!isWindowsNoDiskWrite()) {
+      try {
+        localStorage.setItem(key, serialized);
+      } catch {
+        // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值与属性镜像。
+      }
     }
     try {
       document.documentElement?.setAttribute(getSharedAttributeName(key), serialized);
@@ -159,6 +207,21 @@ try {
 
 export const runtimeStore = {
   get<T>(key: string, fallback: T): T {
+    if (memoryRemovedKeys.has(key)) {
+      return fallback;
+    }
+    const noDiskWrite = isWindowsNoDiskWrite();
+    if (noDiskWrite && memoryStore.has(key)) {
+      return memoryStore.get(key) as T;
+    }
+    if (noDiskWrite) {
+      const bootstrapValue = readSharedBootstrapValue<T>(key);
+      if (bootstrapValue !== undefined) {
+        return writeMemory(key, bootstrapValue);
+      }
+      const existing = readLocal(key, fallback, false);
+      return writeMemory(key, existing.value);
+    }
     const result = readLocal(key, fallback);
     if (result.storageUnavailable && memoryStore.has(key)) {
       return memoryStore.get(key) as T;
@@ -167,19 +230,33 @@ export const runtimeStore = {
   },
   set<T>(key: string, value: T): void {
     writeMemory(key, value);
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值。
+    if (!isWindowsNoDiskWrite()) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch {
+        // 不透明 origin（about:blank/srcdoc）无法持久化，仅保留内存值。
+      }
     }
     emitSharedRuntimeSync(key, value);
   },
   remove(key: string): void {
+    const noDiskWrite = isWindowsNoDiskWrite();
     memoryStore.delete(key);
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      // ignore opaque origin storage failures
+    if (noDiskWrite) {
+      memoryRemovedKeys.add(key);
+      if (shouldShareStoreKey(key)) {
+        try {
+          document.documentElement?.removeAttribute(getSharedAttributeName(key));
+        } catch {
+          // Ignore attribute cleanup failures in opaque or incomplete documents.
+        }
+      }
+    } else {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore opaque origin storage failures
+      }
     }
   }
 };

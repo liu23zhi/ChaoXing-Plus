@@ -50,6 +50,7 @@ class FakeElement {
 function createHarness({ config = {}, instance = 'test-instance', styleText = '/*swal*/', readyState = 'complete', withDocumentElement = true, href = 'https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examlist?secret=1' } = {}) {
   const messages = [];
   const storage = new Map();
+  const storageCalls = [];
   const listeners = new Map();
   const dispatched = [];
   const createdElements = [];
@@ -105,9 +106,9 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
       pathname: locationUrl.pathname
     },
     localStorage: {
-      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
-      setItem: (key, value) => { storage.set(key, String(value)); },
-      removeItem: (key) => { storage.delete(key); }
+      getItem: (key) => { storageCalls.push(['get', key]); return storage.has(key) ? storage.get(key) : null; },
+      setItem: (key, value) => { storageCalls.push(['set', key, String(value)]); storage.set(key, String(value)); },
+      removeItem: (key) => { storageCalls.push(['remove', key]); storage.delete(key); }
     },
     crypto: {
       getRandomValues(array) {
@@ -165,6 +166,7 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
     window: windowObject,
     document: documentObject,
     storage,
+    storageCalls,
     messages,
     dispatched,
     parseMessages,
@@ -200,6 +202,56 @@ test('bootstrap 水合共享配置、建立 host bridge 并发送 ready', async 
   const messages = harness.parseMessages();
   assert.equal(messages.some((message) => message.kind === 'ready'), true);
   assert.equal(messages.some((message) => message.kind === 'disabled'), false);
+});
+
+test('bootstrap 在 no-disk-write 配置位于整包任意位置时只写 DOM 属性，不写 localStorage', async () => {
+  const harness = createHarness({
+    config: {
+      'common.settings.theme': 'pink',
+      'cx.new.study.auto': { enabled: true },
+      'common.settings.windows-no-disk-write': true
+    }
+  });
+  await harness.run();
+
+  assert.deepEqual(harness.storageCalls, []);
+  assert.equal(harness.storage.has('common.settings.theme'), false);
+  assert.equal(
+    harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-theme'),
+    '"pink"'
+  );
+  assert.equal(
+    harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-cx-new-study-auto'),
+    '{"enabled":true}'
+  );
+});
+
+test('bootstrap 在动态配置整包开启 no-disk-write 后不写 localStorage，仍回传内存配置同步', async () => {
+  const harness = createHarness({
+    config: { 'common.settings.extension-enabled': true }
+  });
+  await harness.run();
+  harness.storageCalls.length = 0;
+
+  harness.window.__CX_WIN_ON_CONFIG__({
+    kind: 'config',
+    values: {
+      'common.settings.theme': 'pink',
+      'common.settings.windows-no-disk-write': true
+    }
+  });
+  assert.deepEqual(harness.storageCalls, []);
+  assert.equal(harness.storage.has('common.settings.theme'), false);
+  assert.equal(
+    harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-theme'),
+    '"pink"'
+  );
+
+  harness.document.dispatchEvent({
+    type: 'chaoxing-plus:shared-store-sync',
+    detail: { 'common.settings.theme': 'blue' }
+  });
+  assert.equal(harness.parseMessages().some((message) => message.kind === 'config-sync'), true);
 });
 
 test('bootstrap 在 documentElement 未就绪时延迟写属性，并在 DOMContentLoaded 后发 ready', async () => {
@@ -363,4 +415,40 @@ test('bootstrap 在同一文档重复注入时不会重复发 ready', async () =
   const secondReadyCount = harness.parseMessages().filter((message) => message.kind === 'ready').length;
   assert.equal(firstReadyCount, 1);
   assert.equal(secondReadyCount, 1);
+});
+
+test('bootstrap 同实例重连复用配置桥水合新快照，不重复安装监听或面板', async () => {
+  const harness = createHarness({
+    config: {
+      'common.settings.extension-enabled': true,
+      'common.settings.theme': 'initial'
+    }
+  });
+  await harness.run();
+  const initialHost = harness.window.__CX_WIN_HOST__;
+  const initialBridge = harness.window.__CX_WIN_ON_CONFIG__;
+  const initialPanel = harness.document.getElementById('panel-common-work-results');
+  harness.storageCalls.length = 0;
+  harness.window.__CX_WIN_CONFIG_JSON__ = {
+    'common.settings.extension-enabled': true,
+    'common.settings.theme': 'reconnected',
+    'common.settings.windows-no-disk-write': true
+  };
+  await harness.run();
+
+  assert.equal(harness.window.__CX_WIN_HOST__, initialHost);
+  assert.equal(harness.window.__CX_WIN_ON_CONFIG__, initialBridge);
+  assert.equal(initialHost.getConfig()['common.settings.theme'], 'reconnected');
+  assert.equal(initialHost.getConfig()['common.settings.windows-no-disk-write'], true);
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-theme'), '"reconnected"');
+  assert.deepEqual(harness.storageCalls, []);
+  assert.equal(harness.document.getElementById('panel-common-work-results'), initialPanel);
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'ready').length, 1);
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'panel-shell').length, 1);
+  assert.equal(harness.dispatched.filter((event) => event.type === 'chaoxing-plus:shared-store-hydrate').length, 1);
+  harness.document.dispatchEvent({
+    type: 'chaoxing-plus:shared-store-sync',
+    detail: { 'common.settings.theme': 'updated-after-reconnect' }
+  });
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'config-sync').length, 1);
 });

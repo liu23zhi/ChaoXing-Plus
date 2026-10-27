@@ -26,7 +26,7 @@ import {
   pickSharedValues
 } from '../windows/host/config.mjs';
 import { fetchJson, CdpConnection } from '../windows/host/cdp.mjs';
-import { isBlankishUrl } from '../windows/host/inject.mjs';
+import { isBlankishUrl, PageSession } from '../windows/host/inject.mjs';
 import { evaluateDpiDiagnosis, evaluatePageDiagnosis } from '../windows/host/diagnostics.mjs';
 
 const root = process.cwd();
@@ -91,8 +91,8 @@ function consumeClientFrames(socketState, chunk, onMessage) {
   socketState.buffer = socketState.buffer.subarray(offset);
 }
 
-async function startMockCdp() {
-  const captured = { evaluates: [], trampolineSource: null, methodLog: [] };
+async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFirstConnection = false } = {}) {
+  const captured = { evaluates: [], trampolineSource: null, methodLog: [], connections: 0 };
   const sockets = new Set();
   const server = http.createServer((request, response) => {
     const port = server.address().port;
@@ -136,6 +136,8 @@ async function startMockCdp() {
     );
     const socketState = { buffer: Buffer.alloc(0), socket };
     sockets.add(socket);
+    captured.connections += 1;
+    const connectionIndex = captured.connections;
 
     const sendJson = (payload) => {
       try { socket.write(encodeServerFrame(JSON.stringify(payload))); } catch { /* ignore */ }
@@ -166,6 +168,8 @@ async function startMockCdp() {
       windowObject.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
       const consoleObject = {
         log: (...args) => {
+          if (suppressReadyAfterFirstConnection && connectionIndex > 1
+            && String(args[0]).includes('"kind":"ready"')) return;
           sendJson({
             method: 'Runtime.consoleAPICalled',
             params: {
@@ -228,6 +232,10 @@ async function startMockCdp() {
             try {
               vm.runInNewContext(captured.evaluates[captured.evaluates.length - 1], createSandbox(), { timeout: 2000 });
               sendJson({ id: message.id, result: { result: { type: 'undefined' } } });
+              if (captured.connections === 1 && disconnectOnExpression
+                && captured.evaluates.at(-1).includes(disconnectOnExpression)) {
+                socket.end(Buffer.from([0x88, 0x00]));
+              }
             } catch (error) {
               sendJson({
                 id: message.id,
@@ -295,6 +303,51 @@ async function writeFixtureAssets(directory, { bootstrap, bundle }) {
   await fs.writeFile(path.join(directory, 'vendor', 'sweetalert2.min.css'), '/*mock*/', 'utf8');
 }
 
+test('普通启动流程校验有效 PE 后能到达 spawnClient，不启动真实程序', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-launch-entry-'));
+  const assetsDir = path.join(directory, 'assets');
+  const clientPath = path.join(directory, 'CXExam.exe');
+  const configPath = path.join(directory, 'config.json');
+  const sentinel = 'CXPLUS_TEST_SPAWN_CLIENT_REACHED';
+  const buffer = Buffer.alloc(4096);
+  buffer.writeUInt16LE(0x5a4d, 0);
+  buffer.writeUInt32LE(0x80, 0x3c);
+  buffer.writeUInt32LE(0x00004550, 0x80);
+  buffer.writeUInt16LE(0x014c, 0x84);
+  await fs.writeFile(clientPath, buffer);
+  await fs.writeFile(configPath, '{}', 'utf8');
+  await writeFixtureAssets(assetsDir, { bootstrap: 'true;', bundle: 'true;' });
+  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const args = [
+    '--client', clientPath, '--config', configPath, '--assets', assetsDir,
+    '--no-disk-write', '--no-log', '--no-diagnose', '--no-elevate'
+  ];
+  const source = `
+    import { mock } from 'node:test';
+    const launch = await import(${JSON.stringify(launchUrl)});
+    mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
+      ...launch,
+      isElevated: async () => true,
+      listProcessIdsByName: async () => [],
+      chooseBindablePort: async () => ({ port: 38100, rejected: [] }),
+      spawnClient() { throw new Error(${JSON.stringify(sentinel)}); }
+    } });
+    process.argv = [process.execPath, ${JSON.stringify(mainUrl)}, ...${JSON.stringify(args)}];
+    await import(${JSON.stringify(mainUrl)});
+  `;
+  try {
+    const result = await runCommand(process.execPath, [
+      '--experimental-test-module-mocks', '--input-type=module', '-e', source
+    ]);
+    assert.equal(result.code, 3, result.stderr);
+    assert.match(result.stderr, new RegExp(sentinel, 'u'));
+    assert.doesNotMatch(result.stderr, /isCxExamExecutablePath is not defined/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('config 只持久化共享键并保留默认结构', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-config-'));
   const filePath = path.join(directory, 'config.json');
@@ -336,6 +389,12 @@ test('config 工具函数覆盖共享键过滤与归一化', () => {
   assert.equal(normalized.clientPath, 'C:/x.exe');
   assert.equal(normalized.settings['common.settings.a'], true);
   assert.equal(normalized.injectBlankFrames, true);
+  assert.equal(normalized.injectStrategy, 'hybrid');
+  assert.equal(normalized.injectRetries, 2);
+  assert.equal(normalized.debugEndpointTimeoutMs, 30000);
+  assert.equal(normalized.targetPollIntervalMs, 1000);
+  assert.equal(normalized.bundleTimeoutMs, 120000);
+  assert.equal(normalizeConfig({ injectStrategy: 'script', injectRetries: 5, debugEndpointTimeoutMs: 45000, targetPollIntervalMs: 1500, bundleTimeoutMs: 90000 }).injectStrategy, 'script');
   assert.equal(normalized.dpiAwareness, '');
   assert.equal(normalizeConfig({ dpiAwareness: 'system' }).dpiAwareness, 'system');
   assert.equal(normalizeConfig({ dpiAwareness: 'invalid' }).dpiAwareness, '');
@@ -523,6 +582,57 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
   }
 });
 
+test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async () => {
+  const mock = await startMockCdp({ disconnectOnExpression: '__reconnectBundle' });
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-'));
+  const assetsDir = path.join(directory, 'assets');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: 'window.__reconnectBundle=true;'
+  });
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir,
+      '--config', path.join(directory, 'config.json'),
+      '--target-poll-interval', '250', '--duration', '1800',
+      '--no-disk-write', '--quiet'
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(mock.captured.connections >= 2, `实际连接数 ${mock.captured.connections}`);
+    assert.ok(mock.captured.evaluates.filter((source) => source.includes('__reconnectBundle')).length >= 2);
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('CDP 重连后保留前一会话已完成的注入统计及成功退出码', async () => {
+  const mock = await startMockCdp({ disconnectOnExpression: '__historyBundle', suppressReadyAfterFirstConnection: true });
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-history-'));
+  const assetsDir = path.join(directory, 'assets');
+  const reportPath = path.join(directory, 'report.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: 'window.__historyBundle=true;'
+  });
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir,
+      '--config', path.join(directory, 'config.json'), '--report', reportPath,
+      '--target-poll-interval', '250', '--duration', '1800', '--no-log', '--quiet'
+    ]);
+    assert.ok(mock.captured.connections >= 2, `实际连接数 ${mock.captured.connections}`);
+    const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
+    assert.equal(report.totals.bundles, 1);
+    assert.equal(result.code, 0, result.stderr);
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('宿主 --no-disk-write 禁止配置、日志、诊断和报告输出', async () => {
   const mock = await startMockCdp();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-no-disk-write-'));
@@ -554,6 +664,139 @@ test('宿主 --no-disk-write 禁止配置、日志、诊断和报告输出', asy
     for (const outputPath of [configPath, dataDirectory, diagnosticsDir, reportPath]) {
       await assert.rejects(fs.access(outputPath), { code: 'ENOENT' });
     }
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('配置文件 noDiskWrite 在创建 config store 前生效', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-config-no-disk-write-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  const dataDirectory = path.join(directory, 'data');
+  const diagnosticsDir = path.join(directory, 'diagnostics');
+  const reportPath = path.join(directory, 'report.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
+  });
+  const originalConfig = JSON.stringify({
+    noDiskWrite: true,
+    clientPath: '',
+    port: 0,
+    settings: { 'common.settings.extension-enabled': true }
+  });
+  await fs.writeFile(configPath, originalConfig, 'utf8');
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port),
+      '--assets', assetsDir,
+      '--config', configPath,
+      '--data-dir', dataDirectory,
+      '--diagnostics-dir', diagnosticsDir,
+      '--report', reportPath,
+      '--log',
+      '--diagnose',
+      '--duration', '2500',
+      '--quiet'
+    ]);
+    assert.equal(result.code, 0, `宿主退出码 ${result.code}\n${result.stdout}\n${result.stderr}`);
+    assert.equal(await fs.readFile(configPath, 'utf8'), originalConfig);
+    for (const outputPath of [dataDirectory, diagnosticsDir, reportPath]) {
+      await assert.rejects(fs.access(outputPath), { code: 'ENOENT' });
+    }
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('配置层 deleteConfig 在最终合并后仍会删除显式外部配置', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-delete-config-layer-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));"
+  });
+  await fs.writeFile(configPath, JSON.stringify({
+    deleteConfig: true,
+    clientPath: '',
+    port: 0,
+    settings: { 'common.settings.extension-enabled': true }
+  }), 'utf8');
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port),
+      '--assets', assetsDir,
+      '--config', configPath,
+      '--duration', '250',
+      '--quiet',
+      '--no-elevate'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
+    assert.equal(result.code, 0, `宿主退出码 ${result.code}\n${result.stdout}\n${result.stderr}`);
+    await assert.rejects(fs.access(configPath), { code: 'ENOENT' });
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('第一阶段启动清理参数在任何磁盘写入或清理前报错', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-wipe-disabled-'));
+  const configPath = path.join(directory, 'config.json');
+  const dataDirectory = path.join(directory, 'data');
+  const originalConfig = JSON.stringify({ wipeOwnedFilesOnStart: true });
+  await fs.writeFile(configPath, originalConfig, 'utf8');
+  try {
+    for (const args of [
+      ['--wipe-owned-files-on-start'],
+      ['--options-json', '{"wipeRuntimeRetry":false}'],
+      ['--config', configPath]
+    ]) {
+      const result = await runCommand(process.execPath, [
+        path.resolve(root, 'windows', 'host', 'main.mjs'),
+        ...args, '--attach', '1', '--assets', path.join(directory, 'missing-assets'),
+        '--data-dir', dataDirectory, '--no-log', '--no-diagnose', '--quiet'
+      ]);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /尚未实现/u);
+      assert.equal(await fs.readFile(configPath, 'utf8'), originalConfig);
+      await assert.rejects(fs.access(dataDirectory), { code: 'ENOENT' });
+    }
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('不保留本轮数据时保留已有诊断目录及其中用户文件', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-retain-existing-diagnostics-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  const diagnosticsDir = path.join(directory, 'diagnostics');
+  const sentinelPath = path.join(diagnosticsDir, 'user-notes.txt');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));"
+  });
+  await fs.mkdir(diagnosticsDir);
+  await fs.writeFile(sentinelPath, 'keep user data', 'utf8');
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
+      '--diagnose', '--diagnostics-dir', diagnosticsDir, '--no-retain-data',
+      '--no-log', '--duration', '100', '--quiet'
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await fs.readFile(sentinelPath, 'utf8'), 'keep user data');
+    await assert.rejects(fs.access(path.join(diagnosticsDir, 'render-diagnostics.json')), { code: 'ENOENT' });
   } finally {
     await mock.close();
     await fs.rm(directory, { recursive: true, force: true });
@@ -651,4 +894,230 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test('宿主配置热更新保留 CLI 和内联覆盖，同时广播可变磁盘设置', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reload-main-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: 'window.__reloadBundle=true;'
+  });
+  await fs.writeFile(configPath, JSON.stringify({ settings: { 'common.settings.mutable': 'old' } }), 'utf8');
+  let resultPromise;
+  try {
+    resultPromise = runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
+      '--duration', '4000', '--no-disk-write', '--no-panel', '--answer-mode', 'manual',
+      '--options-json', JSON.stringify({ settings: { 'common.settings.inline-only': 'inline' } }),
+      '--quiet', '--no-elevate'
+    ]);
+    const deadline = Date.now() + 8000;
+    while (!mock.captured.evaluates.some((expression) => expression.includes('__reloadBundle'))) {
+      assert.ok(Date.now() < deadline, 'host did not inject the initial bundle');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    // Wait until main has registered watchFile after its first target poll.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await fs.writeFile(configPath, JSON.stringify({
+      settings: {
+        'common.settings.windows-panel-enabled': true,
+        'common.settings.windows-answer-mode': 'auto',
+        'common.settings.windows-no-disk-write': false,
+        'common.settings.inline-only': 'disk',
+        'common.settings.mutable': 'new'
+      }
+    }), 'utf8');
+    const result = await resultPromise;
+    assert.equal(result.code, 0, result.stderr);
+    const broadcasts = mock.captured.evaluates.filter((expression) => expression.startsWith('try{window.__CX_WIN_ON_CONFIG__'));
+    const last = broadcasts.at(-1);
+    assert.ok(last, 'host did not broadcast the config update');
+    const settings = JSON.parse(last.split('__CX_WIN_ON_CONFIG__(')[1].split(');')[0]).values;
+    assert.equal(settings['common.settings.mutable'], 'new');
+    assert.equal(settings['common.settings.inline-only'], 'inline');
+    assert.equal(settings['common.settings.windows-panel-enabled'], false);
+    assert.equal(settings['common.settings.windows-answer-mode'], 'manual');
+    assert.equal(settings['common.settings.windows-no-disk-write'], true);
+  } finally {
+    if (resultPromise) await resultPromise;
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const startupNoDiskWrite of [true, false]) {
+  test(`配置热更新不能改变本次启动的 noDiskWrite=${startupNoDiskWrite} 策略`, async () => {
+    const mock = await startMockCdp();
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reload-policy-'));
+    const assetsDir = path.join(directory, 'assets');
+    const configPath = path.join(directory, 'config.json');
+    const reportPath = path.join(directory, 'report.json');
+    await writeFixtureAssets(assetsDir, {
+      bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+      bundle: 'window.__policyBundle=true;'
+    });
+    await fs.writeFile(configPath, JSON.stringify({
+      noDiskWrite: startupNoDiskWrite,
+      settings: { 'common.settings.mutable': 'old' }
+    }), 'utf8');
+    let resultPromise;
+    try {
+      resultPromise = runCommand(process.execPath, [
+        path.resolve(root, 'windows', 'host', 'main.mjs'),
+        '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
+        '--duration', '4000', '--no-log', '--no-diagnose', '--report', reportPath, '--no-elevate'
+      ]);
+      const deadline = Date.now() + 8000;
+      while (!mock.captured.evaluates.some((expression) => expression.includes('__policyBundle'))) {
+        assert.ok(Date.now() < deadline, 'host did not inject the initial bundle');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await fs.writeFile(configPath, JSON.stringify({
+        noDiskWrite: !startupNoDiskWrite,
+        settings: {
+          'common.settings.windows-no-disk-write': !startupNoDiskWrite,
+          'common.settings.windows-log-enabled': true,
+          'common.settings.mutable': 'new'
+        }
+      }), 'utf8');
+      const result = await resultPromise;
+      assert.equal(result.code, 0, result.stderr);
+      const broadcasts = mock.captured.evaluates.filter((expression) => expression.startsWith('try{window.__CX_WIN_ON_CONFIG__'));
+      assert.ok(broadcasts.length > 0, 'host did not broadcast the config update');
+      const last = broadcasts.at(-1);
+      const settings = JSON.parse(last.split('__CX_WIN_ON_CONFIG__(')[1].split(');')[0]).values;
+      assert.equal(settings['common.settings.mutable'], 'new');
+      assert.equal(settings['common.settings.windows-no-disk-write'], startupNoDiskWrite);
+      assert.equal(settings['common.settings.windows-log-enabled'], false);
+      assert.match(result.stdout + result.stderr, /noDiskWrite.*重启/u);
+      if (startupNoDiskWrite) {
+        await assert.rejects(fs.access(reportPath), { code: 'ENOENT' });
+      } else {
+        const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
+        assert.equal(report.mode, 'attach');
+      }
+    } finally {
+      if (resultPromise) await resultPromise;
+      await mock.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test('宿主配置热更新拒绝未实现参数并保留上一有效配置', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reload-unsupported-'));
+  const assetsDir = path.join(directory, 'assets');
+  const configPath = path.join(directory, 'config.json');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: 'window.__unsupportedReloadBundle=true;'
+  });
+  await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, settings: { 'common.settings.mutable': 'old' } }), 'utf8');
+  let resultPromise;
+  try {
+    resultPromise = runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
+      '--duration', '4000', '--no-elevate'
+    ]);
+    const deadline = Date.now() + 8000;
+    while (!mock.captured.evaluates.some((expression) => expression.includes('__unsupportedReloadBundle'))) {
+      assert.ok(Date.now() < deadline, 'host did not inject the initial bundle');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await fs.writeFile(configPath, JSON.stringify({
+      executionMode: 'memory',
+      settings: { 'common.settings.mutable': 'rejected' }
+    }), 'utf8');
+    const result = await resultPromise;
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /热更新配置.*尚未实现/u);
+    assert.equal(mock.captured.evaluates.some((expression) => expression.startsWith('try{window.__CX_WIN_ON_CONFIG__') && expression.includes('rejected')), false);
+  } finally {
+    if (resultPromise) await resultPromise;
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('页面回写受 CLI 和内联约束时仍广播校正值给发起页面', async () => {
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-page-policy-'));
+  const assetsDir = path.join(directory, 'assets');
+  await writeFixtureAssets(assetsDir, {
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.windows-panel-enabled':true,'common.settings.windows-answer-mode':'auto','common.settings.windows-no-disk-write':false,'common.settings.inline-only':'page'}}));"
+  });
+  try {
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--attach', String(mock.port), '--assets', assetsDir, '--config', path.join(directory, 'config.json'),
+      '--no-disk-write', '--no-panel', '--answer-mode', 'manual',
+      '--options-json', JSON.stringify({ settings: { 'common.settings.inline-only': 'inline' } }),
+      '--duration', '1800', '--quiet', '--no-elevate'
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    const broadcasts = mock.captured.evaluates.filter((expression) => expression.startsWith('try{window.__CX_WIN_ON_CONFIG__'));
+    assert.ok(broadcasts.length > 0, 'host did not correct the rejected page write');
+    const settings = JSON.parse(broadcasts.at(-1).split('__CX_WIN_ON_CONFIG__(')[1].split(');')[0]).values;
+    assert.equal(settings['common.settings.windows-panel-enabled'], false);
+    assert.equal(settings['common.settings.windows-answer-mode'], 'manual');
+    assert.equal(settings['common.settings.windows-no-disk-write'], true);
+    assert.equal(settings['common.settings.inline-only'], 'inline');
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PageSession 支持 runtime、script 与 hybrid 注入策略', async () => {
+  const logs = [];
+  const createSession = (injectStrategy) => new PageSession({
+    port: 9333,
+    target: { id: `target-${injectStrategy}`, url: 'https://mooc1.chaoxing.com/exam-ans/' },
+    assets: { bootstrap: '', bundle: '', trampoline: '', style: '' },
+    configStore: { isEnabled: () => true, settingsSnapshot: () => ({}) },
+    instanceToken: 'test',
+    injectBlankFrames: true,
+    captureConsole: true,
+    injectStrategy,
+    injectRetries: 0,
+    logger: { info: (message) => logs.push(`info:${message}`), warn: (message) => logs.push(`warn:${message}`) }
+  });
+
+  const runtime = createSession('runtime');
+  let runtimeCalls = 0;
+  runtime.evaluateOrThrow = async () => { runtimeCalls += 1; return {}; };
+  await runtime.injectSource(1, 'window.__runtime=1;', 'runtime');
+  assert.equal(runtimeCalls, 1);
+
+  const script = createSession('script');
+  let expression = '';
+  script.evaluateReturnByValue = async (_contextId, value) => {
+    expression = value;
+    return { value: { ok: true }, exception: null };
+  };
+  await script.injectViaScriptElement(1, 'window.__script=1;', 'script');
+  assert.match(expression, /createElement\('script'\)/u);
+  assert.match(expression, /__CX_WIN_SCRIPT_INJECT_OK__/u);
+  assert.match(expression, /脚本元素加载失败/u);
+  assert.match(expression, /window\[marker\]/u);
+
+  const hybrid = createSession('hybrid');
+  let hybridRuntimeCalls = 0;
+  hybrid.evaluateOrThrow = async () => {
+    hybridRuntimeCalls += 1;
+    throw new Error('runtime unavailable');
+  };
+  hybrid.evaluateReturnByValue = async () => ({ value: { ok: true }, exception: null });
+  await hybrid.injectSource(1, 'window.__hybrid=1;', 'hybrid');
+  assert.equal(hybridRuntimeCalls, 1);
+  assert.equal(logs.some((line) => line.includes('尝试下一路径')), true);
 });

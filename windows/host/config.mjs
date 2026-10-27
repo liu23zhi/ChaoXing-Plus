@@ -19,6 +19,11 @@ const DEFAULT_CONFIG = {
   stopClientOnExit: false,
   injectBlankFrames: true,
   captureConsole: true,
+  injectStrategy: 'hybrid',
+  injectRetries: 2,
+  debugEndpointTimeoutMs: 30000,
+  targetPollIntervalMs: 1000,
+  bundleTimeoutMs: 120000,
   dpiAwareness: '',
   settings: {
     [ENABLED_KEY]: true
@@ -60,6 +65,20 @@ export function normalizeConfig(raw) {
   normalized.stopClientOnExit = normalized.stopClientOnExit === true;
   normalized.injectBlankFrames = normalized.injectBlankFrames !== false;
   normalized.captureConsole = normalized.captureConsole !== false;
+  normalized.injectStrategy = ['hybrid', 'runtime', 'script'].includes(source.injectStrategy)
+    ? source.injectStrategy
+    : DEFAULT_CONFIG.injectStrategy;
+  normalized.injectRetries = Number.isInteger(Number(source.injectRetries))
+    && Number(source.injectRetries) >= 0 && Number(source.injectRetries) <= 5
+    ? Number(source.injectRetries)
+    : DEFAULT_CONFIG.injectRetries;
+  const boundedInteger = (value, fallback, minimum, maximum) => {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+  };
+  normalized.debugEndpointTimeoutMs = boundedInteger(source.debugEndpointTimeoutMs, DEFAULT_CONFIG.debugEndpointTimeoutMs, 1000, 120000);
+  normalized.targetPollIntervalMs = boundedInteger(source.targetPollIntervalMs, DEFAULT_CONFIG.targetPollIntervalMs, 250, 10000);
+  normalized.bundleTimeoutMs = boundedInteger(source.bundleTimeoutMs, DEFAULT_CONFIG.bundleTimeoutMs, 1000, 300000);
   normalized.dpiAwareness = source.dpiAwareness === 'system' ? 'system' : '';
   return normalized;
 }
@@ -68,9 +87,10 @@ export function mergeConfigLayers(...layers) {
   const merged = {};
   for (const layer of layers) {
     if (!layer || typeof layer !== 'object' || Array.isArray(layer)) continue;
+    const previousSettings = merged.settings;
     Object.assign(merged, layer);
     if (layer.settings && typeof layer.settings === 'object' && !Array.isArray(layer.settings)) {
-      merged.settings = { ...(merged.settings || {}), ...pickSharedValues(layer.settings) };
+      merged.settings = { ...(previousSettings || {}), ...pickSharedValues(layer.settings) };
     }
   }
   return normalizeConfig(merged);
@@ -178,13 +198,15 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
       }
       if (pending && persistEnabled) await persist();
     },
-    watch({ onChange, intervalMs = 1500 } = {}) {
+    watch({ onChange, resolveConfig = (next) => next, intervalMs = 1500 } = {}) {
       watchFile(filePath, { interval: intervalMs }, async (current) => {
         if (current.mtimeMs === 0 || closed) return;
         try {
           const text = await fs.readFile(filePath, 'utf8');
           const next = JSON.parse(text.replace(/^\uFEFF/, ''));
-          const changed = this.replaceFromDisk(next);
+          const resolved = await resolveConfig(next);
+          if (closed) return;
+          const changed = this.replaceFromDisk(resolved);
           if (changed) {
             logger(`[config] 检测到配置文件变更，revision=${revision}`);
             onChange?.(config);

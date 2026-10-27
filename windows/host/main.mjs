@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { fetchJson } from './cdp.mjs';
 import { PageSession } from './inject.mjs';
@@ -25,13 +24,11 @@ import {
   waitForDebugEndpoint
 } from './launch.mjs';
 import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, mergeHostConfigLayers } from './config.mjs';
-import { applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseClientSelectionInput, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateSupportedJsonOptions } from './options.mjs';
-import { probeClientSelectionWindow, showClientSelectionWindow } from './selection-window.mjs';
-import {
-  discoverClientCandidates,
-  findPreferredClientIndex,
-  isCxExamExecutablePath
-} from './client-discovery.mjs';
+import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateSupportedJsonOptions } from './options.mjs';
+import { probeClientSelectionWindow } from './selection-window.mjs';
+import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
+import { isCxExamExecutablePath, resolveExplicitClientPath } from './client-discovery.mjs';
+import { observeClientProcess } from './client-process.mjs';
 import {
   RENDER_DIAGNOSTICS_EXPRESSION,
   collectSystemProbe,
@@ -64,8 +61,16 @@ function usage() {
     '  --list-clients       扫描并列出候选客户端后退出',
     '  --select-client      扫描后显示原生选择窗口（含手动浏览）；无窗口时回退终端提示',
     '  --client-index <n>   启动扫描结果中的第 n 个客户端（从 1 开始）',
-    '  --rescan             忽略配置客户端路径并重新扫描（当前无扫描缓存）',
-    '  --no-scan-cache      禁止扫描缓存（当前宿主尚无扫描缓存）',
+    '  --rescan             忽略配置客户端路径并重新扫描，同时更新扫描缓存',
+    '  --no-scan-cache      禁止读取和写入扫描缓存',
+    '  --expected-browser <text> 调试端点 Browser 必须包含的文本（默认 Chrome/）',
+    '  --inject-blank-frames/--no-inject-blank-frames 是否注入 about:blank/srcdoc frame',
+    '  --capture-console/--no-capture-console 是否捕获页面 console 与异常',
+    '  --inject-strategy <mode> hybrid、runtime 或 script；默认 hybrid',
+    '  --inject-retries <n> 注入失败后的重试次数（0-5）',
+    '  --debug-timeout <ms> 调试端点等待超时（1000-120000）',
+    '  --target-poll-interval <ms> CDP target 轮询间隔（250-10000）',
+    '  --bundle-timeout <ms> 业务 bundle 执行超时（1000-300000）',
     '  --port <n>           固定调试端口（0 = 自动选择可绑定端口）',
     '  --assets <dir>       注入资源目录（默认 dist-windows）',
     '  --duration <ms>      运行指定毫秒后自动退出（测试用）',
@@ -98,9 +103,9 @@ function usage() {
     '  --delete-config      退出时删除 --config 指定的外部配置文件（必须同时指定 --config）',
     '  --diagnose/--no-diagnose 开启或关闭页面与窗口渲染诊断',
     '  --diagnostics-dir <path> 诊断输出目录',
-    '  --wipe-* / --self-destruct-* 当前未实现，出现即报错，不会静默降级',
-    '  --execution-mode normal 仅支持普通运行；内存/删除挂起和清理/自毁参数会报错',
-    '  --capabilities       输出机器可读的未实现能力标记（第一阶段 schema 与禁用状态）',
+    '  --wipe-*             启动清理仅保留参数设计，当前尚未实现并会报错',
+    '  --execution-mode normal 仅支持普通运行；内存/删除挂起和自毁参数会报错',
+    '  --capabilities       输出机器可读的能力标记与未实现能力说明',
     '  --quiet              减少控制台输出，不保证屏蔽参数错误或系统提示'
   ].join('\n');
 }
@@ -198,117 +203,17 @@ async function readOptionalJson(filePath, label, { allowMissing = true } = {}) {
 }
 
 async function resolveClientSelection(options, config, logger) {
-  if (options.clientPath) return config.clientPath;
-  if (!options.scanClients && options.clientIndex === null && !options.selectClient && !options.clientFirst && options.ui !== 'cli' && options.ui !== 'gui' && config.clientPath) {
-    return config.clientPath;
-  }
-
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const nativeSelectionRequested = options.ui === 'gui' || options.selectClient;
-  if (options.ui === 'gui' && process.platform !== 'win32') {
-    throw new Error('--ui gui 需要 Windows 原生选择窗口；当前平台不支持，请使用 --ui cli 或 --ui auto');
-  }
-  const terminalPromptRequested = options.clientIndex === null && !options.clientFirst
-    && (options.ui === 'cli' || (options.ui === 'auto' && interactive));
-  // GUI 窗口 / --select-client / 列表 / 指定序号 / 终端提示都可能需要完整候选列表。
-  const mayPrompt = nativeSelectionRequested || (interactive && terminalPromptRequested);
-
-  logger.info('[client] 正在扫描常见安装目录（根目录及一级子目录）');
-  const scanMode = options.scanMode === 'all' ? 'all' : options.scanMode;
-  const scanResult = await discoverClientCandidates({
-    scanMode,
-    stopOnMachine: options.listClients || mayPrompt || options.clientIndex !== null ? null : 0x014c,
-    onFullScan: () => logger.info('[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描')
+  return resolveClientSelectionFlow(options, config, {
+    logger,
+    assertMachine: assertSupportedClientMachine,
+    scanCachePath: options.scanCachePath || '',
+    onCacheEvent: (event) => {
+      if (event.type === 'hit') logger.info(`[client] 使用扫描缓存（${event.count} 个候选）`);
+      else if (event.type === 'miss') logger.info('[client] 扫描缓存不可用，执行实时扫描');
+      else if (event.type === 'write') logger.info(`[client] 已更新扫描缓存（${event.count} 个候选）`);
+      else if (event.type === 'write-error') logger.warn(`[client] 扫描缓存写入失败：${event.error && event.error.message ? event.error.message : String(event.error)}`);
+    }
   });
-  const candidates = scanResult.candidates;
-  if (candidates.length === 0) {
-    if (options.listClients) {
-      logger.info('[client] 未扫描到可用的 CXExam.exe');
-      return null;
-    }
-    throw new Error('未扫描到可用的 CXExam.exe，请使用 --client <path> 手动指定');
-  }
-  const preferredIndex = findPreferredClientIndex(candidates);
-
-  const printCandidates = () => {
-    candidates.forEach((candidate, index) => {
-      const line = `[client] [${index + 1}] ${candidate.path}（${describeMachine(candidate.machine)}）`;
-      // --list-clients 与选择界面的候选列表本身就是命令目的，即使 --quiet 也必须给出。
-      if (options.listClients || mayPrompt) process.stdout.write(`${line}\n`);
-      else logger.info(line);
-    });
-  };
-  printCandidates();
-
-  if (options.listClients) {
-    return null;
-  }
-
-  const resolveSelectedPath = async (selectedPath, { manual = false } = {}) => {
-    const absolute = path.resolve(selectedPath);
-    if (!isCxExamExecutablePath(absolute)) {
-      throw new Error('选择的文件名必须是 CXExam.exe');
-    }
-    const machine = await readPeMachine(absolute);
-    if (machine === null) throw new Error(`选择的文件不是有效 PE 文件：${absolute}`);
-    assertSupportedClientMachine(machine);
-    logger.info(`[client] 通过${manual ? '手动浏览' : '选择界面'}选择：${absolute}（${describeMachine(machine)}）`);
-    return absolute;
-  };
-
-  // 原生选择窗口（Windows / PowerShell + WinForms）：--ui gui 强制使用；--select-client 优先使用。
-  if (nativeSelectionRequested) {
-    logger.info(`[client] 打开原生选择窗口（共 ${candidates.length} 个候选）`);
-    const autoCloseMs = Number.parseInt(String(process.env.CXPLUS_SELECTION_AUTO_CLOSE_MS || ''), 10);
-    const windowResult = await showClientSelectionWindow({
-      candidates: candidates.map((candidate) => ({ path: candidate.path, machine: describeMachine(candidate.machine) })),
-      // 测试/调试用：自动关闭窗口，避免自动化环境阻塞在消息循环。
-      ...(Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? { autoCloseMs } : {})
-    });
-    if (windowResult.status === 'selected') {
-      return resolveSelectedPath(windowResult.path, { manual: windowResult.manual });
-    }
-    if (windowResult.status === 'cancelled') {
-      throw new Error('已取消客户端选择，未启动考试客户端');
-    }
-    logger.warn(`[client] 原生选择窗口不可用：${windowResult.reason || 'unknown'}${options.ui === 'gui' ? '' : '；回退终端提示/推荐候选'}`);
-    if (options.ui === 'gui') {
-      throw new Error(`无法显示原生选择窗口：${windowResult.reason || 'unknown'}。请检查 PowerShell/WinForms 是否可用，或改用 --ui cli`);
-    }
-  }
-
-  const willPrompt = Boolean(interactive && (options.selectClient || terminalPromptRequested));
-  // 非交互终端里 readline.question 不会 settle，直接挂起；此时明确告知并回退到推荐候选。
-  if (!interactive && (options.selectClient || options.ui === 'cli')) {
-    logger.warn('[client] 当前不是交互终端，无法显示选择提示；按推荐候选继续（可用 --client/--client-index/--client-first 显式指定）');
-  }
-
-  let selectedIndex = options.clientIndex === null
-    ? (preferredIndex >= 0 ? preferredIndex : 0)
-    : options.clientIndex - 1;
-  let selectedManualPath = '';
-  if (willPrompt) {
-    const input = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const answer = await input.question(`请选择客户端编号（1-${candidates.length}，默认 ${selectedIndex + 1}），或输入 CXExam.exe 路径：`);
-      if (answer.trim()) {
-        const selection = parseClientSelectionInput(answer, selectedIndex);
-        selectedIndex = selection.index;
-        if (selection.path) selectedManualPath = path.resolve(selection.path);
-      }
-    } finally {
-      input.close();
-    }
-  }
-
-  if (selectedManualPath) {
-    return resolveSelectedPath(selectedManualPath, { manual: true });
-  }
-  if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= candidates.length) {
-    throw new Error(`客户端编号无效：${selectedIndex + 1}，可选范围为 1-${candidates.length}`);
-  }
-  assertSupportedClientMachine(candidates[selectedIndex].machine);
-  return candidates[selectedIndex].path;
 }
 
 async function runSelfCheck(options, logger) {
@@ -466,8 +371,10 @@ async function main() {
     return;
   }
   let options;
+  let cliOptions;
   try {
-    options = parseHostArgs(process.argv.slice(2));
+    cliOptions = parseHostArgs(process.argv.slice(2));
+    options = cliOptions;
     const optionJson = options.optionsJsonFile
       ? await readOptionalJson(path.resolve(options.optionsJsonFile), '--options-json 配置', { allowMissing: false })
       : (options.optionsJson ? JSON.parse(options.optionsJson) : null);
@@ -496,16 +403,30 @@ async function main() {
     return;
   }
 
-  const dataDirectory = options.dataDirExplicit
+  let dataDirectory = options.dataDirExplicit
     ? path.resolve(options.dataDir)
     : path.join(repositoryRoot, 'windows', 'data');
-  const logger = createLogger({ quiet: options.quiet });
+  options.scanCachePath = path.join(dataDirectory, 'scan-cache.json');
+  let logger = createLogger({ quiet: options.quiet });
+  let loggerQuiet = options.quiet;
   let configStoreForCleanup = null;
   let cleanupAfterStartupFailure = null;
   // --no-retain-data / --delete-config：只清理“本次运行创建的宿主数据”和显式指定的外部配置，
   // 不删除运行前已存在的数据，避免误删用户文件。
   const runArtifacts = { files: new Set(), directories: new Set() };
-  const deleteConfigTarget = options.deleteConfig && options.configPath ? path.resolve(options.configPath) : '';
+  const registerNewFile = async (filePath) => {
+    const absolute = path.resolve(filePath);
+    try {
+      await fs.lstat(absolute);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') runArtifacts.files.add(absolute);
+      else throw error;
+    }
+  };
+  let deleteConfigTarget = '';
+  const refreshDeleteConfigTarget = () => {
+    deleteConfigTarget = options.deleteConfig && options.configPath ? path.resolve(options.configPath) : '';
+  };
   let dataLifecycleFinalized = false;
   const finalizeDataLifecycle = async () => {
     if (dataLifecycleFinalized) return;
@@ -515,7 +436,7 @@ async function main() {
         await fs.rm(filePath, { force: true }).catch(() => {});
       }
       for (const directory of runArtifacts.directories) {
-        await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+        await fs.rmdir(directory).catch(() => {});
       }
     }
     if (deleteConfigTarget) {
@@ -527,14 +448,14 @@ async function main() {
     if (options.selfCheck) {
       if (!options.noDiskWrite && options.logFileEnabled !== false && process.env.CXPLUS_NO_LOG_FILE !== '1') {
         const selfCheckLogPath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
+        await registerNewFile(selfCheckLogPath);
         await logger.attachFile(selfCheckLogPath);
-        runArtifacts.files.add(selfCheckLogPath);
       }
       const result = await runSelfCheck(options, logger);
       if (!options.noDiskWrite && options.reportPath) {
         const selfCheckReportPath = path.resolve(options.reportPath);
+        await registerNewFile(selfCheckReportPath);
         await writeReport(options.reportPath, result.report, logger);
-        runArtifacts.files.add(selfCheckReportPath);
       }
       process.exitCode = result.ok ? 0 : 1;
       await logger.close();
@@ -544,18 +465,39 @@ async function main() {
 
     const configPath = resolveHostConfigPath(options);
     const appConfigPath = path.join(repositoryRoot, 'chaoxing-plus.json');
-    const defaultConfigPathname = defaultConfigPath(repositoryRoot);
-    const defaultHostConfig = options.configPath
-      ? await readOptionalJson(defaultConfigPathname, '默认宿主配置')
-      : null;
+    const defaultHostConfigPathname = options.configPath ? defaultConfigPath(repositoryRoot) : configPath;
+    let defaultHostConfig = await readOptionalJson(defaultHostConfigPathname, '默认宿主配置');
     const appConfig = await readOptionalJson(appConfigPath, '同目录配置');
-    let selectedConfig = {};
+    let selectedConfig = options.configPath
+      ? await readOptionalJson(configPath, '--config 配置')
+      : {};
     validateSupportedJsonOptions(appConfig, '同目录配置');
-    if (defaultHostConfig) validateSupportedJsonOptions(defaultHostConfig, '默认宿主配置');
-    if (options.configPath) {
-      selectedConfig = await readOptionalJson(configPath, '--config 配置');
-      validateSupportedJsonOptions(selectedConfig, '--config 配置');
+    validateSupportedJsonOptions(defaultHostConfig, '默认宿主配置');
+    if (options.configPath) validateSupportedJsonOptions(selectedConfig, '--config 配置');
+    const inlineConfig = options.optionsJsonObject || {};
+    const resolveLayeredOptions = () => applyHostOptionLayers(
+      cliOptions,
+      defaultHostConfig,
+      appConfig,
+      selectedConfig,
+      inlineConfig
+    );
+    options = resolveLayeredOptions();
+    options.optionsJsonObject = inlineConfig;
+    refreshDeleteConfigTarget();
+    dataDirectory = options.dataDirExplicit
+      ? path.resolve(options.dataDir)
+      : path.join(repositoryRoot, 'windows', 'data');
+    options.scanCachePath = path.join(
+      dataDirectory,
+      'scan-cache.json'
+    );
+    if (loggerQuiet !== options.quiet) {
+      await logger.close();
+      logger = createLogger({ quiet: options.quiet });
+      loggerQuiet = options.quiet;
     }
+
     let selectedConfigCreated = false;
     if (!options.noDiskWrite && options.attachPort) {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
@@ -563,17 +505,34 @@ async function main() {
       selectedConfigCreated = await ensureConfigFile(repositoryRoot, configPath, (message) => logger.info(message));
       if (selectedConfigCreated) runArtifacts.files.add(configPath);
     }
-    if (options.configPath && selectedConfigCreated) {
-      selectedConfig = await readOptionalJson(configPath, '--config 配置', { allowMissing: false });
-      validateSupportedJsonOptions(selectedConfig, '--config 配置');
+    if (selectedConfigCreated) {
+      const createdLayer = await readOptionalJson(configPath, '宿主默认配置', { allowMissing: false });
+      validateSupportedJsonOptions(createdLayer, '宿主默认配置');
+      if (options.configPath) selectedConfig = createdLayer;
+      else defaultHostConfig = createdLayer;
+      options = resolveLayeredOptions();
+      options.optionsJsonObject = inlineConfig;
+      refreshDeleteConfigTarget();
+      dataDirectory = options.dataDirExplicit
+        ? path.resolve(options.dataDir)
+        : path.join(repositoryRoot, 'windows', 'data');
+      options.scanCachePath = path.join(
+        dataDirectory,
+        'scan-cache.json'
+      );
+      if (loggerQuiet !== options.quiet) {
+        await logger.close();
+        logger = createLogger({ quiet: options.quiet });
+        loggerQuiet = options.quiet;
+      }
     }
+    if (!options.noDiskWrite) await registerNewFile(configPath);
     const configStore = createConfigStore(configPath, {
       logger: (message) => logger.info(message),
       persistEnabled: !options.noDiskWrite
     });
     configStoreForCleanup = configStore;
     await configStore.load();
-    const inlineConfig = options.optionsJsonObject || {};
     const mergedConfig = mergeHostConfigLayers({
       defaultHostConfig,
       appConfig,
@@ -588,18 +547,30 @@ async function main() {
     const loggingEnabled = options.noDiskWrite
       ? false
       : (options.logFileEnabled === undefined ? configuredLogging : options.logFileEnabled);
+    config.settings['common.settings.windows-no-disk-write'] = options.noDiskWrite;
+    config.settings['common.settings.windows-log-enabled'] = loggingEnabled;
     if (loggingEnabled && process.env.CXPLUS_NO_LOG_FILE !== '1') {
       const logFilePath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
+      await registerNewFile(logFilePath);
       await logger.attachFile(logFilePath);
-      runArtifacts.files.add(logFilePath);
     }
     if (options.clientPath) config.clientPath = path.resolve(options.clientPath);
+    if (config.clientPath) {
+      const resolvedExplicitClient = await resolveExplicitClientPath(config.clientPath);
+      if (resolvedExplicitClient) {
+        if (resolvedExplicitClient !== config.clientPath) {
+          logger.info(`[client] 显式客户端目录已解析为：${resolvedExplicitClient}`);
+        }
+        config.clientPath = resolvedExplicitClient;
+      }
+    }
     if (options.stopClientOnExit) config.stopClientOnExit = true;
     if (options.dpiAware) config.dpiAwareness = 'system';
 
     if (!options.attachPort) {
+      if (!options.noDiskWrite && !options.noScanCache) await registerNewFile(options.scanCachePath);
       const selectedClientPath = await resolveClientSelection(options, config, logger);
-      if (options.listClients) {
+      if (options.listClients || selectedClientPath === null) {
         await configStore.close();
         await logger.close();
         await finalizeDataLifecycle();
@@ -616,9 +587,20 @@ async function main() {
       || path.join(dataDirectory, 'diagnostics', diagnosticsStamp);
     const diagnosticsEnabled = !options.noDiskWrite
       && (options.diagnose === true || (!options.attachPort && !options.noDiagnose));
-    if (diagnosticsEnabled) runArtifacts.directories.add(diagnosticsDirectory);
+    if (diagnosticsEnabled) {
+      try {
+        await fs.lstat(diagnosticsDirectory);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') runArtifacts.directories.add(path.resolve(diagnosticsDirectory));
+        else throw error;
+      }
+      for (const name of ['render-diagnostics.json', 'render-diagnostics-window.png', 'render-diagnostics-page.png']) {
+        await registerNewFile(path.join(diagnosticsDirectory, name));
+      }
+    }
     const panelDiagnosticsEnabled = config.settings['common.settings.windows-panel-enabled'] !== false;
     const sessions = new Map();
+    const sessionHistory = [];
     const report = {
       mode: options.attachPort ? 'attach' : 'launch',
       startedAt: nowIso(),
@@ -652,6 +634,7 @@ async function main() {
     }
 
     let clientChild = null;
+    let detachClientProcessObserver = null;
     let stopping = false;
     let configWatcherOff = null;
     let targetTimer = null;
@@ -663,8 +646,19 @@ async function main() {
       }
     };
 
+    const applyRuntimePolicies = (nextConfig, nextOptions) => {
+      const resolved = applyHostOptionsToConfig(nextConfig, { ...nextOptions, noDiskWrite: options.noDiskWrite });
+      resolved.noDiskWrite = options.noDiskWrite;
+      resolved.settings['common.settings.windows-no-disk-write'] = options.noDiskWrite;
+      resolved.settings['common.settings.windows-log-enabled'] = loggingEnabled;
+      return resolved;
+    };
+    const runtimeOptionOverrides = applyHostOptionsToConfig(
+      { settings: {} }, applyHostOptionLayers(cliOptions, inlineConfig)
+    ).settings;
+
     const collectStats = () => {
-      report.targets = [...sessions.values()].map((session) => session.stats);
+      report.targets = sessionHistory.slice();
       report.totals = report.targets.reduce((totals, stats) => ({
         contexts: totals.contexts + stats.contexts,
         bootstraps: totals.bootstraps + stats.bootstraps,
@@ -678,6 +672,10 @@ async function main() {
       if (stopping) return;
       stopping = true;
       logger.info(`[main] 停止：${reason}`);
+      if (detachClientProcessObserver) {
+        detachClientProcessObserver();
+        detachClientProcessObserver = null;
+      }
       if (targetTimer) clearInterval(targetTimer);
       if (configWatcherOff) configWatcherOff();
       collectStats();
@@ -689,13 +687,14 @@ async function main() {
       if (report.diagnostics.enabled && !options.noDiskWrite) {
         await writeDiagnosticsFile(report.diagnostics.directory, report.diagnostics, (message) => logger.info(message));
       }
-      if (clientChild && (forceStopClient || config.stopClientOnExit || options.stopClientOnExit)) {
+      if (clientChild && clientChild.exitCode === null
+        && (forceStopClient || config.stopClientOnExit || options.stopClientOnExit)) {
         await killProcessTree(clientChild.pid, (message) => logger.info(message));
       }
       report.finishedAt = nowIso();
       await configStore.close();
       if (!options.noDiskWrite && options.reportPath) {
-        runArtifacts.files.add(path.resolve(options.reportPath));
+        await registerNewFile(options.reportPath);
         await writeReport(options.reportPath, report, logger);
       }
       if (options.retainData === false) {
@@ -756,6 +755,16 @@ async function main() {
           dpiOverridePrevious = await setDpiAwarenessOverride(clientPath, (message) => logger.info(message));
         }
         clientChild = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) }).child;
+        detachClientProcessObserver = observeClientProcess(clientChild, {
+          onExit: ({ code, signal }) => {
+            logger.warn(`[launch] 本次启动的 CXExam 已退出（code=${code === null ? '?' : code}，signal=${signal || '?'}）`);
+            if (!stopping) void stop('本次启动的 CXExam 进程已退出');
+          },
+          onError: (error) => {
+            logger.error(`[launch] 启动 CXExam 进程失败：${error && error.message ? error.message : String(error)}`);
+            if (!stopping) void stop('本次启动的 CXExam 进程启动失败');
+          }
+        });
       } finally {
         if (dpiOverridePrevious !== undefined) {
           await restoreDpiAwarenessOverride(clientPath, dpiOverridePrevious, (message) => logger.info(message));
@@ -764,7 +773,7 @@ async function main() {
       report.clientPid = clientChild.pid;
       logger.info(`[launch] 客户端已启动 pid=${clientChild.pid}，等待调试端点（首次启动通常需要 10-20 秒）`);
       const endpoint = await waitForDebugEndpoint(port, {
-        timeoutMs: 30000,
+        timeoutMs: config.debugEndpointTimeoutMs,
         child: clientChild,
         fetchJson
       });
@@ -807,6 +816,11 @@ async function main() {
       }
       const pages = (Array.isArray(list) ? list : []).filter((target) => target && target.type === 'page' && target.webSocketDebuggerUrl);
       for (const target of pages) {
+        const previousSession = sessions.get(target.id);
+        if (previousSession && previousSession.closed) {
+          sessions.delete(target.id);
+          logger.info(`[main] target ${target.id} 仍存在，重新建立已断开的 CDP 会话`);
+        }
         if (sessions.has(target.id) || stopping) continue;
         const session = new PageSession({
           port,
@@ -816,25 +830,45 @@ async function main() {
           instanceToken,
           injectBlankFrames: config.injectBlankFrames,
           captureConsole: loggingEnabled && config.captureConsole,
+          injectStrategy: config.injectStrategy,
+          injectRetries: config.injectRetries,
+          bundleTimeoutMs: config.bundleTimeoutMs,
           logger: { info: (message) => logger.info(message), warn: (message) => logger.warn(message) },
           onConfigSync: (detail) => {
-            const changed = configStore.updateFromPage(detail);
-            if (changed) {
-              logger.info(`[config] 页面写入共享配置（revision=${configStore.revision}），广播到全部 frame`);
-              void broadcastConfig();
+            try {
+              const candidate = mergeHostConfigLayers({
+                defaultHostConfig: configStore.snapshot(),
+                selectedConfig: { settings: detail },
+                inlineConfig
+              });
+              const nextOptions = applyHostOptionLayers(
+                cliOptions, { settings: candidate.settings }, { settings: runtimeOptionOverrides }
+              );
+              const constrained = applyRuntimePolicies(candidate, nextOptions);
+              const correctionNeeded = Object.keys(detail || {}).some((key) =>
+                Object.prototype.hasOwnProperty.call(constrained.settings, key)
+                && JSON.stringify(detail[key]) !== JSON.stringify(constrained.settings[key]));
+              const changed = configStore.updateFromPage(constrained.settings);
+              if (changed || correctionNeeded) {
+                logger.info(`[config] 页面写入共享配置（revision=${configStore.revision}），广播到全部 frame`);
+                void broadcastConfig();
+              }
+            } catch (error) {
+              logger.warn(`[config] 页面共享配置无效（忽略本次）：${error.message}`);
             }
           },
           onBundleInjected: (contextId, url) => {
             logger.info(`[inject] context=${contextId} bundle 完成（${sanitizeUrl(url) || 'about:blank'}）`);
           }
         });
+        sessionHistory.push(session.stats);
         sessions.set(target.id, session);
         try {
           await session.open();
         } catch (error) {
           logger.warn(`[main] 连接 target ${target.id} 失败：${error.message}`);
           session.close();
-          sessions.delete(target.id);
+          if (sessions.get(target.id) === session) sessions.delete(target.id);
         }
       }
       const activeIds = new Set(pages.map((target) => target.id));
@@ -849,9 +883,27 @@ async function main() {
     };
 
     await pollTargets();
-    targetTimer = setInterval(() => { void pollTargets(); }, 1000);
+    if (stopping) return;
+    targetTimer = setInterval(() => { void pollTargets(); }, config.targetPollIntervalMs);
 
     configWatcherOff = configStore.watch({
+      resolveConfig: (raw) => {
+        validateSupportedJsonOptions(raw, '热更新配置');
+        const nextDefault = options.configPath ? defaultHostConfig : raw;
+        const nextSelected = options.configPath ? raw : {};
+        const nextOptions = applyHostOptionLayers(cliOptions, nextDefault, appConfig, nextSelected, inlineConfig);
+        if (nextOptions.noDiskWrite !== options.noDiskWrite) {
+          logger.warn('[config] noDiskWrite 已按本次启动策略锁定，修改后需要重启宿主才能生效');
+        }
+        const nextConfig = mergeHostConfigLayers({
+          defaultHostConfig: nextDefault,
+          appConfig,
+          selectedConfig: nextSelected,
+          loadedConfig: raw,
+          inlineConfig
+        });
+        return applyRuntimePolicies(nextConfig, nextOptions);
+      },
       onChange: () => {
         logger.info('[config] 配置文件发生变化，广播到页面');
         void broadcastConfig();
@@ -872,6 +924,7 @@ async function main() {
           screenshotPath: windowShotPath,
           logger: (message) => logger.info(message)
         });
+        if (stopping) return;
         state.system = system;
         state.windowScreenshot = system && system.windowScreenshot ? system.windowScreenshot : null;
         if (system) {
@@ -919,6 +972,7 @@ async function main() {
               screenshotPath: windowShotPath,
               logger: () => {}
             });
+            if (stopping) return;
             if (!Array.isArray(retry.windows) || retry.windows.length === 0) continue;
             system = retry;
             state.system = system;
@@ -963,6 +1017,7 @@ async function main() {
           logger.info(`[diagnostics] 采样 #${index + 1}：${summarizeRenderDiagnostics(sample, { includePanel: panelDiagnosticsEnabled })}`);
           if (index === 0) {
             const screenshot = await session.captureScreenshot();
+            if (stopping) return;
             const savedPath = await writeScreenshot(
               diagnosticsDirectory,
               'render-diagnostics-page.png',
@@ -1020,6 +1075,9 @@ async function main() {
       logger.info(`[main] 完成：${bundles} 个 bundle、${report.totals.bootstraps} 个 bootstrap、${report.totals.configSyncs} 次配置同步`);
     }
   } catch (error) {
+    if (options.quiet && error.code === 'ERR_UNSUPPORTED_HOST_OPTION') {
+      console.error(`[windows-host] 参数错误：${error.message}`);
+    }
     logger.error(`[main] 失败：${error.message}`);
     process.exitCode = 3;
     if (cleanupAfterStartupFailure) {
