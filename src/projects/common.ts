@@ -89,6 +89,7 @@ const WORK_OPTIONS_KEY = 'common.settings.work-options';
 const WORK_RESULTS_KEY = 'common.work-results.results';
 const WORK_RESULTS_VIEW_KEY = 'common.work-results.type';
 const QUESTION_CACHE_KEY = 'common.apps.question-caches';
+const WINDOWS_NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
 const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';
 
 const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';
@@ -219,6 +220,16 @@ function isWindowsHostRuntime() {
   }
 }
 
+// 宿主 --no-disk-write 通过共享设置下发：Windows 端关闭题库缓存的读写与本地持久化。
+// 扩展端没有宿主注入，行为保持不变。
+function isWindowsNoDiskWrite() {
+  try {
+    return isWindowsHostRuntime() && runtimeStore.get<boolean>(WINDOWS_NO_DISK_WRITE_KEY, false) === true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveInitialWorkResultsPanelUiState() {
   const ui = createDefaultWorkResultsPanelUiState();
   // Windows 端默认折叠面板；Chrome 扩展不注入 __CX_WIN_HOST__，保持原有默认展开行为。
@@ -270,11 +281,16 @@ const state = {
     ui: resolveInitialWorkResultsPanelUiState()
   },
   apps: {
-    localQuestionCaches: runtimeStore.get(QUESTION_CACHE_KEY, [] as QuestionCache[])
+    localQuestionCaches: isWindowsNoDiskWrite() ? [] : runtimeStore.get(QUESTION_CACHE_KEY, [] as QuestionCache[])
   }
 };
 
 function applyQuestionCaches(value: unknown) {
+  if (isWindowsNoDiskWrite()) {
+    state.apps.localQuestionCaches = [];
+    answerCache.clear();
+    return true;
+  }
   if (!Array.isArray(value)) {
     return false;
   }
@@ -737,10 +753,16 @@ function toggleWorkResultsPanelVisibility() {
 }
 
 function saveQuestionCaches() {
+  if (isWindowsNoDiskWrite()) {
+    return;
+  }
   runtimeStore.set(QUESTION_CACHE_KEY, state.apps.localQuestionCaches);
 }
 
 function isLocalQuestionCacheEnabled() {
+  if (isWindowsNoDiskWrite()) {
+    return false;
+  }
   return getStudySettingValue('enableLocalQuestionCache', true);
 }
 

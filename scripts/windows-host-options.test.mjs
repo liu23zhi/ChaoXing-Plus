@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import {
   applyHostOptionsToConfig,
   applyOptionsJsonToOptions,
+  describeUnsupportedCapabilities,
   parseClientSelectionInput,
   normalizeAnswerThreads,
   parseOptionsJson,
   parseHostArgs,
+  UNSUPPORTED_CAPABILITIES,
   validateSupportedJsonOptions
 } from '../windows/host/options.mjs';
 
@@ -142,29 +144,61 @@ test('no-diagnose CLI 开关覆盖 options-json，且禁用的 JSON 能力显式
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { settings: { selfDestructOnFullscreenExit: true } }), /尚未实现/u);
   assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /尚未实现/u);
   assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-execution-mode': 'memory' } }), /尚未实现/u);
-  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { retainData: false }), /数据清理/u);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { retainData: false }).retainData, false);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { retainData: true }).retainData, true);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { deleteConfig: true }), /--config/u);
+  assert.doesNotThrow(() => validateSupportedJsonOptions({ retainData: false, deleteConfig: true }));
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { configPath: 'C:\\override.json' }), /--config/u);
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { panel: 'false' }), /布尔值/u);
   assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { scanAll: true }).scanMode, 'fallback-all');
   assert.equal(applyOptionsJsonToOptions(parseHostArgs(['--scan-mode', 'common']), { scanAll: true }).scanMode, 'common');
 });
 
-test('当前未实现的图形选择和数据清理参数明确拒绝', () => {
-  assert.throws(() => parseHostArgs(['--ui', 'gui']), /尚未实现/u);
-  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { ui: 'gui' }), /尚未实现/u);
-  assert.throws(() => parseHostArgs(['--retain-data']), /尚未实现/u);
-  assert.throws(() => parseHostArgs(['--no-retain-data']), /尚未实现/u);
-  assert.throws(() => parseHostArgs(['--delete-config']), /尚未实现/u);
+test('数据保留和删除外部配置参数按方案解析，删除外部配置必须指定 --config', () => {
+  assert.equal(parseHostArgs([]).retainData, true);
+  assert.equal(parseHostArgs(['--retain-data']).retainData, true);
+  assert.equal(parseHostArgs(['--no-retain-data']).retainData, false);
+  assert.equal(parseHostArgs(['--retain-data', '--no-retain-data']).retainData, false);
+  assert.throws(() => parseHostArgs(['--delete-config']), /--config/u);
+  const options = parseHostArgs(['--delete-config', '--config', 'C:\\Tools\\chaoxing-plus.json']);
+  assert.equal(options.deleteConfig, true);
+  assert.equal(options.configPath, 'C:\\Tools\\chaoxing-plus.json');
+  assert.throws(() => parseHostArgs(['--delete-config', '--config', 'C:\\Tools\\chaoxing-plus.json', '--no-disk-write']), /no-disk-write/u);
+  assert.equal(parseHostArgs(['--ui', 'gui']).ui, 'gui');
+  assert.equal(parseHostArgs(['--ui', 'cli']).ui, 'cli');
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { ui: 'gui' }).ui, 'gui');
+  assert.throws(() => parseHostArgs(['--ui', 'bogus']), /只支持/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { ui: 'bogus' }), /只支持/u);
+});
+
+test('未实现能力暴露机器可读 schema / capability 标记', () => {
+  assert.equal(parseHostArgs(['--capabilities']).capabilities, true);
+  assert.equal(UNSUPPORTED_CAPABILITIES.implemented, false);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal']);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues], ['memory', 'delete-suspend']);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.min, 1);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.max, 20);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min, 50);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.max, 5000);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies], ['retry', 'background', 'ignore', 'abort']);
+  assert.equal(UNSUPPORTED_CAPABILITIES.selfDestruct.repeatableKey, true);
+  assert.equal(UNSUPPORTED_CAPABILITIES.selfDestruct.confirmDefault, true);
+  const notes = describeUnsupportedCapabilities();
+  assert.equal(notes.length, 3);
+  assert.match(notes.join('\n'), /startup-wipe/u);
+  assert.match(notes.join('\n'), /self-destruct/u);
 });
 
 test('文档中的普通启动示例参数均可通过宿主解析器', () => {
   const examples = [
     ['--scan-mode', 'fallback-all', '--client-first', '--execution-mode', 'normal', '--no-disk-write', '--no-log', '--quiet', '--no-panel', '--answer-mode', 'manual', '--answer-key', 'Ctrl+Alt+Shift+S', '--answer-threads', '1', '--hide-answer-dialog'],
     ['--scan-mode', 'fallback-all', '--select-client', '--panel', '--panel-expanded', '--panel-top', '24', '--panel-right', '24', '--panel-width', '520', '--answer-mode', 'auto', '--answer-countdown', '5', '--answer-threads', '4', '--show-answer-dialog', '--log', '--diagnose'],
+    ['--report', '.data\\last-report.json', '--retain-data'],
     ['--client', 'D:\\Exam\\CXExam.exe', '--data-dir', 'D:\\CXPlusData', '--panel', '--panel-width', '520', '--log'],
     ['--scan-mode', 'common', '--list-clients', '--no-log', '--quiet'],
     ['--scan-mode', 'all', '--list-clients', '--no-log'],
     ['--config', '.\\chaoxing-plus.json', '--panel'],
+    ['--config', '.\\chaoxing-plus.json', '--delete-config'],
     ['--options-json', '{"panel":true,"panelTop":24,"panelWidth":520}']
   ];
   for (const args of examples) assert.doesNotThrow(() => parseHostArgs(args));
@@ -238,6 +272,9 @@ test('宿主参数写入共享配置，供 bootstrap 和业务 runtime 使用', 
     'common.settings.windows-show-answer-dialog': false,
     'common.settings.windows-answer-threads': 3
   });
+
+  const noDiskWriteConfig = applyHostOptionsToConfig({ settings: {} }, { noDiskWrite: true });
+  assert.equal(noDiskWriteConfig.settings['common.settings.windows-no-disk-write'], true);
 });
 
 test('内存执行、删除挂起和自毁参数显式拒绝，不静默降级为普通运行', () => {
@@ -270,6 +307,10 @@ test('Windows 业务 runtime 使用宿主下发的面板和答题设置', async 
   assert.match(cxSource, /'answer-mode'/u);
   assert.match(cxSource, /'show-answer-dialog'/u);
   assert.match(commonSource, /windows-answer-threads/u);
+  assert.match(commonSource, /windows-no-disk-write/u);
+  assert.match(commonSource, /isWindowsNoDiskWrite/u);
+  assert.match(commonSource, /function saveQuestionCaches\(\) \{\s*if \(isWindowsNoDiskWrite\(\)\)/u);
+  assert.match(commonSource, /function isLocalQuestionCacheEnabled\(\) \{\s*if \(isWindowsNoDiskWrite\(\)\)/u);
   assert.match(cxSource, /createWindowsManualAnswerGate/u);
   assert.match(cxSource, /matchesWindowsAnswerKey/u);
   assert.match(cxSource, /pendingTokens/u);

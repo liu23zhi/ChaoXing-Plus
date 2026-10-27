@@ -10,14 +10,17 @@
     "common.settings.extension-enabled": true,
     "common.settings.windows-panel-enabled": true,
     "common.settings.windows-panel-collapsed": true,
-    "common.settings.windows-answer-mode": "auto",
-    "common.settings.windows-answer-key": "F8",
-    "common.settings.windows-show-answer-dialog": true,
-    "common.settings.windows-log-enabled": true,
-    "common.settings.windows-log-enabled": true,
-    "common.settings.windows-answer-threads": 4,
     "common.settings.windows-panel-top": 16,
     "common.settings.windows-panel-right": 16,
-    "common.settings.windows-panel-width": 460
+    "common.settings.windows-panel-width": 460,
+    "common.settings.windows-panel-theme": "pink",
+    "common.settings.windows-answer-mode": "auto",
+    "common.settings.windows-answer-key": "F8",
+    "common.settings.windows-answer-threads": 4,
+    "common.settings.windows-show-answer-dialog": true,
+    "common.settings.windows-answer-countdown": 5,
+    "common.settings.windows-answer-retry": 3,
+    "common.settings.windows-auto-submit": true,
+    "common.settings.windows-log-enabled": true
   }
 }

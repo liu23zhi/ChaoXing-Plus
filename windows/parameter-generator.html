@@ -46,16 +46,17 @@
         <div class="field"><label for="scanMode">扫描模式</label><select id="scanMode"><option value="common">仅常规路径</option><option value="fallback-all" selected>常规无结果才全盘</option><option value="all">强制全盘扫描</option></select></div>
         <div class="field"><label for="clientIndex">扫描结果序号</label><input id="clientIndex" type="number" min="1" step="1" placeholder="留空"></div>
         <div class="field"><label for="selection">选择策略</label><select id="selection"><option value="first">首个推荐（x86 优先）</option><option value="interactive" selected>交互选择</option><option value="none">只扫描，不选择客户端</option></select></div>
-        <div class="field"><label for="ui">界面</label><select id="ui"><option value="auto" selected>自动</option><option value="gui" disabled>GUI（当前无原生窗口）</option><option value="cli">CLI</option></select></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="listClients" type="checkbox">只列出候选后退出</label><label class="check"><input id="rescan" type="checkbox">忽略配置路径，强制扫描客户端</label></div></div>
+        <div class="field"><label for="ui">界面</label><select id="ui"><option value="auto" selected>自动</option><option value="gui">GUI（Windows 原生选择窗口）</option><option value="cli">CLI</option></select></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="listClients" type="checkbox">只列出候选后退出</label><label class="check"><input id="rescan" type="checkbox">忽略配置路径，强制扫描客户端</label><label class="check"><input id="noScanCache" type="checkbox">禁用扫描缓存（当前宿主无扫描缓存）</label></div></div>
+        <div class="field full"><p class="hint">Windows 上“GUI”与“交互选择”对应 <code>--select-client</code>，会弹出原生选择窗口（含手动浏览）；窗口不可用时回退终端提示。</p></div>
       </div></div>
       <div class="section"><h2>配置与数据</h2><div class="grid">
         <div class="field"><label for="configPath">配置文件</label><input id="configPath" placeholder="可选 JSON 路径"></div>
         <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value=".data"></div>
         <div class="field full"><label for="optionsJson">内联 JSON 或 @JSON 文件</label><textarea id="optionsJson" placeholder='例如 {"panelTop":24,"panelWidth":520} 或 @C:\\Tools\\options.json'></textarea><p class="hint">支持 JSON 对象或 @文件路径；独立命令行参数优先级更高。</p></div>
         <div class="field"><label for="report">运行报告</label><input id="report" placeholder="可选路径"></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input type="checkbox" disabled>自毁时保留数据（未发布）</label><label class="check"><input type="checkbox" disabled>删除外部配置（未发布）</label></div><p class="hint">此选项不控制 CXExam 自身的浏览器存储；启动错误或系统权限提示仍可能输出。</p></div>
-        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不支持配置删除、启动清理、自毁或非普通执行模式字段。</p></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">--no-retain-data 只清理本次运行创建的宿主数据；--delete-config 必须搭配 --config；两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
+        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、自毁或非普通执行模式字段会被拒绝。</p></div>
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
         <div class="field full"><label for="launcherPath">宿主启动脚本路径</label><input id="launcherPath" placeholder="自动定位到项目目录中的 start-windows.cmd"><p class="hint">默认根据此 HTML 的位置生成绝对路径；如果启动脚本单独移动，请在此修改。该路径只用于命令文本，不会写入 JSON。</p></div>
@@ -65,10 +66,7 @@
       <div class="section"><h2>面板</h2><div class="grid">
         <div class="field full"><div class="checks"><label class="check"><input id="panel" type="checkbox" checked>显示悬浮面板</label><label class="check"><input id="panelExpanded" type="checkbox">默认展开</label></div></div>
         <div class="field"><label for="panelTop">顶部距离</label><input id="panelTop" type="number" value="16" min="0" max="10000"></div><div class="field"><label for="panelRight">右侧距离</label><input id="panelRight" type="number" value="16" min="0" max="10000"></div><div class="field"><label for="panelWidth">宽度 <small>320-800</small></label><input id="panelWidth" type="number" value="460" min="320" max="800"></div>
-      </div></div>
-      <div class="section"><h2>日志与诊断</h2><div class="grid">
-        <div class="field full"><div class="checks"><label class="check"><input id="log" type="checkbox" checked>写日志</label><label class="check"><input id="quiet" type="checkbox">不输出控制台</label><label class="check"><input id="diagnose" type="checkbox">诊断</label></div></div>
-        <div class="field"><label for="diagnosticsDir">诊断目录</label><input id="diagnosticsDir" value=".data\\diagnostics"></div>
+        <div class="field"><label for="panelTheme">主题名 <small>预留</small></label><input id="panelTheme" placeholder="留空使用内置主题"></div>
       </div></div>
       <div class="section"><h2>答题</h2><div class="grid">
         <div class="field"><label for="answerMode">答题模式</label><select id="answerMode"><option value="auto" selected>自动答题</option><option value="manual">快捷键逐题放行</option></select></div>
@@ -79,19 +77,26 @@
         <div class="field full"><div class="checks"><label class="check"><input id="showAnswerDialog" type="checkbox" checked>显示自动答题弹窗</label><label class="check"><input id="noAutoSubmit" type="checkbox">不自动提交</label></div></div>
         <div class="field full"><p class="hint">快捷键需包含一个基础按键；请仅在你有权操作的测试或练习环境使用。</p></div>
       </div></div>
-      <div class="section"><h2>启动清理与自毁</h2><div class="grid">
-        <div class="field"><label for="wipeOnStart">启动清理</label><label class="check"><input id="wipeOnStart" type="checkbox" disabled>清理宿主自有文件（未发布）</label></div>
-        <div class="field"><label for="wipePolicy">删除失败策略</label><select id="wipePolicy" disabled><option>retry（默认）</option><option>background</option><option>ignore</option><option>abort</option></select></div>
-        <div class="field"><label for="wipeRetries">启动重试次数（1-20）</label><input id="wipeRetries" type="number" min="1" max="20" value="5" disabled></div>
-        <div class="field"><label for="wipeDelay">重试间隔（毫秒）</label><input id="wipeDelay" type="number" min="50" max="5000" value="200" disabled></div>
-        <div class="field"><label for="wipeInterval">运行期重试间隔（秒）</label><input id="wipeInterval" type="number" value="30" disabled></div>
-        <div class="field"><label class="check"><input id="wipeRuntimeRetry" type="checkbox" checked disabled>运行期间继续重试（未发布）</label></div>
-        <div class="field"><label for="selfDestructKey">自毁快捷键（可重复）</label><input id="selfDestructKey" disabled placeholder="未发布"></div>
-        <div class="field"><label for="selfDestructDelay">自毁延迟（毫秒）</label><input id="selfDestructDelay" type="number" value="0" disabled></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox" disabled>退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox" disabled>静默自毁（未发布）</label></div></div>
-        <div class="field full"><p class="hint">执行模式、启动清理和自毁当前不可执行；控件仅说明参数设计，不会进入输出。</p></div>
+      <div class="section"><h2>日志与诊断</h2><div class="grid">
+        <div class="field full"><div class="checks"><label class="check"><input id="log" type="checkbox" checked>写日志</label><label class="check"><input id="quiet" type="checkbox">不输出控制台</label><label class="check"><input id="diagnose" type="checkbox">诊断</label></div></div>
+        <div class="field"><label for="diagnosticsDir">诊断目录</label><input id="diagnosticsDir" value=".data\\diagnostics"></div>
       </div></div>
-      <div class="section"><h2>未发布能力</h2><div class="capability">内存执行、删除挂起、启动清理和自毁不会导出为可运行参数。“启动清理型”预设会显示阻止提示，避免静默降级。</div></div>
+      <div class="section"><h2>启动清理</h2><div class="grid">
+        <div class="field"><label for="wipeOnStart">启动清理</label><label class="check"><input id="wipeOnStart" type="checkbox" disabled>清理宿主自有文件（当前宿主不可执行）</label></div>
+        <div class="field"><label for="wipePolicy">删除失败策略</label><select id="wipePolicy" disabled><option value="retry">retry（默认）</option><option value="background">background</option><option value="ignore">ignore</option><option value="abort">abort</option></select></div>
+        <div class="field"><label for="wipeRetries">启动重试次数（1-20）</label><input id="wipeRetries" type="number" min="1" max="20" value="5" disabled></div>
+        <div class="field"><label for="wipeDelay">重试间隔（毫秒，50-5000）</label><input id="wipeDelay" type="number" min="50" max="5000" value="200" disabled></div>
+        <div class="field"><label for="wipeInterval">运行期重试间隔（秒）</label><input id="wipeInterval" type="number" value="30" disabled></div>
+        <div class="field"><label class="check"><input id="wipeRuntimeRetry" type="checkbox" checked disabled>运行期间继续重试（当前宿主不可执行）</label></div>
+        <div class="field full"><p class="hint">当前宿主不可执行：这里只展示参数 schema 与范围校验，不会导出为可运行命令。</p></div>
+      </div></div>
+      <div class="section"><h2>自毁</h2><div class="grid">
+        <div class="field"><label for="selfDestructKey">自毁快捷键（可重复）</label><input id="selfDestructKey" disabled placeholder="当前宿主不可执行"></div>
+        <div class="field"><label for="selfDestructDelay">自毁延迟（毫秒）</label><input id="selfDestructDelay" type="number" value="0" disabled></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox" disabled>退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox" disabled>静默自毁</label></div></div>
+        <div class="field full"><p class="hint">当前宿主不可执行：自毁快捷键与行为不会导出为可运行命令；答题快捷键不得与自毁快捷键相同。</p></div>
+      </div></div>
+      <div class="section"><h2>未发布能力</h2><div class="capability">内存执行、删除挂起、启动清理和自毁在当前宿主不可执行，不会导出为可运行参数。“启动清理型”预设会显示阻止提示，避免静默降级。</div></div>
     </section>
     <aside class="out">
       <section class="card"><h2>校验结果</h2><div id="status" class="status">配置有效，可以生成普通宿主参数。</div></section>
@@ -105,7 +110,7 @@
 <script>
 (function () {
   'use strict';
-  var ids = ['clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','configPath','dataDir','optionsJson','report','noDiskWrite','launcherPath','executionMode','stopClient','panel','panelExpanded','panelTop','panelRight','panelWidth','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit'];
+  var ids = ['clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
   function el(id) { return document.getElementById(id); }
   function value(id) { var node = el(id); return node.type === 'checkbox' ? node.checked : node.value.trim(); }
   function setValue(id, next) { var node = el(id); if (!node) return; if (node.type === 'checkbox') node.checked = !!next; else node.value = next == null ? '' : next; }
@@ -137,6 +142,7 @@
       'common.settings.windows-auto-submit': !s.noAutoSubmit
     } };
     if (s.answerRetry !== '') config.settings['common.settings.windows-answer-retry'] = Number(s.answerRetry);
+    if (s.panelTheme) config.settings['common.settings.windows-panel-theme'] = s.panelTheme;
     return config;
   }
   function validShortcut(value) {
@@ -145,22 +151,156 @@
     var keys = parts.filter(function (part) { return !allowedModifiers[part.toLowerCase()]; });
     return keys.length === 1 && /^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|arrow(?:up|down|left|right))$/i.test(keys[0]);
   }
+  function canonicalShortcut(value) {
+    var modifiers = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', shift: 'shift', win: 'win', windows: 'win', meta: 'win', command: 'win' };
+    var parts = [];
+    var base = '';
+    String(value || '').split('+').map(function (part) { return part.trim(); }).filter(Boolean).forEach(function (part) {
+      var lower = part.toLowerCase();
+      if (modifiers[lower]) parts.push(modifiers[lower]);
+      else base = lower;
+    });
+    return parts.sort().join('+') + '+' + base;
+  }
+  function validBoundedNumber(value, minimum, maximum) {
+    if (String(value).trim() === '') return false;
+    var parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum;
+  }
+  function validBoundedInteger(value, minimum, maximum) {
+    if (!/^\d+$/u.test(String(value).trim())) return false;
+    var parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum;
+  }
+  function startsWithOptionPrefix(value) {
+    return String(value || '').indexOf('--') === 0;
+  }
+  var JSON_OPTION_KEYS = {
+    clientPath: 'clientPath', clientIndex: 'clientIndex', clientFirst: 'clientFirst', listClients: 'listClients', selectClient: 'selectClient',
+    scanMode: 'scanMode', scanAll: 'scanMode', ui: 'ui', rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir',
+    noDiskWrite: 'noDiskWrite', retainData: 'retainData', deleteConfig: 'deleteConfig',
+    panel: 'panelEnabled', panelEnabled: 'panelEnabled', panelCollapsed: 'panelCollapsed', panelTop: 'panelTop', panelRight: 'panelRight', panelWidth: 'panelWidth', panelTheme: 'panelTheme',
+    answerMode: 'answerMode', answerKey: 'answerKey', showAnswerDialog: 'showAnswerDialog', answerThreads: 'answerThreads', answerCountdown: 'answerCountdown', answerRetry: 'answerRetry', autoSubmit: 'autoSubmit',
+    log: 'logFileEnabled', logFileEnabled: 'logFileEnabled', quiet: 'quiet', diagnose: 'diagnose', noDiagnose: 'diagnose', diagnosticsDir: 'diagnosticsDir', report: 'reportPath', reportPath: 'reportPath', stopClientOnExit: 'stopClientOnExit', dpiAware: 'dpiAware'
+  };
+  var JSON_BOOLEAN_KEYS = ['clientFirst', 'listClients', 'selectClient', 'scanAll', 'rescan', 'noScanCache', 'noDiskWrite', 'retainData', 'deleteConfig', 'panelEnabled', 'panelCollapsed', 'showAnswerDialog', 'autoSubmit', 'logFileEnabled', 'quiet', 'diagnose', 'stopClientOnExit', 'dpiAware'];
+  var JSON_STRING_KEYS = ['clientPath', 'dataDir', 'panelTheme', 'diagnosticsDir', 'reportPath'];
+  // 与宿主 windows/host/options.mjs 的 options-json 规则保持一致：
+  // 只有未被独立命令行参数覆盖的内联 JSON 字段才会被宿主真正应用，也才需要在这里校验。
+  function emittedCliOptionKeys(s) {
+    var keys = { scanMode: true, ui: true, panelEnabled: true, panelCollapsed: true, answerMode: true, answerKey: true, answerThreads: true, answerCountdown: true, showAnswerDialog: true, logFileEnabled: true, diagnose: true };
+    var hasSelectionFlag = Boolean(s.clientPath || s.clientIndex || s.listClients || (!s.listClients && (s.selection === 'first' || s.selection === 'interactive')));
+    if (hasSelectionFlag) { keys.clientPath = keys.clientIndex = keys.clientFirst = keys.listClients = keys.selectClient = true; }
+    if (s.configPath) keys.configPath = true;
+    if (s.deleteConfig && s.configPath) keys.deleteConfig = true;
+    if (s.noDiskWrite) keys.noDiskWrite = true;
+    if (!s.retainData) keys.retainData = true;
+    if (s.stopClient) keys.stopClientOnExit = true;
+    if (s.rescan) keys.rescan = true;
+    if (s.noScanCache) keys.noScanCache = true;
+    if (s.quiet) keys.quiet = true;
+    if (s.answerRetry !== '') keys.answerRetry = true;
+    if (Number(s.panelTop) !== 16) keys.panelTop = true;
+    if (Number(s.panelRight) !== 16) keys.panelRight = true;
+    if (Number(s.panelWidth) !== 460) keys.panelWidth = true;
+    if (s.panelTheme) keys.panelTheme = true;
+    if (s.report && !s.noDiskWrite) keys.reportPath = true;
+    if (s.dataDir !== '.data') keys.dataDir = true;
+    if (s.diagnosticsDir !== '.data\\diagnostics' && !s.noDiskWrite) keys.diagnosticsDir = true;
+    return keys;
+  }
+  function validateInlineJsonOptions(s, parsed, errors) {
+    if (Object.prototype.hasOwnProperty.call(parsed, 'configPath')) {
+      errors.push('内联 JSON 不能改变配置文件路径，请使用 --config。');
+      return;
+    }
+    var overrides = emittedCliOptionKeys(s);
+    Object.keys(parsed).forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(JSON_OPTION_KEYS, key)) return;
+      var optionKey = JSON_OPTION_KEYS[key];
+      if (overrides[optionKey]) return;
+      var raw = parsed[key];
+      if (JSON_BOOLEAN_KEYS.indexOf(optionKey) >= 0) {
+        if (typeof raw !== 'boolean') { errors.push('内联 JSON 的 ' + key + ' 必须是布尔值。'); return; }
+        if (optionKey === 'deleteConfig' && raw === true && !s.configPath) errors.push('内联 JSON 的 deleteConfig 要求同时使用 --config 指定外部配置。');
+        return;
+      }
+      if (JSON_STRING_KEYS.indexOf(optionKey) >= 0) {
+        if (typeof raw !== 'string') errors.push('内联 JSON 的 ' + key + ' 必须是字符串。');
+        else if (key !== 'diagnosticsDir' && key !== 'reportPath' && key !== 'dataDir' && key !== 'panelTheme' && startsWithOptionPrefix(raw)) errors.push('内联 JSON 的 ' + key + ' 不能以 -- 开头。');
+        return;
+      }
+      switch (optionKey) {
+        case 'clientIndex': if (!validBoundedInteger(raw, 1, Number.MAX_SAFE_INTEGER)) errors.push('内联 JSON 的 clientIndex 必须是大于等于 1 的整数。'); break;
+        case 'scanMode': if (['common', 'fallback-all', 'all'].indexOf(raw) < 0) errors.push('内联 JSON 的 scanMode 只支持 common、fallback-all 或 all。'); break;
+        case 'ui': if (['auto', 'gui', 'cli'].indexOf(raw) < 0) errors.push('内联 JSON 的 ui 只支持 auto、gui 或 cli。'); break;
+        case 'answerMode': if (['auto', 'manual'].indexOf(raw) < 0) errors.push('内联 JSON 的 answerMode 只支持 auto 或 manual。'); break;
+        case 'answerKey': if (typeof raw !== 'string' || !validShortcut(raw)) errors.push('内联 JSON 的 answerKey 必须是单个按键或组合键，例如 F8。'); break;
+        case 'answerThreads': if (!validBoundedInteger(raw, 1, 4)) errors.push('内联 JSON 的 answerThreads 必须是 1 到 4 之间的整数。'); break;
+        case 'answerCountdown': if (!validBoundedInteger(raw, 0, 3600)) errors.push('内联 JSON 的 answerCountdown 必须是 0 到 3600 之间的整数。'); break;
+        case 'answerRetry': if (!validBoundedInteger(raw, 0, 20)) errors.push('内联 JSON 的 answerRetry 必须是 0 到 20 之间的整数。'); break;
+        case 'panelTop': if (!validBoundedNumber(raw, 0, 10000)) errors.push('内联 JSON 的 panelTop 必须是 0 到 10000 之间的数字。'); break;
+        case 'panelRight': if (!validBoundedNumber(raw, 0, 10000)) errors.push('内联 JSON 的 panelRight 必须是 0 到 10000 之间的数字。'); break;
+        case 'panelWidth': if (!validBoundedNumber(raw, 320, 800)) errors.push('内联 JSON 的 panelWidth 必须是 320 到 800 之间的数字。'); break;
+        default: break;
+      }
+    });
+  }
   function validate(s) {
     var errors = [], warnings = [];
-    if (selectedPreset === 'startupClean') errors.push('启动清理当前未发布；该预设不会导出普通运行命令。');
+    if (presetBlocked) errors.push('启动清理当前宿主不可执行（未发布）；该预设不会导出可运行命令。');
     if (!s.launcherPath || !/\.cmd$/iu.test(s.launcherPath)) errors.push('请指定有效的 start-windows.cmd 启动脚本路径。');
     if (s.clientPath && (s.clientIndex || s.selection === 'first')) errors.push('--client 不能与 --client-index 或首个推荐同时指定。');
     if (s.clientIndex && s.selection === 'first') errors.push('--client-index 不能与首个推荐同时指定。');
     if (s.listClients && (s.clientPath || s.clientIndex || s.selection === 'first')) errors.push('--list-clients 不能同时指定启动客户端选择参数。');
-    if (s.panelWidth === '' || Number(s.panelWidth) < 320 || Number(s.panelWidth) > 800) errors.push('面板宽度必须在 320 到 800 之间。');
-    if (s.panelTop === '' || Number(s.panelTop) < 0 || Number(s.panelTop) > 10000) errors.push('面板顶部距离必须在 0 到 10000 之间。');
-    if (s.panelRight === '' || Number(s.panelRight) < 0 || Number(s.panelRight) > 10000) errors.push('面板右侧距离必须在 0 到 10000 之间。');
+    if (s.clientIndex !== '' && !validBoundedInteger(s.clientIndex, 1, Number.MAX_SAFE_INTEGER)) errors.push('扫描结果序号必须是大于等于 1 的整数。');
+    if (!validBoundedNumber(s.panelWidth, 320, 800)) errors.push('面板宽度必须在 320 到 800 之间。');
+    if (!validBoundedNumber(s.panelTop, 0, 10000)) errors.push('面板顶部距离必须在 0 到 10000 之间。');
+    if (!validBoundedNumber(s.panelRight, 0, 10000)) errors.push('面板右侧距离必须在 0 到 10000 之间。');
     if (!/^\d+$/u.test(String(s.answerThreads)) || Number(s.answerThreads) < 1 || Number(s.answerThreads) > 4) errors.push('每次放行题数必须是 1 到 4 之间的整数。');
     if (!/^\d+$/u.test(String(s.answerCountdown)) || Number(s.answerCountdown) > 3600) errors.push('自动答题倒计时必须是 0 到 3600 之间的整数。');
     if (s.answerRetry !== '' && (!/^\d+$/u.test(String(s.answerRetry)) || Number(s.answerRetry) > 20)) errors.push('单题重试次数必须是 0 到 20 之间的整数。');
     if (!validShortcut(s.answerKey)) errors.push('答题快捷键必须包含一个基础按键，例如 F8 或 Ctrl+Alt+Shift+S。');
+    if (String(s.executionMode || 'normal') !== 'normal') errors.push('当前宿主只支持 --execution-mode normal；内存执行和删除挂起不可导出。');
+    if (s.wipeRetries !== '' && (!/^\d+$/u.test(String(s.wipeRetries)) || Number(s.wipeRetries) < 1 || Number(s.wipeRetries) > 20)) errors.push('启动清理重试次数必须是 1 到 20 之间的整数。');
+    if (s.wipeDelay !== '' && (!/^\d+$/u.test(String(s.wipeDelay)) || Number(s.wipeDelay) < 50 || Number(s.wipeDelay) > 5000)) errors.push('启动清理重试间隔必须是 50 到 5000 之间的整数。');
+    if (s.deleteConfig && !s.configPath) errors.push('删除外部配置必须指定 --config。');
+    if (s.selfDestructKey) {
+      if (!validShortcut(s.selfDestructKey)) errors.push('自毁快捷键必须包含一个基础按键，例如 F8 或 Ctrl+Alt+Shift+E。');
+      else if (s.answerKey && canonicalShortcut(s.selfDestructKey) === canonicalShortcut(s.answerKey)) errors.push('答题快捷键不能与自毁快捷键相同。');
+    }
+    if (s.clientPath && startsWithOptionPrefix(s.clientPath)) errors.push('客户端路径不能以 -- 开头（宿主会把它当成缺少参数值）。');
+    if (s.configPath && startsWithOptionPrefix(s.configPath)) errors.push('配置文件路径不能以 -- 开头（宿主会把它当成缺少参数值）。');
+    if (s.dataDir !== '.data' && startsWithOptionPrefix(s.dataDir)) errors.push('数据目录不能以 -- 开头（宿主会把它当成缺少参数值）。');
+    if (s.report && !s.noDiskWrite && startsWithOptionPrefix(s.report)) errors.push('运行报告路径不能以 -- 开头（宿主会把它当成缺少参数值）。');
+    if (s.diagnosticsDir !== '.data\\diagnostics' && !s.noDiskWrite && startsWithOptionPrefix(s.diagnosticsDir)) errors.push('诊断目录不能以 -- 开头（宿主会把它当成缺少参数值）。');
+    var unsupportedRequests = [];
+    if (s.wipeOnStart) unsupportedRequests.push('--wipe-owned-files-on-start');
+    if (s.selfDestructKey) unsupportedRequests.push('--self-destruct-key');
+    if (s.selfDestructOnFullscreenExit) unsupportedRequests.push('--self-destruct-on-fullscreen-exit');
+    if (s.noSelfDestructConfirm) unsupportedRequests.push('--no-self-destruct-confirm');
+    if (unsupportedRequests.length) errors.push('以下能力当前宿主不可执行，不会导出可运行命令：' + unsupportedRequests.join('、') + '。');
     if (s.noDiskWrite && (s.log || s.diagnose || s.report)) errors.push('--no-disk-write 与日志、诊断或报告冲突。');
-    if (s.optionsJson) { var input = s.optionsJson.trim(); if (input.charAt(0) === '@') { if (input.length < 2) errors.push('@JSON 文件路径不能为空。'); } else { try { var parsed = JSON.parse(input); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) errors.push('内联 JSON 顶层必须是对象。'); else { if (hasRestrictedOption(parsed)) errors.push('内联 JSON 含有当前宿主未发布的清理、自毁或执行模式字段。'); if (s.noDiskWrite && hasDiskWriteOption(parsed)) errors.push('--no-disk-write 与内联 JSON 的磁盘输出配置冲突。'); } } catch (error) { errors.push('内联 JSON 无法解析。'); } } }
+    if (s.noDiskWrite && s.deleteConfig) errors.push('--no-disk-write 不能与 --delete-config 同时使用（禁止磁盘写入时不能删除外部配置）。');
+    if (s.optionsJson) {
+      var input = s.optionsJson.trim();
+      if (input.charAt(0) === '@') {
+        if (input.length < 2) errors.push('@JSON 文件路径不能为空。');
+        else if (startsWithOptionPrefix(input.slice(1))) errors.push('@JSON 文件路径不能以 -- 开头。');
+      } else {
+        try {
+          var parsed = JSON.parse(input);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) errors.push('内联 JSON 顶层必须是对象。');
+          else {
+            if (hasRestrictedOption(parsed)) errors.push('内联 JSON 含有当前宿主未发布的清理、自毁或执行模式字段。');
+            if (s.noDiskWrite && hasDiskWriteOption(parsed)) errors.push('--no-disk-write 与内联 JSON 的磁盘输出配置冲突。');
+            validateInlineJsonOptions(s, parsed, errors);
+          }
+        } catch (error) {
+          errors.push('内联 JSON 无法解析。');
+        }
+      }
+    }
     if (!s.clientPath && !s.clientIndex && s.selection !== 'first' && !s.listClients) warnings.push('未指定客户端，运行时将显示候选选择界面。');
     return { errors: errors, warnings: warnings };
   }
@@ -168,13 +308,13 @@
     var ps = ['& ' + quotePowerShell(s.launcherPath)], cmd = [quoteCmd(s.launcherPath)], args = [];
     function both(name, item) { addArg(ps, name, item, quotePowerShell); addArg(cmd, name, item, quoteCmd); if (item === true) args.push(name); else if (item !== false && item !== '' && item != null) args.push(name, String(item)); }
     if (s.clientPath) both('--client', s.clientPath); else if (s.clientIndex) both('--client-index', s.clientIndex); else if (!s.listClients && s.selection === 'first') both('--client-first', true); else if (!s.listClients && s.selection === 'interactive') both('--select-client', true);
-    if (s.listClients) both('--list-clients', true); both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true);
+    if (s.listClients) both('--list-clients', true); both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true); if (s.noScanCache) both('--no-scan-cache', true);
     both('--ui', s.ui);
     both('--execution-mode', 'normal');
-    if (s.configPath) both('--config', s.configPath); if (s.dataDir !== '.data') both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.noDiskWrite) both('--no-disk-write', true);
+    if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== '.data') both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.noDiskWrite) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
     if (s.optionsJson) both('--options-json', s.optionsJson);
     both('--answer-mode', s.answerMode); both('--answer-key', s.answerKey); both('--answer-threads', s.answerThreads); both('--answer-countdown', s.answerCountdown); if (s.answerRetry !== '') both('--answer-retry', s.answerRetry); both(s.showAnswerDialog ? '--show-answer-dialog' : '--hide-answer-dialog', true); if (s.noAutoSubmit) both('--no-auto-submit', true);
-    if (s.panel) both('--panel', true); else both('--no-panel', true); if (s.panelExpanded) both('--panel-expanded', true); else both('--panel-collapsed', true); if (Number(s.panelTop) !== 16) both('--panel-top', s.panelTop); if (Number(s.panelRight) !== 16) both('--panel-right', s.panelRight); if (Number(s.panelWidth) !== 460) both('--panel-width', s.panelWidth);
+    if (s.panel) both('--panel', true); else both('--no-panel', true); if (s.panelExpanded) both('--panel-expanded', true); else both('--panel-collapsed', true); if (Number(s.panelTop) !== 16) both('--panel-top', s.panelTop); if (Number(s.panelRight) !== 16) both('--panel-right', s.panelRight); if (Number(s.panelWidth) !== 460) both('--panel-width', s.panelWidth); if (s.panelTheme) both('--panel-theme', s.panelTheme);
     if (s.log && !s.noDiskWrite) both('--log', true); else both('--no-log', true); if (s.quiet) both('--quiet', true); if (s.diagnose && !s.noDiskWrite) both('--diagnose', true); else both('--no-diagnose', true); if (s.diagnosticsDir !== '.data\\diagnostics' && !s.noDiskWrite) both('--diagnostics-dir', s.diagnosticsDir);
     var optionsText = String(s.optionsJson || '').trim();
     var inlineJson = optionsText && optionsText.charAt(0) !== '@';
@@ -183,8 +323,8 @@
     return { powershell: ps.join(' `\n  '), cmd: cmdSafe ? cmd.join(' ^\n  ') : '', cmdWarning: cmdSafe ? '' : 'cmd 输出不可安全表示当前参数（含内联 JSON、命令解释符、路径末尾反斜杠、百分号、感叹号、引号或换行）；请使用 PowerShell 或配置文件。', args: args };
   }
   function hasRestrictedOption(value) {
-    var restricted = /^(?:selfdestruct.*|wipe.*|deleteconfig|memoryexec|deletesuspend)$/i;
-    function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase(); if (normalized === 'retaindata' || normalized === 'noretaindata') return true; if (restricted.test(normalized) && item[key] !== false) return true; if (normalized === 'executionmode' && item[key] !== 'normal') return true; return visit(item[key]); }); }
+    var restricted = /^(?:selfdestruct.*|wipe.*|memoryexec|deletesuspend)$/i;
+    function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase(); if (restricted.test(normalized) && item[key] !== false) return true; if (normalized === 'executionmode' && item[key] !== 'normal') return true; return visit(item[key]); }); }
     return visit(value);
   }
   function hasDiskWriteOption(value) {
@@ -197,12 +337,14 @@
     status.className = 'status' + (result.errors.length ? ' bad' : result.warnings.length ? ' warn' : '');
     status.innerHTML = result.errors.length ? '<strong>无法生成：</strong><ul>' + result.errors.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : result.warnings.length ? '<strong>可以生成，但请确认：</strong><ul>' + result.warnings.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : '配置有效，可以生成普通宿主参数。';
     el('powershell').value = result.errors.length ? '' : command.powershell; el('cmd').value = result.errors.length ? '' : command.cmd; el('json').value = result.errors.length ? '' : JSON.stringify(configFor(s), null, 2);
-    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui, '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：普通可审计运行', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏'), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭')].join('\n');
-    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '内存执行、删除挂起、启动清理和自毁仍未发布；启动清理型预设会阻止命令导出。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
+    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：普通可审计运行', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理/自毁：当前宿主不可执行'].join('\n');
+    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '内存执行、删除挂起、启动清理和自毁当前宿主不可执行；启动清理型预设会阻止命令导出，避免静默降级。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
   }
   function escapeHtml(text) { return String(text).replace(/[&<>"']/g, function (char) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]; }); }
-  var defaults = { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, configPath: '', dataDir: '.data', optionsJson: '', report: '', noDiskWrite: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', log: true, quiet: false, diagnose: false, diagnosticsDir: '.data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false };
+  var defaults = { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: '.data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: '.data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
   var selectedPreset = '';
+  // “启动清理型”预设的能力当前不可执行：阻止状态要在后续输入后仍然保持，直到切换预设或重置。
+  var presetBlocked = false;
   var presets = {
     silent: { scanMode: 'fallback-all', selection: 'first', ui: 'cli', panel: false, noDiskWrite: true, log: false, diagnose: false, quiet: true, executionMode: 'normal', answerMode: 'manual', answerKey: 'Ctrl+Alt+Shift+S', answerThreads: '1', showAnswerDialog: false },
     friendly: { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', panel: true, panelExpanded: true, log: true, diagnose: true, answerMode: 'auto', answerThreads: '4', answerCountdown: '5', showAnswerDialog: true },
@@ -213,12 +355,12 @@
     path: { clientPath: 'D:\\Exam\\CXExam.exe', selection: 'interactive', scanMode: 'common', panel: true, log: true },
     all: { scanMode: 'all', selection: 'first', ui: 'cli', panel: false, log: false }
   };
-  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets };
-  Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); render(); }); });
+  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: function () { return presetBlocked; } };
+  Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; presetBlocked = name === 'startupClean'; Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); render(); }); });
   ids.forEach(function (id) { el(id).addEventListener('input', function () { selectedPreset = ''; render(); }); el(id).addEventListener('change', function () { selectedPreset = ''; render(); }); });
   document.querySelectorAll('[data-copy]').forEach(function (button) { button.addEventListener('click', function () { var target = el(button.getAttribute('data-copy')); if (!target.value) return; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(target.value); else { target.select(); document.execCommand('copy'); } button.textContent = '已复制'; setTimeout(function () { button.textContent = button.getAttribute('data-copy') === 'json' ? '复制 JSON' : button.getAttribute('data-copy') === 'cmd' ? '复制 cmd' : '复制 PowerShell'; }, 900); }); });
   document.querySelector('[data-download="json"]').addEventListener('click', function () { var data = el('json').value; if (!data) return; var url = URL.createObjectURL(new Blob([data], { type: 'application/json;charset=utf-8' })); var link = document.createElement('a'); link.href = url; link.download = 'chaoxing-plus.options.json'; link.click(); setTimeout(function () { URL.revokeObjectURL(url); }, 500); });
-  el('reset').addEventListener('click', function () { selectedPreset = ''; Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); render(); });
+  el('reset').addEventListener('click', function () { selectedPreset = ''; presetBlocked = false; Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); render(); });
   Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); render();
 }());
 </script>

@@ -198,6 +198,51 @@ test('fallback scan retains the first x64 and stops at the first x86 in encounte
   assert.equal(result.selected.path, 'D:\\z\\nested\\CXExam.exe');
 });
 
+test('fallback scan selects the first encountered x64 when no x86 exists', async () => {
+  const tree = createTree({
+    'D:\\': [{ name: 'alpha', directory: true }, { name: 'beta', directory: true }],
+    'D:\\alpha': [{ name: 'nested', directory: true }],
+    'D:\\beta': [{ name: 'nested', directory: true }],
+    'D:\\alpha\\nested': [{ name: 'CXExam.exe' }],
+    'D:\\beta\\nested': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['D:\\alpha\\nested\\CXExam.exe', 0x8664],
+    ['D:\\beta\\nested\\CXExam.exe', 0x8664]
+  ]));
+  const result = await discoverClientCandidates({
+    scanMode: 'fallback-all',
+    commonRootProvider: async () => [],
+    driveRootProvider: async () => ['D:\\'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader
+  });
+  assert.equal(result.source, 'full');
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), ['D:\\alpha\\nested\\CXExam.exe', 'D:\\beta\\nested\\CXExam.exe']);
+  assert.equal(result.selected.path, 'D:\\alpha\\nested\\CXExam.exe');
+  assert.equal(result.selected.machine, 0x8664);
+});
+
+test('common-only scan mode never falls back to recursive disk scanning', async () => {
+  const tree = createTree({
+    'D:\\': [{ name: 'alpha', directory: true }],
+    'D:\\alpha': [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['D:\\alpha\\CXExam.exe', 0x8664]
+  ]));
+  let fullScanCalls = 0;
+  const result = await discoverClientCandidates({
+    scanMode: 'common',
+    commonRootProvider: async () => [],
+    driveRootProvider: async () => ['D:\\'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    onFullScan: () => { fullScanCalls += 1; }
+  });
+  assert.equal(fullScanCalls, 0);
+  assert.equal(result.source, 'common');
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), ['D:\\alpha\\CXExam.exe']);
+});
+
 test('discoverClientExecutables tolerates inaccessible folders and enforces maxDepth', async () => {
   const tree = createTree({
     'D:\\root': [{ name: 'level1', directory: true }],
@@ -305,6 +350,47 @@ test('manual client selection accepts CXExam.exe path separators but rejects unr
   assert.equal(isCxExamExecutablePath('D:\\Exam Files\\CXExam.exe'), true);
   assert.equal(isCxExamExecutablePath('D:/Exam Files/cxexam.EXE'), true);
   assert.equal(isCxExamExecutablePath('D:\\Exam Files\\Other.exe'), false);
+});
+
+test('常规扫描根目录包含 APPDATA、LOCALAPPDATA 和 PROGRAMDATA', async () => {
+  const roots = await getDefaultDiscoveryRoots({
+    env: {
+      USERPROFILE: 'C:\\Users\\Test',
+      ProgramFiles: 'C:\\Program Files',
+      APPDATA: 'C:\\Users\\Test\\AppData\\Roaming',
+      LOCALAPPDATA: 'C:\\Users\\Test\\AppData\\Local',
+      ProgramData: 'C:\\ProgramData'
+    },
+    fsProvider: { async stat() { return { isDirectory: () => true }; } },
+    driveLetters: ['C'],
+    includeDriveRoots: false
+  });
+  assert.deepEqual(roots, [
+    'C:\\Users\\Test\\Desktop',
+    'C:\\Program Files',
+    'C:\\Users\\Test\\AppData\\Roaming',
+    'C:\\Users\\Test\\AppData\\Local',
+    'C:\\ProgramData'
+  ]);
+});
+
+test('扫描跳过符号链接目录与符号链接文件', async () => {
+  const tree = createTree({
+    'D:\\root': [{ name: 'linked-dir', directory: true, symlink: true }, { name: 'real', directory: true }],
+    'D:\\root\\linked-dir': [{ name: 'CXExam.exe' }],
+    'D:\\root\\real': [{ name: 'CXExam.exe' }, { name: 'linked.exe', symlink: true }]
+  }, new Map([
+    ['D:\\root\\linked-dir\\CXExam.exe', 0x014c],
+    ['D:\\root\\real\\CXExam.exe', 0x8664],
+    ['D:\\root\\real\\linked.exe', 0x014c]
+  ]));
+  const results = await discoverClientExecutables({
+    roots: ['D:\\root'],
+    maxDepth: 3,
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader
+  });
+  assert.deepEqual(results.map((candidate) => candidate.path), ['D:\\root\\real\\CXExam.exe']);
 });
 
 test('AppData and ProgramData are not excluded from recursive discovery', () => {

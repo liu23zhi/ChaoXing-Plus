@@ -643,6 +643,9 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'self-check');
     assert.equal(report.failures.length, 0);
+    assert.equal(report.capabilities.unsupported.implemented, false);
+    assert.deepEqual(report.capabilities.unsupported.executionModes.supported, ['normal']);
+    assert.equal(report.checks.some((check) => check.name.includes('原生客户端选择窗口') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('WebSocket') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('调试端口') && check.ok), true);
   } finally {

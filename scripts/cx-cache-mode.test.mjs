@@ -6,7 +6,7 @@ import ts from '@typescript/typescript6';
 
 const commonSourcePath = resolve('src/projects/common.ts');
 
-async function loadCacheHarness(initial = []) {
+async function loadCacheHarness(initial = [], { windowsNoDiskWrite = false } = {}) {
   const source = await readFile(commonSourcePath, 'utf8');
   const parsed = ts.createSourceFile('common.ts', source, ts.ScriptTarget.Latest, true);
   const functionNames = new Set([
@@ -41,10 +41,10 @@ async function loadCacheHarness(initial = []) {
   ).outputText;
   const methodsUnderTest = Function(
     'state', 'answerCache', 'runtimeStore', 'QUESTION_CACHE_KEY', 'getStudySettingValue',
-    'renderAppsPanel', 'renderWorkResultsPanel', 'shouldCacheSearchInfos', output
+    'renderAppsPanel', 'renderWorkResultsPanel', 'shouldCacheSearchInfos', 'isWindowsNoDiskWrite', output
   )(
     state, answerCache, runtimeStore, 'common.apps.question-caches', () => true,
-    () => {}, () => {}, () => true
+    () => {}, () => {}, () => true, () => windowsNoDiskWrite
   );
   return { state, answerCache, saved: () => saved, ...methodsUnderTest };
 }
@@ -92,4 +92,15 @@ test('same answer from normal and deep searches retains two distinct cache entri
   cache.addQuestionCacheFromWorkResult(completedResult('相同答案'), 'normal');
   cache.addQuestionCacheFromWorkResult(completedResult('相同答案'), 'deep');
   assert.deepEqual(cache.saved().map(({ mode }) => mode), ['deep', undefined]);
+});
+
+test('Windows no-disk-write disables question cache reads, writes and hydration', async () => {
+  const legacy = [{ title: '同一道题', answer: '旧普通答案', from: '题库' }];
+  const cache = await loadCacheHarness(legacy, { windowsNoDiskWrite: true });
+  cache.addQuestionCacheFromWorkResult(completedResult('新答案'), 'normal');
+  // 写盘被禁用：addQuestionCaches 不应调用 runtimeStore.set。
+  assert.equal(cache.saved(), undefined);
+  // 共享配置水合进来的旧缓存也要忽略并清空。
+  assert.equal(cache.applyQuestionCaches(legacy), true);
+  assert.deepEqual(cache.state.apps.localQuestionCaches, []);
 });

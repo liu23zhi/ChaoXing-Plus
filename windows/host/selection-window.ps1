@@ -1,0 +1,202 @@
+param(
+  [Parameter(Mandatory = $true)][string]$InputPath,
+  [Parameter(Mandatory = $true)][string]$OutputPath,
+  [switch]$Probe,
+  [int]$AutoCloseMs = 0
+)
+
+# NOTE: Keep this script pure ASCII. Windows PowerShell 5.1 decodes .ps1 files that
+# have no BOM using the OEM code page, so non-ASCII literals would corrupt parsing.
+# All user-visible text is passed in the UTF-8 JSON input file instead.
+
+$ErrorActionPreference = 'Stop'
+
+function Write-ResultFile {
+  param([hashtable]$Payload)
+  $json = $Payload | ConvertTo-Json -Compress
+  [System.IO.File]::WriteAllText($OutputPath, $json, [System.Text.Encoding]::UTF8)
+}
+
+function Get-Text {
+  param($Value, [string]$Fallback)
+  if ($null -ne $Value -and ([string]$Value).Length -gt 0) { return [string]$Value }
+  return $Fallback
+}
+
+try {
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+} catch {
+  Write-ResultFile @{ cancelled = $true; error = "winforms-unavailable: $($_.Exception.Message)" }
+  exit 3
+}
+
+# Render at system DPI to keep the window sharp at 125%/150%. Failure is non-fatal.
+try {
+  Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+  [void][Win32Dpi.DpiAwareness]::SetProcessDPIAware()
+} catch {
+}
+
+try {
+  $payload = Get-Content -LiteralPath $InputPath -Raw -Encoding UTF8 | ConvertFrom-Json
+} catch {
+  Write-ResultFile @{ cancelled = $true; error = "invalid-input: $($_.Exception.Message)" }
+  exit 4
+}
+
+$candidates = @($payload.candidates)
+$title = Get-Text $payload.title 'Chaoxing Plus - Select Exam Client'
+$hintText = Get-Text $payload.hint 'Select the CXExam.exe client to launch. Use Browse to pick another location.'
+$okText = Get-Text $payload.selectButtonText 'Use selected client'
+$browseText = Get-Text $payload.browseButtonText 'Browse...'
+$cancelText = Get-Text $payload.cancelButtonText 'Cancel'
+$fontName = Get-Text $payload.fontName 'Microsoft YaHei UI'
+$messages = $payload.messages
+$chooseFirstMessage = Get-Text $messages.chooseFirst 'Select a client first, or use Browse to pick CXExam.exe.'
+$mustBeCxExamMessage = Get-Text $messages.mustBeCxExam 'The file name must be CXExam.exe.'
+$dialogTitle = Get-Text $messages.dialogTitle 'Select CXExam.exe'
+$filterPrimary = Get-Text $messages.filterPrimary 'CXExam.exe|CXExam.exe'
+$filterAll = Get-Text $messages.filterAll 'Executable (*.exe)|*.exe'
+
+function New-SelectionForm {
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text = $title
+  $form.StartPosition = 'CenterScreen'
+  $form.MinimizeBox = $false
+  $form.MaximizeBox = $false
+  $form.Width = 820
+  $form.Height = 470
+  $form.MinimumSize = New-Object System.Drawing.Size(620, 360)
+  try {
+    $form.Font = New-Object System.Drawing.Font($fontName, 9)
+  } catch {
+    $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+  }
+
+  $hint = New-Object System.Windows.Forms.Label
+  $hint.Text = $hintText
+  $hint.AutoSize = $false
+  $hint.Dock = 'Top'
+  $hint.Height = 46
+  $hint.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 0)
+  $form.Controls.Add($hint)
+
+  $list = New-Object System.Windows.Forms.ListBox
+  $list.Dock = 'Fill'
+  $list.IntegralHeight = $false
+  $list.HorizontalScrollbar = $true
+  for ($index = 0; $index -lt $candidates.Count; $index += 1) {
+    $candidate = $candidates[$index]
+    $display = Get-Text $candidate.display ("[ {0} ] {1}" -f ($index + 1), [string]$candidate.path)
+    [void]$list.Items.Add($display)
+  }
+  if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+  $form.Controls.Add($list)
+
+  $buttons = New-Object System.Windows.Forms.FlowLayoutPanel
+  $buttons.Dock = 'Bottom'
+  $buttons.Height = 58
+  $buttons.FlowDirection = 'RightToLeft'
+  $buttons.Padding = New-Object System.Windows.Forms.Padding(12, 10, 12, 12)
+  $buttons.WrapContents = $false
+
+  $ok = New-Object System.Windows.Forms.Button
+  $ok.Text = $okText
+  $ok.Width = 150
+  $ok.Height = 32
+  $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+  $browse = New-Object System.Windows.Forms.Button
+  $browse.Text = $browseText
+  $browse.Width = 110
+  $browse.Height = 32
+
+  $cancel = New-Object System.Windows.Forms.Button
+  $cancel.Text = $cancelText
+  $cancel.Width = 90
+  $cancel.Height = 32
+  $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+  [void]$buttons.Controls.Add($ok)
+  [void]$buttons.Controls.Add($browse)
+  [void]$buttons.Controls.Add($cancel)
+  $form.Controls.Add($buttons)
+  $form.AcceptButton = $ok
+  $form.CancelButton = $cancel
+
+  return @{ form = $form; list = $list; ok = $ok; browse = $browse; cancel = $cancel; buttons = $buttons }
+}
+
+try {
+  $ui = New-SelectionForm
+} catch {
+  Write-ResultFile @{ cancelled = $true; error = "form-build-failed: $($_.Exception.Message)" }
+  exit 5
+}
+
+if ($Probe) {
+  # Automated smoke test: build controls only, do not enter the message loop.
+  $ui.form.Dispose()
+  Write-ResultFile @{
+    probe = $true
+    winformsOk = $true
+    candidateCount = $candidates.Count
+    hasListView = ($null -ne $ui.list)
+    hasBrowseButton = ($null -ne $ui.browse)
+  }
+  exit 0
+}
+
+$script:selection = @{ cancelled = $true }
+
+$ui.ok.Add_Click({
+  if ($ui.list.SelectedIndex -lt 0) {
+    [void][System.Windows.Forms.MessageBox]::Show($chooseFirstMessage, $title)
+    return
+  }
+  $candidate = $candidates[$ui.list.SelectedIndex]
+  $script:selection = @{ path = [string]$candidate.path; index = ($ui.list.SelectedIndex + 1); manual = $false; cancelled = $false }
+  $ui.form.Close()
+})
+
+$ui.browse.Add_Click({
+  $dialog = New-Object System.Windows.Forms.OpenFileDialog
+  $dialog.Title = $dialogTitle
+  $dialog.Filter = ($filterPrimary + '|' + $filterAll)
+  $dialog.CheckFileExists = $true
+  if ($dialog.ShowDialog($ui.form) -eq [System.Windows.Forms.DialogResult]::OK) {
+    if ([System.IO.Path]::GetFileName($dialog.FileName) -ne 'CXExam.exe') {
+      [void][System.Windows.Forms.MessageBox]::Show($mustBeCxExamMessage, $title)
+      return
+    }
+    $script:selection = @{ path = $dialog.FileName; index = 0; manual = $true; cancelled = $false }
+    $ui.form.Close()
+  }
+})
+
+$ui.cancel.Add_Click({
+  $script:selection = @{ cancelled = $true }
+  $ui.form.Close()
+})
+
+$ui.list.Add_DoubleClick({
+  $ui.ok.PerformClick()
+})
+
+if ($AutoCloseMs -gt 0) {
+  # Automated verification only: close the window after N ms instead of waiting for a user.
+  $timer = New-Object System.Windows.Forms.Timer
+  $timer.Interval = $AutoCloseMs
+  $timer.Add_Tick({
+    $timer.Stop()
+    $script:selection = @{ cancelled = $true; autoClosed = $true }
+    $ui.form.Close()
+  })
+  $timer.Start()
+}
+
+[void]$ui.form.ShowDialog()
+$ui.form.Dispose()
+Write-ResultFile $script:selection
+exit 0

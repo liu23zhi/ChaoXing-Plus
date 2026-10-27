@@ -25,7 +25,8 @@ import {
   waitForDebugEndpoint
 } from './launch.mjs';
 import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, mergeHostConfigLayers } from './config.mjs';
-import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseClientSelectionInput, parseHostArgs, validateSupportedJsonOptions } from './options.mjs';
+import { applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseClientSelectionInput, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateSupportedJsonOptions } from './options.mjs';
+import { probeClientSelectionWindow, showClientSelectionWindow } from './selection-window.mjs';
 import {
   discoverClientCandidates,
   findPreferredClientIndex,
@@ -59,9 +60,9 @@ function usage() {
     '  --scan-mode <mode>   common、fallback-all 或 all；默认常规无结果才全盘递归',
     '  --scan-all           启用常规无结果后的全盘回退（等价 fallback-all）',
     '  --client-first       选择扫描结果中的首个推荐客户端（x86 优先）',
-    '  --ui <mode>          auto 或 cli；gui 尚未实现',
+    '  --ui <mode>          auto、gui 或 cli；gui/--select-client 使用 Windows 原生选择窗口',
     '  --list-clients       扫描并列出候选客户端后退出',
-    '  --select-client      扫描后交互选择客户端',
+    '  --select-client      扫描后显示原生选择窗口（含手动浏览）；无窗口时回退终端提示',
     '  --client-index <n>   启动扫描结果中的第 n 个客户端（从 1 开始）',
     '  --rescan             忽略配置客户端路径并重新扫描（当前无扫描缓存）',
     '  --no-scan-cache      禁止扫描缓存（当前宿主尚无扫描缓存）',
@@ -93,9 +94,13 @@ function usage() {
     '  --answer-retry <n>   单题重试次数（0-20）',
     '  --no-auto-submit     不自动提交',
     '  --log/--no-log       是否写入宿主日志文件',
+    '  --retain-data/--no-retain-data 退出后是否保留本次运行写入的数据（默认保留）',
+    '  --delete-config      退出时删除 --config 指定的外部配置文件（必须同时指定 --config）',
     '  --diagnose/--no-diagnose 开启或关闭页面与窗口渲染诊断',
     '  --diagnostics-dir <path> 诊断输出目录',
+    '  --wipe-* / --self-destruct-* 当前未实现，出现即报错，不会静默降级',
     '  --execution-mode normal 仅支持普通运行；内存/删除挂起和清理/自毁参数会报错',
+    '  --capabilities       输出机器可读的未实现能力标记（第一阶段 schema 与禁用状态）',
     '  --quiet              减少控制台输出，不保证屏蔽参数错误或系统提示'
   ].join('\n');
 }
@@ -194,35 +199,88 @@ async function readOptionalJson(filePath, label, { allowMissing = true } = {}) {
 
 async function resolveClientSelection(options, config, logger) {
   if (options.clientPath) return config.clientPath;
-  if (!options.scanClients && options.clientIndex === null && !options.selectClient && !options.clientFirst && options.ui !== 'cli' && config.clientPath) {
+  if (!options.scanClients && options.clientIndex === null && !options.selectClient && !options.clientFirst && options.ui !== 'cli' && options.ui !== 'gui' && config.clientPath) {
     return config.clientPath;
   }
 
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const nativeSelectionRequested = options.ui === 'gui' || options.selectClient;
+  if (options.ui === 'gui' && process.platform !== 'win32') {
+    throw new Error('--ui gui 需要 Windows 原生选择窗口；当前平台不支持，请使用 --ui cli 或 --ui auto');
+  }
+  const terminalPromptRequested = options.clientIndex === null && !options.clientFirst
+    && (options.ui === 'cli' || (options.ui === 'auto' && interactive));
+  // GUI 窗口 / --select-client / 列表 / 指定序号 / 终端提示都可能需要完整候选列表。
+  const mayPrompt = nativeSelectionRequested || (interactive && terminalPromptRequested);
+
   logger.info('[client] 正在扫描常见安装目录（根目录及一级子目录）');
   const scanMode = options.scanMode === 'all' ? 'all' : options.scanMode;
-  const willPrompt = options.selectClient
-    || (options.clientIndex === null && !options.clientFirst && options.ui === 'cli')
-    || (options.clientIndex === null && !options.clientFirst && options.ui === 'auto' && process.stdin.isTTY);
   const scanResult = await discoverClientCandidates({
     scanMode,
-    stopOnMachine: options.listClients || willPrompt || options.clientIndex !== null ? null : 0x014c,
+    stopOnMachine: options.listClients || mayPrompt || options.clientIndex !== null ? null : 0x014c,
     onFullScan: () => logger.info('[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描')
   });
   const candidates = scanResult.candidates;
   if (candidates.length === 0) {
+    if (options.listClients) {
+      logger.info('[client] 未扫描到可用的 CXExam.exe');
+      return null;
+    }
     throw new Error('未扫描到可用的 CXExam.exe，请使用 --client <path> 手动指定');
   }
   const preferredIndex = findPreferredClientIndex(candidates);
 
   const printCandidates = () => {
     candidates.forEach((candidate, index) => {
-      logger.info(`[client] [${index + 1}] ${candidate.path}（${describeMachine(candidate.machine)}）`);
+      const line = `[client] [${index + 1}] ${candidate.path}（${describeMachine(candidate.machine)}）`;
+      // --list-clients 与选择界面的候选列表本身就是命令目的，即使 --quiet 也必须给出。
+      if (options.listClients || mayPrompt) process.stdout.write(`${line}\n`);
+      else logger.info(line);
     });
   };
   printCandidates();
 
   if (options.listClients) {
     return null;
+  }
+
+  const resolveSelectedPath = async (selectedPath, { manual = false } = {}) => {
+    const absolute = path.resolve(selectedPath);
+    if (!isCxExamExecutablePath(absolute)) {
+      throw new Error('选择的文件名必须是 CXExam.exe');
+    }
+    const machine = await readPeMachine(absolute);
+    if (machine === null) throw new Error(`选择的文件不是有效 PE 文件：${absolute}`);
+    assertSupportedClientMachine(machine);
+    logger.info(`[client] 通过${manual ? '手动浏览' : '选择界面'}选择：${absolute}（${describeMachine(machine)}）`);
+    return absolute;
+  };
+
+  // 原生选择窗口（Windows / PowerShell + WinForms）：--ui gui 强制使用；--select-client 优先使用。
+  if (nativeSelectionRequested) {
+    logger.info(`[client] 打开原生选择窗口（共 ${candidates.length} 个候选）`);
+    const autoCloseMs = Number.parseInt(String(process.env.CXPLUS_SELECTION_AUTO_CLOSE_MS || ''), 10);
+    const windowResult = await showClientSelectionWindow({
+      candidates: candidates.map((candidate) => ({ path: candidate.path, machine: describeMachine(candidate.machine) })),
+      // 测试/调试用：自动关闭窗口，避免自动化环境阻塞在消息循环。
+      ...(Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? { autoCloseMs } : {})
+    });
+    if (windowResult.status === 'selected') {
+      return resolveSelectedPath(windowResult.path, { manual: windowResult.manual });
+    }
+    if (windowResult.status === 'cancelled') {
+      throw new Error('已取消客户端选择，未启动考试客户端');
+    }
+    logger.warn(`[client] 原生选择窗口不可用：${windowResult.reason || 'unknown'}${options.ui === 'gui' ? '' : '；回退终端提示/推荐候选'}`);
+    if (options.ui === 'gui') {
+      throw new Error(`无法显示原生选择窗口：${windowResult.reason || 'unknown'}。请检查 PowerShell/WinForms 是否可用，或改用 --ui cli`);
+    }
+  }
+
+  const willPrompt = Boolean(interactive && (options.selectClient || terminalPromptRequested));
+  // 非交互终端里 readline.question 不会 settle，直接挂起；此时明确告知并回退到推荐候选。
+  if (!interactive && (options.selectClient || options.ui === 'cli')) {
+    logger.warn('[client] 当前不是交互终端，无法显示选择提示；按推荐候选继续（可用 --client/--client-index/--client-first 显式指定）');
   }
 
   let selectedIndex = options.clientIndex === null
@@ -244,14 +302,7 @@ async function resolveClientSelection(options, config, logger) {
   }
 
   if (selectedManualPath) {
-    if (!isCxExamExecutablePath(selectedManualPath)) {
-      throw new Error('手动选择的文件名必须是 CXExam.exe');
-    }
-    const machine = await readPeMachine(selectedManualPath);
-    if (machine === null) throw new Error(`手动选择的文件不是有效 PE 文件：${selectedManualPath}`);
-    assertSupportedClientMachine(machine);
-    logger.info(`[client] 使用手动路径：${selectedManualPath}`);
-    return selectedManualPath;
+    return resolveSelectedPath(selectedManualPath, { manual: true });
   }
   if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= candidates.length) {
     throw new Error(`客户端编号无效：${selectedIndex + 1}，可选范围为 1-${candidates.length}`);
@@ -325,7 +376,36 @@ async function runSelfCheck(options, logger) {
     add('存在可绑定的调试端口', false, error.message);
   }
 
-  const report = { mode: 'self-check', generatedAt: nowIso(), repositoryRoot, assetsDir, configPath, elevated, checks, warnings, failures };
+  // 原生客户端选择窗口（PowerShell + WinForms）：只构建控件做冒烟，不显示窗口。
+  if (process.platform === 'win32') {
+    try {
+      const probe = await probeClientSelectionWindow({ timeoutMs: 30000 });
+      checks.push({
+        name: '原生客户端选择窗口（PowerShell + WinForms）',
+        ok: probe.ok,
+        detail: probe.ok ? `已构建窗口控件（候选 ${probe.candidateCount}）` : `不可用：${probe.reason}`
+      });
+      if (!probe.ok) warnings.push(`原生客户端选择窗口不可用：${probe.reason}`);
+    } catch (error) {
+      checks.push({ name: '原生客户端选择窗口（PowerShell + WinForms）', ok: false, detail: error.message });
+      warnings.push(`原生客户端选择窗口探测失败：${error.message}`);
+    }
+  } else {
+    checks.push({ name: '原生客户端选择窗口', ok: true, detail: '非 Windows 平台不使用原生窗口' });
+  }
+
+  const report = {
+    mode: 'self-check',
+    generatedAt: nowIso(),
+    repositoryRoot,
+    assetsDir,
+    configPath,
+    elevated,
+    capabilities: { unsupported: UNSUPPORTED_CAPABILITIES, notes: describeUnsupportedCapabilities() },
+    checks,
+    warnings,
+    failures
+  };
   logger.info(`[self-check] 失败 ${failures.length} 项，警告 ${warnings.length} 项`);
   if (!options.quiet) console.log(JSON.stringify(report, null, 2));
   return { report, ok: failures.length === 0 };
@@ -405,6 +485,16 @@ async function main() {
     console.log(usage());
     return;
   }
+  if (options.capabilities) {
+    console.log(JSON.stringify({
+      hostVersion: '6.2.0',
+      executionMode: options.executionMode,
+      supported: { executionModes: ['normal'], scanner: true, parameterGenerator: true, nativeClientSelection: process.platform === 'win32' },
+      unsupported: UNSUPPORTED_CAPABILITIES,
+      notes: describeUnsupportedCapabilities()
+    }, null, 2));
+    return;
+  }
 
   const dataDirectory = options.dataDirExplicit
     ? path.resolve(options.dataDir)
@@ -412,15 +502,43 @@ async function main() {
   const logger = createLogger({ quiet: options.quiet });
   let configStoreForCleanup = null;
   let cleanupAfterStartupFailure = null;
+  // --no-retain-data / --delete-config：只清理“本次运行创建的宿主数据”和显式指定的外部配置，
+  // 不删除运行前已存在的数据，避免误删用户文件。
+  const runArtifacts = { files: new Set(), directories: new Set() };
+  const deleteConfigTarget = options.deleteConfig && options.configPath ? path.resolve(options.configPath) : '';
+  let dataLifecycleFinalized = false;
+  const finalizeDataLifecycle = async () => {
+    if (dataLifecycleFinalized) return;
+    dataLifecycleFinalized = true;
+    if (options.retainData === false) {
+      for (const filePath of runArtifacts.files) {
+        await fs.rm(filePath, { force: true }).catch(() => {});
+      }
+      for (const directory of runArtifacts.directories) {
+        await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+    if (deleteConfigTarget) {
+      await fs.rm(deleteConfigTarget, { force: true }).catch(() => {});
+    }
+  };
 
   try {
     if (options.selfCheck) {
       if (!options.noDiskWrite && options.logFileEnabled !== false && process.env.CXPLUS_NO_LOG_FILE !== '1') {
-        await logger.attachFile(path.join(dataDirectory, 'logs', `host-${Date.now()}.log`));
+        const selfCheckLogPath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
+        await logger.attachFile(selfCheckLogPath);
+        runArtifacts.files.add(selfCheckLogPath);
       }
       const result = await runSelfCheck(options, logger);
-      if (!options.noDiskWrite && options.reportPath) await writeReport(options.reportPath, result.report, logger);
+      if (!options.noDiskWrite && options.reportPath) {
+        const selfCheckReportPath = path.resolve(options.reportPath);
+        await writeReport(options.reportPath, result.report, logger);
+        runArtifacts.files.add(selfCheckReportPath);
+      }
       process.exitCode = result.ok ? 0 : 1;
+      await logger.close();
+      await finalizeDataLifecycle();
       return;
     }
 
@@ -443,6 +561,7 @@ async function main() {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
     } else if (!options.noDiskWrite) {
       selectedConfigCreated = await ensureConfigFile(repositoryRoot, configPath, (message) => logger.info(message));
+      if (selectedConfigCreated) runArtifacts.files.add(configPath);
     }
     if (options.configPath && selectedConfigCreated) {
       selectedConfig = await readOptionalJson(configPath, '--config 配置', { allowMissing: false });
@@ -470,7 +589,9 @@ async function main() {
       ? false
       : (options.logFileEnabled === undefined ? configuredLogging : options.logFileEnabled);
     if (loggingEnabled && process.env.CXPLUS_NO_LOG_FILE !== '1') {
-      await logger.attachFile(path.join(dataDirectory, 'logs', `host-${Date.now()}.log`));
+      const logFilePath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
+      await logger.attachFile(logFilePath);
+      runArtifacts.files.add(logFilePath);
     }
     if (options.clientPath) config.clientPath = path.resolve(options.clientPath);
     if (options.stopClientOnExit) config.stopClientOnExit = true;
@@ -481,6 +602,7 @@ async function main() {
       if (options.listClients) {
         await configStore.close();
         await logger.close();
+        await finalizeDataLifecycle();
         return;
       }
       if (selectedClientPath) config.clientPath = selectedClientPath;
@@ -494,6 +616,7 @@ async function main() {
       || path.join(dataDirectory, 'diagnostics', diagnosticsStamp);
     const diagnosticsEnabled = !options.noDiskWrite
       && (options.diagnose === true || (!options.attachPort && !options.noDiagnose));
+    if (diagnosticsEnabled) runArtifacts.directories.add(diagnosticsDirectory);
     const panelDiagnosticsEnabled = config.settings['common.settings.windows-panel-enabled'] !== false;
     const sessions = new Map();
     const report = {
@@ -571,8 +694,18 @@ async function main() {
       }
       report.finishedAt = nowIso();
       await configStore.close();
-      if (!options.noDiskWrite) await writeReport(options.reportPath, report, logger);
+      if (!options.noDiskWrite && options.reportPath) {
+        runArtifacts.files.add(path.resolve(options.reportPath));
+        await writeReport(options.reportPath, report, logger);
+      }
+      if (options.retainData === false) {
+        logger.info('[data] --no-retain-data：退出时删除本次运行创建的宿主数据文件');
+      }
+      if (deleteConfigTarget) {
+        logger.info(`[data] --delete-config：退出时删除外部配置 ${deleteConfigTarget}`);
+      }
       await logger.close();
+      await finalizeDataLifecycle();
       // CLI 安全兜底：CDP/WebSocket 关闭握手异常时避免进程挂住（unref 不阻止正常退出）。
       const forceExitTimer = setTimeout(() => process.exit(process.exitCode ?? 0), 2000);
       forceExitTimer.unref();
@@ -594,6 +727,7 @@ async function main() {
         await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd() });
         logger.info('[launch] 已请求管理员实例启动，当前窗口退出');
         await logger.close();
+        await finalizeDataLifecycle();
         return;
       }
 
@@ -896,6 +1030,7 @@ async function main() {
       await configStoreForCleanup.close().catch(() => {});
     }
     await logger.close();
+    await finalizeDataLifecycle();
   }
 }
 

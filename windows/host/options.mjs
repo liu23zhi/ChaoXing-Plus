@@ -1,5 +1,56 @@
 const ANSWER_MODES = new Set(['manual', 'auto']);
 
+// 第一阶段未实现能力的机器可读 schema / capability 标记。
+// 宿主只做“显式拒绝 + 帮助/报告展示”，绝不静默降级为普通运行。
+export const UNSUPPORTED_CAPABILITIES = Object.freeze({
+  implemented: false,
+  reason: '第一阶段仅支持普通可审计运行；以下参数会显式报错，不会静默降级',
+  executionModes: Object.freeze({
+    supported: Object.freeze(['normal']),
+    unsupportedFlags: Object.freeze(['--memory-exec', '--delete-suspend']),
+    unsupportedValues: Object.freeze(['memory', 'delete-suspend'])
+  }),
+  startupWipe: Object.freeze({
+    flags: Object.freeze([
+      '--wipe-owned-files-on-start',
+      '--wipe-failure-policy',
+      '--wipe-retries',
+      '--wipe-retry-delay',
+      '--wipe-runtime-retry',
+      '--no-wipe-runtime-retry',
+      '--wipe-runtime-interval'
+    ]),
+    failurePolicies: Object.freeze(['retry', 'background', 'ignore', 'abort']),
+    retries: Object.freeze({ min: 1, max: 20, default: 5 }),
+    retryDelayMs: Object.freeze({ min: 50, max: 5000, default: 200 }),
+    runtimeIntervalSec: Object.freeze({ default: 30 }),
+    runtimeRetryDefault: true
+  }),
+  selfDestruct: Object.freeze({
+    flags: Object.freeze([
+      '--self-destruct-key',
+      '--self-destruct-on-fullscreen-exit',
+      '--self-destruct-delay',
+      '--no-self-destruct-confirm'
+    ]),
+    repeatableKey: true,
+    delayMs: Object.freeze({ default: 0 }),
+    confirmDefault: true
+  })
+});
+
+export function describeUnsupportedCapabilities() {
+  return [
+    `execution: 仅支持 ${UNSUPPORTED_CAPABILITIES.executionModes.supported.join('/')}；`
+      + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues.join('/')} 与 `
+      + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedFlags.join('/')} 未实现`,
+    `startup-wipe: 未实现（策略 ${UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies.join('|')}，`
+      + `重试 ${UNSUPPORTED_CAPABILITIES.startupWipe.retries.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retries.max}，`
+      + `间隔 ${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.max}ms）`,
+    `self-destruct: 未实现（可重复快捷键、延迟 ${UNSUPPORTED_CAPABILITIES.selfDestruct.delayMs.default}ms、默认需确认）`
+  ];
+}
+
 export function normalizeAnswerThreads(value) {
   if (typeof value !== 'number' && typeof value !== 'string') {
     throw new Error('答题线程数必须是 1 到 4 之间的整数');
@@ -99,7 +150,7 @@ function rejectUnsupportedExecutionOption(argument) {
 }
 
 export function validateSupportedJsonOptions(value, source = 'options-json') {
-  const unsupportedKey = /^(?:executionmode|memoryexec|deletesuspend|selfdestruct.*|wipe.*|deleteconfig)$/iu;
+  const unsupportedKey = /^(?:executionmode|memoryexec|deletesuspend|selfdestruct.*|wipe.*)$/iu;
   const visit = (item, prefix = '') => {
     if (!item || typeof item !== 'object') return;
     for (const [key, child] of Object.entries(item)) {
@@ -110,9 +161,6 @@ export function validateSupportedJsonOptions(value, source = 'options-json') {
         .toLowerCase();
       if (unsupportedKey.test(normalizedKey) && child !== false && !(normalizedKey === 'executionmode' && child === 'normal')) {
         throw new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
-      }
-      if (normalizedKey === 'retaindata' || normalizedKey === 'noretaindata') {
-        throw new Error(`${source} 包含当前宿主尚未实现的数据清理参数：${fullKey}`);
       }
       visit(child, fullKey);
     }
@@ -244,8 +292,7 @@ export function applyOptionsJsonToOptions(options, value) {
       case 'clientPath': next.clientPath = readString(raw, jsonKey); break;
       case 'clientIndex': next.clientIndex = readBoundedInteger(raw, jsonKey, 1, Number.MAX_SAFE_INTEGER); break;
       case 'ui':
-        if (raw === 'gui') throw new Error('options-json 的 ui=gui 当前尚未实现原生图形选择窗口');
-        if (!['auto', 'cli'].includes(raw)) throw new Error('options-json 的 ui 只支持 auto 或 cli');
+        if (!['auto', 'gui', 'cli'].includes(raw)) throw new Error('options-json 的 ui 只支持 auto、gui 或 cli');
         next.ui = raw;
         break;
       case 'dataDir': next.dataDir = readString(raw, jsonKey); next.dataDirExplicit = true; break;
@@ -284,7 +331,17 @@ export function applyOptionsJsonToOptions(options, value) {
     next.noScanCache = true;
   }
   validateClientSelectionOptions(next);
+  validateDataLifecycleOptions(next);
   return next;
+}
+
+function validateDataLifecycleOptions(options) {
+  if (options.deleteConfig && !options.configPath) {
+    throw new Error('--delete-config 必须与 --config <path> 一起使用，避免误删默认配置');
+  }
+  if (options.deleteConfig && options.noDiskWrite) {
+    throw new Error('--no-disk-write 与 --delete-config 不能同时使用（禁止磁盘写入时不能删除外部配置）');
+  }
 }
 
 function validateClientSelectionOptions(options) {
@@ -351,7 +408,8 @@ export function parseHostArgs(argv) {
     answerRetry: undefined,
     autoSubmit: undefined,
     executionMode: 'normal',
-    help: false
+    help: false,
+    capabilities: false
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -391,8 +449,7 @@ export function parseHostArgs(argv) {
       case '--no-scan-all': options.scanAll = false; options.scanMode = 'common'; options.scanClients = true; break;
       case '--ui': {
         const value = readValue(argv, index, argument);
-        if (value === 'gui') throw new Error('参数 --ui gui 当前尚未实现原生图形选择窗口，请使用 auto 或 cli');
-        if (!['auto', 'cli'].includes(value)) throw new Error('参数 --ui 只支持 auto 或 cli');
+        if (!['auto', 'gui', 'cli'].includes(value)) throw new Error('参数 --ui 只支持 auto、gui 或 cli');
         options.ui = value;
         index += 1;
         break;
@@ -402,9 +459,14 @@ export function parseHostArgs(argv) {
       case '--data-dir': options.dataDir = readValue(argv, index, argument); options.dataDirExplicit = true; index += 1; break;
       case '--no-disk-write': options.noDiskWrite = true; options.logFileEnabled = false; options.noDiagnose = true; options.reportPath = ''; break;
       case '--retain-data':
+        options.retainData = true;
+        break;
       case '--no-retain-data':
+        options.retainData = false;
+        break;
       case '--delete-config':
-        rejectUnsupportedExecutionOption(argument);
+        options.deleteConfig = true;
+        break;
       case '--port': options.port = readPort(readValue(argv, index, argument), argument, true); index += 1; break;
       case '--assets': options.assetsDir = readValue(argv, index, argument); index += 1; break;
       case '--duration': options.durationMs = Number.parseInt(readValue(argv, index, argument), 10); index += 1; break;
@@ -459,11 +521,13 @@ export function parseHostArgs(argv) {
       case '--delete-suspend':
         rejectUnsupportedExecutionOption(argument);
       case '--help': case '-h': options.help = true; break;
+      case '--capabilities': options.capabilities = true; break;
       default: throw new Error(`未知参数：${argument}`);
     }
   }
   options.cliOptionKeys = new Set(argv.map((argument) => CLI_OPTION_KEYS[argument]).filter(Boolean));
   validateClientSelectionOptions(options);
+  validateDataLifecycleOptions(options);
   if (options.noDiskWrite) {
     options.logFileEnabled = false;
     options.noDiagnose = true;
@@ -496,6 +560,10 @@ export function applyHostOptionsToConfig(config, options) {
     if (options?.[optionKey] !== undefined && options?.[optionKey] !== '') {
       next.settings[settingKey] = options[optionKey];
     }
+  }
+  // 向页面下发宿主写盘开关，用于关闭题库缓存等页面侧持久化（业务 runtime 读取该共享设置）。
+  if (options?.noDiskWrite === true) {
+    next.settings['common.settings.windows-no-disk-write'] = true;
   }
   return next;
 }
