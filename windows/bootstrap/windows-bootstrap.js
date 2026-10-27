@@ -26,6 +26,7 @@
   var HOST_KEY = '__CX_WIN_HOST__';
   var STYLE_ID = 'chaoxing-plus-windows-swal-style';
   var HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
+  var REMOVE_EVENT = 'chaoxing-plus:shared-store-remove';
   var SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
   var ENABLED_KEY = 'common.settings.extension-enabled';
   var PANEL_ENABLED_KEY = 'common.settings.windows-panel-enabled';
@@ -54,7 +55,7 @@
       if (typeof console === 'undefined' || typeof console.log !== 'function') {
         return;
       }
-      console.log(MESSAGE_PREFIX + safeStringify({ kind: kind, detail: detail }));
+      console.log(MESSAGE_PREFIX + safeStringify({ source: 'chaoxing-plus-windows', instance: instance, kind: kind, detail: detail }));
     } catch (error) {
       // 页面可能代理/禁用了 console；宿主会根据 ready 超时给出诊断。
     }
@@ -190,6 +191,39 @@
       dispatchHydrate(shared);
     }
     return shared;
+  }
+
+  function removeSharedValues(keys) {
+    if (keys.length === 0) {
+      return;
+    }
+    var index;
+    for (index = 0; index < keys.length; index += 1) {
+      var key = keys[index];
+      delete pendingAttributeValues[key];
+      try {
+        if (doc.documentElement) {
+          doc.documentElement.removeAttribute(sharedAttributeName(key));
+        }
+      } catch (error) {
+        // A missing document element must not retain a queued stale value.
+      }
+      if (!noDiskWriteEnabled) {
+        try {
+          win.localStorage.removeItem(key);
+        } catch (error) {
+          // Opaque origins may not expose localStorage.
+        }
+      }
+    }
+    try {
+      var CustomEventCtor = win.CustomEvent || (typeof CustomEvent !== 'undefined' ? CustomEvent : undefined);
+      if (typeof CustomEventCtor === 'function') {
+        doc.dispatchEvent(new CustomEventCtor(REMOVE_EVENT, { detail: keys }));
+      }
+    } catch (error) {
+      // Keep the bridge usable when page events are unavailable.
+    }
   }
 
   var pendingAttributeValues = {};
@@ -570,9 +604,25 @@
     if (payload.kind === 'config') {
       var wasEnabled = isEnabled();
       var wasPanelEnabled = isPanelEnabled();
-      config = merge(config, payload.values || {});
+      var values = payload.values || {};
+      var removedKeys = [];
+      if (payload.replace === true) {
+        values = collectSharedValues(values);
+        var previousKeys = Object.keys(collectSharedValues(config));
+        var index;
+        for (index = 0; index < previousKeys.length; index += 1) {
+          if (!hasOwn(values, previousKeys[index])) {
+            removedKeys.push(previousKeys[index]);
+          }
+        }
+        config = values;
+      } else {
+        config = merge(config, values);
+      }
       noDiskWriteEnabled = config[NO_DISK_WRITE_KEY] === true;
-      applySharedValues(payload.values || {}, true);
+      // Hydrate the current write policy before runtimeStore handles removals.
+      applySharedValues(values, true);
+      removeSharedValues(removedKeys);
       if (wasEnabled !== isEnabled() || wasPanelEnabled !== isPanelEnabled()) {
         // 与扩展行为一致：总开关变化后顶层刷新，让业务脚本按新状态重新注入。
         try {
@@ -628,7 +678,7 @@
       // 宿主重连会更新快照，复用原配置桥同步其闭包，避免重复安装监听和面板。
       try {
         if (typeof win.__CX_WIN_ON_CONFIG__ === 'function') {
-          win.__CX_WIN_ON_CONFIG__({ kind: 'config', values: config });
+          win.__CX_WIN_ON_CONFIG__({ kind: 'config', values: config, replace: true });
         }
       } catch (error) {
         send('bootstrap-error', { stage: 'rehydrate-config', message: String((error && error.message) || error) });
@@ -646,7 +696,10 @@
   mountPanelShell();
 
   if (win[HOST_KEY]) {
-    // 同一文档重复注入：只补一次 ready 通知。
+    // A new native host must update the original bridge's sending closure.
+    if (typeof win[HOST_KEY].adoptInstance === 'function') {
+      win[HOST_KEY].adoptInstance(instance, config);
+    }
     whenDomReady(function () {
       mountPanelShell();
       send('ready', { origin: locationInfo.origin, path: locationInfo.path, version: BOOTSTRAP_VERSION });
@@ -663,6 +716,11 @@
     },
     getConfig: function getConfig() {
       return config;
+    },
+    adoptInstance: function adoptInstance(nextInstance, nextConfig) {
+      instance = String(nextInstance || '');
+      win[HOST_KEY].instance = instance;
+      onMessageFromHost({ kind: 'config', values: nextConfig, replace: true });
     },
     requestBundle: function requestBundle() {
       send('ready', { origin: locationInfo.origin, path: locationInfo.path, version: BOOTSTRAP_VERSION, recheck: true });

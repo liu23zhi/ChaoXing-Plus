@@ -31,6 +31,10 @@ class FakeElement {
     return this.attributes.has(String(name)) ? this.attributes.get(String(name)) : null;
   }
 
+  removeAttribute(name) {
+    this.attributes.delete(String(name));
+  }
+
   appendChild(node) {
     this.children.push(node);
     return node;
@@ -305,6 +309,8 @@ test('bootstrap 回传配置变更时只同步共享键，并执行宿主的配�
     }
   });
   const syncMessage = harness.parseMessages().find((message) => message.kind === 'config-sync');
+  assert.equal(syncMessage.source, 'chaoxing-plus-windows');
+  assert.equal(syncMessage.instance, 'test-instance');
   assert.deepEqual(syncMessage.detail, { 'common.settings.b': 5 });
 
   harness.window.__CX_WIN_ON_CONFIG__({
@@ -451,4 +457,121 @@ test('bootstrap 同实例重连复用配置桥水合新快照，不重复安装�
     detail: { 'common.settings.theme': 'updated-after-reconnect' }
   });
   assert.equal(harness.parseMessages().filter((message) => message.kind === 'config-sync').length, 1);
+});
+
+test('bootstrap 新宿主接管旧文档时更新原有发送闭包和完整快照，不重复监听或面板', async () => {
+  const harness = createHarness({ instance: 'native-first', config: {
+    'common.settings.extension-enabled': true,
+    'common.settings.theme': 'initial',
+    'common.settings.retired': 'old'
+  } });
+  await harness.run();
+  const initialHost = harness.window.__CX_WIN_HOST__;
+  const initialSend = initialHost.send;
+  const initialBridge = harness.window.__CX_WIN_ON_CONFIG__;
+  const initialPanel = harness.document.getElementById('panel-common-work-results');
+  harness.storageCalls.length = 0;
+  harness.window.__CX_WIN_INSTANCE__ = 'native-second';
+  harness.window.__CX_WIN_CONFIG_JSON__ = {
+    'common.settings.extension-enabled': true,
+    'common.settings.theme': 'second-host',
+    'common.settings.windows-no-disk-write': true
+  };
+  await harness.run();
+
+  assert.equal(harness.window.__CX_WIN_HOST__, initialHost);
+  assert.equal(harness.window.__CX_WIN_ON_CONFIG__, initialBridge);
+  assert.equal(initialHost.instance, 'native-second');
+  assert.equal(initialHost.send, initialSend);
+  assert.equal(initialHost.getConfig()['common.settings.theme'], 'second-host');
+  assert.equal(Object.hasOwn(initialHost.getConfig(), 'common.settings.retired'), false);
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-theme'), '"second-host"');
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
+  assert.deepEqual(harness.storageCalls, []);
+  assert.equal(harness.document.getElementById('panel-common-work-results'), initialPanel);
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'panel-shell').length, 1);
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'ready').length, 2);
+
+  initialSend('config-sync', { 'common.settings.theme': 'from-original-send-function' });
+  harness.document.dispatchEvent({ type: 'chaoxing-plus:shared-store-sync',
+    detail: { 'common.settings.theme': 'from-original-listener' } });
+  const syncMessages = harness.parseMessages().filter((message) => message.kind === 'config-sync');
+  assert.equal(syncMessages.length, 2);
+  assert.equal(syncMessages.every((message) => message.instance === 'native-second'), true);
+  assert.deepEqual(syncMessages[1].detail, { 'common.settings.theme': 'from-original-listener' });
+  await harness.run();
+  assert.equal(harness.parseMessages().filter((message) => message.kind === 'ready').length, 2);
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', values: { 'common.settings.incremental': true } });
+  assert.equal(initialHost.getConfig()['common.settings.theme'], 'second-host');
+  assert.equal(initialHost.getConfig()['common.settings.incremental'], true);
+});
+
+test('bootstrap 完整快照删除旧共享配置并保留增量消息和非共享存储', async () => {
+  const harness = createHarness({ config: {
+    'common.settings.extension-enabled': true,
+    'common.settings.retired': 'old',
+    'common.settings.keep': 'retained'
+  } });
+  await harness.run();
+  harness.storage.set('other.private', 'unrelated');
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', replace: true, values: {
+    'common.settings.extension-enabled': true,
+    'common.settings.keep': 'retained',
+    'common.settings.added': 'new',
+    'other.private': 'ignored'
+  } });
+  assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'common.settings.retired'), false);
+  assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'other.private'), false);
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
+  assert.equal(harness.storage.has('common.settings.retired'), false);
+  assert.equal(harness.storage.get('other.private'), 'unrelated');
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.dispatched.find((event) =>
+    event.type === 'chaoxing-plus:shared-store-remove').detail)), ['common.settings.retired']);
+  assert.equal(harness.parseMessages().some((message) => message.kind === 'config-sync'), false);
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', values: { 'common.settings.retired': 'restored' } });
+  assert.equal(harness.window.__CX_WIN_HOST__.getConfig()['common.settings.keep'], 'retained');
+  assert.equal(harness.window.__CX_WIN_HOST__.getConfig()['common.settings.retired'], 'restored');
+  assert.equal(harness.storage.get('common.settings.retired'), '"restored"');
+});
+
+test('bootstrap no-disk-write 完整快照删除内存及 DOM 镜像但不触碰旧磁盘值', async () => {
+  const harness = createHarness({ config: {
+    'common.settings.windows-no-disk-write': true,
+    'common.settings.retired': 'memory-value'
+  } });
+  harness.storage.set('common.settings.retired', '"old-disk-value"');
+  await harness.run();
+  harness.storageCalls.length = 0;
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', replace: true,
+    values: { 'common.settings.windows-no-disk-write': true } });
+  assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'common.settings.retired'), false);
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
+  assert.equal(harness.storage.get('common.settings.retired'), '"old-disk-value"');
+  assert.deepEqual(harness.storageCalls, []);
+});
+
+test('bootstrap 完整快照清理未就绪属性队列并容忍不透明 origin，重新添加可恢复', async () => {
+  const harness = createHarness({ config: { 'common.settings.retired': 'old' },
+    readyState: 'loading', withDocumentElement: false });
+  await harness.run();
+  Object.defineProperty(harness.window, 'localStorage', { get() { throw new Error('SecurityError'); } });
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', replace: true, values: {} });
+  harness.document.documentElement = new FakeElement('html');
+  harness.fireDomContentLoaded();
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
+  assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'common.settings.retired'), false);
+  harness.window.__CX_WIN_ON_CONFIG__({ kind: 'config', replace: true,
+    values: { 'common.settings.retired': 'restored' } });
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), '"restored"');
+  assert.equal(harness.window.__CX_WIN_HOST__.getConfig()['common.settings.retired'], 'restored');
+});
+
+test('bootstrap 同文档重连使用完整快照删除已移除的共享配置', async () => {
+  const harness = createHarness({ config: { 'common.settings.retired': 'old' } });
+  await harness.run();
+  harness.window.__CX_WIN_CONFIG_JSON__ = {};
+  await harness.run();
+  assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'common.settings.retired'), false);
+  assert.equal(harness.storage.has('common.settings.retired'), false);
+  assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
 });

@@ -16,6 +16,7 @@ const SHARED_STORE_EXACT_KEYS = new Set([
 ]);
 
 const SHARED_STORE_HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
+const SHARED_STORE_REMOVE_EVENT = 'chaoxing-plus:shared-store-remove';
 const SHARED_STORE_SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
 const WINDOWS_NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
 
@@ -172,6 +173,33 @@ function hydrateSharedRuntimeValues(detail: unknown) {
   }
 }
 
+function removeSharedRuntimeValues(detail: unknown) {
+  if (!Array.isArray(detail)) {
+    return;
+  }
+
+  const noDiskWrite = isWindowsNoDiskWrite();
+  for (const key of detail) {
+    if (typeof key !== 'string' || !shouldShareStoreKey(key)) {
+      continue;
+    }
+    memoryStore.delete(key);
+    memoryRemovedKeys.add(key);
+    try {
+      document.documentElement?.removeAttribute(getSharedAttributeName(key));
+    } catch {
+      // The document may be opaque or still waiting for its root element.
+    }
+    if (!noDiskWrite) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // Keep the tombstone so failed storage access cannot restore the value.
+      }
+    }
+  }
+}
+
 function emitSharedRuntimeSync(key: string, value: unknown) {
   if (!shouldShareStoreKey(key)) {
     return;
@@ -200,6 +228,10 @@ try {
   document.addEventListener(SHARED_STORE_HYDRATE_EVENT, (event) => {
     const detail = typeof event === 'object' && event && 'detail' in event ? (event as { detail?: unknown }).detail : undefined;
     hydrateSharedRuntimeValues(detail);
+  });
+  document.addEventListener(SHARED_STORE_REMOVE_EVENT, (event) => {
+    const detail = typeof event === 'object' && event && 'detail' in event ? (event as { detail?: unknown }).detail : undefined;
+    removeSharedRuntimeValues(detail);
   });
 } catch {
   // ignore non-browser environments
