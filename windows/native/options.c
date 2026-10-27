@@ -636,6 +636,10 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
+    if (!o->retainData || o->deleteConfig || o->selfCheck) {
+        cx_error(error, errorCap, L"data cleanup and self-check are not supported by native host; use the Node host for these options");
+        return FALSE;
+    }
     if (!cx_valid_mode(o->executionModeNormal ? L"normal" : L"unsupported") || !cx_valid_scan_mode(o->scanMode) || !cx_valid_ui(o->ui) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid execution, scan, UI or injection mode"); return FALSE; }
     if (o->clientPathSet && (o->clientIndexSet || o->clientFirstSet || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client path conflicts with client selection flags"); return FALSE; }
     if (o->clientIndexSet && o->clientFirstSet) { cx_error(error, errorCap, L"client index conflicts with client-first"); return FALSE; }

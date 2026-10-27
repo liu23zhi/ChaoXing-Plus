@@ -74,4 +74,15 @@ test('native host CLI writes help and machine-readable output to redirected stdo
 
   const unsupported = run('--wipe-owned-files-on-start');
   assert.equal(unsupported.status, 2, unsupported.stderr || `unsupported option exited with ${unsupported.status}`);
+  assert.match(unsupported.stdout, /not supported/);
+
+  for (const args of [
+    ['--no-retain-data'], ['--delete-config'], ['--self-check'],
+    ['--options-json', '{"retainData":false}'],
+    ['--options-json', '{"deleteConfig":true}']
+  ]) {
+    const result = run('--print-effective-config', ...args);
+    assert.equal(result.status, 2, `${args.join(' ')} must fail before launching a client`);
+    assert.match(result.stdout, /not supported by native host/);
+  }
 });
