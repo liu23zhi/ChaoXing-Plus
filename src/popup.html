@@ -23,10 +23,9 @@
 
       body {
         margin: 0;
-        width: 360px;
+        width: 440px;
         max-width: 100%;
         min-width: 0;
-        min-height: 100svh;
         padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
         display: grid;
         align-content: center;
@@ -43,7 +42,7 @@
         border: 1px solid rgba(148, 163, 184, 0.18);
         box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
         width: 100%;
-        max-width: 360px;
+        max-width: 440px;
         margin-inline: auto;
       }
 
@@ -161,13 +160,18 @@
       @media (max-width: 480px) {
         body {
           width: 100%;
+          min-height: 0;
+          max-height: 85dvh;
+          overflow-y: auto;
           padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+          display: block;
         }
 
         .card {
           gap: 14px;
           padding: 16px;
           border-radius: 14px;
+          max-width: 100%;
         }
 
         .title {
