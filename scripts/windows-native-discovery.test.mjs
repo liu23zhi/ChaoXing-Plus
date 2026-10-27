@@ -236,4 +236,3 @@ test('native discovery skips directory junctions and excluded system directories
     await fs.rm(root, { recursive: true, force: true });
   }
 });
-
