@@ -294,7 +294,9 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
   const next = { ...options };
   const cliKeys = options.cliOptionKeys || new Set();
   const selectedByCli = ['clientPath', 'clientIndex', 'clientFirst', 'listClients', 'selectClient'].find((key) => cliKeys.has(key));
-  const scanSelectionByCli = ['scanClients', 'scanMode', 'rescan', 'noScanCache'].some((key) => cliKeys.has(key));
+  const selectionUiByCli = cliKeys.has('ui') && ['gui', 'cli'].includes(options.ui);
+  const scanSelectionByCli = selectionUiByCli
+    || ['scanClients', 'scanMode', 'rescan', 'noScanCache'].some((key) => cliKeys.has(key));
   const selectionKeys = new Set(['clientPath', 'clientIndex', 'clientFirst', 'listClients', 'selectClient']);
   for (const [jsonKey, optionKey] of Object.entries(JSON_OPTION_KEYS)) {
     if (selectedByCli && selectionKeys.has(optionKey)) continue;
@@ -438,10 +440,17 @@ function configLayerToOptions(value) {
 
 export function applyHostOptionLayers(options, ...layers) {
   let next = options;
-  for (const layer of layers) {
+  const cliKeys = options.cliOptionKeys || new Set();
+  let clientLayer = cliKeys.has('clientPath') ? Infinity : -1;
+  let uiLayer = cliKeys.has('ui') ? Infinity : -1;
+  for (const [index, layer] of layers.entries()) {
     const values = configLayerToOptions(layer);
+    if (!cliKeys.has('clientPath') && Object.prototype.hasOwnProperty.call(values, 'clientPath')) clientLayer = index;
+    if (!cliKeys.has('ui') && Object.prototype.hasOwnProperty.call(values, 'ui')) uiLayer = index;
     if (Object.keys(values).length > 0) next = applyOptionsJsonToOptions(next, values, { deferValidation: true });
   }
+  // Resolve interface selection after all layers so a later auto restores the configured path.
+  if (['gui', 'cli'].includes(next.ui) && uiLayer > clientLayer) next = { ...next, clientPath: '' };
   return finalizeHostOptions(next);
 }
 

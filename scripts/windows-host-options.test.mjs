@@ -230,6 +230,55 @@ test('CLI 扫描选择会忽略配置层的 clientPath，但显式 --client 仍�
   assert.throws(() => parseHostArgs(['--client', 'C:\\Explicit\\CXExam.exe', '--scan-clients']), /扫描参数/u);
 });
 
+test('显式 GUI/CLI 选择界面不被配置路径绕过，但保留显式客户端路径', () => {
+  for (const ui of ['gui', 'cli']) {
+    const stored = { clientPath: 'C:\\Configured\\CXExam.exe' };
+    const selectedUi = applyHostOptionLayers(parseHostArgs(['--ui', ui]), stored);
+    assert.equal(selectedUi.clientPath, '', `ui=${ui}`);
+    assert.equal(selectedUi.ui, ui);
+
+    const explicit = applyHostOptionLayers(parseHostArgs([
+      '--client', 'D:\\Explicit\\CXExam.exe', '--ui', ui
+    ]), stored);
+    assert.equal(explicit.clientPath, 'D:\\Explicit\\CXExam.exe', `ui=${ui}`);
+  }
+  const automatic = applyHostOptionLayers(parseHostArgs(['--ui', 'auto']), {
+    clientPath: 'C:\\Configured\\CXExam.exe'
+  });
+  assert.equal(automatic.clientPath, 'C:\\Configured\\CXExam.exe');
+});
+
+test('高优先级 JSON 界面选择覆盖低层路径，同层路径及 CLI 路径仍生效', () => {
+  for (const ui of ['gui', 'cli']) {
+    const stored = { clientPath: 'C:\\Configured\\CXExam.exe' };
+    const selectedUi = applyHostOptionLayers(parseHostArgs([]), stored, { ui });
+    assert.equal(selectedUi.clientPath, '', `JSON ui=${ui}`);
+    assert.equal(selectedUi.ui, ui);
+
+    const sameLayerPath = applyHostOptionLayers(parseHostArgs([]), stored, {
+      ui, clientPath: 'D:\\Inline\\CXExam.exe'
+    });
+    assert.equal(sameLayerPath.clientPath, 'D:\\Inline\\CXExam.exe', `same layer ui=${ui}`);
+
+    const cliPath = applyHostOptionLayers(parseHostArgs(['--client', 'E:\\CLI\\CXExam.exe']), stored, { ui });
+    assert.equal(cliPath.clientPath, 'E:\\CLI\\CXExam.exe', `CLI path JSON ui=${ui}`);
+
+    const laterPath = applyHostOptionLayers(parseHostArgs([]), stored, { ui }, {
+      clientPath: 'F:\\Later\\CXExam.exe'
+    });
+    assert.equal(laterPath.clientPath, 'F:\\Later\\CXExam.exe', `later path ui=${ui}`);
+  }
+});
+
+test('更高层 auto 覆盖低层界面请求后仍可使用原始配置路径', () => {
+  const options = applyHostOptionLayers(parseHostArgs([]),
+    { clientPath: 'C:\\Configured\\CXExam.exe' },
+    { ui: 'gui' },
+    { ui: 'auto' });
+  assert.equal(options.ui, 'auto');
+  assert.equal(options.clientPath, 'C:\\Configured\\CXExam.exe');
+});
+
 test('启动配置逐层应用 options 字段，优先级为默认、同目录、--config、内联 JSON、CLI', () => {
   const options = parseHostArgs(['--no-log']);
   const merged = applyHostOptionLayers(options,

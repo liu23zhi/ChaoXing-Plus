@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resolveClientSelection } from '../windows/host/client-selection.mjs';
+import { applyHostOptionLayers, parseHostArgs } from '../windows/host/options.mjs';
 
 function makeOptions(overrides = {}) {
   return {
@@ -44,6 +45,45 @@ test('显式 --client 在 auto/gui/cli 下均跳过扫描和选择窗口', async
     assert.equal(selected, clientPath, `ui=${ui}`);
     assert.equal(deps.calls.discover.length, 0, `ui=${ui}`);
     assert.equal(deps.calls.show.length, 0, `ui=${ui}`);
+  }
+});
+
+test('显式 GUI/CLI 会通过配置分层进入扫描选择，显式 --client 仍直接启动', async () => {
+  const configuredPath = 'C:\\Configured\\CXExam.exe';
+  for (const ui of ['gui', 'cli']) {
+    const options = applyHostOptionLayers(parseHostArgs(['--ui', ui]), { clientPath: configuredPath });
+    const deps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true, answer: '1' });
+    const selected = await resolveClientSelection(options, { clientPath: configuredPath }, deps);
+    assert.equal(selected, ui === 'gui' ? candidates[1].path : candidates[0].path, `ui=${ui}`);
+    assert.equal(deps.calls.discover.length, 1, `ui=${ui}`);
+    assert.equal(deps.calls.show.length, ui === 'gui' ? 1 : 0, `ui=${ui}`);
+
+    const explicitPath = 'D:\\Explicit\\CXExam.exe';
+    const explicitOptions = applyHostOptionLayers(parseHostArgs(['--client', explicitPath, '--ui', ui]), {
+      clientPath: configuredPath
+    });
+    const explicitDeps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true });
+    assert.equal(await resolveClientSelection(explicitOptions, { clientPath: explicitOptions.clientPath }, explicitDeps), explicitPath);
+    assert.equal(explicitDeps.calls.discover.length, 0, `explicit client ui=${ui}`);
+    assert.equal(explicitDeps.calls.show.length, 0, `explicit client ui=${ui}`);
+  }
+});
+
+test('内联 JSON 的 GUI/CLI 选择覆盖文件路径，但同一 JSON 的直接路径优先', async () => {
+  const configuredPath = 'C:\\Configured\\CXExam.exe';
+  for (const ui of ['gui', 'cli']) {
+    const options = applyHostOptionLayers(parseHostArgs([]), { clientPath: configuredPath }, { ui });
+    const deps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true, answer: '1' });
+    const selected = await resolveClientSelection(options, { clientPath: configuredPath }, deps);
+    assert.equal(selected, ui === 'gui' ? candidates[1].path : candidates[0].path);
+    assert.equal(deps.calls.discover.length, 1);
+
+    const directPath = 'D:\\Inline\\CXExam.exe';
+    const directOptions = applyHostOptionLayers(parseHostArgs([]), { clientPath: configuredPath }, { ui, clientPath: directPath });
+    const directDeps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true });
+    assert.equal(await resolveClientSelection(directOptions, { clientPath: directOptions.clientPath }, directDeps), directPath);
+    assert.equal(directDeps.calls.discover.length, 0);
+    assert.equal(directDeps.calls.show.length, 0);
   }
 });
 
