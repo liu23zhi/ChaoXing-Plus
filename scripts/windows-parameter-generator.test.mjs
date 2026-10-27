@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { parseHostArgs } from '../windows/host/options.mjs';
+import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseHostArgs } from '../windows/host/options.mjs';
 import { normalizeConfig } from '../windows/host/config.mjs';
 import { RENDER_DIAGNOSTICS_EXPRESSION } from '../windows/host/diagnostics.mjs';
 
@@ -63,17 +63,115 @@ test('预设覆盖关键扫描、面板和普通运行参数', async () => {
   await page.close();
 });
 
-test('生成器生成答题设置，但不导出内存执行、启动清理或自毁参数', async () => {
+const HOST_OPTION_FIELDS = [
+  'clientPath', 'clientIndex', 'clientFirst', 'listClients', 'selectClient', 'scanMode', 'ui',
+  'rescan', 'noScanCache', 'noDiskWrite', 'quiet', 'logFileEnabled', 'diagnose', 'noDiagnose',
+  'reportPath', 'diagnosticsDir', 'dataDir', 'dataDirExplicit', 'retainData', 'deleteConfig',
+  'stopClientOnExit', 'panelEnabled', 'panelCollapsed', 'panelTop', 'panelRight', 'panelWidth',
+  'panelTheme', 'answerMode', 'answerKey', 'answerThreads', 'answerCountdown', 'answerRetry',
+  'showAnswerDialog', 'autoSubmit', 'expectedBrowser', 'injectStrategy', 'injectRetries',
+  'injectBlankFrames', 'captureConsole', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs'
+];
+
+function relevantHostOptions(options) {
+  return Object.fromEntries(HOST_OPTION_FIELDS.map((key) => [key, options[key]]));
+}
+
+test('所有可执行预设的 JSON 与生成命令具有相同的宿主启动行为', async () => {
+  const page = await openGenerator();
+  for (const preset of ['silent', 'friendly', 'lazy', 'manual', 'scan', 'path', 'all']) {
+    await page.click(`[data-preset="${preset}"]`);
+    const output = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      return { args: generator.commandFor(generator.state()).args, json: JSON.parse(document.querySelector('#json').value) };
+    });
+    const fromCommand = parseHostArgs(output.args);
+    const fromJson = applyOptionsJsonToOptions(parseHostArgs([]), output.json);
+    assert.deepEqual(relevantHostOptions(fromJson), relevantHostOptions(fromCommand), preset);
+    if (preset === 'silent') {
+      assert.equal(output.json.noDiskWrite, true);
+      assert.equal(output.json.logFileEnabled, false);
+      assert.equal(output.json.quiet, true);
+      assert.equal(output.json.clientFirst, true);
+    }
+  }
+  await page.close();
+});
+
+test('生成器导出 CEF 多路径注入参数并可由宿主重新解析', async () => {
+  const page = await openGenerator();
+  await page.select('#injectStrategy', 'script');
+  await page.$eval('#injectRetries', (node) => { node.value = '4'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.$eval('#debugTimeout', (node) => { node.value = '45000'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.$eval('#targetPollInterval', (node) => { node.value = '1500'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.$eval('#bundleTimeout', (node) => { node.value = '90000'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.click('#injectBlankFrames');
+  await page.click('#captureConsole');
+  const output = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    return { args: generator.commandFor(generator.state()).args, json: JSON.parse(document.querySelector('#json').value) };
+  });
+  const fromCommand = parseHostArgs(output.args);
+  const fromJson = applyOptionsJsonToOptions(parseHostArgs([]), output.json);
+  assert.equal(fromCommand.injectStrategy, 'script');
+  assert.equal(fromCommand.injectRetries, 4);
+  assert.equal(fromCommand.debugEndpointTimeoutMs, 45000);
+  assert.equal(fromCommand.targetPollIntervalMs, 1500);
+  assert.equal(fromCommand.bundleTimeoutMs, 90000);
+  assert.equal(fromCommand.injectBlankFrames, false);
+  assert.equal(fromCommand.captureConsole, false);
+  assert.equal(fromJson.injectStrategy, 'script');
+  assert.equal(fromJson.bundleTimeoutMs, 90000);
+  await page.close();
+});
+
+test('导出 JSON 合并内联配置并由实际发出的表单参数覆盖，settings 保持深合并', async () => {
+  const page = await openGenerator();
+  const source = {
+    panelTop: 24,
+    answerMode: 'manual',
+    quiet: true,
+    settings: { 'common.settings.fixture': 'kept', 'common.settings.windows-panel-enabled': false }
+  };
+  await page.$eval('#optionsJson', (node, json) => { node.value = json; node.dispatchEvent(new Event('input', { bubbles: true })); }, JSON.stringify(source));
+  await page.select('#ui', 'gui');
+  const output = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    return { args: generator.commandFor(generator.state()).args, json: JSON.parse(document.querySelector('#json').value) };
+  });
+  const commandOptions = applyOptionsJsonToOptions(parseHostArgs(output.args), source);
+  const jsonOptions = applyOptionsJsonToOptions(parseHostArgs([]), output.json);
+  assert.deepEqual(relevantHostOptions(jsonOptions), relevantHostOptions(commandOptions));
+  const expected = applyHostOptionsToConfig(normalizeConfig(output.json), commandOptions);
+  const actual = applyHostOptionsToConfig(normalizeConfig(output.json), jsonOptions);
+  assert.deepEqual(actual.settings, expected.settings);
+  assert.equal(output.json.settings['common.settings.fixture'], 'kept');
+  assert.equal(jsonOptions.panelTop, 24);
+  assert.equal(jsonOptions.answerMode, 'auto');
+  assert.equal(jsonOptions.ui, 'gui');
+  await page.close();
+});
+
+test('@文件注入保留可运行命令但阻止不完整 JSON 导出', async () => {
+  const page = await openGenerator();
+  await page.$eval('#optionsJson', (node) => { node.value = '@C:\\Tools\\settings.json'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--options-json/u);
+  assert.equal(await page.$eval('#json', (node) => node.value), '');
+  assert.match(await page.$eval('#status', (node) => node.textContent), /JSON.*(?:外部|文件)|(?:外部|文件).*JSON/u);
+  await page.close();
+});
+
+test('生成器导出答题和启动清理参数，但不导出内存执行或自毁参数', async () => {
   const page = await openGenerator();
   assert.equal(await page.$('#answerMode') !== null, true);
   assert.equal(await page.$eval('#selfDestructKey', (node) => node.disabled), true);
-  assert.equal(await page.$eval('#wipeOnStart', (node) => node.disabled), true);
+  assert.equal(await page.$eval('#wipeOnStart', (node) => node.disabled), false);
   const output = await page.$eval('#powershell', (node) => node.value + document.querySelector('#cmd').value + document.querySelector('#json').value);
   assert.match(output, /--answer-mode/u);
-  assert.doesNotMatch(output, /--(?:self-destruct|memory-exec|delete-suspend|wipe-owned-files)/iu);
+  assert.doesNotMatch(output, /--(?:self-destruct|memory-exec|delete-suspend)/iu);
   await page.click('[data-preset="startupClean"]');
-  assert.match(await page.$eval('#status', (node) => node.textContent), /未发布/u);
-  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--wipe-owned-files-on-start/u);
   await page.close();
 });
 
@@ -152,7 +250,7 @@ test('生成器严格校验答题线程并拒绝不安全的 cmd 内联 JSON 输
   await page.close();
 });
 
-test('生成器覆盖数据保留、自毁快捷键冲突和未实现能力校验', async () => {
+test('生成器覆盖数据保留、自毁快捷键冲突和启动清理范围校验', async () => {
   const page = await openGenerator();
   const dispatch = (id, configure) => page.evaluate((selector, configureSource) => {
     const node = document.querySelector(selector);
@@ -198,7 +296,7 @@ test('生成器覆盖数据保留、自毁快捷键冲突和未实现能力校�
   assert.match(await page.$eval('#status', (node) => node.textContent), /--execution-mode normal/u);
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
 
-  // 未实现能力标记为“当前宿主不可执行”，而不是静默忽略。
+  // 内存执行、删除挂起和自毁仍标记为当前宿主不可执行。
   assert.match(await page.$eval('.capability', (node) => node.textContent), /当前宿主不可执行/u);
   await page.close();
 });
@@ -217,7 +315,9 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
     ['{"configPath":"C:\\\\x.json"}', /配置文件路径/u],
     ['{"panelWidth":900}', /320 到 800/u],
     ['{"panelTop":20000}', /0 到 10000/u],
-    ['{"answerRetry":-1}', /0 到 20/u]
+    ['{"answerRetry":-1}', /0 到 20/u],
+    ['{"wipeRetries":21}', /超出宿主允许范围/u],
+    ['{"wipeFailurePolicy":"stop"}', /retry、background、ignore 或 abort/u]
   ];
   for (const [json, pattern] of blockedCases) {
     await setField('optionsJson', `node.value = ${JSON.stringify(json)};`);
@@ -227,6 +327,10 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
   await setField('optionsJson', "node.value = '{not json';");
   assert.match(await page.$eval('#status', (node) => node.textContent), /无法解析/u);
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+
+  await setField('optionsJson', "node.value = '{\"wipeOwnedFilesOnStart\":true,\"wipeRetries\":7,\"wipeRetryDelayMs\":350,\"wipeRuntimeIntervalSec\":45}';");
+  assert.notEqual(await page.$eval('#powershell', (node) => node.value), '');
+  assert.match(await page.$eval('#json', (node) => node.value), /wipeOwnedFilesOnStart/u);
 
   // 会被独立 CLI 参数覆盖的 JSON 字段由宿主忽略，生成器不应误报。
   await setField('optionsJson', "node.value = '{\"answerThreads\":9}';");
@@ -245,7 +349,7 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
   await page.close();
 });
 
-test('生成器归一化快捷键别名、保持启动清理预设阻止状态并导出新增参数', async () => {
+test('生成器归一化快捷键别名、导出启动清理参数', async () => {
   const page = await openGenerator();
   const setField = (id, source) => page.evaluate((selector, script) => {
     const node = document.querySelector(selector);
@@ -259,10 +363,23 @@ test('生成器归一化快捷键别名、保持启动清理预设阻止状态�
   await page.click('#reset');
 
   await page.click('[data-preset="startupClean"]');
-  assert.match(await page.$eval('#status', (node) => node.textContent), /未发布/u);
+  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
+  const startupClean = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    return { args: generator.commandFor(generator.state()).args, json: JSON.parse(document.querySelector('#json').value) };
+  });
+  const cleanFromCommand = parseHostArgs(startupClean.args);
+  const cleanFromJson = applyOptionsJsonToOptions(parseHostArgs([]), startupClean.json);
+  assert.equal(cleanFromCommand.wipeOwnedFilesOnStart, true);
+  assert.equal(cleanFromCommand.wipeRetries, 5);
+  assert.equal(cleanFromCommand.wipeRetryDelayMs, 200);
+  assert.equal(cleanFromCommand.wipeRuntimeIntervalSec, 30);
+  for (const key of ['wipeOwnedFilesOnStart', 'wipeFailurePolicy', 'wipeRetries', 'wipeRetryDelayMs', 'wipeRuntimeRetry', 'wipeRuntimeIntervalSec']) {
+    assert.equal(cleanFromJson[key], cleanFromCommand[key], key);
+  }
   await setField('quiet', 'node.checked = false;');
-  assert.match(await page.$eval('#status', (node) => node.textContent), /未发布/u);
-  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--wipe-owned-files-on-start/u);
   await page.click('[data-preset="lazy"]');
   assert.notEqual(await page.$eval('#powershell', (node) => node.value), '');
   await page.click('#reset');
@@ -281,7 +398,21 @@ test('生成器归一化快捷键别名、保持启动清理预设阻止状态�
   assert.match(info.powershell, /--panel-theme 'pink'/u);
   assert.doesNotThrow(() => parseHostArgs(info.args));
   assert.match(info.summary, /运行数据/u);
-  assert.match(info.summary, /启动清理\/自毁/u);
+  assert.match(info.summary, /启动清理/u);
+  await page.close();
+});
+
+test('生成器拒绝宿主范围以外的运行期清理间隔', async () => {
+  const page = await openGenerator();
+  for (const value of ['0', '86401']) {
+    await page.$eval('#wipeInterval', (node, next) => {
+      node.value = next;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
+    assert.match(await page.$eval('#status', (node) => node.textContent), /运行期重试间隔必须是 1 到 86400/u);
+    assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+    assert.equal(await page.$eval('#json', (node) => node.value), '');
+  }
   await page.close();
 });
 
