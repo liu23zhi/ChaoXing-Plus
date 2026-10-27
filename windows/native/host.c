@@ -11,6 +11,7 @@
 #include "session.h"
 #include "selection.h"
 #include "audit.h"
+#include "config-store.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
@@ -48,6 +49,12 @@ static CX_AUDIT *h_audit;
 static CX_AUDIT_REPORT h_report;
 static BOOL h_capture_console;
 static BOOL h_quiet;
+typedef struct H_CONFIG H_CONFIG;
+static H_CONFIG *h_config;
+static char h_instance[64] = "native";
+static void h_config_queue(const char *json, DWORD length);
+static const char *h_config_json(DWORD *length);
+static BOOL h_config_enabled(const CX_OPTIONS *options);
 
 /* Keep the large fixed-size option/path buffers out of the 1 MiB Windows
    thread stack.  The native host deliberately has no CRT startup, so this
@@ -62,8 +69,8 @@ static WCHAR h_exe_path[HOST_PATH_CAP];
 static char h_settings[CX_OPTIONS_JSON_CAP];
 static WCHAR h_selected_path[HOST_PATH_CAP];
 static JT h_event_tokens[HOST_REPLY_TOKENS];
-static JT h_page_message_tokens[64];
-static char h_page_message[16384];
+static JT h_page_message_tokens[HOST_REPLY_TOKENS];
+static char h_page_message[CX_OPTIONS_JSON_CAP + 512];
 
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
@@ -131,10 +138,18 @@ static void h_audit_page_message(const char *json, const JT *tokens, int params)
         for (i = 0; prefix[i] && h_page_message[i] == prefix[i]; ++i) { }
         if (prefix[i]) continue;
         length = h_len(h_page_message + i);
-        if (jparse(h_page_message + i, length, h_page_message_tokens, 64) > 0
-            && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "bootstrap-error")) {
+        if (jparse(h_page_message + i, length, h_page_message_tokens, HOST_REPLY_TOKENS) <= 0) return;
+        if (jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "bootstrap-error")) {
             ++h_report.errors;
             h_audit_event("warn", "bootstrap", "Bootstrap reported an error; detail omitted");
+        } else if (jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "config-sync")) {
+            int detail = jkey(h_page_message + i, h_page_message_tokens, 0, "detail");
+            if (detail >= 0 && h_page_message_tokens[detail].type == '{'
+                && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "source"), "chaoxing-plus-windows")
+                && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "instance"), h_instance)
+                && cx_session_can_sync_config(h_current_page->state, jint(json, tokens, jkey(json, tokens, params, "executionContextId"), -1)))
+                h_config_queue(h_page_message + i + h_page_message_tokens[detail].start,
+                    (DWORD)(h_page_message_tokens[detail].end - h_page_message_tokens[detail].start));
         }
         return;
     }
@@ -310,7 +325,8 @@ static BOOL h_inject_asset(NET_WS *ws, DWORD *nextId, const WCHAR *strategy, DWO
 static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *options,
                               const char *style, DWORD styleLength, BOOL preflight, WCHAR *error, DWORD errorCap) {
     const char prefix[] = "window.__CX_WIN_CONFIG_JSON__=";
-    const char middle[] = ";window.__CX_WIN_INSTANCE__=\"native\";window.__CX_WIN_STYLE_TEXT__=";
+    const char middle[] = ";window.__CX_WIN_INSTANCE__=";
+    const char stylePrefix[] = ";window.__CX_WIN_STYLE_TEXT__=";
     char *config = NULL, *expression = NULL;
     DWORD configLength = 0, capacity, at = 0;
     BOOL ok = FALSE;
@@ -318,6 +334,7 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
     if (!config || !cx_options_effective_settings_json_utf8(options, config, CX_OPTIONS_JSON_CAP, &configLength)) {
         h_error(error, errorCap, L"cannot serialize native settings"); goto done;
     }
+    if (!preflight && h_config_json(&configLength)) CopyMemory(config, h_config_json(&configLength), configLength + 1);
     if (!style || styleLength > (HOST_SOURCE_CAP - configLength - 256) / 6) {
         h_error(error, errorCap, L"native style exceeds its size limit"); goto done;
     }
@@ -327,6 +344,8 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
     if (!h_append_bytes(expression, capacity, &at, prefix, sizeof(prefix) - 1)
         || !h_append_bytes(expression, capacity, &at, config, configLength)
         || !h_append_bytes(expression, capacity, &at, middle, sizeof(middle) - 1)
+        || !h_json_quote(expression, capacity, &at, h_instance, (DWORD)h_len(h_instance))
+        || !h_append_bytes(expression, capacity, &at, stylePrefix, sizeof(stylePrefix) - 1)
         || !h_json_quote(expression, capacity, &at, style, styleLength)
         || !h_append_bytes(expression, capacity, &at, ";true;", 6)) {
         h_error(error, errorCap, L"native page config exceeds its size limit"); goto done;
@@ -355,6 +374,7 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     for (p = 38100; p < 38200; ++p) if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
     return FALSE;
 }
+#include "host-config.inc"
 #include "host-session.inc"
 
 static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *result, WCHAR *error, DWORD errorCap) {
@@ -434,6 +454,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) { h_report.stopReason = "cancelled"; ok = TRUE; } goto done; }
     }
     h_report.stopReason = "assets-failed";
+    if (!h_config_begin(options, error, errorCap)) goto done;
     if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
         || !cx_asset_load(L"chaoxing-plus.windows.js", options->assetsDirSet ? options->assetsDir : NULL, &bundle, &bundleLength, error, errorCap)
         || !cx_asset_load(L"sweetalert2.min.css", options->assetsDirSet ? options->assetsDir : NULL, &style, &styleLength, error, errorCap)
@@ -451,6 +472,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
     ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
 done:
+    h_config_close();
     h_report.success = ok && h_exit_code == 0;
     if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }
     else h_audit_event("info", "stop", h_report.stopReason);
@@ -505,7 +527,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --capture-console|--no-capture-console（只记录页面错误事件，不保存页面文本）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
             "状态: --help --capabilities\n"
-            "尚未提供: 配置持久化/热重载及渲染诊断；请使用 Node 宿主获得这些能力。\n"
+            "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
+            "  日志/写盘策略与启动选项本轮锁定；渲染诊断尚未接入。\n"
             "内存执行、删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
         return 0;
     }
@@ -513,7 +536,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":false,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }

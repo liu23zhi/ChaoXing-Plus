@@ -46,7 +46,7 @@ static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *opti
     if (!h_endpoint_owned(port, options, error, errorCap)) { h_page_close(page); return FALSE; }
     page->ws = net_ws_open(port, page->websocket, error, errorCap);
     if (!page->ws) return FALSE;
-    page->state = cx_session_create(page->url, options->injectBlankFrames, options->extensionEnabled);
+    page->state = cx_session_create(page->url, options->injectBlankFrames, h_config_enabled(options));
     if (!page->state) { h_error(error, errorCap, L"out of memory creating page session"); goto done; }
     h_current_page = page; h_task_pending = FALSE; h_current_context = 0;
     page->nextId = 1;
@@ -120,14 +120,16 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
                 && h_inject_asset(page->ws, &page->nextId, options->injectStrategy, (DWORD)options->injectRetries, bootstrap, bootstrapLength, error, errorCap);
             /* A reconnect must not depend on CDP retaining old console-ready events. */
             if (success) success = h_send_eval(page->ws, page->nextId++, requestReady, sizeof(requestReady) - 1, error, errorCap);
+        } else if (task.type == CX_SESSION_TASK_CONFIG) {
+            success = h_config_send(page, error, errorCap);
         } else {
             success = h_inject_asset(page->ws, &page->nextId, options->injectStrategy, (DWORD)options->injectRetries, bundle, bundleLength, error, errorCap);
         }
         /* A normal stop can cancel a valid in-flight task without failing it. */
         if ((success || h_operation_active()) && cx_session_complete(page->state, &task, success)) {
             if (success && task.type == CX_SESSION_TASK_BUNDLE) ++h_bundles_completed;
-            h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap",
-                success ? "Injection acknowledged" : "Injection failed");
+            h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_CONFIG ? "config" : (task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap"),
+                task.type == CX_SESSION_TASK_CONFIG ? (success ? "Configuration acknowledged" : "Configuration delivery failed") : (success ? "Injection acknowledged" : "Injection failed"));
         }
         h_sample_page(page);
         h_task_pending = FALSE;
@@ -234,6 +236,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     do {
         DWORD now = GetTickCount();
         h_current_page = NULL; h_task_pending = FALSE;
+        h_config_tick(pages);
         if (!lastPoll || now - lastPoll >= (DWORD)options->targetPollIntervalMs) {
             h_targets_refresh(pages, port, options, trampoline, trampolineLength, error, errorCap);
             lastPoll = GetTickCount();
@@ -249,7 +252,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
         h_current_page = NULL; h_task_pending = FALSE;
         Sleep(20);
     } while (h_operation_active());
-    ok = !options->extensionEnabled || h_bundles_completed > 0;
+    ok = !h_config_enabled(options) || h_bundles_completed > 0;
     h_report.stopReason = h_duration && GetTickCount() - h_started >= h_duration ? "duration" : "client-exit";
     if (!ok) h_error(error, errorCap, L"native session ended without any completed business injection");
 done:

@@ -164,6 +164,61 @@ static void test_normal_stop_cancellation(void) {
     h_client_pid = 0; h_duration = 0; h_current_page = NULL; h_task_pending = FALSE;
 }
 
+static BOOL write_config_fixture(const WCHAR *path, const char *text) {
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD written = 0, length = (DWORD)h_len(text);
+    BOOL ok;
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ok = WriteFile(file, text, length, &written, NULL) && written == length;
+    CloseHandle(file); return ok;
+}
+static BOOL config_fixture_keeps_page(void) {
+    JT tokens[64];
+    return h_config && jparse(h_config->current, (int)h_config->currentLength, tokens, 64) > 0
+        && jeq(h_config->current, tokens, jkey(h_config->current, tokens, 0, "common.settings.fixture"), "page");
+}
+static void test_config_write_conflict(void) {
+    typedef struct { WCHAR temporary[1024], directory[1024], file[1024]; H_NATIVE_PAGE pages[HOST_MAX_PAGES]; } FIXTURE;
+    const char initial[] = "{\"settings\":{\"common.settings.fixture\":\"initial\"}}";
+    const char external[] = "{\"settings\":{\"common.settings.fixture\":\"external\"}}";
+    const char patch[] = "{\"common.settings.fixture\":\"page\"}";
+    FIXTURE *fixture = (FIXTURE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FIXTURE));
+    WCHAR error[256]; HANDLE lock = INVALID_HANDLE_VALUE;
+    BOOL prepared = FALSE;
+    if (!fixture) { check("configuration conflict fixture allocates", FALSE); return; }
+    if (!GetTempPathW(1024, fixture->temporary) || !GetTempFileNameW(fixture->temporary, L"cxc", 0, fixture->directory)) goto done;
+    if (!DeleteFileW(fixture->directory) || !CreateDirectoryW(fixture->directory, NULL)) goto done;
+    lstrcpyW(fixture->file, fixture->directory); lstrcatW(fixture->file, L"\\config.json");
+    lstrcpyW(h_exe_path, fixture->directory); lstrcatW(h_exe_path, L"\\host.exe");
+    if (!write_config_fixture(fixture->file, initial)) goto done;
+    cx_options_init(&h_base_options); cx_options_init(&h_cli_options); cx_options_init(&h_json_options);
+    lstrcpyW(h_base_options.configPath, fixture->file); h_base_options.configPathSet = TRUE;
+    lstrcpyW(h_cli_options.configPath, fixture->file); h_cli_options.configPathSet = TRUE;
+    if (!cx_options_apply_json_utf8(&h_base_options, initial, sizeof(initial) - 1, error, 256)) goto done;
+    h_client_pid = 0; h_duration = 0; h_task_pending = FALSE; fakeTick = 1000;
+    if (!h_config_begin(&h_base_options, error, 256)) goto done;
+    h_config_queue(patch, sizeof(patch) - 1); h_config_tick(fixture->pages);
+    if (!write_config_fixture(fixture->file, external)) goto done;
+    lock = CreateFileW(fixture->file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (lock == INVALID_HANDLE_VALUE) goto done;
+    prepared = TRUE; h_config->pollAt = 0; fakeTick = 3000;
+    h_config_tick(fixture->pages);
+    check("failed config write cannot discard the newer in-memory page settings",
+        h_config->dirtySet && config_fixture_keeps_page());
+    CloseHandle(lock); lock = INVALID_HANDLE_VALUE; h_config->pollAt = 0; fakeTick = 5000;
+    h_config_tick(fixture->pages);
+    check("config reload resumes after the pending page patch is saved",
+        !h_config->dirtySet && config_fixture_keeps_page());
+done:
+    check("configuration conflict fixture prepares real file replacement failure", prepared);
+    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+    h_config_close();
+    if (fixture->file[0]) DeleteFileW(fixture->file);
+    if (fixture->directory[0]) RemoveDirectoryW(fixture->directory);
+    h_exe_path[0] = 0;
+    HeapFree(GetProcessHeap(), 0, fixture);
+}
+
 static void test_owned_target_refresh(void) {
     H_NATIVE_PAGE *pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
     WCHAR error[HOST_ERROR_CAP];
@@ -267,6 +322,7 @@ void __stdcall InjectionTestMain(void) {
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     test_owned_target_refresh();
     test_normal_stop_cancellation();
+    test_config_write_conflict();
     {
         WCHAR error[HOST_ERROR_CAP];
         DWORD before = calls, i;

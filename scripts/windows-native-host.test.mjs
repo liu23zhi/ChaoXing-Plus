@@ -99,7 +99,8 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.contextLifecycle, true);
   assert.equal(nativeCapabilities.navigation, true);
   assert.equal(nativeCapabilities.targetReconnect, true);
-  assert.equal(nativeCapabilities.configReload, false);
+  assert.equal(nativeCapabilities.configReload, true);
+  assert.equal(nativeCapabilities.configPersistence, true);
   assert.equal(nativeCapabilities.fileLogging, true);
   assert.equal(nativeCapabilities.runReport, true);
 
