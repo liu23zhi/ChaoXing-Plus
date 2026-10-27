@@ -18,6 +18,9 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length,
 /* 1: complete text message, 0: timeout, -1: closed or failed. */
 int net_ws_read(NET_WS *ws, char **text, DWORD *length,
                 WCHAR *error, DWORD errorCap);
+/* timeoutMs is a total budget. Zero polls without waiting and preserves partial frames. */
+int net_ws_read_timeout(NET_WS *ws, char **text, DWORD *length, DWORD timeoutMs,
+                        WCHAR *error, DWORD errorCap);
 void net_ws_close(NET_WS *ws);
 void net_free(void *memory);
 

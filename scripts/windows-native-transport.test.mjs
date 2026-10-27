@@ -27,6 +27,7 @@ test('native transport sources expose the no-CRT interfaces', async () => {
   assert.match(jsonHeader, /BOOL\s+jwstr\s*\(/);
   assert.match(netHeader, /BOOL\s+net_http_get\s*\(/);
   assert.match(netHeader, /int\s+net_ws_read\s*\(/);
+  assert.match(netHeader, /int\s+net_ws_read_timeout\s*\(/);
   assert.match(processHeader, /BOOL\s+proc_launch\s*\(/);
   assert.match(processHeader, /BOOL\s+proc_pe\s*\(/);
   assert.match(memorySource, /void\s*\*\s*__cdecl\s+memcpy\s*\(/);
@@ -66,4 +67,13 @@ test('compiled native transport self-test', { skip: !process.env.CX_NATIVE_TRANS
   });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /(?:TRANSPORT|PROTOCOL)[-_ ]?SELF[-_ ]?TEST[ :]+(?:OK|PASS)/i);
+  for (const regression of [
+    'zero timeout never waits for an empty socket',
+    'partial header resumes on the next read',
+    'continuation completes a preserved fragmented message',
+    'continuous control frames respect the total deadline',
+    'zero timeout yields after a bounded control-frame batch'
+  ]) {
+    assert.ok(result.stdout.includes(`PASS ${regression}`), `missing transport regression: ${regression}`);
+  }
 });

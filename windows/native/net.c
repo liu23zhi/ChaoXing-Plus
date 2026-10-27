@@ -298,6 +298,7 @@ NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) 
     DWORD valueLength, offset = 0, begin;
     char *request = NULL, *out, portText[11], key[25], expectedAccept[29];
     BYTE nonce[16];
+    u_long nonblocking = 1;
     if (!url || !websocket_path(port, url, &path)) { set_error(error, errorCap, L"Rejected non-loopback or mismatched WebSocket URL."); return NULL; }
     ws = (NET_WS *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NET_WS));
     if (!ws) { set_error(error, errorCap, L"Out of memory."); return NULL; }
@@ -338,6 +339,9 @@ NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) 
     }
     ws->rxLength -= offset;
     copy_bytes(ws->rx, ws->rx + offset, ws->rxLength);
+    if (ioctlsocket(ws->socket, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+        set_error(error, errorCap, L"Cannot enable nonblocking WebSocket I/O."); goto failed;
+    }
     net_free(request);
     return ws;
 failed:
@@ -346,10 +350,34 @@ failed:
     return NULL;
 }
 
-static BOOL send_frame(NET_WS *ws, BYTE opcode, const BYTE *data, DWORD length) {
+static int socket_ready(SOCKET socket, BOOL writing, DWORD timeoutMs) {
+    fd_set selected;
+    struct timeval timeout;
+    FD_ZERO(&selected); FD_SET(socket, &selected);
+    timeout.tv_sec = (long)(timeoutMs / 1000);
+    timeout.tv_usec = (long)((timeoutMs % 1000) * 1000);
+    return select(0, writing ? NULL : &selected, writing ? &selected : NULL, NULL, &timeout);
+}
+
+static BOOL send_ws_all(NET_WS *ws, const BYTE *data, DWORD length, DWORD started, DWORD timeoutMs) {
+    DWORD sent = 0;
+    while (sent < length) {
+        int count;
+        DWORD elapsed = GetTickCount() - started;
+        if (timeoutMs && elapsed >= timeoutMs) return FALSE;
+        count = send(ws->socket, (const char *)data + sent, (int)(length - sent), 0);
+        if (count > 0) { sent += (DWORD)count; continue; }
+        if (count != SOCKET_ERROR || WSAGetLastError() != WSAEWOULDBLOCK) return FALSE;
+        elapsed = GetTickCount() - started;
+        if (!timeoutMs || elapsed >= timeoutMs || socket_ready(ws->socket, TRUE, timeoutMs - elapsed) <= 0) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL send_frame_timeout(NET_WS *ws, BYTE opcode, const BYTE *data, DWORD length, DWORD timeoutMs) {
     BYTE header[14], mask[4];
     BYTE *masked;
-    DWORD headLength, i;
+    DWORD headLength, i, started = GetTickCount();
     BOOL okay;
     if (length > BODY_LIMIT || ws->failed || !CryptGenRandom(ws->crypto, 4, mask)) return FALSE;
     header[0] = (BYTE)(0x80 | opcode);
@@ -367,10 +395,14 @@ static BOOL send_frame(NET_WS *ws, BYTE opcode, const BYTE *data, DWORD length) 
     masked = (BYTE *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1);
     if (!masked) return FALSE;
     for (i = 0; i < length; i++) masked[i] = data[i] ^ mask[i & 3];
-    okay = send_all(ws->socket, header, headLength) && send_all(ws->socket, masked, length);
+    okay = send_ws_all(ws, header, headLength, started, timeoutMs) && send_ws_all(ws, masked, length, started, timeoutMs);
     net_free(masked);
     if (!okay) ws->failed = TRUE;
     return okay;
+}
+
+static BOOL send_frame(NET_WS *ws, BYTE opcode, const BYTE *data, DWORD length) {
+    return send_frame_timeout(ws, opcode, data, length, 2000);
 }
 
 BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length,
@@ -381,9 +413,9 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length,
     return TRUE;
 }
 
-int net_ws_read(NET_WS *ws, char **text, DWORD *length,
-                WCHAR *error, DWORD errorCap) {
-    DWORD started = GetTickCount();
+int net_ws_read_timeout(NET_WS *ws, char **text, DWORD *length, DWORD timeoutMs,
+                        WCHAR *error, DWORD errorCap) {
+    DWORD started = GetTickCount(), steps = 0;
     if (text) *text = NULL;
     if (length) *length = 0;
     if (!ws || !text || !length || ws->failed) { set_error(error, errorCap, L"WebSocket is closed."); return -1; }
@@ -391,7 +423,9 @@ int net_ws_read(NET_WS *ws, char **text, DWORD *length,
         DWORD headLength = 2, payload = 0, frameLength = 0;
         BYTE opcode = 0, final = 0;
         BOOL complete = FALSE;
-        if (GetTickCount() - started > 2000) return 0;
+        DWORD elapsed = GetTickCount() - started;
+        /* A busy control stream must yield to other targets even in polling mode. */
+        if ((!timeoutMs && steps++ >= 64) || (timeoutMs && elapsed >= timeoutMs)) return 0;
         if (ws->rxLength >= 2) {
             final = ws->rx[0] & 0x80; opcode = ws->rx[0] & 15;
             if ((ws->rx[0] & 0x70) || (ws->rx[1] & 0x80)) goto protocol_error;
@@ -421,11 +455,11 @@ int net_ws_read(NET_WS *ws, char **text, DWORD *length,
             BYTE *data = ws->rx + headLength;
             if (opcode == 8) {
                 if (payload == 1) goto protocol_error;
-                send_frame(ws, 8, data, payload);
+                send_frame_timeout(ws, 8, data, payload, timeoutMs ? timeoutMs - elapsed : 0);
                 ws->failed = TRUE;
                 set_error(error, errorCap, L"WebSocket peer closed the connection."); return -1;
             } else if (opcode == 9) {
-                if (!send_frame(ws, 10, data, payload)) { set_error(error, errorCap, L"WebSocket pong send failed."); return -1; }
+                if (!send_frame_timeout(ws, 10, data, payload, timeoutMs ? timeoutMs - elapsed : 0)) { set_error(error, errorCap, L"WebSocket pong send failed."); return -1; }
             } else if (opcode == 10) {
                 /* Unsolicited pongs are legal and do not affect message assembly. */
             } else if (opcode == 1 || opcode == 0) {
@@ -452,7 +486,13 @@ int net_ws_read(NET_WS *ws, char **text, DWORD *length,
         }
         if (ws->rxLength >= RX_LIMIT) goto protocol_error;
         {
-            int count = recv(ws->socket, (char *)ws->rx + ws->rxLength, (int)(RX_LIMIT - ws->rxLength), 0);
+            int count, ready;
+            elapsed = GetTickCount() - started;
+            if (timeoutMs && elapsed >= timeoutMs) return 0;
+            ready = socket_ready(ws->socket, FALSE, timeoutMs ? timeoutMs - elapsed : 0);
+            if (!ready) return 0;
+            if (ready < 0) { set_error(error, errorCap, L"WebSocket read readiness failed."); ws->failed = TRUE; return -1; }
+            count = recv(ws->socket, (char *)ws->rx + ws->rxLength, (int)(RX_LIMIT - ws->rxLength), 0);
             if (count == SOCKET_ERROR) {
                 int code = WSAGetLastError();
                 if (code == WSAETIMEDOUT || code == WSAEWOULDBLOCK) return 0;
@@ -466,6 +506,11 @@ protocol_error:
     ws->failed = TRUE;
     set_error(error, errorCap, L"Rejected invalid or oversized WebSocket frame.");
     return -1;
+}
+
+int net_ws_read(NET_WS *ws, char **text, DWORD *length,
+                WCHAR *error, DWORD errorCap) {
+    return net_ws_read_timeout(ws, text, length, 2000, error, errorCap);
 }
 
 void net_ws_close(NET_WS *ws) {
