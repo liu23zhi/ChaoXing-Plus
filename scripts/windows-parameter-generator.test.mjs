@@ -161,17 +161,34 @@ test('@文件注入保留可运行命令但阻止不完整 JSON 导出', async (
   await page.close();
 });
 
-test('生成器导出答题和启动清理参数，但不导出内存执行或自毁参数', async () => {
+test('生成器只导出第一阶段能力，启动清理设计预设不生成可运行输出', async () => {
   const page = await openGenerator();
   assert.equal(await page.$('#answerMode') !== null, true);
   assert.equal(await page.$eval('#selfDestructKey', (node) => node.disabled), true);
-  assert.equal(await page.$eval('#wipeOnStart', (node) => node.disabled), false);
+  for (const id of ['wipeOnStart', 'wipePolicy', 'wipeRetries', 'wipeDelay', 'wipeInterval', 'wipeRuntimeRetry']) {
+    assert.equal(await page.$eval(`#${id}`, (node) => node.disabled), true, id);
+  }
   const output = await page.$eval('#powershell', (node) => node.value + document.querySelector('#cmd').value + document.querySelector('#json').value);
   assert.match(output, /--answer-mode/u);
-  assert.doesNotMatch(output, /--(?:self-destruct|memory-exec|delete-suspend)/iu);
+  assert.doesNotMatch(output, /--(?:wipe|self-destruct|memory-exec|delete-suspend)/iu);
   await page.click('[data-preset="startupClean"]');
-  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
-  assert.match(await page.$eval('#powershell', (node) => node.value), /--wipe-owned-files-on-start/u);
+  assert.match(await page.$eval('#status', (node) => node.textContent), /启动清理.*当前宿主不可执行/u);
+  assert.match(await page.$eval('#summary', (node) => node.textContent), /启动清理.*设计.*retry/u);
+  const blocked = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    return {
+      outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value),
+      command: generator.commandFor(generator.state()),
+      config: generator.configFor(generator.state()),
+      capabilityBlocked: generator.capabilityBlocked()
+    };
+  });
+  assert.deepEqual(blocked.outputs, ['', '', '']);
+  assert.equal(blocked.command.powershell, '');
+  assert.equal(blocked.command.cmd, '');
+  assert.deepEqual(blocked.command.args, []);
+  assert.equal(blocked.config, null);
+  assert.equal(blocked.capabilityBlocked, true);
   await page.close();
 });
 
@@ -316,8 +333,8 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
     ['{"panelWidth":900}', /320 到 800/u],
     ['{"panelTop":20000}', /0 到 10000/u],
     ['{"answerRetry":-1}', /0 到 20/u],
-    ['{"wipeRetries":21}', /超出宿主允许范围/u],
-    ['{"wipeFailurePolicy":"stop"}', /retry、background、ignore 或 abort/u]
+    ['{"wipeRetries":21}', /当前宿主不可执行/u],
+    ['{"wipeFailurePolicy":"stop"}', /当前宿主不可执行/u]
   ];
   for (const [json, pattern] of blockedCases) {
     await setField('optionsJson', `node.value = ${JSON.stringify(json)};`);
@@ -329,8 +346,9 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
 
   await setField('optionsJson', "node.value = '{\"wipeOwnedFilesOnStart\":true,\"wipeRetries\":7,\"wipeRetryDelayMs\":350,\"wipeRuntimeIntervalSec\":45}';");
-  assert.notEqual(await page.$eval('#powershell', (node) => node.value), '');
-  assert.match(await page.$eval('#json', (node) => node.value), /wipeOwnedFilesOnStart/u);
+  assert.match(await page.$eval('#status', (node) => node.textContent), /启动清理.*当前宿主不可执行/u);
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  assert.equal(await page.$eval('#json', (node) => node.value), '');
 
   // 会被独立 CLI 参数覆盖的 JSON 字段由宿主忽略，生成器不应误报。
   await setField('optionsJson', "node.value = '{\"answerThreads\":9}';");
@@ -349,7 +367,7 @@ test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号�
   await page.close();
 });
 
-test('生成器归一化快捷键别名、导出启动清理参数', async () => {
+test('生成器归一化快捷键别名，修改设计预设后仍不降级输出', async () => {
   const page = await openGenerator();
   const setField = (id, source) => page.evaluate((selector, script) => {
     const node = document.querySelector(selector);
@@ -363,23 +381,10 @@ test('生成器归一化快捷键别名、导出启动清理参数', async () =>
   await page.click('#reset');
 
   await page.click('[data-preset="startupClean"]');
-  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
-  const startupClean = await page.evaluate(() => {
-    const generator = window.__CX_PARAMETER_GENERATOR__;
-    return { args: generator.commandFor(generator.state()).args, json: JSON.parse(document.querySelector('#json').value) };
-  });
-  const cleanFromCommand = parseHostArgs(startupClean.args);
-  const cleanFromJson = applyOptionsJsonToOptions(parseHostArgs([]), startupClean.json);
-  assert.equal(cleanFromCommand.wipeOwnedFilesOnStart, true);
-  assert.equal(cleanFromCommand.wipeRetries, 5);
-  assert.equal(cleanFromCommand.wipeRetryDelayMs, 200);
-  assert.equal(cleanFromCommand.wipeRuntimeIntervalSec, 30);
-  for (const key of ['wipeOwnedFilesOnStart', 'wipeFailurePolicy', 'wipeRetries', 'wipeRetryDelayMs', 'wipeRuntimeRetry', 'wipeRuntimeIntervalSec']) {
-    assert.equal(cleanFromJson[key], cleanFromCommand[key], key);
-  }
+  assert.match(await page.$eval('#status', (node) => node.textContent), /启动清理.*当前宿主不可执行/u);
   await setField('quiet', 'node.checked = false;');
-  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /未发布/u);
-  assert.match(await page.$eval('#powershell', (node) => node.value), /--wipe-owned-files-on-start/u);
+  assert.match(await page.$eval('#status', (node) => node.textContent), /启动清理.*当前宿主不可执行/u);
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
   await page.click('[data-preset="lazy"]');
   assert.notEqual(await page.$eval('#powershell', (node) => node.value), '');
   await page.click('#reset');
@@ -399,6 +404,52 @@ test('生成器归一化快捷键别名、导出启动清理参数', async () =>
   assert.doesNotThrow(() => parseHostArgs(info.args));
   assert.match(info.summary, /运行数据/u);
   assert.match(info.summary, /启动清理/u);
+  await page.close();
+});
+
+test('生成器阻止全部表单清理请求和内联 JSON/shared settings 清理字段', async () => {
+  const page = await openGenerator();
+  const assertBlocked = async (label) => {
+    const output = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      return {
+        status: document.getElementById('status').textContent,
+        outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value),
+        args: generator.commandFor(generator.state()).args,
+        config: generator.configFor(generator.state())
+      };
+    });
+    assert.match(output.status, /启动清理.*当前宿主不可执行/u, label);
+    assert.deepEqual(output.outputs, ['', '', ''], label);
+    assert.deepEqual(output.args, [], label);
+    assert.equal(output.config, null, label);
+  };
+  for (const [id, value] of [
+    ['wipeOnStart', true], ['wipePolicy', 'background'], ['wipeRetries', '6'],
+    ['wipeDelay', '250'], ['wipeInterval', '45'], ['wipeRuntimeRetry', false]
+  ]) {
+    await page.click('#reset');
+    await page.$eval(`#${id}`, (node, next) => {
+      if (node.type === 'checkbox') node.checked = next;
+      else node.value = next;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
+    await assertBlocked(id);
+  }
+  for (const value of [
+    { wipeOwnedFilesOnStart: true }, { wipeFailurePolicy: 'retry' }, { wipeRetries: 5 },
+    { wipeRetryDelayMs: 200 }, { wipeRuntimeRetry: false }, { wipeRuntimeIntervalSec: 30 },
+    { settings: { 'common.settings.windows-wipe-owned-files-on-start': true } },
+    { settings: { 'common.settings.windows-wipe-runtime-retry': false } },
+    { settings: { 'common.settings.windows-wipe-retries': 5 } }
+  ]) {
+    await page.click('#reset');
+    await page.$eval('#optionsJson', (node, json) => {
+      node.value = json;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, JSON.stringify(value));
+    await assertBlocked(JSON.stringify(value));
+  }
   await page.close();
 });
 
