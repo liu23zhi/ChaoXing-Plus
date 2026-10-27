@@ -7,9 +7,9 @@
 
 typedef struct SESSION_CONTEXT {
     BOOL used, bootstrapped, ready, disabled, bundled;
-    BOOL bootstrapQueued, bundleQueued, ensure;
+    BOOL bootstrapQueued, bundleQueued, configQueued, ensure;
     int id;
-    DWORD generation, bootstrapToken, bundleToken;
+    DWORD generation, bootstrapToken, bundleToken, configToken;
     char frameId[SESSION_ID_CAP];
     char origin[CX_SESSION_URL_CAP];
 } SESSION_CONTEXT;
@@ -119,8 +119,8 @@ static BOOL session_bundle_allowed(const CX_SESSION *session, const SESSION_CONT
 static void session_reset_context(CX_SESSION *session, SESSION_CONTEXT *context) {
     context->generation = session_serial(&session->generation);
     context->bootstrapped = FALSE; context->bundled = FALSE; context->ready = FALSE; context->disabled = FALSE;
-    context->bootstrapQueued = TRUE; context->bundleQueued = FALSE; context->ensure = FALSE;
-    context->bootstrapToken = 0; context->bundleToken = 0;
+    context->bootstrapQueued = TRUE; context->bundleQueued = FALSE; context->configQueued = FALSE; context->ensure = FALSE;
+    context->bootstrapToken = 0; context->bundleToken = 0; context->configToken = 0;
 }
 static BOOL session_set_frame(CX_SESSION *session, const char *id, const char *parent, const char *url) {
     DWORD i;
@@ -187,6 +187,33 @@ void cx_session_close(CX_SESSION *session) {
 }
 void cx_session_free(CX_SESSION *session) { if (session) HeapFree(GetProcessHeap(), 0, session); }
 const CX_SESSION_STATS *cx_session_stats(const CX_SESSION *session) { return session ? &session->stats : NULL; }
+void cx_session_update_config(CX_SESSION *session, BOOL extensionEnabled) {
+    DWORD i;
+    SESSION_CONTEXT *context;
+    if (!session || session->stats.closed) return;
+    session->extensionEnabled = extensionEnabled;
+    for (i = 0; i <= CX_SESSION_MAX_CONTEXTS; ++i) {
+        context = i < CX_SESSION_MAX_CONTEXTS ? &session->contexts[i] : &session->fallback;
+        if (!context->used) continue;
+        context->disabled = FALSE;
+        /* A bootstrap already sent may still contain the previous snapshot. */
+        if (context->bootstrapped || context->bootstrapToken) {
+            context->configQueued = TRUE;
+            context->configToken = 0;
+        }
+        if (extensionEnabled && context->ready && !context->bundled && !context->bundleToken)
+            context->bundleQueued = TRUE;
+    }
+}
+BOOL cx_session_can_sync_config(const CX_SESSION *session, int contextId) {
+    const SESSION_CONTEXT *context = NULL;
+    DWORD i;
+    if (!session || session->stats.closed || contextId < 0) return FALSE;
+    if (contextId == 0) context = &session->fallback;
+    else for (i = 0; i < CX_SESSION_MAX_CONTEXTS; ++i)
+        if (session->contexts[i].used && session->contexts[i].id == contextId) { context = &session->contexts[i]; break; }
+    return context && context->used && context->bootstrapped;
+}
 
 static void session_page_message(CX_SESSION *session, const char *json, const JT *tokens, int params) {
     SESSION_CONTEXT *context;
@@ -331,12 +358,17 @@ BOOL cx_session_next(CX_SESSION *session, CX_SESSION_TASK *task) {
     for (i = 0; i <= CX_SESSION_MAX_CONTEXTS; ++i) {
         context = i < CX_SESSION_MAX_CONTEXTS ? &session->contexts[i] : &session->fallback;
         if (!context->used) continue;
-        if (context->bootstrapQueued && !context->bootstrapToken && !context->bundleToken) {
+        if (context->bootstrapQueued && !context->bootstrapToken && !context->bundleToken && !context->configToken) {
             task->type = CX_SESSION_TASK_BOOTSTRAP;
             context->bootstrapQueued = FALSE;
             context->bootstrapToken = session_serial(&session->token);
             task->token = context->bootstrapToken;
-        } else if (context->bundleQueued && context->bootstrapped && context->ready && !context->bootstrapToken && !context->bundleToken) {
+        } else if (context->configQueued && context->bootstrapped && !context->bootstrapToken && !context->bundleToken && !context->configToken) {
+            task->type = CX_SESSION_TASK_CONFIG;
+            context->configQueued = FALSE;
+            context->configToken = session_serial(&session->token);
+            task->token = context->configToken;
+        } else if (context->bundleQueued && context->bootstrapped && context->ready && !context->bootstrapToken && !context->bundleToken && !context->configToken && !context->configQueued) {
             context->bundleQueued = FALSE;
             if (!session_bundle_allowed(session, context)) continue;
             task->type = CX_SESSION_TASK_BUNDLE;
@@ -360,7 +392,8 @@ BOOL cx_session_task_active(const CX_SESSION *session, const CX_SESSION_TASK *ta
         if (session->contexts[i].used && session->contexts[i].id == task->contextId) { context = &session->contexts[i]; break; }
     if (!context || !context->used || context->generation != task->generation) return FALSE;
     return task->type == CX_SESSION_TASK_BOOTSTRAP ? context->bootstrapToken == task->token
-        : task->type == CX_SESSION_TASK_BUNDLE && context->bundleToken == task->token;
+        : task->type == CX_SESSION_TASK_BUNDLE ? context->bundleToken == task->token
+        : task->type == CX_SESSION_TASK_CONFIG && context->configToken == task->token;
 }
 BOOL cx_session_complete(CX_SESSION *session, const CX_SESSION_TASK *task, BOOL success) {
     SESSION_CONTEXT *context;
@@ -369,9 +402,11 @@ BOOL cx_session_complete(CX_SESSION *session, const CX_SESSION_TASK *task, BOOL 
     if (task->type == CX_SESSION_TASK_BOOTSTRAP) {
         context->bootstrapToken = 0;
         if (success) { context->bootstrapped = TRUE; ++session->stats.bootstraps; }
-    } else {
+    } else if (task->type == CX_SESSION_TASK_BUNDLE) {
         context->bundleToken = 0;
         if (success) { context->bundled = TRUE; context->bundleQueued = FALSE; context->ensure = FALSE; ++session->stats.bundles; }
+    } else {
+        context->configToken = 0;
     }
     if (!success) ++session->stats.errors;
     return TRUE;

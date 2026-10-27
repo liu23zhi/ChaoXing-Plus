@@ -88,6 +88,8 @@ static void run_messages(void) {
     feed(session, "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"id\":2,\"origin\":\"https://a.chaoxing.com\",\"auxData\":{\"isDefault\":false}}}}");
     feed(session, "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"id\":3,\"origin\":\"https://a.chaoxing.com\"}}}");
     check(cx_session_stats(session)->contexts == 0 && !cx_session_next(session, &task), "isolated or unclassified worlds are ignored");
+    check(!cx_session_can_sync_config(session, 2) && !cx_session_can_sync_config(session, 3),
+        "isolated and unclassified worlds cannot sync configuration");
     context(session);
     check(cx_session_next(session, &task) && cx_session_complete(session, &task, TRUE), "message fixture bootstraps");
     feed(session, "{\"method\":\"Runtime.consoleAPICalled\",\"params\":{\"executionContextId\":1,\"args\":[{\"type\":\"string\",\"value\":\"{\\\"kind\\\":\\\"ready\\\"}\"}]}}");
@@ -161,6 +163,92 @@ static void run_capacity(void) {
     check(accepted && cx_session_stats(session)->contexts == CX_SESSION_MAX_CONTEXTS && cx_session_stats(session)->errors == 1, "context capacity is bounded without overwriting live generations");
     cx_session_free(session);
 }
+static void run_config_updates(void) {
+    CX_SESSION *session = cx_session_create("https://a.chaoxing.com/exam", TRUE, FALSE);
+    CX_SESSION_TASK boot = {0}, config = {0}, bundle = {0}, replacement = {0};
+    DWORD errors;
+    context(session);
+    check(!cx_session_can_sync_config(session, 1) && !cx_session_can_sync_config(session, 0)
+        && !cx_session_can_sync_config(session, 123), "configuration sync rejects unknown and unbootstrapped contexts");
+    cx_session_update_config(session, FALSE);
+    check(cx_session_next(session, &boot) && boot.type == CX_SESSION_TASK_BOOTSTRAP, "configuration before bootstrap does not create a redundant config task");
+    cx_session_update_config(session, FALSE);
+    check(!cx_session_next(session, &config), "configuration waits for an in-flight bootstrap acknowledgement");
+    check(cx_session_complete(session, &boot, TRUE) && cx_session_can_sync_config(session, 1), "bootstrapped default context can sync shared configuration");
+    check(cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG
+        && cx_session_complete(session, &config, TRUE), "configuration changed during bootstrap is delivered after its acknowledgement");
+    feed(session, "{\"method\":\"Runtime.consoleAPICalled\",\"params\":{\"executionContextId\":1,\"args\":[{\"type\":\"string\",\"value\":\"__CX_WIN_MSG__{\\\"kind\\\":\\\"disabled\\\"}\"}]}}");
+    ready(session);
+    check(!cx_session_next(session, &bundle), "initially disabled context retains readiness without injecting a bundle");
+    cx_session_update_config(session, TRUE);
+    check(cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG
+        && !cx_session_next(session, &bundle), "reenabling a disabled context delivers configuration before business injection");
+    check(cx_session_complete(session, &config, TRUE)
+        && cx_session_next(session, &bundle) && bundle.type == CX_SESSION_TASK_BUNDLE,
+        "reenabling clears the disabled state and resumes a ready bundle");
+    cx_session_update_config(session, FALSE);
+    check(!cx_session_next(session, &replacement), "configuration does not reenter an in-flight bundle");
+    check(cx_session_complete(session, &bundle, TRUE)
+        && cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG
+        && cx_session_complete(session, &config, TRUE), "configuration follows a previously started bundle without repeating it");
+    cx_session_update_config(session, TRUE);
+    check(cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG
+        && cx_session_complete(session, &config, TRUE) && !cx_session_next(session, &bundle),
+        "reenabling an already loaded context never schedules another bundle");
+    check(cx_session_stats(session)->bootstraps == 1 && cx_session_stats(session)->bundles == 1,
+        "configuration acknowledgements do not inflate injection statistics");
+    cx_session_update_config(session, TRUE);
+    check(cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG, "live context schedules a configuration task");
+    cx_session_update_config(session, FALSE);
+    cx_session_update_config(session, TRUE);
+    check(!cx_session_task_active(session, &config) && !cx_session_complete(session, &config, TRUE),
+        "new configuration invalidates an older in-flight configuration token");
+    check(cx_session_next(session, &replacement) && replacement.type == CX_SESSION_TASK_CONFIG
+        && replacement.token != config.token && !cx_session_next(session, &config),
+        "repeated configuration changes coalesce into one replacement task");
+    errors = cx_session_stats(session)->errors;
+    check(cx_session_complete(session, &replacement, FALSE)
+        && !cx_session_complete(session, &replacement, FALSE)
+        && cx_session_stats(session)->errors == errors + 1 && !cx_session_next(session, &config),
+        "failed configuration is counted once without an automatic retry loop");
+    cx_session_update_config(session, FALSE);
+    check(cx_session_next(session, &config), "navigation configuration fixture has an in-flight task");
+    feed(session, "{\"method\":\"Page.frameNavigated\",\"params\":{\"frame\":{\"id\":\"top\",\"url\":\"https://a.chaoxing.com/new\"}}}");
+    check(!cx_session_can_sync_config(session, 1) && !cx_session_task_active(session, &config)
+        && !cx_session_complete(session, &config, TRUE), "navigation rejects stale configuration messages and acknowledgements");
+    check(cx_session_next(session, &boot) && boot.type == CX_SESSION_TASK_BOOTSTRAP
+        && cx_session_complete(session, &boot, TRUE), "replacement document bootstraps with the current configuration");
+    ready(session);
+    check(!cx_session_next(session, &bundle), "disabled configuration prevents a replacement document bundle");
+    cx_session_update_config(session, TRUE);
+    check(cx_session_next(session, &config) && cx_session_complete(session, &config, TRUE)
+        && cx_session_next(session, &bundle) && bundle.type == CX_SESSION_TASK_BUNDLE,
+        "enabled configuration resumes replacement document readiness");
+    feed(session, "{\"method\":\"Runtime.executionContextDestroyed\",\"params\":{\"executionContextId\":1}}");
+    check(!cx_session_can_sync_config(session, 1), "destroyed contexts cannot sync configuration");
+    cx_session_close(session);
+    cx_session_update_config(session, TRUE);
+    check(!cx_session_can_sync_config(session, 1) && !cx_session_next(session, &config), "closed sessions ignore configuration updates");
+    cx_session_free(session);
+}
+static void run_config_fallback(void) {
+    CX_SESSION *session = cx_session_create("https://a.chaoxing.com/exam", TRUE, FALSE);
+    CX_SESSION_TASK boot = {0}, config = {0}, bundle = {0};
+    check(!cx_session_can_sync_config(session, 0), "synthetic context is rejected until a real fallback was bootstrapped");
+    cx_session_request_top_ensure(session);
+    check(cx_session_next(session, &boot) && cx_session_complete(session, &boot, TRUE)
+        && cx_session_can_sync_config(session, 0), "bootstrapped fallback can sync configuration");
+    check(!cx_session_next(session, &bundle), "disabled fallback postpones its bundle");
+    cx_session_update_config(session, TRUE);
+    check(cx_session_next(session, &config) && config.type == CX_SESSION_TASK_CONFIG && config.contextId == 0
+        && cx_session_complete(session, &config, TRUE), "fallback receives current configuration through a queued task");
+    check(cx_session_next(session, &bundle) && bundle.type == CX_SESSION_TASK_BUNDLE && bundle.contextId == 0,
+        "reenabled fallback resumes the business bundle");
+    context(session);
+    check(!cx_session_can_sync_config(session, 0) && !cx_session_can_sync_config(session, 1),
+        "default context registration replaces fallback configuration authority");
+    cx_session_free(session);
+}
 void __stdcall SessionTestMain(void) {
     run_lifecycle();
     run_filter("https://chaoxing.com/exam", TRUE, TRUE, TRUE);
@@ -177,6 +265,8 @@ void __stdcall SessionTestMain(void) {
     run_detach();
     run_failures();
     run_capacity();
+    run_config_updates();
+    run_config_fallback();
     output(failures ? "NATIVE SESSION TESTS FAIL\n" : "NATIVE SESSION TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);
 }

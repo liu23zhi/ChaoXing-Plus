@@ -14,7 +14,8 @@ typedef struct CX_SESSION CX_SESSION;
 
 typedef enum CX_SESSION_TASK_TYPE {
     CX_SESSION_TASK_BOOTSTRAP = 1,
-    CX_SESSION_TASK_BUNDLE = 2
+    CX_SESSION_TASK_BUNDLE = 2,
+    CX_SESSION_TASK_CONFIG = 3
 } CX_SESSION_TASK_TYPE;
 
 typedef struct CX_SESSION_TASK {
@@ -43,6 +44,9 @@ const CX_SESSION_STATS *cx_session_stats(const CX_SESSION *session);
 BOOL cx_session_feed(CX_SESSION *session, const char *json, DWORD length);
 BOOL cx_session_frame_tree(CX_SESSION *session, const char *json, DWORD length);
 void cx_session_request_top_ensure(CX_SESSION *session);
+/* Config tasks read the host's latest snapshot; superseded task tokens expire. */
+void cx_session_update_config(CX_SESSION *session, BOOL extensionEnabled);
+BOOL cx_session_can_sync_config(const CX_SESSION *session, int contextId);
 
 /* next marks a task in flight; complete rejects stale/destroyed context tokens. */
 BOOL cx_session_next(CX_SESSION *session, CX_SESSION_TASK *task);
