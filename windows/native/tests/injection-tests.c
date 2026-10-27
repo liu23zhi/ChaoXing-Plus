@@ -1,4 +1,10 @@
 /* Compile the actual host injection code against a deterministic CDP transport. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+DWORD WINAPI test_tick_count(void);
+#define GetTickCount test_tick_count
+#define proc_port_owner test_port_owner
+#define proc_alive test_proc_alive
 #define WinMain HostWinMain
 #define WinMainCRTStartup HostMainCRTStartup
 #include "../host.c"
@@ -10,6 +16,18 @@ static char methods[33];
 static char response[256];
 static DWORD scriptReplyMode;
 static BOOL emitRequest;
+static BOOL targetFixture, ownerAllowed, mockClientAlive;
+static DWORD ownerChecks, httpCalls, openCalls, closeCalls, fakeTick;
+
+DWORD WINAPI test_tick_count(void) { return fakeTick; }
+BOOL test_proc_alive(DWORD pid) { (void)pid; return mockClientAlive; }
+BOOL test_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *error, DWORD cap) {
+    (void)port; (void)rootPid;
+    ++ownerChecks;
+    *owner = ownerAllowed ? 123 : 0;
+    if (!ownerAllowed) h_error(error, cap, L"fixture listener ownership changed");
+    return ownerAllowed;
+}
 
 static void check(const char *name, BOOL passed) {
     h_print_utf8(passed ? "PASS " : "FAIL ");
@@ -31,9 +49,9 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length, WCHAR *error, 
     id = (DWORD)jint(text, tokens, jkey(text, tokens, 0, "id"), -1);
     params = jkey(text, tokens, 0, "params");
     token = jkey(text, tokens, params, "expression");
-    if (!emitRequest && !jwstr(text, tokens, token, expression, 1024)) return FALSE;
+    if (!emitRequest && !targetFixture && !jwstr(text, tokens, token, expression, 1024)) return FALSE;
     ids[calls] = id;
-    methods[calls] = !emitRequest && expression[0] == L'(' ? 'S' : 'R';
+    methods[calls] = !emitRequest && !targetFixture && expression[0] == L'(' ? 'S' : 'R';
     methods[++calls] = 0;
     response[at++] = '{'; response[at++] = '"'; response[at++] = 'i';
     response[at++] = 'd'; response[at++] = '"'; response[at++] = ':';
@@ -41,6 +59,11 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length, WCHAR *error, 
     do { digits[n++] = (char)('0' + value % 10); value /= 10; } while (value);
     while (n) response[at++] = digits[--n];
     tail = calls <= failures ? ",\"error\":{\"message\":\"forced rejection\"}}" : ",\"result\":{\"result\":{\"type\":\"boolean\",\"value\":true}}}";
+    if (targetFixture) {
+        tail = jeq(text, tokens, jkey(text, tokens, 0, "method"), "Page.getFrameTree")
+            ? ",\"result\":{\"frameTree\":{\"frame\":{\"id\":\"top\",\"url\":\"https://a.chaoxing.com/exam-ans/\"}}}}"
+            : ",\"result\":{}}";
+    }
     if (calls > failures && methods[calls - 1] == 'S') {
         if (scriptReplyMode == 1) tail = ",\"result\":{\"result\":{\"type\":\"boolean\",\"value\":false}}}";
         else if (scriptReplyMode == 2) tail = ",\"result\":{\"result\":{\"type\":\"undefined\"}}}";
@@ -60,14 +83,68 @@ int net_ws_read(NET_WS *ws, char **text, DWORD *length, WCHAR *error, DWORD cap)
     CopyMemory(*text, response, *length + 1);
     return 1;
 }
+int net_ws_read_timeout(NET_WS *ws, char **text, DWORD *length, DWORD timeout, WCHAR *error, DWORD cap) {
+    (void)timeout;
+    return net_ws_read(ws, text, length, error, cap);
+}
 
 void net_free(void *memory) { HeapFree(GetProcessHeap(), 0, memory); }
 NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD cap) {
-    (void)port; (void)url; (void)error; (void)cap; return NULL;
+    (void)port; (void)url; (void)error; (void)cap;
+    ++openCalls;
+    return targetFixture ? (NET_WS *)1 : NULL;
 }
-void net_ws_close(NET_WS *ws) { (void)ws; }
+void net_ws_close(NET_WS *ws) { (void)ws; ++closeCalls; }
 BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length, WCHAR *error, DWORD cap) {
-    (void)port; (void)path; (void)body; (void)length; (void)error; (void)cap; return FALSE;
+    const char fixture[] = "[{\"id\":\"owned-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/owned-page\"}]";
+    (void)port; (void)path; (void)error; (void)cap;
+    ++httpCalls;
+    if (!targetFixture) return FALSE;
+    *length = sizeof(fixture) - 1;
+    *body = (char *)HeapAlloc(GetProcessHeap(), 0, sizeof(fixture));
+    if (!*body) return FALSE;
+    CopyMemory(*body, fixture, sizeof(fixture));
+    return TRUE;
+}
+
+static void test_owned_target_refresh(void) {
+    H_NATIVE_PAGE *pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
+    WCHAR error[HOST_ERROR_CAP];
+    DWORD beforeHttp, beforeOpen, beforeClose, beforeOwner;
+    BOOL refreshed;
+    if (!pages) { check("ownership fixture allocation", FALSE); return; }
+    cx_options_init(&h_base_options);
+    h_base_options.quiet = TRUE;
+    targetFixture = TRUE; ownerAllowed = TRUE; mockClientAlive = TRUE;
+    ownerChecks = httpCalls = openCalls = closeCalls = calls = failures = 0;
+    h_client_pid = 123; h_duration = 0; h_task_pending = FALSE; fakeTick = 1000;
+    refreshed = h_targets_refresh(pages, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("initial verified ownership opens the target", refreshed && httpCalls == 1 && openCalls == 1 && pages[0].ws != NULL);
+    check("target discovery and opening each verify ownership", ownerChecks >= 2);
+    beforeHttp = httpCalls; beforeOpen = openCalls; beforeClose = closeCalls;
+    ownerAllowed = FALSE;
+    refreshed = h_targets_refresh(pages, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("ownership change rejects refresh before any HTTP or WS", !refreshed && httpCalls == beforeHttp && openCalls == beforeOpen);
+    check("ownership change closes the previous page session", pages[0].ws == NULL && pages[0].state == NULL && closeCalls == beforeClose + 1);
+    h_page_close(&pages[0]);
+    h_zero(&pages[0], sizeof(pages[0]));
+    beforeOpen = openCalls;
+    check("direct page reconnect rejects changed ownership before WS", !h_page_open(&pages[0], 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP) && openCalls == beforeOpen);
+    h_page_close(&pages[0]);
+    h_zero(&pages[0], sizeof(pages[0]));
+    h_client_pid = 0; h_base_options.attachPortSet = TRUE;
+    beforeOwner = ownerChecks; beforeOpen = openCalls;
+    refreshed = h_targets_refresh(pages, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("explicit attach mode permits the debug ownership exception", refreshed && ownerChecks == beforeOwner && openCalls == beforeOpen + 1 && pages[0].ws != NULL);
+    h_page_close(&pages[0]);
+    h_zero(&pages[0], sizeof(pages[0]));
+    h_client_pid = 123; h_base_options.attachPortSet = FALSE; ownerAllowed = TRUE;
+    fakeTick = 0x90000000UL; beforeOpen = openCalls;
+    refreshed = h_targets_refresh(pages, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("zero retry deadline allows first connection with high TickCount", refreshed && openCalls == beforeOpen + 1 && pages[0].ws != NULL);
+    h_page_close(&pages[0]);
+    HeapFree(GetProcessHeap(), 0, pages);
+    targetFixture = FALSE; h_client_pid = 0; h_current_page = NULL; h_task_pending = FALSE;
 }
 
 static BOOL run_replies(const WCHAR *strategy, DWORD retries, DWORD failCount, DWORD replyMode, DWORD *nextId) {
@@ -131,6 +208,7 @@ void __stdcall InjectionTestMain(void) {
     check("script missing execution result falls back to runtime", run_replies(L"script", 0, 0, 2, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     check("script exception falls back to runtime", run_replies(L"script", 0, 0, 3, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
+    test_owned_target_refresh();
     {
         WCHAR error[HOST_ERROR_CAP];
         DWORD before = calls, i;

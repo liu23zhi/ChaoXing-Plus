@@ -339,11 +339,15 @@ static void d_root_list_free(D_ROOT_LIST *list) {
 }
 
 static void d_env_root(D_ROOT_LIST *common, const WCHAR *name, const WCHAR *suffix) {
-    WCHAR value[CX_DISCOVERY_MAX_PATH];
+    WCHAR *value;
     WCHAR *root;
-    DWORD length = GetEnvironmentVariableW(name, value, CX_DISCOVERY_MAX_PATH);
-    if (!length || length >= CX_DISCOVERY_MAX_PATH) return;
+    DWORD length;
+    value = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CX_DISCOVERY_MAX_PATH * sizeof(WCHAR));
+    if (!value) return;
+    length = GetEnvironmentVariableW(name, value, CX_DISCOVERY_MAX_PATH);
+    if (!length || length >= CX_DISCOVERY_MAX_PATH) { HeapFree(GetProcessHeap(), 0, value); return; }
     root = suffix ? d_join(value, suffix) : d_dup(value);
+    HeapFree(GetProcessHeap(), 0, value);
     if (root) { d_root_list_add(common, root); HeapFree(GetProcessHeap(), 0, root); }
 }
 

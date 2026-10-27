@@ -42,7 +42,7 @@ $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
 & $resourceCompiler /nologo ('/i' + $scriptRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $scriptRoot))
-$sources = @('memory','json','net','process','discovery','options','assets','host')
+$sources = @('memory','json','net','process','discovery','options','assets','selection','session','host')
 foreach ($source in $sources) {
     & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $scriptRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
@@ -52,27 +52,30 @@ try {
     $env:Path = (Join-Path $kitRoot ('bin\' + $sdk.Name + '\x64')) + ';' + $originalPath
     $objects = $sources | ForEach-Object { Join-Path $build ($_ + '.obj') }
     $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
-    & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+    & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
     if ($BuildTests) {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
-        $testObjects = @('memory','json','process','discovery','options','assets') | ForEach-Object { Join-Path $build ($_ + '.obj') }
+        $testObjects = @('memory','json','process','discovery','options','assets','selection','session') | ForEach-Object { Join-Path $build ($_ + '.obj') }
         $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' }
-        & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+        & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }
         foreach ($test in @(
             @{ Name = 'assets-tests'; Entry = 'AssetTestMain'; Objects = @('memory','assets'); Resources = @($resourceObject) },
             @{ Name = 'options-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','options'); Resources = @() },
-            @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() }
+            @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() },
+            @{ Name = 'session-tests'; Entry = 'SessionTestMain'; Objects = @('memory','json','session'); Resources = @() },
+            @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @() },
+            @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() }
         )) {
             $testObject = Join-Path $build ($test.Name + '.obj')
             & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot ('tests\' + $test.Name + '.c'))
             if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($test.Name)" }
-            $testObjects = $test.Objects | ForEach-Object { Join-Path $build ($_ + '.obj') }
+            $testObjects = @($test.Objects | ForEach-Object { Join-Path $build ($_ + '.obj') })
             $testResources = $test.Resources
-            & $linker @testArgs ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib shell32.lib
+            & $linker @testArgs ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
             if ($LASTEXITCODE -ne 0) { throw "Native test link failed: $($test.Name)" }
         }
     }
