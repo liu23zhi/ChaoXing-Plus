@@ -7,12 +7,14 @@
 #include "process.h"
 #include "net.h"
 #include "json.h"
+#include "assets.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
 #define HOST_URL_CAP 2048
 #define HOST_SOURCE_CAP (8UL * 1024UL * 1024UL)
 #define HOST_COMMAND_CAP (8UL * 1024UL * 1024UL)
+#define HOST_EVAL_SOURCE_CAP ((HOST_COMMAND_CAP - 1024UL) / 6UL)
 #define HOST_REPLY_TOKENS 1024
 
 /* Keep the large fixed-size option/path buffers out of the 1 MiB Windows
@@ -33,14 +35,6 @@ static BOOL h_copy(WCHAR *out, DWORD cap, const WCHAR *in) {
     DWORD i = 0; if (!out || !cap || !in) return FALSE;
     while (in[i] && i + 1 < cap) { out[i] = in[i]; ++i; }
     out[i] = 0; return in[i] == 0;
-}
-static BOOL h_append(WCHAR *out, DWORD cap, const WCHAR *in) {
-    DWORD at = (DWORD)h_wlen(out), i = 0; if (!out || !in || at >= cap) return FALSE;
-    while (in[i] && at + i + 1 < cap) { out[at + i] = in[i]; ++i; }
-    out[at + i] = 0; return in[i] == 0;
-}
-static BOOL h_append_char(WCHAR *out, DWORD cap, WCHAR c) {
-    DWORD n = (DWORD)h_wlen(out); if (n + 1 >= cap) return FALSE; out[n] = c; out[n + 1] = 0; return TRUE;
 }
 static void h_error(WCHAR *error, DWORD cap, const WCHAR *text) { if (error && cap) lstrcpynW(error, text, (int)cap); }
 static void h_print(const WCHAR *text) {
@@ -81,20 +75,6 @@ static BOOL h_append_bytes(char *out, DWORD cap, DWORD *at, const char *text, DW
     if (!out || !at || !text || *at >= cap || length >= cap - *at) return FALSE;
     CopyMemory(out + *at, text, length); *at += length; out[*at] = 0; return TRUE;
 }
-static BOOL h_file_read(const WCHAR *path, char **data, DWORD *length, WCHAR *error, DWORD cap) {
-    HANDLE f; DWORD size, got; char *buf;
-    if (!path || !data || !length) return FALSE;
-    *data = NULL; *length = 0;
-    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) { h_error(error, cap, L"cannot open native asset"); return FALSE; }
-    size = GetFileSize(f, NULL);
-    if (size == INVALID_FILE_SIZE || size >= HOST_SOURCE_CAP) { CloseHandle(f); h_error(error, cap, L"native asset is too large"); return FALSE; }
-    buf = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size + 1);
-    if (!buf) { CloseHandle(f); h_error(error, cap, L"out of memory reading native asset"); return FALSE; }
-    got = 0;
-    if (!ReadFile(f, buf, size, &got, NULL) || got != size) { HeapFree(GetProcessHeap(), 0, buf); CloseHandle(f); h_error(error, cap, L"cannot read native asset"); return FALSE; }
-    CloseHandle(f); buf[size] = 0; *data = buf; *length = size; return TRUE;
-}
 static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWORD length) {
     static const char hex[] = "0123456789abcdef";
     DWORD i, need; unsigned char c;
@@ -112,11 +92,6 @@ static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWOR
     }
     if (*at >= cap) return FALSE; out[(*at)++] = '"'; out[*at] = 0; return TRUE;
 }
-static BOOL h_make_path(WCHAR *out, DWORD cap, const WCHAR *dir, const WCHAR *name) {
-    if (!h_copy(out, cap, dir)) return FALSE;
-    if (out[h_wlen(out) - 1] != L'\\') if (!h_append_char(out, cap, L'\\')) return FALSE;
-    return h_append(out, cap, name);
-}
 static BOOL h_find_websocket(const char *body, DWORD length, char *url, DWORD cap) {
     const char key[] = "\"webSocketDebuggerUrl\""; DWORD i, start, end, k = 0;
     if (!body || !url || cap < 2) return FALSE;
@@ -128,9 +103,9 @@ static BOOL h_find_websocket(const char *body, DWORD length, char *url, DWORD ca
     end = i; if (i >= length || end <= start || end - start + 1 > cap) return FALSE;
     for (i = start; i < end; ++i) url[i - start] = body[i]; url[end - start] = 0; return TRUE;
 }
-static BOOL h_send_eval(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, WCHAR *error, DWORD errorCap) {
+static BOOL h_send_eval_checked(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, BOOL requireTrue, WCHAR *error, DWORD errorCap) {
     char *command, *reply = NULL; JT *tokens; DWORD at = 0, replyLength = 0, commandCap, deadline; int readResult, count, idToken, resultToken, exceptionToken; char idText[16]; DWORD n = 0; unsigned int v = id;
-    if (!expression || expressionLength > (HOST_COMMAND_CAP - 1024UL) / 6UL) { h_error(error, errorCap, L"CDP expression exceeds native limit"); return FALSE; }
+    if (!expression || expressionLength > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"CDP expression exceeds native limit"); return FALSE; }
     commandCap = expressionLength * 6UL + 1024UL;
     if (commandCap > HOST_COMMAND_CAP) commandCap = HOST_COMMAND_CAP;
     command = (char *)HeapAlloc(GetProcessHeap(), 0, commandCap); if (!command) { h_error(error, errorCap, L"out of memory building CDP command"); return FALSE; }
@@ -154,14 +129,27 @@ static BOOL h_send_eval(NET_WS *ws, DWORD id, const char *expression, DWORD expr
         resultToken = jkey(reply, tokens, 0, "result");
         exceptionToken = resultToken >= 0 ? jkey(reply, tokens, resultToken, "exceptionDetails") : -1;
         if (jkey(reply, tokens, 0, "error") >= 0 || exceptionToken >= 0 || resultToken < 0) { h_error(error, errorCap, L"CDP Runtime.evaluate returned an exception"); net_free(reply); HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
+        if (requireTrue) {
+            int remote = jkey(reply, tokens, resultToken, "result");
+            int type = remote >= 0 ? jkey(reply, tokens, remote, "type") : -1;
+            int value = remote >= 0 ? jkey(reply, tokens, remote, "value") : -1;
+            if (!jeq(reply, tokens, type, "boolean") || value < 0 || tokens[value].type != 'p' || !jeq(reply, tokens, value, "true")) {
+                h_error(error, errorCap, L"DOM script did not acknowledge execution (CSP, syntax or runtime failure)");
+                net_free(reply); HeapFree(GetProcessHeap(), 0, tokens); return FALSE;
+            }
+        }
         net_free(reply); HeapFree(GetProcessHeap(), 0, tokens); return TRUE;
     }
 command_error:
     HeapFree(GetProcessHeap(), 0, command); h_error(error, errorCap, L"CDP command exceeds native limit"); return FALSE;
 }
+static BOOL h_send_eval(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, WCHAR *error, DWORD errorCap) {
+    return h_send_eval_checked(ws, id, expression, expressionLength, FALSE, error, errorCap);
+}
 static BOOL h_inject_source(NET_WS *ws, DWORD id, const char *source, DWORD length, WCHAR *error, DWORD errorCap) {
-    static const char pre[] = "(function(){var s=document.createElement('script');s.textContent=";
-    static const char post[] = ";var p=document.head||document.documentElement||document.body;if(!p){return false;}p.appendChild(s);if(s.parentNode){s.parentNode.removeChild(s);}return true;})()";
+    static const char pre[] = "(function(){var marker='__CX_WIN_NATIVE_SCRIPT_'+Date.now()+'_'+Math.random().toString(36).slice(2);var source=";
+    /* Appending an inline script can succeed even when CSP or a JS error stops it. */
+    static const char post[] = ";var s=document.createElement('script');var p=document.head||document.documentElement||document.body;if(!p){return false;}s.textContent=source+'\\n;window['+JSON.stringify(marker)+']=true;\\n';try{p.appendChild(s);return window[marker]===true;}finally{if(s.parentNode){s.parentNode.removeChild(s);}try{delete window[marker];}catch(e){window[marker]=undefined;}}})()";
     DWORD preLength = sizeof(pre) - 1, postLength = sizeof(post) - 1, total; char *expr; DWORD at = 0; BOOL ok;
     if (length > (HOST_COMMAND_CAP - preLength - postLength - 2) / 6UL) { h_error(error, errorCap, L"injection source is too large"); return FALSE; }
     total = preLength + postLength + length * 6UL + 2;
@@ -169,7 +157,7 @@ static BOOL h_inject_source(NET_WS *ws, DWORD id, const char *source, DWORD leng
     while (at < preLength) { expr[at] = pre[at]; ++at; }
     if (!h_json_quote(expr, total, &at, source, length)) { HeapFree(GetProcessHeap(), 0, expr); h_error(error, errorCap, L"injection source is too large"); return FALSE; }
     { DWORD i = 0; while (i < postLength) expr[at++] = post[i++]; }
-    expr[at] = 0; ok = h_send_eval(ws, id, expr, at, error, errorCap); HeapFree(GetProcessHeap(), 0, expr); return ok;
+    expr[at] = 0; ok = h_send_eval_checked(ws, id, expr, at, TRUE, error, errorCap); HeapFree(GetProcessHeap(), 0, expr); return ok;
 }
 static BOOL h_inject_runtime(NET_WS *ws, DWORD id, const char *source, DWORD length, WCHAR *error, DWORD errorCap) {
     return h_send_eval(ws, id, source, length, error, errorCap);
@@ -201,6 +189,44 @@ static BOOL h_inject_asset(NET_WS *ws, DWORD *nextId, const WCHAR *strategy, DWO
     h_copy(error, errorCap, lastError);
     return FALSE;
 }
+static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *options,
+                              const char *style, DWORD styleLength, BOOL preflight, WCHAR *error, DWORD errorCap) {
+    const char prefix[] = "window.__CX_WIN_CONFIG_JSON__=";
+    const char middle[] = ";window.__CX_WIN_INSTANCE__=\"native\";window.__CX_WIN_STYLE_TEXT__=";
+    char *config = NULL, *expression = NULL;
+    DWORD configLength = 0, capacity, at = 0;
+    BOOL ok = FALSE;
+    config = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
+    if (!config || !cx_options_effective_settings_json_utf8(options, config, CX_OPTIONS_JSON_CAP, &configLength)) {
+        h_error(error, errorCap, L"cannot serialize native settings"); goto done;
+    }
+    if (!style || styleLength > (HOST_SOURCE_CAP - configLength - 256) / 6) {
+        h_error(error, errorCap, L"native style exceeds its size limit"); goto done;
+    }
+    capacity = configLength + styleLength * 6 + 256;
+    expression = (char *)HeapAlloc(GetProcessHeap(), 0, capacity);
+    if (!expression) { h_error(error, errorCap, L"out of memory setting native config"); goto done; }
+    if (!h_append_bytes(expression, capacity, &at, prefix, sizeof(prefix) - 1)
+        || !h_append_bytes(expression, capacity, &at, config, configLength)
+        || !h_append_bytes(expression, capacity, &at, middle, sizeof(middle) - 1)
+        || !h_json_quote(expression, capacity, &at, style, styleLength)
+        || !h_append_bytes(expression, capacity, &at, ";true;", 6)) {
+        h_error(error, errorCap, L"native page config exceeds its size limit"); goto done;
+    }
+    if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
+    ok = preflight || h_send_eval(ws, (*nextId)++, expression, at, error, errorCap);
+done:
+    if (config) HeapFree(GetProcessHeap(), 0, config);
+    if (expression) HeapFree(GetProcessHeap(), 0, expression);
+    return ok;
+}
+static BOOL h_preflight_assets(const CX_OPTIONS *options, DWORD bootstrapLength, DWORD bundleLength,
+                               const char *style, DWORD styleLength, WCHAR *error, DWORD errorCap) {
+    if (bootstrapLength > HOST_EVAL_SOURCE_CAP || bundleLength > HOST_EVAL_SOURCE_CAP) {
+        h_error(error, errorCap, L"native JavaScript asset exceeds CDP expression limit"); return FALSE;
+    }
+    return h_set_page_config(NULL, NULL, options, style, styleLength, TRUE, error, errorCap);
+}
 static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     USHORT p; WCHAR error[64];
     if (options && options->portSet && options->port > 0 && options->port <= 65535) {
@@ -211,11 +237,8 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     for (p = 38100; p < 38200; ++p) if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
     return FALSE;
 }
-static BOOL h_run(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD errorCap) {
-    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; DWORD index, pid = 0, nextId = 2; HANDLE client = NULL; USHORT port; char *body = NULL, *bootstrap = NULL, *bundle = NULL, *config = NULL; DWORD bodyLength, bootstrapLength, bundleLength, configLength; char url[HOST_URL_CAP]; NET_WS *ws = NULL; WCHAR *assetDir = NULL, *path = NULL; BOOL ok = FALSE, ownerReady = FALSE; int i;
-    assetDir = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)HOST_PATH_CAP * sizeof(WCHAR));
-    path = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)HOST_PATH_CAP * sizeof(WCHAR));
-    if (!assetDir || !path) { h_error(error, errorCap, L"out of memory allocating native paths"); goto done; }
+static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
+    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; DWORD index, pid = 0, nextId = 1; HANDLE client = NULL; USHORT port; char *body = NULL, *bootstrap = NULL, *bundle = NULL, *style = NULL; DWORD bodyLength, bootstrapLength, bundleLength, styleLength; char url[HOST_URL_CAP]; NET_WS *ws = NULL; BOOL ok = FALSE, ownerReady = FALSE; int i;
     h_zero(&discover, sizeof(discover)); h_zero(&result, sizeof(result)); h_zero(url, sizeof(url)); cx_discovery_init(&result);
     discover.mode = h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL);
     discover.clientPath = options->clientPathSet ? options->clientPath : NULL; discover.hostIs32Bit = FALSE;
@@ -225,6 +248,10 @@ static BOOL h_run(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD
     index = result.recommendedIndex;
     if (options->clientIndexSet) { if ((DWORD)options->clientIndex < 1 || (DWORD)options->clientIndex > result.count) { h_error(error, errorCap, L"client-index is outside the discovered candidate list"); goto done; } index = (DWORD)options->clientIndex - 1; }
     if (options->listClients) { for (i = 0; i < (int)result.count; ++i) { h_print(result.items[i].path); h_print(L"\r\n"); } ok = TRUE; goto done; }
+    if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
+        || !cx_asset_load(L"chaoxing-plus.windows.js", options->assetsDirSet ? options->assetsDir : NULL, &bundle, &bundleLength, error, errorCap)
+        || !cx_asset_load(L"sweetalert2.min.css", options->assetsDirSet ? options->assetsDir : NULL, &style, &styleLength, error, errorCap)) goto done;
+    if (!h_preflight_assets(options, bootstrapLength, bundleLength, style, styleLength, error, errorCap)) goto done;
     if (!h_choose_port(options, &port)) { h_error(error, errorCap, L"no usable loopback CDP port"); goto done; }
     if (!proc_launch(result.items[index].path, port, &pid, &client, error, errorCap)) goto done;
     for (i = 0; i < 60 && proc_alive(pid); ++i) {
@@ -236,23 +263,17 @@ static BOOL h_run(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD
     }
     if (!url[0]) { h_error(error, errorCap, L"CXExam CDP endpoint did not become ready"); goto done; }
     ws = net_ws_open(port, url, error, errorCap); if (!ws) { goto done; }
-    config = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP); if (!config || !cx_options_effective_settings_json_utf8(options, config, CX_OPTIONS_JSON_CAP, &configLength)) { h_error(error, errorCap, L"cannot serialize native settings"); goto done; }
-    { const char pre[] = "window.__CX_WIN_CONFIG_JSON__="; const char mid[] = ";window.__CX_WIN_INSTANCE__=\"native\";true;"; DWORD total = sizeof(pre)-1 + configLength + sizeof(mid)-1; char *expr = (char *)HeapAlloc(GetProcessHeap(), 0, total + 1); DWORD at = 0, j = 0; if (!expr) { h_error(error, errorCap, L"out of memory setting native config"); goto done; } while (j < sizeof(pre)-1) expr[at++] = pre[j++]; for (j=0;j<configLength;j++) expr[at++] = config[j]; j=0; while(j<sizeof(mid)-1) expr[at++]=mid[j++]; expr[at]=0; if (!h_send_eval(ws, 1, expr, at, error, errorCap)) { HeapFree(GetProcessHeap(),0,expr); goto done; } HeapFree(GetProcessHeap(),0,expr); }
-    if (!h_copy(assetDir, HOST_PATH_CAP, options->assetsDirSet ? options->assetsDir : exePath)) goto done;
-    if (options->assetsDirSet) { /* caller supplied a directory */ } else { WCHAR *slash = assetDir + h_wlen(assetDir); while (slash > assetDir && slash[-1] != L'\\' && slash[-1] != L'/') --slash; *slash = 0; }
-    if (!h_make_path(path, HOST_PATH_CAP, assetDir, L"windows-bootstrap.js") || !h_file_read(path, &bootstrap, &bootstrapLength, error, errorCap)) goto done;
-    if (!h_make_path(path, HOST_PATH_CAP, assetDir, L"chaoxing-plus.windows.js") || !h_file_read(path, &bundle, &bundleLength, error, errorCap)) goto done;
+    if (!h_set_page_config(ws, &nextId, options, style, styleLength, FALSE, error, errorCap)) goto done;
     if (!h_inject_asset(ws, &nextId, options->injectStrategy, (DWORD)options->injectRetries, bootstrap, bootstrapLength, error, errorCap) || !h_inject_asset(ws, &nextId, options->injectStrategy, (DWORD)options->injectRetries, bundle, bundleLength, error, errorCap)) goto done;
     ok = TRUE;
 done:
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");
-    if (body) net_free(body); if (bootstrap) HeapFree(GetProcessHeap(), 0, bootstrap); if (bundle) HeapFree(GetProcessHeap(), 0, bundle); if (config) HeapFree(GetProcessHeap(), 0, config); if (ws) net_ws_close(ws);
+    if (body) net_free(body); if (bootstrap) HeapFree(GetProcessHeap(), 0, bootstrap); if (bundle) HeapFree(GetProcessHeap(), 0, bundle); if (style) HeapFree(GetProcessHeap(), 0, style); if (ws) net_ws_close(ws);
     if (client) {
         if (ok) WaitForSingleObject(client, INFINITE);
         else { proc_stop_owned(pid); WaitForSingleObject(client, 5000); }
         CloseHandle(client); if (ok) proc_stop_owned(pid);
     }
-    if (assetDir) HeapFree(GetProcessHeap(), 0, assetDir); if (path) HeapFree(GetProcessHeap(), 0, path);
     cx_discovery_free(&result); return ok;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
@@ -273,7 +294,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         return 0;
     }
     if (h_base_options.capabilities) {
-        h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
+        if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
+        h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }
     if (h_base_options.printEffectiveConfig) {
@@ -281,7 +303,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;
         h_print_utf8(h_settings); h_print_utf8("\n"); return 0;
     }
-    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2; ok = h_run(&h_base_options, h_exe_path, h_main_error, HOST_ERROR_CAP); WSACleanup(); return ok ? 0 : 1;
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2; ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP); WSACleanup(); return ok ? 0 : 1;
 }
 
 void __stdcall WinMainCRTStartup(void) {

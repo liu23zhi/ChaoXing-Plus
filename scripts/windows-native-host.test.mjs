@@ -66,7 +66,10 @@ test('native host CLI writes help and machine-readable output to redirected stdo
 
   const capabilities = run('--capabilities');
   assert.equal(capabilities.status, 0, capabilities.stderr || `capabilities exited with ${capabilities.status}`);
-  assert.equal(JSON.parse(capabilities.stdout).host, 'native');
+  const nativeCapabilities = JSON.parse(capabilities.stdout);
+  assert.equal(nativeCapabilities.host, 'native');
+  assert.equal(nativeCapabilities.embeddedResources, true);
+  assert.equal(nativeCapabilities.embeddedResourceCount, 4);
 
   const config = run('--print-effective-config', '--no-disk-write');
   assert.equal(config.status, 0, config.stderr || `config exited with ${config.status}`);
