@@ -28,6 +28,14 @@
   var HYDRATE_EVENT = 'chaoxing-plus:shared-store-hydrate';
   var REMOVE_EVENT = 'chaoxing-plus:shared-store-remove';
   var SYNC_EVENT = 'chaoxing-plus:shared-store-sync';
+  var DIAGNOSTICS_EVENT = 'chaoxing-plus:windows-host-diagnostics';
+  var diagnosticsEntries = [];
+  var DIAGNOSTICS_CODES = [
+    'host-started', 'client-started', 'endpoint-waiting', 'endpoint-ready',
+    'session-connected', 'session-reconnected', 'session-retry', 'bootstrap-ready',
+    'bootstrap-failed', 'bundle-ready', 'bundle-failed', 'config-updated',
+    'config-failed', 'page-error', 'top-navigated'
+  ];
   var ENABLED_KEY = 'common.settings.extension-enabled';
   var PANEL_ENABLED_KEY = 'common.settings.windows-panel-enabled';
   var NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
@@ -58,6 +66,59 @@
       console.log(MESSAGE_PREFIX + safeStringify({ source: 'chaoxing-plus-windows', instance: instance, kind: kind, detail: detail }));
     } catch (error) {
       // 页面可能代理/禁用了 console；宿主会根据 ready 超时给出诊断。
+    }
+  }
+
+  function notifyDiagnostics() {
+    try {
+      var CustomEventCtor = win.CustomEvent || (typeof CustomEvent !== 'undefined' ? CustomEvent : undefined);
+      if (typeof CustomEventCtor === 'function') {
+        doc.dispatchEvent(new CustomEventCtor(DIAGNOSTICS_EVENT));
+      }
+    } catch (error) {
+      // Diagnostics remain readable even when a page blocks custom events.
+    }
+  }
+
+  function copyDiagnostics() {
+    return diagnosticsEntries.map(function (entry) {
+      return { sequence: entry.sequence, elapsedMs: entry.elapsedMs, level: entry.level, code: entry.code };
+    });
+  }
+
+  function setDiagnostics(snapshot) {
+    try {
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
+        || snapshot.source !== 'chaoxing-plus-windows-host'
+        || !instance || snapshot.instance !== instance
+        || !Array.isArray(snapshot.entries) || snapshot.entries.length > 100) {
+        return false;
+      }
+      var entries = [];
+      var previousSequence = 0;
+      var index;
+      for (index = 0; index < snapshot.entries.length; index += 1) {
+        var entry = snapshot.entries[index];
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+          || typeof entry.sequence !== 'number' || !isFinite(entry.sequence)
+          || Math.floor(entry.sequence) !== entry.sequence || entry.sequence <= previousSequence
+          || entry.sequence > 9007199254740991
+          || typeof entry.elapsedMs !== 'number' || !isFinite(entry.elapsedMs)
+          || entry.elapsedMs < 0 || entry.elapsedMs > 9007199254740991
+          || (entry.level !== 'info' && entry.level !== 'warn' && entry.level !== 'error')
+          || DIAGNOSTICS_CODES.indexOf(entry.code) === -1) {
+          return false;
+        }
+        previousSequence = entry.sequence;
+        entries.push({ sequence: entry.sequence, elapsedMs: entry.elapsedMs, level: entry.level, code: entry.code });
+      }
+      if (safeStringify(entries) !== safeStringify(diagnosticsEntries)) {
+        diagnosticsEntries = entries;
+        notifyDiagnostics();
+      }
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 
@@ -717,9 +778,17 @@
     getConfig: function getConfig() {
       return config;
     },
+    setDiagnostics: setDiagnostics,
+    getDiagnostics: copyDiagnostics,
     adoptInstance: function adoptInstance(nextInstance, nextConfig) {
-      instance = String(nextInstance || '');
+      var normalizedInstance = String(nextInstance || '');
+      var changedInstance = normalizedInstance !== instance;
+      instance = normalizedInstance;
       win[HOST_KEY].instance = instance;
+      if (changedInstance) {
+        diagnosticsEntries = [];
+        notifyDiagnostics();
+      }
       onMessageFromHost({ kind: 'config', values: nextConfig, replace: true });
     },
     requestBundle: function requestBundle() {

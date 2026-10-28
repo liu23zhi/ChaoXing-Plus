@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkChrome75Syntax } from './windows/host/chrome75-syntax.mjs';
+import { readWindowsBuildFeatures } from './scripts/windows-build-features.mjs';
 
 process.env.VITE_CJS_IGNORE_WARNING = '1';
 const require = createRequire(import.meta.url);
@@ -34,6 +35,7 @@ async function sha256(filePath) {
 }
 
 async function main() {
+  const features = await readWindowsBuildFeatures({ release: process.argv.includes('--release') });
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
@@ -41,7 +43,8 @@ async function main() {
   await build({
     configFile: false,
     define: {
-      __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl)
+      __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
+      __CXPLUS_WINDOWS_INJECTION_LOG__: JSON.stringify(features.injectionLog)
     },
     build: {
       target: 'chrome75',
@@ -94,6 +97,7 @@ async function main() {
     version: packageJson.version,
     builtAt: new Date().toISOString(),
     chromiumTarget: '75 (CEF 75.1.4 / Chromium 75.0.3770.100)',
+    features,
     entry: 'windows/host/main.mjs',
     files,
     notes: [
@@ -103,6 +107,7 @@ async function main() {
     ]
   };
   await writeFile(path.join(outDir, 'package-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  console.log(`[build:windows] injectionLog=${features.injectionLog}`);
   console.log(`[build:windows] 完成：${outDir}`);
 }
 

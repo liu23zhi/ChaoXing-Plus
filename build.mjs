@@ -85,7 +85,8 @@ async function main() {
   await build({
     configFile: false,
     define: {
-      __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl)
+      __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
+      __CXPLUS_WINDOWS_INJECTION_LOG__: 'false'
     },
     build: {
       watch: watchMode ? {} : null,

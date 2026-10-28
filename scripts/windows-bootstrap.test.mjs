@@ -208,6 +208,76 @@ test('bootstrap 水合共享配置、建立 host bridge 并发送 ready', async 
   assert.equal(messages.some((message) => message.kind === 'disabled'), false);
 });
 
+function diagnosticSnapshot(instance = 'test-instance', entries = [{ sequence: 1, elapsedMs: 0, level: 'info', code: 'host-started' }]) {
+  return { source: 'chaoxing-plus-windows-host', instance, entries };
+}
+
+test('bootstrap keeps a defensive bounded diagnostics snapshot entirely in memory', async () => {
+  const harness = createHarness({ config: { 'common.settings.windows-no-disk-write': true } });
+  await harness.run();
+  const host = harness.window.__CX_WIN_HOST__;
+  const messages = harness.messages.length;
+  const storageCalls = harness.storageCalls.length;
+  const snapshot = diagnosticSnapshot();
+  assert.equal(host.setDiagnostics(snapshot), true);
+  snapshot.entries[0].code = 'page-error';
+  const copy = host.getDiagnostics();
+  assert.equal(copy[0].code, 'host-started');
+  copy[0].code = 'config-failed';
+  copy.push({ sequence: 2 });
+  assert.equal(host.getDiagnostics().length, 1);
+  assert.equal(host.getDiagnostics()[0].code, 'host-started');
+  const eventCount = () => harness.dispatched.filter((event) => event.type === 'chaoxing-plus:windows-host-diagnostics').length;
+  assert.equal(eventCount(), 1);
+  assert.equal(host.setDiagnostics(diagnosticSnapshot()), true);
+  assert.equal(eventCount(), 1, 'duplicate snapshots do not notify or append');
+  assert.equal(harness.messages.length, messages, 'diagnostics must not enter the host config channel');
+  assert.equal(harness.storageCalls.length, storageCalls);
+  assert.equal(harness.dispatched.find((event) => event.type === 'chaoxing-plus:windows-host-diagnostics').detail, undefined);
+});
+
+test('bootstrap rejects malformed diagnostics atomically and accepts only fixed codes and sorted safe sequences', async () => {
+  const harness = createHarness();
+  await harness.run();
+  const host = harness.window.__CX_WIN_HOST__;
+  assert.equal(host.setDiagnostics(diagnosticSnapshot()), true);
+  const invalid = [
+    { ...diagnosticSnapshot(), source: 'other' }, diagnosticSnapshot('old-instance'),
+    diagnosticSnapshot('', []), diagnosticSnapshot('test-instance', {}),
+    diagnosticSnapshot('test-instance', Array.from({ length: 101 }, (_, index) => ({ sequence: index + 1, elapsedMs: index, level: 'info', code: 'session-connected' }))),
+    ...[
+      { sequence: 0 }, { sequence: 1.5 }, { sequence: 9007199254740992 },
+      { elapsedMs: -1 }, { elapsedMs: Infinity }, { elapsedMs: '1' },
+      { level: 'debug' }, { code: 'arbitrary message' }
+    ].map((patch) => diagnosticSnapshot('test-instance', [{ sequence: 2, elapsedMs: 1, level: 'info', code: 'bundle-ready', ...patch }])),
+    diagnosticSnapshot('test-instance', [
+      { sequence: 2, elapsedMs: 1, level: 'info', code: 'bundle-ready' },
+      { sequence: 2, elapsedMs: 2, level: 'warn', code: 'session-retry' }
+    ])
+  ];
+  for (const snapshot of invalid) assert.equal(host.setDiagnostics(snapshot), false, JSON.stringify(snapshot));
+  assert.equal(host.getDiagnostics()[0].code, 'host-started');
+  const bounded = Array.from({ length: 100 }, (_, index) => ({ sequence: index + 10, elapsedMs: index / 2, level: 'info', code: 'session-connected' }));
+  assert.equal(host.setDiagnostics(diagnosticSnapshot('test-instance', bounded)), true);
+  assert.equal(host.getDiagnostics().length, 100);
+});
+
+test('bootstrap preserves diagnostics on same-instance reconnect and clears before a new host takes over', async () => {
+  const harness = createHarness();
+  await harness.run();
+  const host = harness.window.__CX_WIN_HOST__;
+  host.setDiagnostics(diagnosticSnapshot());
+  await harness.run();
+  assert.equal(host.getDiagnostics().length, 1);
+  harness.window.__CX_WIN_INSTANCE__ = 'next-instance';
+  await harness.run();
+  assert.equal(harness.window.__CX_WIN_HOST__, host);
+  assert.equal(host.getDiagnostics().length, 0);
+  assert.equal(host.setDiagnostics(diagnosticSnapshot()), false);
+  assert.equal(host.setDiagnostics(diagnosticSnapshot('next-instance')), true);
+  assert.equal(harness.dispatched.filter((event) => event.type === 'chaoxing-plus:windows-host-diagnostics').length, 3);
+});
+
 test('bootstrap 在 no-disk-write 配置位于整包任意位置时只写 DOM 属性，不写 localStorage', async () => {
   const harness = createHarness({
     config: {

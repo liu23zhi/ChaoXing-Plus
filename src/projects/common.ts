@@ -2,6 +2,7 @@ import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUpload
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
 import { $modal } from '../runtime/message.js';
+import { mountWindowsHostLogPanel } from '../runtime/windows-host-log.js';
 import type { ScriptPanel, ConfigDefinition } from '../runtime/types.js';
 import { playbackRate, volume } from '../utils/configs.js';
 import {
@@ -2370,7 +2371,12 @@ function renderWorkResultsPanel() {
   const rootScrollTop = panel.root.scrollTop;
   const bodyScrollTop = panel.body.scrollTop;
   const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]')?.scrollTop ?? 0;
+  const hostLogs = mountWindowsHostLogPanel(panel.root, isWindowsHostRuntime() && canShowFloatingPanel());
+  const hostLogList = hostLogs?.querySelector<HTMLElement>('[data-windows-host-log-entries]');
+  const hostLogScrollTop = hostLogList?.scrollTop ?? 0;
   panel.body.replaceChildren(createWorkResultsPanel());
+  if (hostLogs) panel.body.firstElementChild?.prepend(hostLogs);
+  if (hostLogList) hostLogList.scrollTop = hostLogScrollTop;
   panel.root.scrollTop = rootScrollTop;
   panel.body.scrollTop = bodyScrollTop;
 
