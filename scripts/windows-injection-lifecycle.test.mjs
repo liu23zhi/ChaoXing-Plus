@@ -418,6 +418,13 @@ test('归属校验在 attach 中不查询进程，停止后的迟到结果不能
   assert.equal(fixture.state.queries, 1);
 });
 
+function diagnosticsGlobals() {
+  return {
+    diagnostics: { record() {} }, connectedTargets: new Set(), retryingTargets: new Set(),
+    targetRefreshFailed: false, configFailureReported: false, recordConfigFailure() {}
+  };
+}
+
 test('target 轮询先检查监听归属，并在建连前再次检查，失效时不接触端点', async () => {
   const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
   const match = source.match(/const pollTargets = (async \(\) => \{[\s\S]*?\n    \});/u);
@@ -427,6 +434,7 @@ test('target 轮询先检查监听归属，并在建连前再次检查，失效�
     const sessions = new Map();
     let checks = 0;
     const poll = vm.runInNewContext(`(${match[1]})`, {
+      ...diagnosticsGlobals(),
       stopping: false,
       verifyEndpointOwnership: async () => {
         calls.push('ownership');
@@ -470,6 +478,7 @@ test('旧会话打开失败的迟到结果不会删除已经重建的新会话',
   const sessions = new Map();
   const target = { id: 'same-target', type: 'page', url: 'https://mooc1.chaoxing.com/exam-ans/', webSocketDebuggerUrl: 'ws://fixture' };
   const pollTargets = vm.runInNewContext(`(${match[1]})`, {
+    ...diagnosticsGlobals(),
     stopping: false,
     verifyEndpointOwnership: async () => true,
     fetchJson: async () => [target],
@@ -519,6 +528,7 @@ test('页面共享配置同步不把已选择的客户端路径当成新的启�
   let broadcasts = 0;
   const warnings = [];
   const pollTargets = vm.runInNewContext(`(${match[1]})`, {
+    ...diagnosticsGlobals(),
     stopping: false,
     verifyEndpointOwnership: async () => true,
     fetchJson: async () => [{ id: 'selected', type: 'page', webSocketDebuggerUrl: 'ws://fixture' }],
@@ -528,6 +538,7 @@ test('页面共享配置同步不把已选择的客户端路径当成新的启�
     PageSession: class {
       constructor(options) { onConfigSync = options.onConfigSync; }
       async open() {}
+      isTopContext() { return true; }
     },
     logger: { info() {}, warn(message) { warnings.push(message); } },
     sanitizeUrl: (value) => value,

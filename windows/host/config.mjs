@@ -105,12 +105,13 @@ export function mergeHostConfigLayers({ defaultHostConfig, appConfig, selectedCo
   );
 }
 
-export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250, persistEnabled = true } = {}) {
+export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250, persistEnabled = true, onError = () => {} } = {}) {
   let config = normalizeConfig(undefined);
   let revision = 0;
   let timer = null;
   let closed = false;
   let pending = false;
+  const notifyError = () => { try { onError(); } catch { /* Observers cannot change config failure handling. */ } };
 
   async function load() {
     try {
@@ -129,12 +130,17 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
   }
 
   async function persist() {
-    pending = false;
-    const directory = path.dirname(filePath);
-    await fs.mkdir(directory, { recursive: true });
-    const temporary = `${filePath}.${process.pid}.tmp`;
-    await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-    await fs.rename(temporary, filePath);
+    try {
+      pending = false;
+      const directory = path.dirname(filePath);
+      await fs.mkdir(directory, { recursive: true });
+      const temporary = `${filePath}.${process.pid}.tmp`;
+      await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+      await fs.rename(temporary, filePath);
+    } catch (error) {
+      notifyError();
+      throw error;
+    }
   }
 
   function schedulePersist() {
@@ -213,6 +219,7 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
           }
         } catch (error) {
           logger(`[config] 配置文件变更解析失败（忽略本次）：${error.message}`);
+          notifyError();
         }
       });
       return () => unwatchFile(filePath);

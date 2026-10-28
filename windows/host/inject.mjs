@@ -53,7 +53,7 @@ function targetWebSocketUrl(value, port) {
 }
 
 export class PageSession {
-  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected }) {
+  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected, diagnostics }) {
     this.port = port;
     this.target = target;
     this.assets = assets;
@@ -67,6 +67,14 @@ export class PageSession {
     this.logger = logger;
     this.onConfigSync = onConfigSync;
     this.onBundleInjected = onBundleInjected;
+    this.diagnostics = diagnostics;
+    this.diagnosticEvents = new Set();
+    this.diagnosticDelivery = null;
+    this.diagnosticDirty = false;
+    this.diagnosticsReadyContexts = new Set();
+    this.diagnosticAcknowledged = new Map();
+    this.diagnosticRetryTimer = null;
+    this.pageErrorReported = false;
     this.connection = null;
     this.scriptIdentifier = null;
     this.contexts = new Map();
@@ -195,6 +203,10 @@ export class PageSession {
   }
 
   clearContext(contextId) {
+    if (this.isTopContext(contextId)) this.cancelDiagnosticRetry();
+    this.diagnosticsReadyContexts.delete(contextId);
+    this.diagnosticAcknowledged.delete(contextId);
+    for (const key of this.diagnosticEvents) if (key.endsWith(`:${contextId}`)) this.diagnosticEvents.delete(key);
     this.contexts.delete(contextId);
     this.bootstrapped.delete(contextId);
     this.readyContexts.delete(contextId);
@@ -238,6 +250,7 @@ export class PageSession {
   async handleEvent(message) {
     if (this.closed || !message) return;
     if (message.method === 'cx.disconnected') {
+      this.recordDiagnostic('session-retry', 'warn');
       this.logger.warn(`[session] target ${this.target.id} 调试连接已断开`);
       this.close();
       return;
@@ -248,6 +261,10 @@ export class PageSession {
       const auxData = context.auxData || {};
       if (context.id > 0 && auxData.isDefault === true) {
         if (!this.contexts.has(context.id)) {
+          if (this.topFrameId && auxData.frameId === this.topFrameId) {
+            this.cancelDiagnosticRetry();
+            this.diagnosticAcknowledged.clear();
+          }
           this.contexts.set(context.id, {
             frameId: auxData.frameId || '',
             origin: context.origin || ''
@@ -271,6 +288,10 @@ export class PageSession {
       this.readyContexts.clear();
       this.bundleLoaded.clear();
       this.bundlePending.clear();
+      this.diagnosticEvents.clear();
+      this.diagnosticsReadyContexts.clear();
+      this.diagnosticAcknowledged.clear();
+      this.cancelDiagnosticRetry();
       this.stats.contexts = 0;
       return;
     }
@@ -294,6 +315,8 @@ export class PageSession {
       }
       if (!frame.parentId) {
         this.topFrameId = frame.id || this.topFrameId;
+        this.pageErrorReported = false;
+        this.recordDiagnostic('top-navigated');
         this.logger.info(`[nav] 顶层导航：${sanitizeForLog(frame.url || '')}`);
         this.scheduleTopFrameEnsure();
       }
@@ -303,7 +326,12 @@ export class PageSession {
       this.handleConsoleEvent(params);
       return;
     }
-    if (this.captureConsole && message.method === 'Runtime.exceptionThrown') {
+    if (message.method === 'Runtime.exceptionThrown') {
+      if (!this.pageErrorReported) {
+        this.pageErrorReported = true;
+        this.recordDiagnostic('page-error', 'error');
+      }
+      if (!this.captureConsole) return;
       const description = params.exceptionDetails && params.exceptionDetails.exception
         ? params.exceptionDetails.exception.description || params.exceptionDetails.exception.value
         : '';
@@ -354,10 +382,11 @@ export class PageSession {
     }
     if (payload.kind === 'config-sync') {
       this.stats.configSyncs += 1;
-      this.onConfigSync?.(detail);
+      this.onConfigSync?.(detail, contextId);
       return;
     }
     if (payload.kind === 'bootstrap-error') {
+      this.recordDiagnostic('bootstrap-failed', 'error', contextId);
       this.recordError(`bootstrap 错误：${detail.stage || ''} ${detail.message || ''}`.trim());
       return;
     }
@@ -391,6 +420,84 @@ export class PageSession {
     this.stats.errors.push(text.slice(0, 500));
     if (this.stats.errors.length > 20) this.stats.errors.shift();
     this.logger.warn(`[session] ${text.slice(0, 300)}`);
+  }
+
+  isTopContext(contextId) {
+    const context = this.contexts.get(contextId);
+    return Boolean(this.topFrameId && context && context.frameId === this.topFrameId);
+  }
+
+  recordDiagnostic(code, level = 'info', contextId) {
+    if (!this.diagnostics || this.closed) return;
+    if (contextId !== undefined) {
+      if (!this.isTopContext(contextId)) return;
+      const key = `${code}:${contextId}`;
+      if (this.diagnosticEvents.has(key)) return;
+      this.diagnosticEvents.add(key);
+    }
+    this.diagnostics.record(code, level);
+  }
+
+  cancelDiagnosticRetry() {
+    if (this.diagnosticRetryTimer !== null) clearTimeout(this.diagnosticRetryTimer);
+    this.diagnosticRetryTimer = null;
+  }
+
+  scheduleDiagnosticRetry() {
+    const contextId = this.getTopContextId();
+    if (this.diagnosticRetryTimer !== null || this.closed || !this.connection || this.connection.closed
+      || !this.isTopContext(contextId) || !this.diagnosticsReadyContexts.has(contextId)
+      || this.configStore.settingsSnapshot()['common.settings.windows-panel-enabled'] === false) return;
+    this.diagnosticRetryTimer = setTimeout(() => {
+      this.diagnosticRetryTimer = null;
+      void this.broadcastDiagnostics();
+    }, 2000);
+  }
+
+  async broadcastDiagnostics() {
+    if (!this.diagnostics || this.closed || !this.connection || this.connection.closed
+      || this.configStore.settingsSnapshot()['common.settings.windows-panel-enabled'] === false) return false;
+    this.diagnosticDirty = true;
+    if (this.diagnosticRetryTimer !== null) return false;
+    if (this.diagnosticDelivery) return this.diagnosticDelivery;
+    const delivery = (async () => {
+      let acknowledged = false;
+      do {
+        this.diagnosticDirty = false;
+        const contextId = this.getTopContextId();
+        const context = this.contexts.get(contextId);
+        const connection = this.connection;
+        if (!this.isTopContext(contextId) || !this.diagnosticsReadyContexts.has(contextId)) return false;
+        const active = () => !this.closed && this.connection === connection && !connection.closed
+          && this.contexts.get(contextId) === context && this.isTopContext(contextId) && this.getTopContextId() === contextId
+          && this.diagnosticsReadyContexts.has(contextId)
+          && this.configStore.settingsSnapshot()['common.settings.windows-panel-enabled'] !== false;
+        const entries = this.diagnostics.snapshot();
+        const lastSequence = entries.length ? entries[entries.length - 1].sequence : 0;
+        const previous = this.diagnosticAcknowledged.get(contextId);
+        if (previous && previous.context === context && previous.sequence === lastSequence && previous.count === entries.length) {
+          this.cancelDiagnosticRetry();
+          acknowledged = true;
+          continue;
+        }
+        const payload = JSON.stringify({ source: 'chaoxing-plus-windows-host', instance: this.instanceToken, entries });
+        const expression = `(function(){if(window.self!==window.top)return false;var host=window.__CX_WIN_HOST__;return !!host&&typeof host.setDiagnostics==='function'&&host.setDiagnostics(${payload})===true;})()`;
+        try {
+          const result = await this.evaluateReturnByValue(contextId, expression, { timeoutMs: 3000 });
+          acknowledged = active() && !result.exception && result.value === true;
+        } catch {
+          acknowledged = false;
+        }
+        if (acknowledged) {
+          this.diagnosticAcknowledged.set(contextId, { context, sequence: lastSequence, count: entries.length });
+          this.cancelDiagnosticRetry();
+        } else if (active()) this.scheduleDiagnosticRetry();
+      } while (this.diagnosticDirty && !this.closed && this.diagnosticRetryTimer === null);
+      return acknowledged;
+    })();
+    this.diagnosticDelivery = delivery;
+    try { return await delivery; }
+    finally { if (this.diagnosticDelivery === delivery) this.diagnosticDelivery = null; }
   }
 
   async evaluate(contextId, expression, { timeoutMs = 60000 } = {}) {
@@ -480,9 +587,13 @@ export class PageSession {
       await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });
       if (this.closed || this.contexts.get(contextId) !== context) return;
       this.stats.bootstraps += 1;
+      this.diagnosticsReadyContexts.add(contextId);
+      this.recordDiagnostic('bootstrap-ready', 'info', contextId);
+      void this.broadcastDiagnostics();
     } catch (error) {
-      if (error.code === 'CX_INJECTION_CANCELLED') return;
+      if (error.code === 'CX_INJECTION_CANCELLED' || this.closed || this.contexts.get(contextId) !== context) return;
       this.bootstrapped.delete(contextId);
+      this.recordDiagnostic('bootstrap-failed', 'error', contextId);
       this.recordError(`注入 bootstrap 失败 context=${contextId}：${error.message}`);
     }
   }
@@ -496,22 +607,27 @@ export class PageSession {
       return;
     }
     const version = this.assets.version ? JSON.stringify(this.assets.version) : '"dev"';
+    const context = this.contexts.get(contextId);
     const suffix = `\n;window.__CX_WIN_BUNDLE_LOADED__=true;window.__CX_WIN_BUNDLE_VERSION__=${version};`;
     const injection = (async () => {
       try {
         await this.injectSource(contextId, this.assets.bundle + suffix, '业务 bundle 执行失败', { timeoutMs: this.bundleTimeoutMs });
+        if (this.closed || this.contexts.get(contextId) !== context) return;
         this.bundleLoaded.add(contextId);
         this.stats.bundles += 1;
+        this.recordDiagnostic('bundle-ready', 'info', contextId);
+        void this.broadcastDiagnostics();
         this.logger.info(`[inject] 已注入业务 bundle：context=${contextId} url=${this.frameUrlForContext(contextId) || 'about:blank'}`);
         this.onBundleInjected?.(contextId, this.frameUrlForContext(contextId));
       } catch (error) {
-        if (error.code === 'CX_INJECTION_CANCELLED') return;
+        if (error.code === 'CX_INJECTION_CANCELLED' || this.closed || this.contexts.get(contextId) !== context) return;
         const message = String(error.message || error);
         // 导航过程中上下文被销毁是正常时序，不计入错误。
         if (/Cannot find context/i.test(message)) {
           this.logger.info(`[session] 上下文已随导航销毁，跳过 bundle：context=${contextId}`);
           return;
         }
+        this.recordDiagnostic('bundle-failed', 'error', contextId);
         this.recordError(`注入业务 bundle 失败 context=${contextId}：${message}`);
       }
     })();
@@ -594,17 +710,22 @@ export class PageSession {
       try {
         await this.evaluate(contextId, expression, { timeoutMs: 10000 });
       } catch (error) {
+        this.recordDiagnostic('config-failed', 'warn', contextId);
         this.logger.warn(`[session] 广播配置失败 context=${contextId}：${error.message}`);
       }
       if (this.readyContexts.has(contextId)) {
         await this.injectBundle(contextId);
       }
     }
+    void this.broadcastDiagnostics();
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.cancelDiagnosticRetry();
+    this.diagnosticsReadyContexts.clear();
+    this.diagnosticAcknowledged.clear();
     if (this.rescanTimer) {
       clearTimeout(this.rescanTimer);
       this.rescanTimer = null;

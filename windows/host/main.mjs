@@ -29,6 +29,7 @@ import { probeClientSelectionWindow } from './selection-window.mjs';
 import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
 import { isCxExamExecutablePath, resolveExplicitClientPath } from './client-discovery.mjs';
 import { observeClientProcess } from './client-process.mjs';
+import { createHostDiagnostics } from './memory-diagnostics.mjs';
 import {
   RENDER_DIAGNOSTICS_EXPRESSION,
   collectSystemProbe,
@@ -411,6 +412,14 @@ async function main() {
   let loggerQuiet = options.quiet;
   let configStoreForCleanup = null;
   let cleanupAfterStartupFailure = null;
+  let diagnosticsChanged = () => {};
+  const diagnostics = createHostDiagnostics({ onChange: () => diagnosticsChanged() });
+  diagnostics.record('host-started');
+  let configFailureReported = false;
+  const recordConfigFailure = () => {
+    if (!configFailureReported) diagnostics.record('config-failed', 'warn');
+    configFailureReported = true;
+  };
   // --no-retain-data / --delete-config：只清理“本次运行创建的宿主数据”和显式指定的外部配置，
   // 不删除运行前已存在的数据，避免误删用户文件。
   const runArtifacts = { files: new Set(), directories: new Set() };
@@ -529,7 +538,8 @@ async function main() {
     if (!options.noDiskWrite) await registerNewFile(configPath);
     const configStore = createConfigStore(configPath, {
       logger: (message) => logger.info(message),
-      persistEnabled: !options.noDiskWrite
+      persistEnabled: !options.noDiskWrite,
+      onError: recordConfigFailure
     });
     configStoreForCleanup = configStore;
     await configStore.load();
@@ -639,6 +649,24 @@ async function main() {
     let configWatcherOff = null;
     let targetTimer = null;
     let diagnosticsDone = null;
+    let diagnosticBroadcastRunning = false;
+    let diagnosticBroadcastDirty = false;
+    const broadcastMemoryDiagnostics = async () => {
+      if (stopping) return;
+      diagnosticBroadcastDirty = true;
+      if (diagnosticBroadcastRunning) return;
+      diagnosticBroadcastRunning = true;
+      try {
+        do {
+          diagnosticBroadcastDirty = false;
+          for (const session of sessions.values()) {
+            if (stopping) break;
+            await session.broadcastDiagnostics().catch(() => false);
+          }
+        } while (diagnosticBroadcastDirty && !stopping);
+      } finally { diagnosticBroadcastRunning = false; }
+    };
+    diagnosticsChanged = () => { void broadcastMemoryDiagnostics(); };
 
     const broadcastConfig = async () => {
       for (const session of sessions.values()) {
@@ -671,6 +699,7 @@ async function main() {
     const stop = async (reason, forceStopClient = false) => {
       if (stopping) return;
       stopping = true;
+      diagnosticsChanged = () => {};
       logger.info(`[main] 停止：${reason}`);
       if (detachClientProcessObserver) {
         detachClientProcessObserver();
@@ -771,6 +800,7 @@ async function main() {
           dpiOverridePrevious = await setDpiAwarenessOverride(clientPath, (message) => logger.info(message));
         }
         clientChild = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) }).child;
+        if (Number.isInteger(clientChild.pid) && clientChild.pid > 0) diagnostics.record('client-started');
         detachClientProcessObserver = observeClientProcess(clientChild, {
           onExit: ({ code, signal }) => {
             logger.warn(`[launch] 本次启动的 CXExam 已退出（code=${code === null ? '?' : code}，signal=${signal || '?'}）`);
@@ -788,6 +818,7 @@ async function main() {
       }
       report.clientPid = clientChild.pid;
       logger.info(`[launch] 客户端已启动 pid=${clientChild.pid}，等待调试端点（首次启动通常需要 10-20 秒）`);
+      diagnostics.record('endpoint-waiting');
       const endpoint = await waitForDebugEndpoint(port, {
         timeoutMs: config.debugEndpointTimeoutMs,
         child: clientChild,
@@ -804,9 +835,11 @@ async function main() {
         throw new Error(`调试端点 Browser=${report.endpoint.browser} 与期望 ${expected} 不匹配，可能连接到了其它程序`);
       }
       if (!(await verifyEndpointOwnership())) return;
+      diagnostics.record('endpoint-ready');
       logger.info(`[launch] 监听归属校验通过：pid=${clientChild.pid}，127.0.0.1:${port}`);
     } else {
       logger.warn(`[attach] 测试/调试模式：只连接 127.0.0.1:${port}，不启动客户端、不校验监听归属`);
+      diagnostics.record('endpoint-waiting');
       const endpoint = await fetchJson(port, '/json/version', { timeoutMs: 5000 });
       report.endpoint = {
         browser: endpoint.Browser || '',
@@ -814,9 +847,13 @@ async function main() {
         userAgent: endpoint['User-Agent'] || ''
       };
       logger.info(`[attach] 已连接调试端点：${report.endpoint.browser}（CDP ${report.endpoint.protocolVersion}）`);
+      diagnostics.record('endpoint-ready');
     }
 
     // ---- 注入阶段 ----
+    const connectedTargets = new Set();
+    const retryingTargets = new Set();
+    let targetRefreshFailed = false;
     const pollTargets = async () => {
       if (stopping) return;
       let list;
@@ -824,9 +861,12 @@ async function main() {
         if (!(await verifyEndpointOwnership())) return;
         list = await fetchJson(port, '/json/list', { timeoutMs: 2000 });
       } catch (error) {
+        if (!targetRefreshFailed) diagnostics.record('session-retry', 'warn');
+        targetRefreshFailed = true;
         logger.warn(`[main] 刷新调试 target 失败：${error.message}`);
         return;
       }
+      targetRefreshFailed = false;
       const pages = (Array.isArray(list) ? list : []).filter((target) => target && target.type === 'page' && target.webSocketDebuggerUrl);
       for (const target of pages) {
         const previousSession = sessions.get(target.id);
@@ -846,8 +886,9 @@ async function main() {
           injectStrategy: config.injectStrategy,
           injectRetries: config.injectRetries,
           bundleTimeoutMs: config.bundleTimeoutMs,
+          diagnostics,
           logger: { info: (message) => logger.info(message), warn: (message) => logger.warn(message) },
-          onConfigSync: (detail) => {
+          onConfigSync: (detail, contextId) => {
             try {
               const candidate = mergeHostConfigLayers({
                 defaultHostConfig: configStore.snapshot(),
@@ -863,10 +904,13 @@ async function main() {
                 && JSON.stringify(detail[key]) !== JSON.stringify(constrained.settings[key]));
               const changed = configStore.updateFromPage(constrained.settings);
               if (changed || correctionNeeded) {
+                configFailureReported = false;
+                if (session.isTopContext(contextId)) diagnostics.record('config-updated');
                 logger.info(`[config] 页面写入共享配置（revision=${configStore.revision}），广播到全部 frame`);
                 void broadcastConfig();
               }
             } catch (error) {
+              if (session.isTopContext(contextId)) recordConfigFailure();
               logger.warn(`[config] 页面共享配置无效（忽略本次）：${error.message}`);
             }
           },
@@ -879,7 +923,15 @@ async function main() {
         try {
           if (!(await verifyEndpointOwnership())) return;
           await session.open();
+          if (stopping || session.closed) continue;
+          diagnostics.record(connectedTargets.has(target.id) ? 'session-reconnected' : 'session-connected');
+          connectedTargets.add(target.id);
+          retryingTargets.delete(target.id);
         } catch (error) {
+          if (!stopping && !retryingTargets.has(target.id)) {
+            diagnostics.record('session-retry', 'warn');
+            retryingTargets.add(target.id);
+          }
           logger.warn(`[main] 连接 target ${target.id} 失败：${error.message}`);
           session.close();
           if (sessions.get(target.id) === session) sessions.delete(target.id);
@@ -892,6 +944,8 @@ async function main() {
           logger.info(`[main] target 已关闭：${targetId}`);
           session.close();
           sessions.delete(targetId);
+          connectedTargets.delete(targetId);
+          retryingTargets.delete(targetId);
         }
       }
       collectStats();
@@ -926,6 +980,8 @@ async function main() {
         return applyRuntimePolicies(nextConfig, nextOptions);
       },
       onChange: () => {
+        configFailureReported = false;
+        diagnostics.record('config-updated');
         logger.info('[config] 配置文件发生变化，广播到页面');
         void broadcastConfig();
       }

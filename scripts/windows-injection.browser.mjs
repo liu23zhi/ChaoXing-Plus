@@ -2,10 +2,13 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { PageSession } from '../windows/host/inject.mjs';
 import { fetchJson } from '../windows/host/cdp.mjs';
+import { createHostDiagnostics } from '../windows/host/memory-diagnostics.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
@@ -57,7 +60,7 @@ function fixtureAssets() {
   };
 }
 
-async function openFixture({ strategy = 'hybrid', retries = 0, csp = false, hostname = 'a.chaoxing.com', pathname, expectBundle = true, assets = fixtureAssets(), configStore = { isEnabled: () => true, settingsSnapshot: () => ({}) }, instanceToken } = {}) {
+async function openFixture({ strategy = 'hybrid', retries = 0, csp = false, hostname = 'a.chaoxing.com', pathname, expectBundle = true, assets = fixtureAssets(), configStore = { isEnabled: () => true, settingsSnapshot: () => ({}) }, instanceToken, diagnostics } = {}) {
   const page = await browser.newPage();
   let session;
   try {
@@ -79,6 +82,7 @@ async function openFixture({ strategy = 'hybrid', retries = 0, csp = false, host
       captureConsole: true,
       injectStrategy: strategy,
       injectRetries: retries,
+      diagnostics,
       logger: { info: (message) => logs.push(message), warn: (message) => logs.push(message) }
     });
     await session.open();
@@ -453,5 +457,116 @@ test('reconnecting the real bootstrap in the same instance hydrates the new conf
   } finally {
     reconnected?.close();
     await closeFixture(fixture);
+  }
+});
+
+test('real bootstrap receives bounded memory history, replays it after navigation and adopts a reconnected host', async () => {
+  const diagnostics = createHostDiagnostics();
+  for (const code of ['host-started', 'client-started', 'endpoint-waiting', 'endpoint-ready']) diagnostics.record(code);
+  const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') };
+  const configStore = { isEnabled: () => true, settingsSnapshot: () => ({ 'common.settings.windows-no-disk-write': true }) };
+  const fixture = await openFixture({ strategy: 'runtime', assets, configStore, diagnostics, pathname: `/exam-ans/diagnostics-${++sequence}` });
+  let reconnected;
+  try {
+    assert.equal(await fixture.session.broadcastDiagnostics(), true);
+    const initial = await fixture.page.evaluate(() => window.__CX_WIN_HOST__.getDiagnostics());
+    assert.deepEqual(initial, diagnostics.snapshot());
+    assert.ok(initial.some((entry) => entry.code === 'endpoint-waiting'));
+    await fixture.page.goto(`http://a.chaoxing.com:${port}/exam-ans/diagnostics-next-${++sequence}`);
+    await fixture.page.waitForFunction(() => window.__CX_WIN_BUNDLE_LOADED__ === true);
+    await waitFor(() => fixture.session.stats.bundles === 2, 'navigated diagnostic bundle acknowledgement');
+    assert.equal(await fixture.session.broadcastDiagnostics(), true);
+    assert.deepEqual(await fixture.page.evaluate(() => window.__CX_WIN_HOST__.getDiagnostics()), diagnostics.snapshot());
+    await fixture.page.evaluate(() => { window.__previousDiagnosticsHost = window.__CX_WIN_HOST__; });
+    await fixture.session.connection.send('Runtime.discardConsoleEntries');
+    fixture.session.connection.socket.close(1000, 'diagnostics reconnect fixture');
+    await waitFor(() => fixture.session.closed, 'diagnostics original session close');
+    const instanceToken = `diagnostics-reconnected-${++sequence}`;
+    reconnected = new PageSession({
+      port: browserPort, target: fixture.session.target, assets, configStore, instanceToken,
+      injectBlankFrames: true, captureConsole: false, injectStrategy: 'runtime', injectRetries: 0,
+      logger: fixture.session.logger, diagnostics
+    });
+    await reconnected.open();
+    await waitFor(() => reconnected.stats.bootstraps === 1, 'reconnected diagnostic bootstrap');
+    for (let index = 0; index < 120; index++) diagnostics.record(index % 2 ? 'config-updated' : 'top-navigated');
+    assert.equal(await reconnected.broadcastDiagnostics(), true);
+    assert.deepEqual(await fixture.page.evaluate(() => ({
+      reused: window.__previousDiagnosticsHost === window.__CX_WIN_HOST__,
+      instance: window.__CX_WIN_HOST__.instance,
+      entries: window.__CX_WIN_HOST__.getDiagnostics()
+    })), { reused: true, instance: instanceToken, entries: diagnostics.snapshot() });
+    assert.equal(diagnostics.snapshot().length, 100);
+  } finally {
+    reconnected?.close();
+    await closeFixture(fixture);
+  }
+});
+
+test('real bootstrap with a hidden panel receives no memory history despite successful injections', async () => {
+  const diagnostics = createHostDiagnostics();
+  diagnostics.record('host-started');
+  const fixture = await openFixture({
+    strategy: 'runtime', diagnostics,
+    assets: { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') },
+    configStore: { isEnabled: () => true, settingsSnapshot: () => ({
+      'common.settings.windows-panel-enabled': false, 'common.settings.windows-no-disk-write': true
+    }) }
+  });
+  try {
+    assert.equal(await fixture.session.broadcastDiagnostics(), false);
+    assert.deepEqual(await fixture.page.evaluate(() => window.__CX_WIN_HOST__.getDiagnostics()), []);
+    assert.ok(diagnostics.snapshot().some((entry) => entry.code === 'bundle-ready'));
+    assert.equal(await fixture.page.evaluate(() => document.querySelectorAll('#panel-common-work-results').length), 0);
+  } finally { await closeFixture(fixture); }
+});
+
+test('production Node attach exposes memory diagnostics with quiet no-disk-write and no generated files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'cx-node-memory-diagnostics-'));
+  const assetsDir = join(directory, 'assets');
+  const page = await browser.newPage();
+  let child;
+  try {
+    await mkdir(join(assetsDir, 'vendor'), { recursive: true });
+    const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') };
+    await Promise.all([
+      writeFile(join(assetsDir, 'windows-bootstrap.js'), assets.bootstrap),
+      writeFile(join(assetsDir, 'chaoxing-plus.windows.js'), assets.bundle),
+      writeFile(join(assetsDir, 'trampoline.js'), assets.trampoline),
+      writeFile(join(assetsDir, 'vendor', 'sweetalert2.min.css'), ''),
+      writeFile(join(assetsDir, 'package-manifest.json'), '{"version":"6.2.0"}')
+    ]);
+    await page.goto(`http://a.chaoxing.com:${port}/exam-ans/production-diagnostics-${++sequence}?private-token=fixture`);
+    child = spawn(process.execPath, [resolve('windows/host/main.mjs'),
+      '--attach', String(browserPort), '--assets', assetsDir, '--config', join(directory, 'config.json'),
+      '--data-dir', join(directory, 'data'), '--report', join(directory, 'report.json'),
+      '--duration', '3000', '--no-disk-write', '--quiet'
+    ], { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const finished = new Promise((done, fail) => {
+      child.once('error', fail);
+      child.once('close', (code, signal) => done({ code, signal }));
+    });
+    await page.waitForFunction(() => window.__CX_WIN_HOST__ && window.__CX_WIN_HOST__.getDiagnostics()
+      .some((entry) => entry.code === 'session-connected'), { timeout: 7000 });
+    const entries = await page.evaluate(() => window.__CX_WIN_HOST__.getDiagnostics());
+    for (const code of ['host-started', 'endpoint-waiting', 'endpoint-ready', 'session-connected', 'bootstrap-ready', 'bundle-ready']) {
+      assert.ok(entries.some((entry) => entry.code === code), code);
+    }
+    assert.equal(entries.some((entry) => entry.code === 'client-started'), false, 'attach must not claim to launch a client');
+    assert.doesNotMatch(JSON.stringify(entries), /private-token|fixture|exam-ans|assets|config\.json/u);
+    let exitDeadline;
+    const result = await Promise.race([finished, new Promise((_, fail) => {
+      exitDeadline = setTimeout(() => fail(new Error('Node diagnostics fixture did not stop')), 10000);
+    })]).finally(() => clearTimeout(exitDeadline));
+    assert.deepEqual(result, { code: 0, signal: null });
+    assert.equal(stdout + stderr, '');
+    assert.deepEqual(await readdir(directory), ['assets']);
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    await page.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

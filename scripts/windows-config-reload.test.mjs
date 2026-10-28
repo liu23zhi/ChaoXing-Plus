@@ -141,3 +141,17 @@ test('config watch discards an async resolver result completed after the store c
   assert.equal(fixture.store.revision, revision);
   assert.deepEqual(fixture.store.snapshot(), before);
 });
+
+test('config failures notify observers without passing private errors or changing the valid snapshot', async (t) => {
+  const observed = [];
+  const fixture = await createFixture(t, { settings: { 'common.settings.mutable': 'old' } }, {
+    onError(...args) { observed.push(args); throw new Error('observer failure must stay nonfatal'); }
+  });
+  const before = fixture.store.snapshot();
+  fixture.watch();
+  await delay(50);
+  await fs.writeFile(fixture.filePath, '{private-token=invalid-json', 'utf8');
+  await waitFor(() => observed.length > 0, 'invalid JSON did not notify the observer');
+  assert.deepEqual(observed, [[]]);
+  assert.deepEqual(fixture.store.snapshot(), before);
+});
