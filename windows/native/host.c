@@ -433,6 +433,7 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
 }
 #include "host-config.inc"
 #include "host-session.inc"
+#include "host-self-check.inc"
 
 static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *result, WCHAR *error, DWORD errorCap) {
     DWORD index = result->recommendedIndex, mode = 0;
@@ -591,7 +592,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
             "  --capture-console|--no-capture-console（只记录页面错误事件，不保存页面文本）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
-            "状态: --help --capabilities\n"
+            "状态: --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  页面布局诊断仅采集一次性页面视口与面板几何/样式，不采集窗口 DPI、正文、URL 或截图。\n"
             "内存执行、删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
@@ -601,10 +602,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }
+    if (h_base_options.selfCheck) return h_self_check(&h_base_options);
     if (h_base_options.printEffectiveConfig) {
         DWORD settingsLength = 0;
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;

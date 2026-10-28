@@ -674,8 +674,8 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (o->clientPathSet && !o->clientPath[0]) o->clientPathSet = FALSE;
     /* Defer UI suppression until the final layer, preserving the path if a later auto overrides it. */
     if (o->clientPathSet && !cx_streq(o->ui, L"auto") && o->uiSource > o->clientPathSource) { o->clientPathSet = FALSE; o->clientPathSuppressedByUi = TRUE; }
-    if (!o->retainData || o->deleteConfig || o->selfCheck) {
-        cx_error(error, errorCap, L"data cleanup and self-check are not supported by native host; use the Node host for these options");
+    if (!o->retainData || o->deleteConfig) {
+        cx_error(error, errorCap, L"data cleanup is not supported by native host; use the Node host for these options");
         return FALSE;
     }
     if (!cx_valid_mode(o->executionModeNormal ? L"normal" : L"unsupported") || !cx_valid_scan_mode(o->scanMode) || !cx_valid_ui(o->ui) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid execution, scan, UI or injection mode"); return FALSE; }

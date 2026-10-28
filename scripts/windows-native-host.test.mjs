@@ -110,6 +110,7 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.runReport, true);
   assert.equal(nativeCapabilities.renderDiagnostics, false);
   assert.equal(nativeCapabilities.pageRenderDiagnostics, true);
+  assert.equal(nativeCapabilities.selfCheck, true);
 
   const config = run('--print-effective-config', '--no-disk-write');
   assert.equal(config.status, 0, config.stderr || `config exited with ${config.status}`);
@@ -120,7 +121,7 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.match(unsupported.stdout, /not supported/);
 
   for (const args of [
-    ['--no-retain-data'], ['--delete-config'], ['--self-check'],
+    ['--no-retain-data'], ['--delete-config'],
     ['--options-json', '{"retainData":false}'],
     ['--options-json', '{"deleteConfig":true}']
   ]) {
