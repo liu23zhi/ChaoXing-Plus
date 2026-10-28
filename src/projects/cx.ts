@@ -255,6 +255,7 @@ function showTopCenterNotice(
   }
 
   clearTopCenterNotice();
+  if (getWindowsRuntimeSetting<boolean>('panel-enabled', true) === false) return;
 
   const overlay = targetDocument.createElement('div');
   overlay.id = TOP_CENTER_NOTICE_ID;
