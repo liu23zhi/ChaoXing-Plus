@@ -515,6 +515,112 @@ function createCacheFs() {
   };
 }
 
+test('默认 fallback-all 完整常规扫描命中后可复用缓存且不触发全盘', async () => {
+  const cachePath = 'C:\\cache\\scan-cache.json';
+  const cacheFs = createCacheFs();
+  const tree = createTree({ 'C:\\Clients': [{ name: 'CXExam.exe' }] }, new Map([['C:\\Clients\\CXExam.exe', 0x8664]]));
+  let fullScans = 0;
+  const options = {
+    cachePath, cacheFs,
+    commonRootProvider: async () => ['C:\\Clients'],
+    driveRootProvider: async () => [],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    onFullScan: () => { fullScans += 1; }
+  };
+  assert.equal((await discoverClientCandidates(options)).source, 'common');
+  for (const stopOnMachine of [0x014c, null]) {
+    const result = await discoverClientCandidates({
+      ...options,
+      stopOnMachine,
+      fsProvider: {
+        async stat() { return { isFile: () => true }; },
+        async readdir() { assert.fail('valid common cache must not enumerate directories'); }
+      }
+    });
+    assert.equal(result.source, 'cache');
+    assert.equal(result.selected.path, 'C:\\Clients\\CXExam.exe');
+  }
+  assert.equal(fullScans, 0);
+  assert.equal(JSON.parse(cacheFs.files.get(cachePath)).complete, true);
+});
+
+test('需要完整候选列表时拒绝不完整的新格式常规缓存', async () => {
+  const cachePath = 'C:\\cache\\scan-cache.json';
+  const cacheFs = createCacheFs();
+  const tree = createTree({
+    'C:\\Clients': [{ name: 'a', directory: true }, { name: 'b', directory: true }],
+    'C:\\Clients\\a': [{ name: 'CXExam.exe' }],
+    'C:\\Clients\\b': [{ name: 'CXExam.exe' }]
+  }, new Map([['C:\\Clients\\a\\CXExam.exe', 0x014c], ['C:\\Clients\\b\\CXExam.exe', 0x8664]]));
+  const options = {
+    cachePath, cacheFs,
+    commonRootProvider: async () => ['C:\\Clients'], driveRootProvider: async () => [],
+    fsProvider: { ...tree.fsProvider, async stat() { return { isFile: () => true }; } },
+    peMachineReader: tree.peMachineReader
+  };
+  await discoverClientCandidates(options);
+  const partial = JSON.parse(cacheFs.files.get(cachePath));
+  partial.complete = false;
+  partial.candidates = partial.candidates.slice(0, 1);
+  cacheFs.files.set(cachePath, JSON.stringify(partial));
+  const result = await discoverClientCandidates({ ...options, stopOnMachine: null });
+  assert.equal(result.source, 'common');
+  assert.deepEqual(result.candidates.map((candidate) => candidate.path), ['C:\\Clients\\a\\CXExam.exe', 'C:\\Clients\\b\\CXExam.exe']);
+});
+
+test('常规根目录或固定磁盘根目录变化时不复用原扫描缓存', async () => {
+  for (const changedRoots of ['common', 'drive']) {
+    const cacheFs = createCacheFs();
+    const tree = createTree({
+      'C:\\Old': [{ name: 'CXExam.exe' }],
+      'D:\\New': [{ name: 'CXExam.exe' }]
+    }, new Map([['C:\\Old\\CXExam.exe', 0x8664], ['D:\\New\\CXExam.exe', 0x014c]]));
+    const options = {
+      scanMode: 'common', cachePath: 'C:\\cache\\scan-cache.json', cacheFs,
+      commonRootProvider: async () => changedRoots === 'common' ? ['C:\\Old'] : [],
+      driveRootProvider: async () => changedRoots === 'drive' ? ['C:\\Old'] : [],
+      fsProvider: { ...tree.fsProvider, async stat() { return { isFile: () => true }; } },
+      peMachineReader: tree.peMachineReader
+    };
+    await discoverClientCandidates(options);
+    const result = await discoverClientCandidates({
+      ...options,
+      commonRootProvider: async () => changedRoots === 'common' ? ['D:\\New'] : [],
+      driveRootProvider: async () => changedRoots === 'drive' ? ['D:\\New'] : []
+    });
+    assert.equal(result.source, 'common');
+    assert.equal(result.selected.path, 'D:\\New\\CXExam.exe');
+  }
+});
+
+test('目录排除策略变化时重新扫描，不复用被排除客户端的缓存', async () => {
+  const excludedName = 'cache-policy-child';
+  const cacheFs = createCacheFs();
+  const tree = createTree({
+    'C:\\Clients': [{ name: 'CXExam.exe' }, { name: excludedName, directory: true }],
+    ['C:\\Clients\\' + excludedName]: [{ name: 'CXExam.exe' }]
+  }, new Map([
+    ['C:\\Clients\\CXExam.exe', 0x8664],
+    ['C:\\Clients\\' + excludedName + '\\CXExam.exe', 0x014c]
+  ]));
+  const options = {
+    scanMode: 'common', cachePath: 'C:\\cache\\scan-cache.json', cacheFs,
+    commonRootProvider: async () => ['C:\\Clients'], driveRootProvider: async () => [],
+    fsProvider: { ...tree.fsProvider, async stat() { return { isFile: () => true }; } },
+    peMachineReader: tree.peMachineReader
+  };
+  assert.equal((await discoverClientCandidates(options)).selected.machine, 0x014c);
+  DEFAULT_SKIP_DIRECTORY_NAMES.add(excludedName);
+  try {
+    const result = await discoverClientCandidates(options);
+    assert.equal(result.source, 'common');
+    assert.equal(result.selected.path, 'C:\\Clients\\CXExam.exe');
+  } finally {
+    DEFAULT_SKIP_DIRECTORY_NAMES.delete(excludedName);
+  }
+});
+
 test('常规候选与 common 缓存均按 x86 优先、同架构路径排序', async () => {
   const candidates = [
     { path: 'C:\\Clients\\a64\\CXExam.exe', machine: 0x8664 },
@@ -582,33 +688,36 @@ test('扫描缓存只复用仍存在且架构未变化的有效候选', async ()
   });
   assert.equal(second.source, 'cache');
   assert.deepEqual(second.candidates.map((candidate) => candidate.path), ['C:\\Disk\\CXExam.exe']);
-  assert.equal(scans, 1);
+  assert.equal(scans, 2, 'cache reuse still resolves the current roots without enumerating directories');
 });
 
 test('扫描缓存候选失效或架构变化时自动放弃缓存并重扫', async () => {
-  const cacheFs = createCacheFs();
-  const cachePath = 'C:\\cache\\scan-cache.json';
-  cacheFs.files.set(cachePath, JSON.stringify({
-    version: 1,
-    createdAt: Date.now(),
-    scanMode: 'common',
-    source: 'common',
-    candidates: [{ path: 'C:\\Disk\\CXExam.exe', machine: 0x014c }]
-  }));
-  const tree = createTree({ 'C:\\Disk': [{ name: 'CXExam.exe' }] }, new Map([['C:\\Disk\\CXExam.exe', 0x8664]]));
-  let scans = 0;
-  const result = await discoverClientCandidates({
-    scanMode: 'common',
-    cachePath,
-    cacheFs,
-    commonRootProvider: async () => { scans += 1; return ['C:\\Disk']; },
-    driveRootProvider: async () => [],
-    fsProvider: tree.fsProvider,
-    peMachineReader: tree.peMachineReader
-  });
-  assert.equal(result.source, 'common');
-  assert.equal(scans, 1);
-  assert.equal(result.candidates[0].machine, 0x8664);
+  for (const changedCandidate of ['missing', 'architecture']) {
+    const cacheFs = createCacheFs();
+    const executables = new Map([['C:\\Disk\\CXExam.exe', 0x014c]]);
+    const tree = createTree({ 'C:\\Disk': [{ name: 'CXExam.exe' }] }, executables);
+    const options = {
+      scanMode: 'common', cachePath: 'C:\\cache\\scan-cache.json', cacheFs,
+      commonRootProvider: async () => ['C:\\Disk'], driveRootProvider: async () => [],
+      fsProvider: tree.fsProvider, peMachineReader: tree.peMachineReader
+    };
+    await discoverClientCandidates(options);
+    if (changedCandidate === 'missing') executables.delete('C:\\Disk\\CXExam.exe');
+    else executables.set('C:\\Disk\\CXExam.exe', 0x8664);
+    const result = await discoverClientCandidates({
+      ...options,
+      fsProvider: {
+        ...tree.fsProvider,
+        async stat() {
+          if (changedCandidate === 'missing') throw new Error('candidate removed');
+          return { isFile: () => true };
+        }
+      }
+    });
+    assert.equal(result.source, 'common');
+    if (changedCandidate === 'missing') assert.equal(result.candidates.length, 0);
+    else assert.equal(result.candidates[0].machine, 0x8664);
+  }
 });
 
 test('强制重扫绕过旧缓存但仍写回最新结果', async () => {
@@ -635,7 +744,7 @@ test('强制重扫绕过旧缓存但仍写回最新结果', async () => {
   assert.equal(JSON.parse(cacheFs.files.get(cachePath)).candidates[0].machine, 0x014c);
 });
 
-test('完整缓存只接受 full 来源，并保留全盘扫描顺序', async () => {
+test('全盘缓存只复用完整递归结果，并保留全盘扫描顺序', async () => {
   const cacheFs = createCacheFs();
   const cachePath = 'C:\\cache\\scan-cache.json';
   cacheFs.files.set(cachePath, JSON.stringify({
@@ -673,17 +782,9 @@ test('完整缓存只接受 full 来源，并保留全盘扫描顺序', async ()
   assert.equal(result.source, 'full');
   assert.equal(scans, 1);
 
-  cacheFs.files.set(cachePath, JSON.stringify({
-    version: 1,
-    createdAt: Date.now(),
-    scanMode: 'fallback-all',
-    source: 'full',
-    complete: true,
-    candidates: [
-      { path: 'D:\\level1\\z\\CXExam.exe', machine: 0x8664 },
-      { path: 'D:\\level1\\a\\CXExam.exe', machine: 0x014c }
-    ]
-  }));
+  const cached = JSON.parse(cacheFs.files.get(cachePath));
+  cached.candidates.reverse();
+  cacheFs.files.set(cachePath, JSON.stringify(cached));
   const hit = await discoverClientCandidates({ ...common, fsProvider: { async stat() { return { isFile: () => true }; }, async readdir() { throw new Error('full cache hit must not scan'); } } });
   assert.equal(hit.source, 'cache');
   assert.deepEqual(hit.candidates.map((candidate) => candidate.path), ['D:\\level1\\z\\CXExam.exe', 'D:\\level1\\a\\CXExam.exe']);

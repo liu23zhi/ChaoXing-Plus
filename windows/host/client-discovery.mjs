@@ -24,7 +24,7 @@ export const DEFAULT_SKIP_DIRECTORY_NAMES = new Set([
 // Full-disk fallback callers can opt into an unbounded traversal explicitly.
 export const COMMON_SCAN_MAX_DEPTH = 1;
 export const FULL_SCAN_MAX_DEPTH = Number.MAX_SAFE_INTEGER;
-export const CLIENT_SCAN_CACHE_VERSION = 1;
+export const CLIENT_SCAN_CACHE_VERSION = 2;
 export const DEFAULT_CLIENT_SCAN_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export function findPreferredClientIndex(candidates) {
@@ -98,7 +98,17 @@ function normalizeCachedCandidate(value) {
   return { path: normalizedPath, name: path.win32.basename(normalizedPath), machine };
 }
 
-async function readClientScanCache(cachePath, { scanMode, requireComplete = false, fsProvider, peMachineReader, cacheFs = fs, cacheTtlMs = DEFAULT_CLIENT_SCAN_CACHE_TTL_MS } = {}) {
+function createClientScanScope(scanMode, commonRoots, driveRoots) {
+  return {
+    commonRoots: scanMode === 'all' ? [] : Array.from(commonRoots || [], pathKey),
+    driveRoots: Array.from(driveRoots || [], pathKey),
+    commonMaxDepth: COMMON_SCAN_MAX_DEPTH,
+    fullMaxDepth: FULL_SCAN_MAX_DEPTH,
+    skippedDirectories: Array.from(DEFAULT_SKIP_DIRECTORY_NAMES, (name) => String(name).toLowerCase()).sort()
+  };
+}
+
+async function readClientScanCache(cachePath, { scanMode, scope, fsProvider, peMachineReader, cacheFs = fs, cacheTtlMs = DEFAULT_CLIENT_SCAN_CACHE_TTL_MS } = {}) {
   if (!cachePath || !cacheFs || typeof cacheFs.readFile !== 'function') return null;
   let parsed;
   try {
@@ -108,9 +118,10 @@ async function readClientScanCache(cachePath, { scanMode, requireComplete = fals
     return null;
   }
   if (!parsed || parsed.version !== CLIENT_SCAN_CACHE_VERSION || parsed.scanMode !== scanMode) return null;
-  // fallback/all 缓存只能来自完整递归扫描；常规零深度结果不足以证明没有深层客户端。
-  if (scanMode !== 'common' && parsed.source !== 'full') return null;
-  if (requireComplete && parsed.complete !== true) return null;
+  if (JSON.stringify(parsed.scope) !== JSON.stringify(scope) || parsed.complete !== true) return null;
+  if (parsed.source !== 'common' && parsed.source !== 'full') return null;
+  if (scanMode === 'all' && parsed.source !== 'full') return null;
+  if (scanMode === 'common' && parsed.source !== 'common') return null;
   if (!Number.isFinite(parsed.createdAt) || Date.now() - parsed.createdAt > cacheTtlMs || Date.now() - parsed.createdAt < 0) return null;
   if (!Array.isArray(parsed.candidates) || parsed.candidates.length === 0) return null;
 
@@ -136,13 +147,14 @@ async function readClientScanCache(cachePath, { scanMode, requireComplete = fals
   return parsed.source === 'full' ? result : result.sort(compareCommonCandidates);
 }
 
-async function writeClientScanCache(cachePath, { scanMode, source, complete, candidates, cacheFs = fs } = {}) {
+async function writeClientScanCache(cachePath, { scanMode, scope, source, complete, candidates, cacheFs = fs } = {}) {
   if (!cachePath || !cacheFs || typeof cacheFs.writeFile !== 'function' || typeof cacheFs.mkdir !== 'function') return;
   const directory = path.dirname(cachePath);
   const payload = {
     version: CLIENT_SCAN_CACHE_VERSION,
     createdAt: Date.now(),
     scanMode,
+    scope,
     source,
     complete: complete === true,
     candidates: candidates.map(({ path: candidatePath, name, machine }) => ({ path: candidatePath, name, machine }))
@@ -418,10 +430,14 @@ export async function discoverClientCandidates({
   forceRescan = false
 } = {}) {
   const cacheEnabled = Boolean(cachePath) && !noScanCache && !noDiskWrite;
+  // Resolve the current scan range before reusing a cache from another environment.
+  const commonRoots = scanMode === 'all' ? [] : await commonRootProvider({ fsProvider, desktopRootProvider });
+  const driveRoots = await driveRootProvider({ fsProvider });
+  const scope = createClientScanScope(scanMode, commonRoots, driveRoots);
   if (cacheEnabled && !forceRescan) {
     const cachedCandidates = await readClientScanCache(cachePath, {
       scanMode,
-      requireComplete: stopOnMachine === null,
+      scope,
       fsProvider,
       peMachineReader,
       cacheFs,
@@ -436,7 +452,6 @@ export async function discoverClientCandidates({
   }
   let result;
   if (scanMode === 'all') {
-    const driveRoots = await driveRootProvider({ fsProvider });
     onFullScan();
     const candidates = await discoverClientExecutables({
       roots: driveRoots,
@@ -448,14 +463,12 @@ export async function discoverClientCandidates({
     });
     result = { candidates, source: 'full', selected: candidates.find((item) => item.machine === 0x014c) || candidates[0] || null };
   } else {
-    const commonRoots = await commonRootProvider({ fsProvider, desktopRootProvider });
     const commonCandidates = await discoverClientExecutables({
       roots: commonRoots,
       scanMode: 'common',
       fsProvider,
       peMachineReader
     });
-    const driveRoots = await driveRootProvider({ fsProvider });
     const driveCandidates = await discoverClientExecutables({
       roots: driveRoots,
       scanMode: 'common',
@@ -489,10 +502,12 @@ export async function discoverClientCandidates({
       result = { candidates: fullCandidates, source: 'full', selected };
     }
   }
-  const cacheComplete = stopOnMachine === null && (scanMode === 'common' || result.source === 'full');
+  // Every common root is fully scanned; a positive common result also completes
+  // fallback-all because recursive scanning is only needed when common is empty.
+  const cacheComplete = result.source === 'common' || stopOnMachine === null;
   if (cacheEnabled && result.candidates.length > 0 && (result.source !== 'full' || cacheComplete)) {
     try {
-      await writeClientScanCache(cachePath, { scanMode, source: result.source, complete: cacheComplete, candidates: result.candidates, cacheFs });
+      await writeClientScanCache(cachePath, { scanMode, scope, source: result.source, complete: cacheComplete, candidates: result.candidates, cacheFs });
       onCacheEvent({ type: 'write', path: cachePath, count: result.candidates.length });
     } catch (error) {
       onCacheEvent({ type: 'write-error', path: cachePath, error });
