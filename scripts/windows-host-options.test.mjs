@@ -58,6 +58,16 @@ test('Windows 宿主参数支持脚本指定路径和自动答题', () => {
   assert.equal(options.panelEnabled, true);
 });
 
+test('测试运行时长只接受与原生一致的非负 32 位整数毫秒', () => {
+  for (const duration of [0, 1, 2147483647]) {
+    assert.equal(parseHostArgs(['--duration', String(duration)]).durationMs, duration);
+  }
+  assert.equal(parseHostArgs(['--duration', '100', '--duration', '0']).durationMs, 0);
+  for (const duration of ['', '-1', 'abc', '100garbage', '2147483648', '1e3', '1.5']) {
+    assert.throws(() => parseHostArgs(['--duration', duration]), /--duration.*0 到 2147483647.*整数/u);
+  }
+});
+
 test('注入链路参数可由 CLI/JSON 配置，并校验启动超时范围', () => {
   const options = parseHostArgs([
     '--expected-browser', 'Chrome/75',

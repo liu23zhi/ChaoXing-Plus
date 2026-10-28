@@ -636,7 +636,7 @@ export function parseHostArgs(argv) {
         break;
       case '--port': options.port = readPort(readValue(argv, index, argument), argument, true); index += 1; break;
       case '--assets': options.assetsDir = readValue(argv, index, argument); index += 1; break;
-      case '--duration': options.durationMs = Number.parseInt(readValue(argv, index, argument), 10); index += 1; break;
+      case '--duration': options.durationMs = readBoundedInteger(readValue(argv, index, argument), argument, 0, 2147483647); index += 1; break;
       case '--attach': options.attachPort = readPort(readValue(argv, index, argument), argument); index += 1; break;
       case '--report': options.reportPath = readValue(argv, index, argument); index += 1; break;
       case '--self-check': options.selfCheck = true; break;
