@@ -438,6 +438,23 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
 #include "host-session.inc"
 #include "host-self-check.inc"
 
+static void h_print_candidates(const CX_DISCOVERY_RESULT *result) {
+    DWORD i;
+    h_print(L"Index\tArchitecture\tVersion\tPath\r\n");
+    for (i = 0; i < result->count; ++i) {
+        const CX_CLIENT_CANDIDATE *candidate = result->items + i;
+        char number[16];
+        h_decimal(number, i + 1); h_print_utf8(number); h_print(L"\t");
+        h_print(candidate->machine == CX_DISCOVERY_MACHINE_X86 ? L"x86\t" : L"x64\t");
+        h_print(candidate->version[0] ? candidate->version : L"unknown"); h_print(L"\t");
+        h_print(candidate->path);
+        if (i == result->recommendedIndex) h_print(L" [recommended]");
+        h_print(L"\r\n");
+    }
+}
+static BOOL h_selection_space(WCHAR value) {
+    return value == L' ' || value == L'\t' || value == L'\r' || value == L'\n';
+}
 static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *result, WCHAR *error, DWORD errorCap) {
     DWORD index = result->recommendedIndex, mode = 0;
     BOOL console = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode);
@@ -451,31 +468,45 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
         if (status == CX_SELECTION_CANCELLED) { h_exit_code = 3; return FALSE; }
         return status == CX_SELECTION_SELECTED;
     }
-    if (!result->count) { h_error(error, errorCap, L"no valid CXExam.exe was found"); return FALSE; }
     if (options->clientIndexSet) {
         if (options->clientIndex < 1 || (DWORD)options->clientIndex > result->count) { h_error(error, errorCap, L"client-index is outside the discovered candidate list"); return FALSE; }
         index = (DWORD)options->clientIndex - 1;
     } else if (!options->clientPathSet && !options->clientFirst && !options->quiet && console) {
-        WCHAR input[512]; DWORD i, read = 0; int value = 0;
-        for (i = 0; i < result->count; ++i) {
-            char number[16]; h_decimal(number, i + 1); h_print_utf8(number); h_print(L". "); h_print(result->items[i].path); h_print(L"\r\n");
-        }
-        h_print(L"Select a client number (Enter uses recommended): ");
-        if (!ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), input, 511, &read, NULL)) { h_error(error, errorCap, L"cannot read client selection"); return FALSE; }
+        WCHAR input[512], *selection; DWORD i, length, read = 0, value = 0;
+        h_print_candidates(result);
+        h_print(L"Select a number or CXExam.exe path (Enter: recommended; q: cancel): ");
+        if (!ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), input, 511, &read, NULL) || !read) { h_error(error, errorCap, L"cannot read client selection"); return FALSE; }
+        if (read >= 511) { h_error(error, errorCap, L"client selection is too long; use --client for longer paths"); return FALSE; }
         input[read] = 0;
-        if (input[0] >= L'0' && input[0] <= L'9') {
-            for (i = 0; i < read && input[i] >= L'0' && input[i] <= L'9'; ++i) {
-                if (value > 100000) { h_error(error, errorCap, L"invalid client selection"); return FALSE; }
-                value = value * 10 + input[i] - L'0';
+        selection = input;
+        while (h_selection_space(*selection)) ++selection;
+        length = (DWORD)h_wlen(selection);
+        while (length && h_selection_space(selection[length - 1])) selection[--length] = 0;
+        if (length == 1 && (selection[0] == L'q' || selection[0] == L'Q')) { h_exit_code = 3; return FALSE; }
+        for (i = 0; i < length && selection[i] >= L'0' && selection[i] <= L'9'; ++i) { }
+        if (length && i == length) {
+            for (i = 0; i < length; ++i) {
+                DWORD digit = (DWORD)(selection[i] - L'0');
+                if (value > (0xffffffffUL - digit) / 10) { h_error(error, errorCap, L"invalid client selection"); return FALSE; }
+                value = value * 10 + digit;
             }
-            if (value < 1 || (DWORD)value > result->count) { h_error(error, errorCap, L"invalid client selection"); return FALSE; }
-            index = (DWORD)value - 1;
+            if (value < 1 || value > result->count) { h_error(error, errorCap, L"invalid client selection"); return FALSE; }
+            index = value - 1;
+        } else if (length) {
+            SYSTEM_INFO info; CX_DISCOVERY_RESULT manual; BOOL valid;
+            if (length > 1 && selection[0] == L'"' && selection[length - 1] == L'"') { selection[length - 1] = 0; ++selection; }
+            GetNativeSystemInfo(&info); cx_discovery_init(&manual);
+            valid = cx_discovery_resolve_client(selection, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, &manual, error, errorCap);
+            if (valid) valid = manual.count && h_copy(h_selected_path, HOST_PATH_CAP, manual.items[manual.recommendedIndex].path);
+            cx_discovery_free(&manual);
+            return valid;
         }
     }
+    if (!result->count) { h_error(error, errorCap, L"no valid CXExam.exe was found"); return FALSE; }
     return h_copy(h_selected_path, HOST_PATH_CAP, result->items[index].path);
 }
 static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
-    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; DWORD i; HANDLE client = NULL; USHORT port = 0;
+    CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; HANDLE client = NULL; USHORT port = 0;
     char *bootstrap = NULL, *bundle = NULL, *style = NULL, *trampoline = NULL;
     DWORD bootstrapLength, bundleLength, styleLength, trampolineLength;
     BOOL ok = FALSE;
@@ -520,7 +551,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         discover.enumerateAll = options->listClients || options->selectClient || options->clientIndexSet || h_equal(options->ui, L"gui") || (!options->clientFirst && !options->quiet);
         if (!cx_discovery_scan(&discover, &result, error, errorCap)) goto done;
         if (options->listClients) {
-            for (i = 0; i < result.count; ++i) { h_print(result.items[i].path); h_print(L"\r\n"); }
+            h_print_candidates(&result);
             h_report.stopReason = "list-clients"; ok = TRUE; goto done;
         }
         if (!result.count && options->quiet && options->clientFirst) { h_report.stopReason = "no-client"; ok = TRUE; goto done; }

@@ -71,14 +71,15 @@ try {
             @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'audit-tests'; Entry = 'AuditTestMain'; Objects = @('memory','audit'); Resources = @() },
             @{ Name = 'config-store-tests'; Entry = 'ConfigStoreTestMain'; Objects = @('memory','json','config-store'); Resources = @() },
-            @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() }
-            @{ Name = 'elevation-tests'; Entry = 'ElevationTestMain'; Objects = @('memory'); Resources = @() }
-            @{ Name = 'elevation-host-tests'; Entry = 'ElevationHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) }
-            @{ Name = 'dpi-tests'; Entry = 'DpiTestMain'; Objects = @('memory'); Resources = @() }
-            @{ Name = 'dpi-child'; Entry = 'DpiChildMain'; Objects = @('memory'); Resources = @(); Manifest = 'tests\dpi-child.manifest' }
-            @{ Name = 'dpi-process-tests'; Entry = 'DpiProcessTestMain'; Objects = @('memory','process','dpi'); Resources = @() }
-            @{ Name = 'process-check-tests'; Entry = 'ProcessCheckTestMain'; Objects = @('memory'); Resources = @() }
-            @{ Name = 'process-fixture'; Entry = 'ProcessFixtureMain'; Objects = @('memory'); Resources = @() }
+            @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() },
+            @{ Name = 'elevation-tests'; Entry = 'ElevationTestMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'elevation-host-tests'; Entry = 'ElevationHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) },
+            @{ Name = 'dpi-tests'; Entry = 'DpiTestMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'dpi-child'; Entry = 'DpiChildMain'; Objects = @('memory'); Resources = @(); Manifest = 'tests\dpi-child.manifest' },
+            @{ Name = 'dpi-process-tests'; Entry = 'DpiProcessTestMain'; Objects = @('memory','process','dpi'); Resources = @() },
+            @{ Name = 'process-check-tests'; Entry = 'ProcessCheckTestMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'process-fixture'; Entry = 'ProcessFixtureMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'cli-selection-tests'; Entry = 'CliSelectionTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) }
         )) {
             $testObject = Join-Path $build ($test.Name + '.obj')
             & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot ('tests\' + $test.Name + '.c'))
@@ -88,7 +89,7 @@ try {
             $testManifest = @()
             if ($test.ContainsKey('Manifest')) { $testManifest = @('/MANIFESTINPUT:' + (Join-Path $scriptRoot $test.Manifest)) }
             & $linker @testArgs @testManifest ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
-            if ($LASTEXITCODE -ne 0) { throw "Native test link failed: $($test.Name)" }
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $bin ($test.Name + '.exe')) -PathType Leaf)) { throw "Native test link failed or output is missing: $($test.Name)" }
         }
     }
 } finally { $env:Path = $originalPath }
