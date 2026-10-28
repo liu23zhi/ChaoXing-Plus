@@ -348,6 +348,16 @@ static BOOL cx_json_execution_mode(const char *s, const JT *t, int object,
     }
     return TRUE;
 }
+static BOOL cx_json_dpi_mode(CX_OPTIONS *o, const char *s, const JT *t, int object,
+                             WCHAR *error, DWORD errorCap) {
+    int v; WCHAR mode[CX_OPTIONS_SHORT_CAP];
+    if (!cx_skey(s, t, object, "dpiAwareness", &v)) return TRUE;
+    if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP)
+        || !(cx_streq(mode, L"") || cx_streq(mode, L"system"))) {
+        cx_error(error, errorCap, L"JSON dpiAwareness must be an empty string or system"); return FALSE;
+    }
+    o->dpiAware = cx_streq(mode, L"system"); o->dpiAwareSet = TRUE; return TRUE;
+}
 static BOOL cx_merge_shared_settings(CX_OPTIONS *o, const char *patch, DWORD patchLength,
                                      WCHAR *error, DWORD errorCap) {
     char *base, *merged; DWORD length = 0, previous = o->sharedSettingsLength; BOOL ok;
@@ -436,7 +446,8 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
     if (object < 0 || tokens[object].type != '{') { cx_error(error, errorCap, L"JSON root must be an object"); return FALSE; }
     if (!cx_reject_unknown_top(json, tokens, object, error, errorCap) ||
         !cx_json_reject_unsupported(json, tokens, object, error, errorCap) ||
-        !cx_json_execution_mode(json, tokens, object, error, errorCap)) return FALSE;
+        !cx_json_execution_mode(json, tokens, object, error, errorCap)
+        || !cx_json_dpi_mode(o, json, tokens, object, error, errorCap)) return FALSE;
     if (!cx_json_wstr_field(json, tokens, object, "clientPath", o->clientPath, CX_OPTIONS_PATH_CAP, &o->clientPathSet, error, errorCap) ||
         !cx_json_wstr_field(json, tokens, object, "dataDir", o->dataDir, CX_OPTIONS_PATH_CAP, &o->dataDirSet, error, errorCap) ||
         !cx_json_wstr_field(json, tokens, object, "expectedBrowser", o->expectedBrowser, CX_OPTIONS_SHORT_CAP, &o->expectedBrowserSet, error, errorCap) ||
@@ -681,6 +692,9 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
+    if (o->dpiAware && (o->noDiskWrite || o->attachPortSet)) {
+        cx_error(error, errorCap, L"dpi-aware requires an owned launch and conflicts with no-disk-write or attach"); return FALSE;
+    }
     if (o->elevatedClientSet && (!o->elevated || !o->elevatedClientPath[0]
         || o->attachPortSet || o->help || o->capabilities || o->selfCheck
         || o->printEffectiveConfig || o->listClients)) {

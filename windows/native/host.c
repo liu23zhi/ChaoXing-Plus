@@ -14,6 +14,7 @@
 #include "config-store.h"
 #include "diagnostics.h"
 #include "elevation.h"
+#include "dpi.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
@@ -540,10 +541,30 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
+        CX_DPI_OVERRIDE *dpi = NULL;
+        BOOL launched;
+        DWORD launchError;
         h_report.stopReason = "launch-failed";
         if (!h_choose_port(options, &port)) { h_error(error, errorCap, L"no usable loopback CDP port"); goto done; }
-        if (!proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap)) {
-            DWORD launchError = GetLastError();
+        if (options->dpiAware) {
+            h_report.stopReason = "dpi-override-failed";
+            dpi = cx_dpi_begin(h_selected_path, error, errorCap);
+            if (!dpi) goto done;
+            h_audit_event("info", "dpi", "Applying temporary system DPI compatibility for owned client launch");
+        }
+        h_report.stopReason = "launch-failed";
+        launched = proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap);
+        launchError = GetLastError();
+        if (launched) { h_report.clientPid = h_client_pid; h_report.port = port; }
+        if (dpi) {
+            WCHAR restoreError[HOST_ERROR_CAP];
+            if (!cx_dpi_restore(dpi, restoreError, HOST_ERROR_CAP)) {
+                h_report.stopReason = "dpi-restore-failed";
+                h_error(error, errorCap, restoreError); goto done;
+            }
+            h_audit_event("info", "dpi", "Restored the original DPI compatibility setting");
+        }
+        if (!launched) {
             if (launchError == ERROR_ELEVATION_REQUIRED) {
                 if (cx_elevation_can_restart(launchError, options->noElevate, options->elevated)) {
                     h_needs_elevation = TRUE; ok = TRUE;
@@ -624,6 +645,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
             "运行: --execution-mode normal --port <0-65535> --stop-client-on-exit\n"
             "  --no-elevate（禁止启动遇到 740 时通过 Windows UAC 重启宿主）\n"
+            "  --dpi-aware（启动时临时使用 HIGHDPIAWARE，随后恢复原值；与 no-disk-write/attach 互斥）\n"
             "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
             "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局采样）\n"
             "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
@@ -639,7 +661,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,\"temporaryDpiOverride\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }

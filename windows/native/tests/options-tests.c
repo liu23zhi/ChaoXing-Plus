@@ -292,6 +292,23 @@ static void test_selection_layer_priority(void) {
     check(apply("{\"clientIndex\":-1}") && !cx_options_finalize(&baseOptions, errorText, 512), "negative JSON client index is rejected before launch");
 }
 
+static void test_dpi_options(void) {
+    WCHAR *on[] = { L"--dpi-aware" };
+    reset();
+    check(apply("{\"dpiAwareness\":\"system\"}") && baseOptions.dpiAware && baseOptions.dpiAwareSet,
+        "JSON system DPI mode enables the actual launch option");
+    check(apply("{\"dpiAwareness\":\"\"}") && !baseOptions.dpiAware, "higher empty DPI mode disables an earlier override");
+    check(apply("{\"dpiAwareness\":\"system\",\"dpiAware\":false}") && !baseOptions.dpiAware,
+        "explicit boolean DPI alias overrides string alias in one JSON layer");
+    check(cx_options_parse_cli(&cliOptions, 1, on, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512) && baseOptions.dpiAware,
+        "independent DPI CLI flag wins over configured disabled mode");
+    reset();
+    check(!apply("{\"dpiAwareness\":47}"), "invalid numeric DPI mode rejected rather than silently ignored");
+    reset();
+    check(!apply("{\"dpiAwareness\":\"per-monitor\"}"), "unsupported DPI mode rejected");
+}
+
 static void test_elevation_options(void) {
     WCHAR *disable[] = { L"--no-elevate" };
     WCHAR *value[] = { L"--expected-browser", L"--elevated" };
@@ -317,6 +334,7 @@ void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     test_elevation_options();
+    test_dpi_options();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;
     ExitProcess(failures ? 1 : 0);
