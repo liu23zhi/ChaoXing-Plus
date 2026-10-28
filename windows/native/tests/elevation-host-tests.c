@@ -4,6 +4,7 @@
 DWORD WINAPI test_attributes(LPCWSTR path);
 LPWSTR WINAPI test_command_line(void);
 #define cx_discovery_scan test_discovery_scan
+#define proc_check_instances test_check_instances
 #define proc_launch test_launch
 #define proc_stop_owned test_stop_owned
 #define proc_port_bindable test_bindable
@@ -31,6 +32,14 @@ static DWORD restartCalls;
 static BOOL restartCancelled;
 static DWORD dpiBegins, dpiRestores, stopped, sequence, dpiAt, launchAt, restoreAt;
 static BOOL dpiActive, dpiBeginAllowed = TRUE, dpiRestoreAllowed = TRUE;
+static DWORD processChecks, existingCount;
+static BOOL inspectionAllowed = TRUE;
+
+BOOL test_check_instances(const WCHAR *path, DWORD *count, WCHAR *error, DWORD cap) {
+    (void)path; ++processChecks; *count = inspectionAllowed ? existingCount : 0;
+    if (!inspectionAllowed) h_error(error, cap, L"fixture process inspection failed");
+    return inspectionAllowed;
+}
 
 CX_DPI_OVERRIDE *test_dpi_begin(const WCHAR *client, WCHAR *error, DWORD cap) {
     (void)client; ++dpiBegins; dpiAt = ++sequence;
@@ -102,6 +111,7 @@ static void reset(void) {
     restartCalls = 0; restartCancelled = FALSE;
     dpiBegins = dpiRestores = stopped = sequence = dpiAt = launchAt = restoreAt = 0;
     dpiActive = FALSE; dpiBeginAllowed = dpiRestoreAllowed = TRUE;
+    processChecks = existingCount = 0; inspectionAllowed = TRUE;
 }
 void __stdcall ElevationHostTestMain(void) {
     BOOL result;
@@ -150,9 +160,32 @@ void __stdcall ElevationHostTestMain(void) {
     reset(); testOptions.dpiAware = TRUE; dpiRestoreAllowed = FALSE; launchFailure = ERROR_SUCCESS;
     check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && stopped == 1 && h_report.clientPid == 4321
         && !h_needs_elevation, "DPI restore failure stops only the newly owned client and keeps its PID in report");
+    reset(); testOptions.dpiAware = TRUE; existingCount = 2;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && processChecks == 1
+        && !dpiBegins && !launches && !stopped && !h_needs_elevation
+        && !lstrcmpA(h_report.stopReason, "client-already-running") && !h_audit && !h_config,
+        "existing clients block before DPI and launch without stopping them or requesting UAC");
+    reset(); testOptions.dpiAware = TRUE; inspectionAllowed = FALSE;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && processChecks == 1
+        && !dpiBegins && !launches && !stopped && !h_needs_elevation
+        && !lstrcmpA(h_report.stopReason, "process-check-failed"),
+        "failed process inspection blocks before DPI and launch instead of counting zero clients");
+    reset(); testOptions.elevated = TRUE; testOptions.elevatedClientSet = TRUE; existingCount = 1;
+    h_copy(testOptions.elevatedClientPath, 32768, L"D:\\原始选择\\CXExam.exe");
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && processChecks == 1
+        && !launches && !stopped && !h_needs_elevation
+        && !lstrcmpA(h_report.stopReason, "client-already-running"),
+        "resumed UAC host rechecks existing clients before starting the selected path");
+    reset(); testOptions.dpiAware = TRUE; launchFailure = ERROR_ALREADY_EXISTS;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && dpiBegins == 1 && dpiRestores == 1
+        && dpiAt < launchAt && launchAt < restoreAt && !stopped && !h_needs_elevation,
+        "a late existing-client conflict restores DPI and never requests UAC or stops existing clients");
+    reset(); testOptions.listClients = TRUE; existingCount = 1;
+    check(h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && !processChecks && !launches
+        && !dpiBegins && !stopped, "listing clients never inspects or alters existing processes");
     reset(); commandLineFixture = L"host.exe --self-check --dpi-aware --quiet";
-    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && !dpiBegins && !launches,
-        "self-check never creates a temporary DPI registry override");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && !dpiBegins && !launches && !processChecks,
+        "self-check never creates a DPI override or checks for running client conflicts");
     h_print_utf8(failures ? "NATIVE ELEVATION HOST TESTS FAIL\n" : "NATIVE ELEVATION HOST TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);
 }

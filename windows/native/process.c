@@ -246,31 +246,60 @@ static BOOL p_name_equal(const WCHAR *left, const WCHAR *right) {
     }
 }
 
-int proc_instances(const WCHAR *exePath, DWORD *pids, int cap) {
-    HANDLE snapshot;
+static BOOL p_instances(const WCHAR *exePath, DWORD *pids, DWORD pidCap, DWORD *total,
+                         WCHAR *err, DWORD errorCap) {
+    HANDLE snapshot = INVALID_HANDLE_VALUE;
     PROCESSENTRY32W entry;
     const WCHAR *name = exePath;
-    DWORD self = GetCurrentProcessId(), i;
-    int count = 0;
-    if (!exePath || !*exePath) return 0;
+    DWORD self = GetCurrentProcessId(), i, count = 0, code = ERROR_INVALID_PARAMETER;
+    BOOL ok = FALSE;
+    if (total) *total = 0;
+    p_error(err, errorCap, L"", 0);
+    if (!exePath || !*exePath || !total) goto done;
     for (i = 0; exePath[i]; ++i) if (exePath[i] == L'\\' || exePath[i] == L'/') name = exePath + i + 1;
+    if (!*name) goto done;
     snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    if (snapshot == INVALID_HANDLE_VALUE) { code = GetLastError(); goto done; }
     p_zero(&entry, sizeof(entry));
     entry.dwSize = sizeof(entry);
-    if (Process32FirstW(snapshot, &entry)) do {
-        if (!entry.th32ProcessID || entry.th32ProcessID == self) continue;
-        if (!p_name_equal(entry.szExeFile, name)) continue;
-        if (pids && count < cap) pids[count] = entry.th32ProcessID;
-        ++count;
-    } while (Process32NextW(snapshot, &entry));
-    CloseHandle(snapshot);
-    return count;
+    if (!Process32FirstW(snapshot, &entry)) {
+        code = GetLastError(); ok = code == ERROR_NO_MORE_FILES; goto done;
+    }
+    for (;;) {
+        if (entry.th32ProcessID && entry.th32ProcessID != self && p_name_equal(entry.szExeFile, name)) {
+            if (count == MAXDWORD) { code = ERROR_ARITHMETIC_OVERFLOW; goto done; }
+            if (pids && count < pidCap) pids[count] = entry.th32ProcessID;
+            ++count;
+        }
+        if (!Process32NextW(snapshot, &entry)) {
+            code = GetLastError(); ok = code == ERROR_NO_MORE_FILES; break;
+        }
+    }
+done:
+    if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    if (ok) { *total = count; code = ERROR_SUCCESS; }
+    else {
+        if (!code) code = ERROR_GEN_FAILURE;
+        p_error(err, errorCap, L"Cannot reliably inspect running client processes", code);
+    }
+    SetLastError(code); return ok;
+}
+
+BOOL proc_check_instances(const WCHAR *exePath, DWORD *count, WCHAR *err, DWORD cap) {
+    return p_instances(exePath, NULL, 0, count, err, cap);
+}
+
+int proc_instances(const WCHAR *exePath, DWORD *pids, int cap) {
+    DWORD count;
+    if (cap < 0) { SetLastError(ERROR_INVALID_PARAMETER); return -1; }
+    if (!p_instances(exePath, pids, (DWORD)cap, &count, NULL, 0)) return -1;
+    if (count > 2147483647UL) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return -1; }
+    return (int)count;
 }
 
 BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
     WCHAR *full = NULL, *directory = NULL, *command = NULL;
-    DWORD length, i, at, code = 0, slot;
+    DWORD length, i, at, code = 0, slot, running;
     STARTUPINFOW startup;
     PROCESS_INFORMATION info;
     FILETIME created, exited;
@@ -298,6 +327,8 @@ BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCH
     at = p_copy(command, length + 128, at, L"\" --remote-debugging-port=");
     at = p_decimal(command, length + 128, at, port);
     p_copy(command, length + 128, at, L" --remote-debugging-address=127.0.0.1");
+    if (!proc_check_instances(full, &running, err, cap)) { code = GetLastError(); goto done; }
+    if (running) { code = ERROR_ALREADY_EXISTS; p_error(err, cap, L"Client is already running; close it before starting a new owned client", code); goto done; }
     p_zero(&startup, sizeof(startup)); startup.cb = sizeof(startup);
     p_zero(&info, sizeof(info));
     p_lock();

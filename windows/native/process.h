@@ -12,8 +12,10 @@ BOOL proc_port_free(USHORT port);
    reject otherwise-free ports that fall inside an excluded/reserved range
    (bind fails with WSAEACCES); CEF's devtools server would fail the same way. */
 BOOL proc_port_bindable(USHORT port, WCHAR *err, DWORD cap);
-/* Counts running processes whose executable file name matches the target.
-   Used to refuse testing while another CXExam.exe instance is running. */
+/* A completed process snapshot is required to establish the count. On failure
+   returns FALSE and leaves count at zero; zero alone is never proof of absence. */
+BOOL proc_check_instances(const WCHAR *exePath, DWORD *count, WCHAR *err, DWORD cap);
+/* Legacy PID-list wrapper: returns -1 on inspection failure. */
 int proc_instances(const WCHAR *exePath, DWORD *pids, int cap);
 DWORD proc_stop_owned(DWORD rootPid);
 BOOL proc_pe(const WCHAR *path, WORD *machine, WORD *subsystemMajor,
