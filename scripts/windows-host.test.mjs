@@ -190,6 +190,7 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
       };
     };
 
+    const sandbox = vm.createContext(createSandbox());
     socket.on('data', (chunk) => {
       consumeClientFrames(socketState, chunk, (text) => {
         let message;
@@ -230,7 +231,7 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
           case 'Runtime.evaluate': {
             captured.evaluates.push(String(message.params && message.params.expression ? message.params.expression : ''));
             try {
-              vm.runInNewContext(captured.evaluates[captured.evaluates.length - 1], createSandbox(), { timeout: 2000 });
+              vm.runInContext(captured.evaluates[captured.evaluates.length - 1], sandbox, { timeout: 2000 });
               sendJson({ id: message.id, result: { result: { type: 'undefined' } } });
               if (captured.connections === 1 && disconnectOnExpression
                 && captured.evaluates.at(-1).includes(disconnectOnExpression)) {
@@ -546,8 +547,8 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
   const configPath = path.join(directory, 'config.json');
   const reportPath = path.join(directory, 'report.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
   });
   await fs.writeFile(configPath, JSON.stringify({
     clientPath: '',
@@ -587,7 +588,7 @@ test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-'));
   const assetsDir = path.join(directory, 'assets');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
     bundle: 'window.__reconnectBundle=true;'
   });
   try {
@@ -613,7 +614,7 @@ test('CDP 重连后保留前一会话已完成的注入统计及成功退出码'
   const assetsDir = path.join(directory, 'assets');
   const reportPath = path.join(directory, 'report.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
     bundle: 'window.__historyBundle=true;'
   });
   try {
@@ -642,8 +643,8 @@ test('宿主 --no-disk-write 禁止配置、日志、诊断和报告输出', asy
   const diagnosticsDir = path.join(directory, 'diagnostics');
   const reportPath = path.join(directory, 'report.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
   });
   try {
     const result = await runCommand(process.execPath, [
@@ -679,8 +680,8 @@ test('配置文件 noDiskWrite 在创建 config store 前生效', async () => {
   const diagnosticsDir = path.join(directory, 'diagnostics');
   const reportPath = path.join(directory, 'report.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'config-sync',detail:{'common.settings.fromPage':42}}));"
   });
   const originalConfig = JSON.stringify({
     noDiskWrite: true,
@@ -720,8 +721,8 @@ test('配置层 deleteConfig 在最终合并后仍会删除显式外部配置', 
   const assetsDir = path.join(directory, 'assets');
   const configPath = path.join(directory, 'config.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));"
   });
   await fs.writeFile(configPath, JSON.stringify({
     deleteConfig: true,
@@ -782,8 +783,8 @@ test('不保留本轮数据时保留已有诊断目录及其中用户文件', as
   const diagnosticsDir = path.join(directory, 'diagnostics');
   const sentinelPath = path.join(diagnosticsDir, 'user-notes.txt');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));"
   });
   await fs.mkdir(diagnosticsDir);
   await fs.writeFile(sentinelPath, 'keep user data', 'utf8');
@@ -828,8 +829,8 @@ test('宿主 --diagnose 会采集渲染诊断并写入诊断文件', async () =>
   const reportPath = path.join(directory, 'report.json');
   const diagnosticsDir = path.join(directory, 'diagnostics');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));"
   });
   await fs.writeFile(configPath, JSON.stringify({
     clientPath: '',
@@ -902,7 +903,7 @@ test('宿主配置热更新保留 CLI 和内联覆盖，同时广播可变磁盘
   const assetsDir = path.join(directory, 'assets');
   const configPath = path.join(directory, 'config.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
     bundle: 'window.__reloadBundle=true;'
   });
   await fs.writeFile(configPath, JSON.stringify({ settings: { 'common.settings.mutable': 'old' } }), 'utf8');
@@ -957,7 +958,7 @@ for (const startupNoDiskWrite of [true, false]) {
     const configPath = path.join(directory, 'config.json');
     const reportPath = path.join(directory, 'report.json');
     await writeFixtureAssets(assetsDir, {
-      bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+      bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
       bundle: 'window.__policyBundle=true;'
     });
     await fs.writeFile(configPath, JSON.stringify({
@@ -1015,7 +1016,7 @@ test('宿主配置热更新拒绝未实现参数并保留上一有效配置', as
   const assetsDir = path.join(directory, 'assets');
   const configPath = path.join(directory, 'config.json');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
     bundle: 'window.__unsupportedReloadBundle=true;'
   });
   await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, settings: { 'common.settings.mutable': 'old' } }), 'utf8');
@@ -1052,8 +1053,8 @@ test('页面回写受 CLI 和内联约束时仍广播校正值给发起页面', 
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-page-policy-'));
   const assetsDir = path.join(directory, 'assets');
   await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'ready',detail:{}}));",
-    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({kind:'config-sync',detail:{'common.settings.windows-panel-enabled':true,'common.settings.windows-answer-mode':'auto','common.settings.windows-no-disk-write':false,'common.settings.inline-only':'page'}}));"
+    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+    bundle: "console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'config-sync',detail:{'common.settings.windows-panel-enabled':true,'common.settings.windows-answer-mode':'auto','common.settings.windows-no-disk-write':false,'common.settings.inline-only':'page'}}));"
   });
   try {
     const result = await runCommand(process.execPath, [

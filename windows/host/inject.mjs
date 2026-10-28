@@ -61,6 +61,7 @@ export class PageSession {
     this.scriptIdentifier = null;
     this.contexts = new Map();
     this.frameUrls = new Map();
+    this.frameParents = new Map();
     this.topFrameId = null;
     this.bootstrapped = new Set();
     this.readyContexts = new Set();
@@ -122,6 +123,8 @@ export class PageSession {
         if (!tree || depth > 16) return;
         if (tree.frame && tree.frame.id) {
           this.frameUrls.set(tree.frame.id, tree.frame.url || '');
+          if (tree.frame.parentId) this.frameParents.set(tree.frame.id, tree.frame.parentId);
+          else this.frameParents.delete(tree.frame.id);
         }
         for (const child of tree.childFrames || []) visit(child, depth + 1);
       };
@@ -181,6 +184,47 @@ export class PageSession {
     return false;
   }
 
+  clearContext(contextId) {
+    this.contexts.delete(contextId);
+    this.bootstrapped.delete(contextId);
+    this.readyContexts.delete(contextId);
+    this.bundleLoaded.delete(contextId);
+    this.bundlePending.delete(contextId);
+  }
+
+  removeFrameSubtree(frameId) {
+    if (!frameId) return;
+    const removedFrames = new Set([frameId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [childId, parentId] of this.frameParents) {
+        if (!removedFrames.has(childId) && removedFrames.has(parentId)) {
+          removedFrames.add(childId);
+          changed = true;
+        }
+      }
+    }
+    for (const [contextId, context] of this.contexts) {
+      if (removedFrames.has(context.frameId)) this.clearContext(contextId);
+    }
+    for (const removedFrameId of removedFrames) {
+      this.frameUrls.delete(removedFrameId);
+      this.frameParents.delete(removedFrameId);
+    }
+    if (removedFrames.has(this.topFrameId)) this.topFrameId = null;
+    this.stats.contexts = this.contexts.size;
+  }
+
+  isHostMessage(payload, contextId) {
+    return Number.isInteger(contextId)
+      && contextId > 0
+      && this.contexts.has(contextId)
+      && this.bootstrapped.has(contextId)
+      && payload.source === 'chaoxing-plus-windows'
+      && payload.instance === this.instanceToken;
+  }
+
   async handleEvent(message) {
     if (this.closed || !message) return;
     if (message.method === 'cx.disconnected') {
@@ -207,11 +251,7 @@ export class PageSession {
     }
     if (message.method === 'Runtime.executionContextDestroyed') {
       const contextId = params.executionContextId;
-      this.contexts.delete(contextId);
-      this.bootstrapped.delete(contextId);
-      this.readyContexts.delete(contextId);
-      this.bundleLoaded.delete(contextId);
-      this.bundlePending.delete(contextId);
+      this.clearContext(contextId);
       this.stats.contexts = this.contexts.size;
       return;
     }
@@ -224,10 +264,23 @@ export class PageSession {
       this.stats.contexts = 0;
       return;
     }
+    if (message.method === 'Page.frameAttached') {
+      if (params.frameId && params.parentFrameId) {
+        this.frameParents.set(params.frameId, params.parentFrameId);
+      }
+      return;
+    }
+    if (message.method === 'Page.frameDetached') {
+      this.removeFrameSubtree(params.frameId);
+      this.scheduleRescan();
+      return;
+    }
     if (message.method === 'Page.frameNavigated') {
       const frame = params.frame || {};
       if (frame.id) {
         this.frameUrls.set(frame.id, frame.url || '');
+        if (frame.parentId) this.frameParents.set(frame.id, frame.parentId);
+        else this.frameParents.delete(frame.id);
       }
       if (!frame.parentId) {
         this.topFrameId = frame.id || this.topFrameId;
@@ -268,11 +321,18 @@ export class PageSession {
     if (!payload || typeof payload !== 'object') return;
     const detail = payload.detail || {};
     if (payload.kind === 'boot-request') {
-      if (Number.isInteger(contextId) && contextId > 0) await this.injectBootstrap(contextId);
+      const hasSource = Object.prototype.hasOwnProperty.call(payload, 'source');
+      const hasInstance = Object.prototype.hasOwnProperty.call(payload, 'instance');
+      // trampoline requests precede bootstrap; an existing envelope must match completely.
+      if ((hasSource || hasInstance) && (!hasSource || !hasInstance
+        || payload.source !== 'chaoxing-plus-windows' || payload.instance !== this.instanceToken)) return;
+      if (Number.isInteger(contextId) && contextId > 0 && this.contexts.has(contextId)) {
+        await this.injectBootstrap(contextId);
+      }
       return;
     }
+    if (!this.isHostMessage(payload, contextId)) return;
     if (payload.kind === 'ready') {
-      if (!Number.isInteger(contextId) || contextId <= 0) return;
       this.readyContexts.add(contextId);
       if (!this.configStore.isEnabled()) return;
       await this.injectBundle(contextId);

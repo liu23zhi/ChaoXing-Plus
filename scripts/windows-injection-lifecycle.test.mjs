@@ -84,7 +84,7 @@ function mockRegistrationCdp(t, { deferContext = false, deferRegistration = fals
   session = makeSession({
     injectStrategy: 'runtime',
     assets: {
-      bootstrap: 'window.__CX_WIN_HOST__=true;window.bootstrapRuns=(window.bootstrapRuns||0)+1;console.log(\'__CX_WIN_MSG__{"kind":"ready"}\');',
+      bootstrap: 'window.__CX_WIN_HOST__=true;window.bootstrapRuns=(window.bootstrapRuns||0)+1;console.log(\'__CX_WIN_MSG__{"source":"chaoxing-plus-windows","instance":"lifecycle-test","kind":"ready"}\');',
       bundle: 'window.bundleRuns=(window.bundleRuns||0)+1;',
       trampoline: '',
       style: ''
@@ -138,15 +138,111 @@ test('新文档注册期间关闭会话时只取消，不记录兼容性降级�
 
 test('同一上下文并发 ready 只执行一次业务 bundle', async () => {
   const session = makeSession();
+  session.bootstrapped.add(1);
   const pending = deferred();
   let executions = 0;
   session.evaluateOrThrow = async () => { executions += 1; await pending.promise; };
-  const first = session.handlePageMessage({ kind: 'ready' }, 1);
-  const second = session.handlePageMessage({ kind: 'ready' }, 1);
+  const ready = { source: 'chaoxing-plus-windows', instance: 'lifecycle-test', kind: 'ready' };
+  const first = session.handlePageMessage(ready, 1);
+  const second = session.handlePageMessage(ready, 1);
   pending.resolve();
   await Promise.all([first, second]);
   assert.equal(executions, 1);
   assert.equal(session.stats.bundles, 1);
+});
+
+test('拒绝未知上下文和伪造来源的 ready 与 config-sync 消息', async () => {
+  let injections = 0;
+  let configSyncs = 0;
+  const session = makeSession({ onConfigSync: () => { configSyncs += 1; } });
+  session.bootstrapped.add(1);
+  session.injectBundle = async () => { injections += 1; };
+  await session.handlePageMessage({ source: 'chaoxing-plus-windows', instance: 'lifecycle-test', kind: 'ready' }, 999);
+  await session.handlePageMessage({ source: 'forged', instance: 'lifecycle-test', kind: 'ready' }, 1);
+  await session.handlePageMessage({ source: 'chaoxing-plus-windows', instance: 'other-instance', kind: 'ready' }, 1);
+  await session.handlePageMessage({ source: 'forged', instance: 'lifecycle-test', kind: 'config-sync', detail: { enabled: false } }, 1);
+  await session.handlePageMessage({ source: 'chaoxing-plus-windows', instance: 'other-instance', kind: 'config-sync', detail: { enabled: false } }, 1);
+  assert.equal(injections, 0);
+  assert.equal(configSyncs, 0);
+  assert.equal(session.readyContexts.size, 0);
+  assert.equal(session.stats.configSyncs, 0);
+});
+
+test('trampoline boot-request 仅能从已登记的默认执行上下文触发 bootstrap', async () => {
+  const session = makeSession();
+  const requested = [];
+  session.injectBootstrap = async (contextId) => { requested.push(contextId); };
+  await session.handlePageMessage({ kind: 'boot-request' }, 999);
+  await session.handlePageMessage({ kind: 'boot-request' }, 1);
+  assert.deepEqual(requested, [1]);
+});
+
+test('boot-request 拒绝伪造或不完整的宿主标识，允许初始化前请求和完整匹配标识', async () => {
+  const session = makeSession();
+  const requested = [];
+  session.injectBootstrap = async (contextId) => { requested.push(contextId); };
+  for (const envelope of [
+    { source: 'forged', instance: 'lifecycle-test' },
+    { source: 'chaoxing-plus-windows', instance: 'other-instance' },
+    { source: 'chaoxing-plus-windows' },
+    { instance: 'lifecycle-test' },
+    { source: null, instance: null }
+  ]) {
+    await session.handlePageMessage({ kind: 'boot-request', ...envelope }, 1);
+  }
+  assert.deepEqual(requested, []);
+  await session.handlePageMessage({ kind: 'boot-request' }, 1);
+  await session.handlePageMessage({ kind: 'boot-request', source: 'chaoxing-plus-windows', instance: 'lifecycle-test' }, 1);
+  assert.deepEqual(requested, [1, 1]);
+});
+
+test('初始 frame 树保留父子关系，使移除父 frame 能清理已存在的后代', async () => {
+  const session = makeSession();
+  session.connection = { send: async () => ({ frameTree: {
+    frame: { id: 'top', url: session.target.url },
+    childFrames: [{
+      frame: { id: 'child', parentId: 'top', url: 'about:blank' },
+      childFrames: [{ frame: { id: 'grandchild', parentId: 'child', url: 'about:blank' } }]
+    }]
+  } }) };
+  await session.refreshFrameTree();
+  assert.deepEqual([...session.frameParents], [['child', 'top'], ['grandchild', 'child']]);
+  session.contexts.set(2, { frameId: 'child' });
+  session.contexts.set(3, { frameId: 'grandchild' });
+  session.removeFrameSubtree('child');
+  assert.deepEqual([...session.contexts.keys()], [1]);
+  assert.deepEqual([...session.frameUrls.keys()], ['top']);
+  assert.equal(session.frameParents.size, 0);
+});
+
+test('frameDetached 清除目标 frame 及后代的执行上下文和注入状态', async () => {
+  const session = makeSession();
+  session.contexts.set(2, { frameId: 'child', origin: 'https://mooc1.chaoxing.com' });
+  session.contexts.set(3, { frameId: 'grandchild', origin: 'https://mooc1.chaoxing.com' });
+  session.contexts.set(4, { frameId: 'sibling', origin: 'https://mooc1.chaoxing.com' });
+  session.frameUrls.set('child', 'about:blank');
+  session.frameUrls.set('grandchild', 'about:blank');
+  session.frameUrls.set('sibling', 'about:blank');
+  session.frameParents = new Map([['child', 'top'], ['grandchild', 'child'], ['sibling', 'top']]);
+  for (const contextId of [1, 2, 3, 4]) {
+    session.bootstrapped.add(contextId);
+    session.readyContexts.add(contextId);
+    session.bundleLoaded.add(contextId);
+    session.bundlePending.set(contextId, Promise.resolve());
+  }
+  let rescans = 0;
+  session.scheduleRescan = () => { rescans += 1; };
+  await session.handleEvent({ method: 'Page.frameDetached', params: { frameId: 'child', reason: 'remove' } });
+  assert.deepEqual([...session.contexts.keys()], [1, 4]);
+  assert.deepEqual([...session.bootstrapped], [1, 4]);
+  assert.deepEqual([...session.readyContexts], [1, 4]);
+  assert.deepEqual([...session.bundleLoaded], [1, 4]);
+  assert.deepEqual([...session.bundlePending.keys()], [1, 4]);
+  assert.equal(session.frameUrls.has('child'), false);
+  assert.equal(session.frameUrls.has('grandchild'), false);
+  assert.equal(session.frameUrls.has('sibling'), true);
+  assert.equal(session.stats.contexts, 2);
+  assert.equal(rescans, 1);
 });
 
 test('上下文销毁后丢弃注入的迟到结果并移除 frame 状态', async () => {

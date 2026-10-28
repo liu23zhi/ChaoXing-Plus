@@ -50,7 +50,7 @@ function fixtureAssets() {
       window.__CX_WIN_HOST__ = { fixture: true };
       window.__bootstrapMethod = document.currentScript ? 'script' : 'runtime';
       window.__fixtureReadyCount = (window.__fixtureReadyCount || 0) + 1;
-      console.log('${messagePrefix}'+JSON.stringify({kind:'ready'}));
+      console.log('${messagePrefix}'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready'}));
     }`,
     bundle: `window.__fixtureBundleCount = (window.__fixtureBundleCount || 0) + 1;
       window.__bundleMethod = document.currentScript ? 'script' : 'runtime';`
@@ -190,6 +190,24 @@ test('navigation replaces the execution context and injects the new document onl
       /context|destroyed/i
     );
     assert.equal(await fixture.page.evaluate(() => window.__staleContextMutation), undefined);
+  } finally { await closeFixture(fixture); }
+});
+
+test('real console messages must match the active host before synchronizing configuration', async () => {
+  const fixture = await openFixture({ strategy: 'runtime' });
+  try {
+    const changes = [];
+    fixture.session.onConfigSync = (detail) => changes.push(detail);
+    await fixture.page.evaluate((prefix) => {
+      const send = (envelope, detail) => console.log(prefix + JSON.stringify({ kind: 'config-sync', detail, ...envelope }));
+      send({}, { marker: 'missing-envelope' });
+      send({ source: 'forged', instance: window.__CX_WIN_INSTANCE__ }, { marker: 'wrong-source' });
+      send({ source: 'chaoxing-plus-windows', instance: 'old-instance' }, { marker: 'old-instance' });
+      send({ source: 'chaoxing-plus-windows', instance: window.__CX_WIN_INSTANCE__ }, { marker: 'accepted' });
+    }, messagePrefix);
+    await waitFor(() => changes.length > 0, 'the validated configuration message');
+    assert.deepEqual(changes, [{ marker: 'accepted' }]);
+    assert.equal(fixture.session.stats.configSyncs, 1);
   } finally { await closeFixture(fixture); }
 });
 
