@@ -711,6 +711,22 @@ async function main() {
     };
     cleanupAfterStartupFailure = () => stop('启动失败，清理本次启动的客户端与注入资源', true);
 
+    const verifyEndpointOwnership = async () => {
+      if (stopping) return false;
+      if (options.attachPort) return true;
+      let owner = null;
+      try { owner = await getListenerOwnerPid(port); } catch { /* Unknown ownership is rejected below. */ }
+      if (stopping) return false;
+      if (!clientChild || !Number.isInteger(clientChild.pid) || clientChild.pid <= 0 || owner !== clientChild.pid) {
+        report.ownershipVerified = false;
+        for (const session of sessions.values()) session.close();
+        sessions.clear();
+        throw Object.assign(new Error(`调试端口 ${port} 的监听进程（${owner === null ? '未知' : owner}）不是本次启动的客户端（${clientChild ? clientChild.pid : '未知'}）`), { code: 'CX_ENDPOINT_OWNERSHIP' });
+      }
+      report.ownershipVerified = true;
+      return true;
+    };
+
     process.on('SIGINT', () => { void stop('SIGINT'); });
     process.on('SIGTERM', () => { void stop('SIGTERM'); });
 
@@ -787,12 +803,8 @@ async function main() {
       if (expected && !String(report.endpoint.browser).includes(expected)) {
         throw new Error(`调试端点 Browser=${report.endpoint.browser} 与期望 ${expected} 不匹配，可能连接到了其它程序`);
       }
-      const owner = await getListenerOwnerPid(port);
-      if (owner !== clientChild.pid) {
-        throw new Error(`调试端口 ${port} 的监听进程（${owner === null ? '未知' : owner}）不是本次启动的客户端（${clientChild.pid}）`);
-      }
-      report.ownershipVerified = true;
-      logger.info(`[launch] 监听归属校验通过：pid=${owner}，127.0.0.1:${port}`);
+      if (!(await verifyEndpointOwnership())) return;
+      logger.info(`[launch] 监听归属校验通过：pid=${clientChild.pid}，127.0.0.1:${port}`);
     } else {
       logger.warn(`[attach] 测试/调试模式：只连接 127.0.0.1:${port}，不启动客户端、不校验监听归属`);
       const endpoint = await fetchJson(port, '/json/version', { timeoutMs: 5000 });
@@ -809,9 +821,10 @@ async function main() {
       if (stopping) return;
       let list;
       try {
+        if (!(await verifyEndpointOwnership())) return;
         list = await fetchJson(port, '/json/list', { timeoutMs: 2000 });
       } catch (error) {
-        logger.warn(`[main] 读取 /json/list 失败：${error.message}`);
+        logger.warn(`[main] 刷新调试 target 失败：${error.message}`);
         return;
       }
       const pages = (Array.isArray(list) ? list : []).filter((target) => target && target.type === 'page' && target.webSocketDebuggerUrl);
@@ -864,11 +877,13 @@ async function main() {
         sessionHistory.push(session.stats);
         sessions.set(target.id, session);
         try {
+          if (!(await verifyEndpointOwnership())) return;
           await session.open();
         } catch (error) {
           logger.warn(`[main] 连接 target ${target.id} 失败：${error.message}`);
           session.close();
           if (sessions.get(target.id) === session) sessions.delete(target.id);
+          if (error.code === 'CX_ENDPOINT_OWNERSHIP') return;
         }
       }
       const activeIds = new Set(pages.map((target) => target.id));
@@ -884,7 +899,13 @@ async function main() {
 
     await pollTargets();
     if (stopping) return;
-    targetTimer = setInterval(() => { void pollTargets(); }, config.targetPollIntervalMs);
+    let targetPollPending = false;
+    targetTimer = setInterval(() => {
+      if (stopping || targetPollPending) return;
+      targetPollPending = true;
+      void pollTargets().catch((error) => logger.warn(`[main] target 轮询失败：${error.message}`))
+        .finally(() => { targetPollPending = false; });
+    }, config.targetPollIntervalMs);
 
     configWatcherOff = configStore.watch({
       resolveConfig: (raw) => {

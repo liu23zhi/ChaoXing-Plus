@@ -42,6 +42,16 @@ function sanitizeForLog(url, maxLength = 220) {
   }
 }
 
+function targetWebSocketUrl(value, port) {
+  const match = typeof value === 'string' ? /^ws:\/\/(?:127\.0\.0\.1|localhost):([0-9]+)(\/.*)$/iu.exec(value) : null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !match || Number(match[1]) !== port
+    || !/^[\x21-\x7e]+$/u.test(match[2]) || match[2].includes('#')) {
+    throw Object.assign(new Error('拒绝非本机、端口不匹配或无效的 CDP WebSocket 地址'), { code: 'CX_ENDPOINT_URL' });
+  }
+  // localhost must use the same IPv4 listener whose PID the host verified.
+  return `ws://127.0.0.1:${port}${match[2]}`;
+}
+
 export class PageSession {
   constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected }) {
     this.port = port;
@@ -82,7 +92,7 @@ export class PageSession {
   }
 
   async open() {
-    const connection = await CdpConnection.open(this.target.webSocketDebuggerUrl);
+    const connection = await CdpConnection.open(targetWebSocketUrl(this.target.webSocketDebuggerUrl, this.port));
     if (this.closed) {
       connection.close();
       throw Object.assign(new Error('注入会话已关闭，取消迟到的 CDP 连接'), { code: 'CX_INJECTION_CANCELLED' });
@@ -467,7 +477,7 @@ export class PageSession {
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
-      await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败');
+      await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });
       if (this.closed || this.contexts.get(contextId) !== context) return;
       this.stats.bootstraps += 1;
     } catch (error) {

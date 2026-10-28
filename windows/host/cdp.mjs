@@ -62,21 +62,13 @@ export class CdpConnection {
     this.listeners = new Set();
     this.closed = false;
     this.handleMessage = (event) => this.dispatchMessage(event);
-    this.handleClose = () => {
-      this.closed = true;
-      for (const entry of this.pending.values()) {
-        entry.reject(new Error('CDP 连接已关闭'));
-      }
-      this.pending.clear();
-      for (const listener of this.listeners) {
-        try { listener({ method: 'cx.disconnected', params: {} }, true); } catch { /* ignore */ }
-      }
-    };
+    this.handleClose = () => this.finishClose({ notify: true });
     socket.addEventListener('message', this.handleMessage);
     socket.addEventListener('close', this.handleClose);
   }
 
   async dispatchMessage(event) {
+    if (this.closed) return;
     const text = decodeMessageData(event && event.data);
     if (typeof text !== 'string') return;
     let message;
@@ -111,6 +103,10 @@ export class CdpConnection {
   }
 
   send(method, params = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+    // WebSocket.send silently drops data in CLOSING before a close event arrives.
+    if (!this.closed && this.socket.readyState !== 1) {
+      this.finishClose({ notify: true, closeSocket: true });
+    }
     if (this.closed) return Promise.reject(new Error('CDP 连接已关闭'));
     const id = this.nextId;
     this.nextId += 1;
@@ -134,13 +130,15 @@ export class CdpConnection {
     });
   }
 
-  close() {
+  finishClose({ notify = false, closeSocket = false } = {}) {
     if (this.closed) return;
     this.closed = true;
+    const listeners = Array.from(this.listeners);
+    this.listeners.clear();
+    this.socket.removeEventListener('message', this.handleMessage);
+    this.socket.removeEventListener('close', this.handleClose);
     try {
-      this.socket.removeEventListener('message', this.handleMessage);
-      this.socket.removeEventListener('close', this.handleClose);
-      this.socket.close();
+      if (closeSocket) this.socket.close();
     } catch {
       // ignore
     }
@@ -148,5 +146,14 @@ export class CdpConnection {
       entry.reject(new Error('CDP 连接已关闭'));
     }
     this.pending.clear();
+    if (notify) {
+      for (const listener of listeners) {
+        try { listener({ method: 'cx.disconnected', params: {} }, true); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  close() {
+    this.finishClose({ closeSocket: true });
   }
 }
