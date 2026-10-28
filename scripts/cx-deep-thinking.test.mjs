@@ -48,12 +48,9 @@ async function loadAnswererFactory(factoryName, dependencies) {
   visit(parsed);
   assert.ok(factory, `${factoryName} exists`);
   const initializer = ts.isArrowFunction(factory.initializer) ? factory.initializer.body : factory.initializer;
-  const workerExpression = ts.isNewExpression(initializer)
-    ? initializer
-    : ts.isCallExpression(initializer) && ts.isNewExpression(initializer.arguments[0])
-      ? initializer.arguments[0]
-      : undefined;
-  assert.ok(workerExpression);
+  let workerExpression = initializer;
+  while (ts.isCallExpression(workerExpression)) workerExpression = workerExpression.arguments[0];
+  assert.ok(ts.isNewExpression(workerExpression));
   const answerer = workerExpression.arguments[0].properties.find((property) => property.name?.getText(parsed) === 'answerer').initializer;
   const code = ts.transpileModule(
     `return (workerOptions = {}) => (${answerer.getText(parsed)});`,

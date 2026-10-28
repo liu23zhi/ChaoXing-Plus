@@ -15,10 +15,21 @@ export class OCSWorker extends CommonEventEmitter {
         this.opts = opts;
     }
     async doWork(options) {
+        try {
+            return await this.runWork(options);
+        }
+        finally {
+            this.isRunning = false;
+            this.emit('settled');
+        }
+    }
+    async runWork(options) {
         this.emit('start');
         this.isRunning = true;
+        const closeController = new AbortController();
         this.once('close', () => {
             this.isClose = true;
+            closeController.abort();
         });
         this.on('stop', () => {
             this.isStop = true;
@@ -26,6 +37,36 @@ export class OCSWorker extends CommonEventEmitter {
         this.on('continuate', () => {
             this.isStop = false;
         });
+        const waitForTask = (task, timeoutMs) => new Promise((resolve, reject) => {
+            const signal = closeController.signal;
+            if (this.isClose || signal.aborted) {
+                reject(new Error('答题已关闭。'));
+                return;
+            }
+            let timeout;
+            const cleanup = () => {
+                signal.removeEventListener('abort', onClose);
+                if (timeout !== undefined)
+                    clearTimeout(timeout);
+            };
+            const onClose = () => {
+                cleanup();
+                reject(new Error('答题已关闭。'));
+            };
+            signal.addEventListener('abort', onClose, { once: true });
+            if (timeoutMs !== undefined) {
+                timeout = setTimeout(() => {
+                    cleanup();
+                    reject(new Error('答题超时！'));
+                }, timeoutMs);
+            }
+            Promise.resolve().then(() => {
+                if (this.isClose || signal.aborted)
+                    throw new Error('答题已关闭。');
+                return task();
+            }).then((value) => { cleanup(); resolve(value); }, (error) => { cleanup(); reject(error); });
+        });
+        const waitForWorkerContinue = () => waitForTask(() => waitForContinuate(() => this.isStop && !this.isClose));
         const questionRoots = typeof this.opts.root === 'string' ? Array.from(document.querySelectorAll(this.opts.root)) : this.opts.root;
         this.totalQuestionCount += questionRoots.length;
         if (options?.enable_debug) {
@@ -43,6 +84,7 @@ export class OCSWorker extends CommonEventEmitter {
                 root: questionRoot,
                 elements: domSearchAll(this.opts.elements, questionRoot),
                 type: undefined,
+                waitForContinue: waitForWorkerContinue,
                 answerSeparators: this.opts.answerSeparators,
                 answerMatchMode: this.opts.answerMatchMode || 'similar'
             };
@@ -67,6 +109,10 @@ export class OCSWorker extends CommonEventEmitter {
             console.debug('上下文已初始化: ', results);
         }
         await this.opts.onResultsInitialized?.(results);
+        const requestCompleted = [];
+        const requestCompletions = results.map((_result, index) => new Promise((resolve) => {
+            requestCompleted[index] = resolve;
+        }));
         const requestThread = async (index) => {
             let error;
             const result = results[index];
@@ -75,23 +121,31 @@ export class OCSWorker extends CommonEventEmitter {
                 this.isRunning = false;
                 return;
             }
-            if (this.isStop) {
-                await waitForContinuate(() => this.isStop);
-            }
             ctx.searchInfos = [];
-            result.searching = true;
-            await this.opts.onResultsUpdate?.(result, index, results);
-            if (options?.enable_debug) {
-                console.groupEnd();
-                console.group('开始搜题: ', ctx.elements.title
-                    ?.map((t) => t?.innerText)
-                    .filter(Boolean)
-                    .join(', ')
-                    .slice(0, 20));
-                console.log('ctx', result.ctx);
-            }
             try {
-                ctx.searchInfos = (await this.opts.answerer(ctx.elements, ctx)) || [];
+                if (this.isStop)
+                    await waitForWorkerContinue();
+                if (this.opts.beforeSearch) {
+                    await waitForTask(() => this.opts.beforeSearch(ctx, closeController.signal));
+                }
+                if (this.isStop)
+                    await waitForWorkerContinue();
+                if (this.isClose)
+                    return;
+                result.searching = true;
+                await waitForTask(() => this.opts.onResultsUpdate?.(result, index, results));
+                if (options?.enable_debug) {
+                    console.groupEnd();
+                    console.group('开始搜题: ', ctx.elements.title
+                        ?.map((t) => t?.innerText)
+                        .filter(Boolean)
+                        .join(', ')
+                        .slice(0, 20));
+                    console.log('ctx', result.ctx);
+                }
+                // Queuing and manual authorization must not consume the search deadline.
+                // Race the answerer itself so a late response cannot replace a timeout.
+                ctx.searchInfos = (await waitForTask(() => this.opts.answerer(ctx.elements, ctx), (AnswerWrapperHandlerConfig.timeout_seconds + 10) * 1000)) || [];
                 ctx.searchInfos.forEach((info) => {
                     info.results = info.results.map((ans) => {
                         ans.answer = ans.answer ? ans.answer.trim() : '';
@@ -102,30 +156,19 @@ export class OCSWorker extends CommonEventEmitter {
             catch (err) {
                 error = String(err);
             }
+            if (this.isClose)
+                return;
             result.ctx = ctx;
             result.searching = false;
             result.requested = true;
             result.error = error;
+            requestCompleted[index]();
             if (options?.enable_debug) {
                 console.log('搜题结果: ', ctx.searchInfos);
             }
             await this.opts.onResultsUpdate?.(results[index], index, results);
         };
-        const waitForRequested = async (result) => {
-            return new Promise((resolve, reject) => {
-                const interval = setInterval(() => {
-                    if (result?.requested === true) {
-                        clearInterval(interval);
-                        clearTimeout(timeout);
-                        resolve();
-                    }
-                }, 200);
-                const timeout = setTimeout(() => {
-                    clearInterval(interval);
-                    reject(new Error('答题超时！'));
-                }, (AnswerWrapperHandlerConfig.timeout_seconds + 10) * 1000);
-            });
-        };
+        const waitForRequested = (index) => waitForTask(() => requestCompletions[index]);
         const resolverThread = async () => {
             for (let index = 0; index < results.length; index++) {
                 const result = results[index];
@@ -137,21 +180,36 @@ export class OCSWorker extends CommonEventEmitter {
                 }
                 try {
                     if (this.isStop) {
-                        await waitForContinuate(() => this.isStop);
+                        await waitForWorkerContinue();
                     }
-                    await waitForRequested(result);
+                    await waitForRequested(index);
+                    // A balance error can stop the worker while the search request is in
+                    // flight. Re-check immediately after it completes so the resolver
+                    // cannot apply an answer before the user explicitly resumes.
+                    if (this.isStop) {
+                        await waitForWorkerContinue();
+                    }
                 }
                 catch {
-                    // ignore timeout here and let resolver produce final error state
+                    if (this.isClose)
+                        return;
                 }
+                if (this.isClose)
+                    return;
                 try {
-                    if (result.ctx && result.ctx.searchInfos.length !== 0) {
+                    if (this.isStop) {
+                        await waitForWorkerContinue();
+                    }
+                    if (this.isClose)
+                        return;
+                    const ctx = result.ctx;
+                    if (ctx && ctx.searchInfos.length !== 0) {
                         if (typeof this.opts.work === 'object') {
-                            if (result.ctx.elements.options) {
-                                if (result.ctx.type) {
-                                    const resolver = createDefaultQuestionResolver(result.ctx)[result.ctx.type];
+                            if (ctx.elements.options) {
+                                if (ctx.type) {
+                                    const resolver = createDefaultQuestionResolver(ctx)[ctx.type];
                                     const handler = this.opts.work.handler;
-                                    res = await resolver(result.ctx.searchInfos, result.ctx.elements.options, handler);
+                                    res = await waitForTask(() => resolver(ctx.searchInfos, ctx.elements.options, handler));
                                 }
                                 else {
                                     error = '题目类型解析失败, 请自行提供解析器, 或者忽略此题。';
@@ -163,7 +221,7 @@ export class OCSWorker extends CommonEventEmitter {
                         }
                         else {
                             const work = this.opts.work;
-                            res = await work(result.ctx);
+                            res = await waitForTask(() => work(ctx));
                         }
                     }
                     else {
@@ -173,6 +231,12 @@ export class OCSWorker extends CommonEventEmitter {
                 catch (err) {
                     error = err?.message || String(err);
                 }
+                if (this.isClose)
+                    return;
+                if (this.isStop)
+                    await waitForWorkerContinue().catch(() => { });
+                if (this.isClose)
+                    return;
                 if (!error && res && res.finish === false) {
                     error = result.ctx?.searchInfos
                         ?.map((info) => info.error)
@@ -192,53 +256,13 @@ export class OCSWorker extends CommonEventEmitter {
         };
         const requestThreadHandler = async () => {
             const threadCount = resolveWorkerThreadCount(this.opts.thread);
-            const locks = [];
-            const waitForLock = () => {
-                return new Promise((resolve, reject) => {
-                    const interval = setInterval(() => {
-                        if (locks.length > 0) {
-                            const lock = locks.shift();
-                            if (lock) {
-                                resolve(lock);
-                                clearInterval(interval);
-                                clearTimeout(timeout);
-                            }
-                        }
-                    }, 100);
-                    const timeout = setTimeout(() => {
-                        clearInterval(interval);
-                        reject(new Error('获取线程锁超时！'));
-                    }, 3 * 60 * 1000);
-                });
-            };
-            const requestThreads = [];
-            for (let index = 0; index < results.length; index++) {
-                requestThreads.push(() => requestThread(index));
-            }
-            for (let index = 0; index < threadCount; index++) {
-                locks.push(index + 1);
-            }
-            let requestFinished = 0;
-            const promises = [];
-            for (let index = 0; index < threadCount; index++) {
-                promises.push(async () => {
-                    try {
-                        while (requestFinished < results.length && requestThreads.length > 0 && this.isClose === false) {
-                            const thread = requestThreads.shift();
-                            if (thread) {
-                                const lock = await waitForLock();
-                                await thread();
-                                requestFinished++;
-                                locks.push(lock);
-                            }
-                        }
-                    }
-                    catch (err) {
-                        console.error(err);
-                    }
-                });
-            }
-            await Promise.all(promises.map((f) => f()));
+            let nextIndex = 0;
+            await Promise.all(Array.from({ length: threadCount }, async () => {
+                while (nextIndex < results.length && !this.isClose) {
+                    const index = nextIndex++;
+                    await requestThread(index);
+                }
+            }));
         };
         const resolvedResults = await Promise.all([resolverThread(), requestThreadHandler()]);
         this.isRunning = false;

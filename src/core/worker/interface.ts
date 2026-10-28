@@ -219,6 +219,8 @@ export interface WorkOptions<E extends RawElements> {
 	elements: E;
 	/** 查题器 */
 	answerer: AnswererType<E>;
+	/** 搜题计时前等待授权；关闭答题器时 signal 取消等待。 */
+	beforeSearch?: (ctx: WorkContext<E>, signal: AbortSignal) => void | Promise<void>;
 	/** 工作器 */
 	work: DefaultWork<E> | CustomWork<E>;
 	/** 多线程数量（个） */
@@ -262,6 +264,8 @@ export type WorkerEvents = {
 	start: () => void;
 	/** 答题结果 */
 	done: () => void;
+	/** 本轮结束，包含初始化失败与关闭；不代表答题成功。 */
+	settled: () => void;
 	/** 关闭答题 */
 	close: () => void;
 	/** 暂停答题 */

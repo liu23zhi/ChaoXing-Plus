@@ -37,13 +37,13 @@ before(async () => {
     ${compiled}
     window.__noticeTest = {
       id: TOP_CENTER_NOTICE_ID,
-      configure(windows, panel) {
+      configure(windows, panel, answerKey) {
         if (windows) window.__CX_WIN_HOST__ = {};
         else delete window.__CX_WIN_HOST__;
         if (panel === undefined) delete settings['common.settings.windows-panel-enabled'];
         else settings['common.settings.windows-panel-enabled'] = panel;
         settings['common.settings.windows-answer-mode'] = 'manual';
-        settings['common.settings.windows-answer-key'] = 'Ctrl+Alt+Shift+S';
+        settings['common.settings.windows-answer-key'] = answerKey || 'Ctrl+Alt+Shift+S';
         settings['common.settings.windows-answer-threads'] = 2;
       },
       show: showTopCenterNotice,
@@ -132,4 +132,31 @@ test('manual no-panel answer gate grants permits without notices and close still
     return { readyNotice, triggeredNotice, keyHandled: event.defaultPrevented, closedNotice: Boolean(document.getElementById(api.id)), closedKeyHandled: afterClose.defaultPrevented };
   });
   assert.deepEqual(state, { readyNotice: false, triggeredNotice: false, keyHandled: true, closedNotice: false, closedKeyHandled: false });
+});
+
+test('manual answer gate accepts legacy and canonical direction names with actual browser key events', async (t) => {
+  const page = await pageFor(t);
+  for (const direction of ['Up', 'Down', 'Left', 'Right']) {
+    for (const name of [direction, `Arrow${direction}`]) {
+      const shortcut = `Ctrl+${name}`;
+      await page.evaluate((key) => {
+        const api = window.__noticeTest;
+        api.configure(true, false, key);
+        window.__directionReleased = false;
+        window.__directionGate = api.gate([document]);
+        void window.__directionGate.wait().then(() => { window.__directionReleased = true; });
+      }, shortcut);
+      await page.keyboard.press(`Arrow${direction}`);
+      assert.equal(await page.evaluate(() => window.__directionReleased), false, `${shortcut} requires Ctrl`);
+      await page.keyboard.down('Control');
+      try { await page.keyboard.press(`Arrow${direction}`); }
+      finally { await page.keyboard.up('Control'); }
+      await page.waitForFunction(() => window.__directionReleased, { timeout: 1000 });
+      const closedState = await page.evaluate(() => {
+        window.__directionGate.close();
+        return { released: window.__directionReleased, notice: Boolean(document.getElementById(window.__noticeTest.id)) };
+      });
+      assert.deepEqual(closedState, { released: true, notice: false }, shortcut);
+    }
+  }
 });

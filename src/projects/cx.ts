@@ -11,6 +11,7 @@ import {
   OCSWorker,
   request,
   type QuestionTypes,
+  type RawElements,
   type SearchInformation,
   type SimplifyWorkResult
 } from '../core/index.js';
@@ -100,13 +101,21 @@ function normalizeWindowsAnswerKey(value: unknown): WindowsAnswerShortcut {
     shift: false,
     meta: false
   };
+  const keyAliases: Record<string, string> = {
+    space: ' ',
+    esc: 'escape',
+    up: 'arrowup',
+    down: 'arrowdown',
+    left: 'arrowleft',
+    right: 'arrowright'
+  };
   parts.forEach((part) => {
     const modifier = aliases[part];
     if (modifier) {
       shortcut[modifier] = true;
       return;
     }
-    shortcut.key = part === 'space' ? ' ' : part === 'esc' ? 'escape' : part;
+    shortcut.key = keyAliases[part] || part;
   });
   return shortcut;
 }
@@ -139,8 +148,9 @@ function createWindowsManualAnswerGate(targetDocuments: Document[]) {
   const triggerCount = Number.isFinite(rawThreadCount)
     ? Math.max(1, Math.min(4, rawThreadCount))
     : DEFAULT_WORKER_THREAD_COUNT;
-  const waiters: Array<() => void> = [];
+  const waiters: Array<{ permit: () => void; cancel: () => void }> = [];
   let pendingTokens = 0;
+  let closed = false;
   const documents = [...new Set(targetDocuments.filter(Boolean))];
   const onKeyDown = (event: KeyboardEvent) => {
     if (!matchesWindowsAnswerKey(event, configuredKey)) return;
@@ -149,7 +159,7 @@ function createWindowsManualAnswerGate(targetDocuments: Document[]) {
     const count = Math.min(triggerCount + pendingTokens, waiters.length);
     pendingTokens = triggerCount + pendingTokens - count;
     for (let index = 0; index < count; index += 1) {
-      waiters.shift()?.();
+      waiters.shift()?.permit();
     }
     showTopCenterNotice(
       count > 0
@@ -163,20 +173,81 @@ function createWindowsManualAnswerGate(targetDocuments: Document[]) {
   showTopCenterNotice(`手动答题已就绪，按 ${keyLabel} 触发 ${triggerCount} 道题。`, { duration: 0 });
 
   return {
-    wait() {
-      return new Promise<void>((resolve) => {
+    takePendingTokens() {
+      const tokens = pendingTokens;
+      pendingTokens = 0;
+      return tokens;
+    },
+    wait(signal?: AbortSignal) {
+      return new Promise<void>((resolve, reject) => {
+        if (closed || signal?.aborted) {
+          reject(new Error('手动答题等待已取消。'));
+          return;
+        }
         if (pendingTokens > 0) {
           pendingTokens -= 1;
           resolve();
           return;
         }
-        waiters.push(resolve);
+        const remove = () => {
+          const index = waiters.indexOf(waiter);
+          if (index !== -1) waiters.splice(index, 1);
+          signal?.removeEventListener('abort', waiter.cancel);
+        };
+        const waiter = {
+          permit() { remove(); resolve(); },
+          cancel() { remove(); reject(new Error('手动答题等待已取消。')); }
+        };
+        waiters.push(waiter);
+        signal?.addEventListener('abort', waiter.cancel, { once: true });
       });
     },
     close() {
+      closed = true;
+      pendingTokens = 0;
+      while (waiters.length) waiters[0].cancel();
       documents.forEach((targetDocument) => targetDocument.removeEventListener('keydown', onKeyDown, true));
       clearTopCenterNotice();
     }
+  };
+}
+
+function createWindowsManualAnswerGateController(targetDocuments: Document[]) {
+  let gate: ReturnType<typeof createWindowsManualAnswerGate>;
+  const owners = new Set<object>();
+  return <E extends RawElements>(worker: OCSWorker<E>) => {
+    if (!isWindowsManualAnswerMode()) return worker;
+    const owner = {};
+    let carriedTokens = 0;
+    const release = () => {
+      const owned = owners.delete(owner);
+      if (worker.isClose) carriedTokens = 0;
+      if (owned && owners.size === 0) {
+        // Only the same paged worker may use its remaining permit batch later.
+        if (!worker.isClose) carriedTokens += gate?.takePendingTokens() || 0;
+        gate?.close();
+        gate = undefined;
+      }
+    };
+    worker.on('start', () => {
+      if (!worker.isClose) owners.add(owner);
+    });
+    worker.on('done', release);
+    worker.on('settled', release);
+    worker.on('close', release);
+    worker.opts.beforeSearch = (_ctx, signal) => {
+      if (!owners.has(owner) || worker.isClose || signal.aborted) {
+        throw new Error('手动答题等待已取消。');
+      }
+      if (carriedTokens > 0) {
+        carriedTokens -= 1;
+        return;
+      }
+      // Concurrent retries share one permit budget and one keyboard listener.
+      if (!gate) gate = createWindowsManualAnswerGate(targetDocuments);
+      return gate?.wait(signal);
+    };
+    return worker;
   };
 }
 
@@ -3612,7 +3683,7 @@ const JobRunner = {
         .trim();
     };
 
-    const manualAnswerGate = createWindowsManualAnswerGate([frameDocument, document]);
+    const authorizeManualAnswer = createWindowsManualAnswerGateController([frameDocument, document]);
 
     const deduplicateSearchRequest = createSearchRequestDeduplicator<SearchInformation[]>();
     const createChapterWorker = (
@@ -3624,7 +3695,7 @@ const JobRunner = {
         suppressWorkResultsPanelUpdate?: boolean;
       } = {}
     ) =>
-      trackTikuAdapterWorker(new OCSWorker({
+      trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
         root: questionRoots,
         elements: {
           title: '.Zy_TItle .clearfix',
@@ -3678,7 +3749,6 @@ const JobRunner = {
             return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
           };
 
-          if (typeof manualAnswerGate !== 'undefined') await manualAnswerGate?.wait();
           const searchInCaches = appsMethods().searchAnswerInCaches;
           return searchInCaches && !workerOptions.skipCache
             ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
@@ -3833,7 +3903,7 @@ const JobRunner = {
             });
           }
         }
-      }));
+      })));
 
     const cacheableResults: SimplifyWorkResult[] = [];
     const worker = createChapterWorker(roots, {
@@ -4107,7 +4177,6 @@ const JobRunner = {
           uploadable: latestUploadable
         };
     } finally {
-      manualAnswerGate?.close();
       taskBusy = false;
       workResultsMethods().refresh?.();
     }
@@ -4166,7 +4235,7 @@ function workOrExam(
     targetJobId: type,
     jobName: preview_mode ? `${type}-preview` : `${type}-step-by-step`
   });
-  const manualAnswerGate = createWindowsManualAnswerGate([document]);
+  const authorizeManualAnswer = createWindowsManualAnswerGateController([document]);
   $message.info(`开始${type === 'work' ? '作业' : '考试'}`);
 
   if (preview_mode) {
@@ -4620,7 +4689,7 @@ function workOrExam(
       retainForBalanceRecovery?: boolean;
     } = {}
   ) =>
-    trackTikuAdapterWorker(new OCSWorker({
+    trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
       root: questionRoots,
       elements: {
         title: (root) => Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector)).filter((element) => Boolean(element.textContent?.trim())),
@@ -4677,7 +4746,6 @@ function workOrExam(
           return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
         };
 
-        if (typeof manualAnswerGate !== 'undefined') await manualAnswerGate?.wait();
         const searchInCaches = appsMethods().searchAnswerInCaches;
         return searchInCaches && !workerOptions.skipCache
           ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
@@ -4837,7 +4905,7 @@ function workOrExam(
 
         workResultsMethods().appendResults?.(simplified);
       }
-    }), workerOptions.retainForBalanceRecovery === true);
+    })), workerOptions.retainForBalanceRecovery === true);
 
   const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });
 
@@ -5082,7 +5150,6 @@ function workOrExam(
         $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
       }
     })().finally(() => {
-      manualAnswerGate?.close();
       taskBusy = false;
       workResultsMethods().refresh?.();
     });
@@ -5326,7 +5393,6 @@ function workOrExam(
       }
       worker.emit('done');
     })().finally(() => {
-      manualAnswerGate?.close();
       stepwiseTaskActive = false;
       untrackTikuAdapterWorker(worker);
       workResultsMethods().refresh?.();

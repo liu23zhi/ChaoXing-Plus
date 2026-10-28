@@ -46,6 +46,7 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
   ].join('\n');
   const globals = {
     setTimeout, clearTimeout, setInterval, clearInterval,
+    AbortController,
     domSearchAll: () => ({ title: [{}], options: [{}] }),
     AnswerWrapperHandlerConfig: { timeout_seconds: 1 },
     getStoredTikuAdapterConfig: () => ({}),
