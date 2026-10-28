@@ -231,6 +231,35 @@ static void json_number(CX_AUDIT_TEXT *out, const char *key, DWORD value) {
 static void json_bool(CX_AUDIT_TEXT *out, const char *key, BOOL value) {
     put(out, ','); json_string(out, key); put(out, ':'); append(out, value ? "true" : "false");
 }
+const char *cx_endpoint_reason_name(CX_ENDPOINT_REASON reason) {
+    switch (reason) {
+        case CX_ENDPOINT_NO_LISTENER: return "no-listener";
+        case CX_ENDPOINT_LISTENER_NOT_OWNED: return "listener-not-owned";
+        case CX_ENDPOINT_LISTENER_QUERY_FAILED: return "listener-query-failed";
+        case CX_ENDPOINT_LISTENER_BINDING_REJECTED: return "listener-binding-rejected";
+        case CX_ENDPOINT_HTTP_FAILED: return "http-failed";
+        case CX_ENDPOINT_INVALID_VERSION: return "invalid-version";
+        case CX_ENDPOINT_BROWSER_MISMATCH: return "browser-mismatch";
+        case CX_ENDPOINT_READY: return "ready";
+        default: return "not-started";
+    }
+}
+static void json_endpoint_probe(CX_AUDIT_TEXT *out, const CX_ENDPOINT_PROBE *probe) {
+    DWORD reason;
+    append(out, ",\"endpointProbe\":{\"attempts\":"); number(out, probe->attempts, 0);
+    json_number(out, "elapsedMs", probe->elapsedMs);
+    json_bool(out, "listenerSeen", probe->listenerSeen);
+    json_bool(out, "ownershipVerified", probe->ownershipVerified);
+    json_bool(out, "versionResponseReceived", probe->versionResponseReceived);
+    append(out, ",\"lastReason\":"); json_string(out, cx_endpoint_reason_name(probe->lastReason));
+    append(out, ",\"reasonCounts\":{");
+    for (reason = CX_ENDPOINT_NO_LISTENER; reason < CX_ENDPOINT_REASON_COUNT; ++reason) {
+        if (reason != CX_ENDPOINT_NO_LISTENER) put(out, ',');
+        json_string(out, cx_endpoint_reason_name((CX_ENDPOINT_REASON)reason)); put(out, ':');
+        number(out, probe->reasonCounts[reason], 0);
+    }
+    append(out, "}}");
+}
 BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
                            WCHAR *error, DWORD errorCap) {
     char *buffer, finishedAt[25]; CX_AUDIT_TEXT out; HANDLE file; BOOL ok; DWORD code;
@@ -251,6 +280,7 @@ BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
     json_bool(&out, "ownershipVerified", report->ownershipVerified); json_bool(&out, "success", report->success);
     append(&out, ",\"injectStrategy\":"); json_string(&out, report->injectStrategy);
     append(&out, ",\"stopReason\":"); json_string(&out, report->stopReason);
+    json_endpoint_probe(&out, &report->endpointProbe);
     append(&out, ",\"totals\":{\"contexts\":"); number(&out, report->contexts, 0);
     json_number(&out, "bootstraps", report->bootstraps); json_number(&out, "bundles", report->bundles);
     json_number(&out, "errors", report->errors); json_number(&out, "reconnects", report->reconnects);

@@ -51,14 +51,20 @@ static void h_page_close(H_NATIVE_PAGE *page) {
     if (h_current_page == page) { h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0; }
 }
 
-static BOOL h_endpoint_owned(USHORT port, const CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
+static BOOL h_endpoint_owned_reason(USHORT port, const CX_OPTIONS *options,
+                                    CX_PORT_OWNER_REASON *reason, WCHAR *error, DWORD errorCap) {
     DWORD owner = 0;
+    if (reason) *reason = CX_PORT_OWNER_QUERY_FAILED;
     if (options->attachPortSet) return TRUE;
     if (!h_client_pid) { h_error(error, errorCap, L"CDP endpoint has no owned client process"); return FALSE; }
-    if (!proc_port_owner(port, h_client_pid, &owner, error, errorCap)) return FALSE;
+    if (!proc_port_owner_ex(port, h_client_pid, &owner, reason, error, errorCap)) return FALSE;
     if (!owner) { h_error(error, errorCap, L"CDP listener ownership could not be verified"); return FALSE; }
     h_report.ownershipVerified = TRUE;
     return TRUE;
+}
+
+static BOOL h_endpoint_owned(USHORT port, const CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
+    return h_endpoint_owned_reason(port, options, NULL, error, errorCap);
 }
 
 static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *options,
@@ -167,22 +173,41 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
     return TRUE;
 }
 
-static BOOL h_browser_matches(const char *json, DWORD length, const WCHAR *expected) {
+static CX_ENDPOINT_REASON h_version_reason(const char *json, DWORD length, const WCHAR *expected) {
     JT tokens[64];
     WCHAR *browser;
     DWORD i, j;
     BOOL found = FALSE;
-    if (jparse(json, (int)length, tokens, 64) < 1) return FALSE;
+    if (jparse(json, (int)length, tokens, 64) < 1 || tokens[0].type != '{') return CX_ENDPOINT_INVALID_VERSION;
     browser = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, 4096 * sizeof(WCHAR));
-    if (!browser) return FALSE;
-    if (jwstr(json, tokens, jkey(json, tokens, 0, "Browser"), browser, 4096)) {
-        if (!expected[0]) found = TRUE;
-        for (i = 0; browser[i] && !found; ++i) {
-            for (j = 0; expected[j] && browser[i + j] == expected[j]; ++j) { }
-            if (!expected[j]) found = TRUE;
-        }
+    if (!browser) return CX_ENDPOINT_INVALID_VERSION;
+    if (!jwstr(json, tokens, jkey(json, tokens, 0, "Browser"), browser, 4096) || !browser[0]) {
+        HeapFree(GetProcessHeap(), 0, browser); return CX_ENDPOINT_INVALID_VERSION;
     }
-    HeapFree(GetProcessHeap(), 0, browser); return found;
+    if (!expected[0]) found = TRUE;
+    for (i = 0; browser[i] && !found; ++i) {
+        for (j = 0; expected[j] && browser[i + j] == expected[j]; ++j) { }
+        if (!expected[j]) found = TRUE;
+    }
+    HeapFree(GetProcessHeap(), 0, browser);
+    return found ? CX_ENDPOINT_READY : CX_ENDPOINT_BROWSER_MISMATCH;
+}
+
+static void h_probe_record(CX_ENDPOINT_REASON reason) {
+    CX_ENDPOINT_PROBE *probe = &h_report.endpointProbe;
+    if (reason <= CX_ENDPOINT_NOT_STARTED || reason >= CX_ENDPOINT_REASON_COUNT) return;
+    probe->lastReason = reason;
+    if (probe->attempts < MAXDWORD) ++probe->attempts;
+    if (probe->reasonCounts[reason] < MAXDWORD) ++probe->reasonCounts[reason];
+}
+
+static CX_ENDPOINT_REASON h_owner_probe_reason(CX_PORT_OWNER_REASON reason) {
+    switch (reason) {
+        case CX_PORT_OWNER_NO_LISTENER: return CX_ENDPOINT_NO_LISTENER;
+        case CX_PORT_OWNER_NOT_OWNED: return CX_ENDPOINT_LISTENER_NOT_OWNED;
+        case CX_PORT_OWNER_BINDING_REJECTED: return CX_ENDPOINT_LISTENER_BINDING_REJECTED;
+        default: return CX_ENDPOINT_LISTENER_QUERY_FAILED;
+    }
 }
 
 static BOOL h_targets_refresh(H_NATIVE_PAGE *pages, USHORT port, const CX_OPTIONS *options,
@@ -245,6 +270,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     char *body = NULL, *wrapped;
     DWORD length, wrappedLength, i, lastPoll = 0, waitStart = GetTickCount();
     BOOL ready = FALSE, ok = FALSE;
+    h_zero(&h_report.endpointProbe, sizeof(h_report.endpointProbe));
     pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
     wrapped = h_bundle_source(bundle, bundleLength, &wrappedLength);
     if (!pages || !wrapped) { h_error(error, errorCap, L"out of memory allocating native sessions"); goto done; }
@@ -252,26 +278,44 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     h_command_timeout = (DWORD)options->bundleTimeoutMs;
     while (h_operation_active() && GetTickCount() - waitStart < (DWORD)options->debugTimeoutMs) {
         DWORD elapsed, remaining;
-        if (h_endpoint_owned(port, options, error, errorCap)) {
+        CX_PORT_OWNER_REASON ownerReason;
+        if (h_endpoint_owned_reason(port, options, &ownerReason, error, errorCap)) {
+            if (!options->attachPortSet) {
+                h_report.endpointProbe.listenerSeen = TRUE;
+                h_report.endpointProbe.ownershipVerified = TRUE;
+            }
             elapsed = GetTickCount() - waitStart;
-            if (elapsed >= (DWORD)options->debugTimeoutMs) break;
+            if (elapsed >= (DWORD)options->debugTimeoutMs) { h_probe_record(CX_ENDPOINT_HTTP_FAILED); break; }
             remaining = (DWORD)options->debugTimeoutMs - elapsed;
             if (h_http_get(port, "/json/version", remaining, &body, &length, error, errorCap)) {
                 if (GetTickCount() - waitStart >= (DWORD)options->debugTimeoutMs) {
-                    net_free(body); body = NULL; break;
+                    net_free(body); body = NULL; h_probe_record(CX_ENDPOINT_HTTP_FAILED); break;
                 }
-                ready = h_browser_matches(body, length, options->expectedBrowser);
-                net_free(body); body = NULL;
-                if (!h_operation_active() || GetTickCount() - waitStart >= (DWORD)options->debugTimeoutMs) { ready = FALSE; break; }
+                h_report.endpointProbe.listenerSeen = TRUE;
+                h_report.endpointProbe.versionResponseReceived = TRUE;
+                {
+                    CX_ENDPOINT_REASON versionReason = h_version_reason(body, length, options->expectedBrowser);
+                    ready = versionReason == CX_ENDPOINT_READY;
+                    net_free(body); body = NULL;
+                    if (!h_operation_active() || GetTickCount() - waitStart >= (DWORD)options->debugTimeoutMs) {
+                        ready = FALSE; h_probe_record(CX_ENDPOINT_HTTP_FAILED); break;
+                    }
+                    h_probe_record(versionReason);
+                }
                 if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
                 break;
-            }
+            } else h_probe_record(CX_ENDPOINT_HTTP_FAILED);
+        } else {
+            if (ownerReason == CX_PORT_OWNER_NOT_OWNED || ownerReason == CX_PORT_OWNER_BINDING_REJECTED)
+                h_report.endpointProbe.listenerSeen = TRUE;
+            h_probe_record(h_owner_probe_reason(ownerReason));
         }
         elapsed = GetTickCount() - waitStart;
         if (!h_operation_active() || elapsed >= (DWORD)options->debugTimeoutMs) break;
         remaining = h_io_budget((DWORD)options->debugTimeoutMs - elapsed);
         if (remaining) Sleep(remaining < 100 ? remaining : 100);
     }
+    h_report.endpointProbe.elapsedMs = GetTickCount() - waitStart;
     if (!ready) {
         if (h_client_pid && !proc_alive(h_client_pid)) {
             h_report.stopReason = "client-exit-before-endpoint";
@@ -308,6 +352,10 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     h_report.stopReason = h_duration && GetTickCount() - h_started >= h_duration ? "duration" : "client-exit";
     if (!ok) h_error(error, errorCap, L"native session ended without any completed business injection");
 done:
+    if (!ready && h_report.endpointProbe.attempts) {
+        h_report.endpointProbe.elapsedMs = GetTickCount() - waitStart;
+        h_audit_event("warn", "endpoint-probe", cx_endpoint_reason_name(h_report.endpointProbe.lastReason));
+    }
     h_report.contexts = 0;
     if (pages) {
         /* Gauge at stop, before close frees live contexts; execution totals are cumulative. */

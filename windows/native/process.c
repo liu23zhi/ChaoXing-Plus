@@ -147,6 +147,7 @@ static BOOL p_refresh(OwnedRoot *root) {
         nodes[count].parent = entry.th32ParentProcessID;
         ++count;
     } while (Process32NextW(snapshot, &entry));
+    if (result && GetLastError() != ERROR_NO_MORE_FILES) result = FALSE;
     CloseHandle(snapshot);
     if (result) do {
         changed = 0;
@@ -359,13 +360,15 @@ done:
     return launched;
 }
 
-BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *err, DWORD cap) {
+BOOL proc_port_owner_ex(USHORT port, DWORD rootPid, DWORD *owner,
+                        CX_PORT_OWNER_REASON *reason, WCHAR *err, DWORD cap) {
     MIB_TCPTABLE_OWNER_PID *v4;
     MIB_TCP6TABLE_OWNER_PID *v6;
     DWORD i, found = 0, code;
     USHORT network = p_network_port(port);
     BOOL accepted = FALSE;
     OwnedRoot *root;
+    if (reason) *reason = CX_PORT_OWNER_QUERY_FAILED;
     if (owner) *owner = 0;
     p_error(err, cap, L"", 0);
     if (!port || !rootPid || !owner) { p_error(err, cap, L"Invalid ownership arguments", 0); return FALSE; }
@@ -373,11 +376,11 @@ BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *err, DWORD
     if (!v4) { p_error(err, cap, L"Cannot inspect IPv4 listeners", GetLastError()); return FALSE; }
     for (i = 0; i < v4->dwNumEntries; ++i) if ((USHORT)v4->table[i].dwLocalPort == network) {
         if (v4->table[i].dwLocalAddr != 0x0100007fUL || (found && found != v4->table[i].dwOwningPid)) {
+            if (reason) *reason = CX_PORT_OWNER_BINDING_REJECTED;
             p_error(err, cap, L"Port is not bound exclusively to 127.0.0.1 by one process", 0); goto cleanup4;
         }
         found = v4->table[i].dwOwningPid;
     }
-    if (!found) { p_error(err, cap, L"No IPv4 listener on the debug port", 0); goto cleanup4; }
     v6 = (MIB_TCP6TABLE_OWNER_PID *)p_tcp_table(AF_INET6);
     if (!v6) {
         code = GetLastError();
@@ -386,19 +389,32 @@ BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *err, DWORD
         for (i = 0; i < v6->dwNumEntries; ++i) if ((USHORT)v6->table[i].dwLocalPort == network) break;
         if (i < v6->dwNumEntries) {
             HeapFree(GetProcessHeap(), 0, v6);
+            if (reason) *reason = CX_PORT_OWNER_BINDING_REJECTED;
             p_error(err, cap, L"Port also has an IPv6 listener; 127.0.0.1-only is required", 0); goto cleanup4;
         }
         HeapFree(GetProcessHeap(), 0, v6);
     }
+    if (!found) {
+        if (reason) *reason = CX_PORT_OWNER_NO_LISTENER;
+        p_error(err, cap, L"No IPv4 listener on the debug port", 0); goto cleanup4;
+    }
     p_lock();
     root = p_root(rootPid);
-    if (!root) p_error(err, cap, L"Root PID was not launched by this probe", 0);
+    if (!root) {
+        if (reason) *reason = CX_PORT_OWNER_NOT_OWNED;
+        p_error(err, cap, L"Root PID was not launched by this probe", 0);
+    }
     else if (!p_refresh(root)) p_error(err, cap, L"Cannot inspect the complete owned process tree", 0);
     else {
         HANDLE query = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, found);
         FILETIME created, exited;
         if (query) {
-            if (p_times(query, &created, &exited) && p_known(root, found, &created)) { *owner = found; accepted = TRUE; }
+            if (p_times(query, &created, &exited)) {
+                if (p_known(root, found, &created)) {
+                    *owner = found; accepted = TRUE;
+                    if (reason) *reason = CX_PORT_OWNER_VERIFIED;
+                } else if (reason) *reason = CX_PORT_OWNER_NOT_OWNED;
+            }
             CloseHandle(query);
         }
         if (!accepted) p_error(err, cap, L"Listener PID is outside the owned process tree", 0);
@@ -407,6 +423,10 @@ BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *err, DWORD
 cleanup4:
     HeapFree(GetProcessHeap(), 0, v4);
     return accepted;
+}
+
+BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *err, DWORD cap) {
+    return proc_port_owner_ex(port, rootPid, owner, NULL, err, cap);
 }
 
 DWORD proc_stop_owned(DWORD rootPid) {

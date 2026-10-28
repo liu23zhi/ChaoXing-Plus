@@ -42,6 +42,14 @@ async function run(mode = '') {
       assert.equal(report.ownershipVerified, true);
       assert.equal(report.injectStrategy, 'hybrid');
       assert.equal(report.stopReason, 'duration"\\\n\t\u0001');
+      assert.deepEqual(report.endpointProbe, {
+        attempts: 3, elapsedMs: 50, listenerSeen: true, ownershipVerified: true,
+        versionResponseReceived: true, lastReason: 'ready', reasonCounts: {
+          'no-listener': 1, 'listener-not-owned': 0, 'listener-query-failed': 0,
+          'listener-binding-rejected': 0, 'http-failed': 1, 'invalid-version': 0,
+          'browser-mismatch': 0, ready: 1
+        }
+      });
       assert.deepEqual(report.totals, { contexts: 7, bootstraps: 6, bundles: 5, errors: 4, reconnects: 3, pageSessions: 2 });
       for (const stamp of [report.startedAt, report.finishedAt]) assert.match(stamp, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
       assert.ok(report.finishedAt >= report.startedAt);
@@ -71,6 +79,7 @@ test('compiled native audit exercises real files, policies, and report JSON', { 
     'log open failure returns a usable audit with an error',
     'bad report parent returns a bounded failure',
     'generation failure preserves the previous report',
+    'report contains only fixed endpoint reason codes and bounded counters',
   ]) assert.ok(stdout.includes(`PASS ${regression}`), `missing audit regression: ${regression}`);
   assert.match(stdout, /Z \[info\] \[after-failure\] safe\n/);
   assert.match(stdout, /Z \[warn\] \[file\] safe\n/);

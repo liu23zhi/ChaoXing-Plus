@@ -24,6 +24,17 @@ test('compiled process checks distinguish an empty snapshot from enumeration fai
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /NATIVE PROCESS CHECK TESTS PASS/);
+  for (const name of [
+    'listener probe classifies absent IPv4 and IPv6 listeners',
+    'listener probe classifies IPv4 table query failure',
+    'listener probe classifies IPv6 table query failure',
+    'listener probe classifies wildcard binding without permitting it',
+    'listener probe classifies IPv6-only binding without permitting it',
+    'listener probe classifies dual-stack binding without permitting it',
+    'listener probe classifies unregistered root identity',
+    'legacy listener ownership wrapper preserves rejection',
+    'owned process tree rejects incomplete enumeration before trusting identities'
+  ]) assert.ok(result.stdout.includes(`PASS ${name}`), result.stdout);
 });
 
 test('native host refuses a running test client without stopping it or applying DPI', {

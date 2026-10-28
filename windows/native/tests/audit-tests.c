@@ -51,6 +51,12 @@ static CX_AUDIT_REPORT report(void) {
     r.contexts = 7; r.bootstraps = 6; r.bundles = 5; r.errors = 4;
     r.reconnects = 3; r.pageSessions = 2; r.success = TRUE; r.ownershipVerified = TRUE;
     r.injectStrategy = "hybrid"; r.stopReason = "duration\"\\\n\t\001";
+    r.endpointProbe.attempts = 3; r.endpointProbe.elapsedMs = 50;
+    r.endpointProbe.listenerSeen = TRUE; r.endpointProbe.ownershipVerified = TRUE;
+    r.endpointProbe.versionResponseReceived = TRUE; r.endpointProbe.lastReason = CX_ENDPOINT_READY;
+    r.endpointProbe.reasonCounts[CX_ENDPOINT_NO_LISTENER] = 1;
+    r.endpointProbe.reasonCounts[CX_ENDPOINT_HTTP_FAILED] = 1;
+    r.endpointProbe.reasonCounts[CX_ENDPOINT_READY] = 1;
     return r;
 }
 static void test_files(void) {
@@ -73,6 +79,10 @@ static void test_files(void) {
     check("write complete report into nested Unicode path", cx_audit_write_report(a, &r, errorText, 256));
     text = read_file(o->reportPath);
     check("report contains metadata and escaped stop reason", contains(text, "\"version\":\"6.2.0\"") && contains(text, "\"host\":\"native\"") && contains(text, "\"startedAt\":\"2") && contains(text, "\"finishedAt\":\"2") && contains(text, "duration\\\"\\\\\\n\\t\\u0001"));
+    check("report contains only fixed endpoint reason codes and bounded counters", contains(text, "\"endpointProbe\":{\"attempts\":3,\"elapsedMs\":50")
+        && contains(text, "\"lastReason\":\"ready\"") && contains(text, "\"no-listener\":1")
+        && contains(text, "\"http-failed\":1") && contains(text, "\"ready\":1")
+        && lstrcmpA(cx_endpoint_reason_name((CX_ENDPOINT_REASON)999), "not-started") == 0);
     if (text) HeapFree(GetProcessHeap(), 0, text);
     cx_audit_close(a); HeapFree(GetProcessHeap(), 0, first); HeapFree(GetProcessHeap(), 0, o);
 }

@@ -4,6 +4,7 @@
 DWORD WINAPI test_tick_count(void);
 #define GetTickCount test_tick_count
 #define proc_port_owner test_port_owner
+#define proc_port_owner_ex test_port_owner_ex
 #define proc_alive test_proc_alive
 #define WinMain HostWinMain
 #define WinMainCRTStartup HostMainCRTStartup
@@ -24,6 +25,8 @@ static DWORD openBudget, openAdvance;
 static BOOL openExitClient;
 static DWORD cancelReadMode;
 static BOOL multipleTargets;
+static CX_PORT_OWNER_REASON mockOwnerReason;
+static const char *mockVersion;
 
 DWORD WINAPI test_tick_count(void) { return fakeTick; }
 BOOL test_proc_alive(DWORD pid) { (void)pid; return mockClientAlive; }
@@ -33,6 +36,13 @@ BOOL test_port_owner(USHORT port, DWORD rootPid, DWORD *owner, WCHAR *error, DWO
     *owner = ownerAllowed ? 123 : 0;
     if (!ownerAllowed) h_error(error, cap, L"fixture listener ownership changed");
     return ownerAllowed;
+}
+BOOL test_port_owner_ex(USHORT port, DWORD rootPid, DWORD *owner, CX_PORT_OWNER_REASON *reason, WCHAR *error, DWORD cap) {
+    BOOL ok = test_port_owner(port, rootPid, owner, error, cap);
+    if (reason) *reason = ok ? CX_PORT_OWNER_VERIFIED : mockOwnerReason;
+    /* Simulate elapsed work without sleeping in the deterministic endpoint loop. */
+    if (!ok) fakeTick += 1000;
+    return ok;
 }
 
 static void check(const char *name, BOOL passed) {
@@ -112,7 +122,7 @@ NET_WS *net_ws_open_timeout(USHORT port, const char *url, DWORD timeoutMs, WCHAR
 }
 void net_ws_close(NET_WS *ws) { (void)ws; ++closeCalls; }
 BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length, WCHAR *error, DWORD cap) {
-    const char *fixture = lstrcmpA(path, "/json/version") == 0 ? "{\"Browser\":\"Chrome/75.0.3770.100\"}"
+    const char *fixture = lstrcmpA(path, "/json/version") == 0 ? (mockVersion ? mockVersion : "{\"Browser\":\"Chrome/75.0.3770.100\"}")
         : multipleTargets
             ? "[{\"id\":\"first-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/first\"},{\"id\":\"second-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/second\"}]"
             : "[{\"id\":\"owned-page\",\"type\":\"page\",\"url\":\"https://a.chaoxing.com/exam-ans/\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1:38100/devtools/page/owned-page\"}]";
@@ -171,6 +181,51 @@ static void test_http_deadline_budget(void) {
         && lstrcmpA(h_report.stopReason, "client-exit-before-endpoint") == 0);
     httpExitClient = FALSE; mockClientAlive = TRUE;
     httpAdvance = 0; targetFixture = FALSE; h_client_pid = 0; h_duration = 0;
+}
+
+static void test_endpoint_probe(void) {
+    WCHAR error[HOST_ERROR_CAP];
+    DWORD i;
+    BOOL ok;
+    const CX_PORT_OWNER_REASON ownerReasons[] = { CX_PORT_OWNER_NO_LISTENER, CX_PORT_OWNER_NOT_OWNED,
+        CX_PORT_OWNER_QUERY_FAILED, CX_PORT_OWNER_BINDING_REJECTED };
+    const CX_ENDPOINT_REASON expected[] = { CX_ENDPOINT_NO_LISTENER, CX_ENDPOINT_LISTENER_NOT_OWNED,
+        CX_ENDPOINT_LISTENER_QUERY_FAILED, CX_ENDPOINT_LISTENER_BINDING_REJECTED };
+    const char *names[] = { "endpoint probe distinguishes no listener", "endpoint probe distinguishes foreign ownership",
+        "endpoint probe distinguishes listener query failure", "endpoint probe distinguishes rejected binding" };
+    cx_options_init(&h_base_options); h_base_options.quiet = TRUE; h_base_options.debugTimeoutMs = 1000;
+    targetFixture = TRUE; mockClientAlive = TRUE; h_client_pid = 123;
+    h_current_page = NULL; h_task_pending = FALSE; h_duration = 0;
+    ownerAllowed = FALSE;
+    for (i = 0; i < 4; ++i) {
+        h_zero(&h_report, sizeof(h_report)); fakeTick = h_started = 1000;
+        httpCalls = openCalls = ownerChecks = 0; mockOwnerReason = ownerReasons[i];
+        ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+        check(names[i], !ok && !httpCalls && !openCalls && ownerChecks == 1
+            && h_report.endpointProbe.attempts == 1 && h_report.endpointProbe.lastReason == expected[i]
+            && h_report.endpointProbe.reasonCounts[expected[i]] == 1 && h_report.endpointProbe.elapsedMs == 1000
+            && !h_report.endpointProbe.ownershipVerified && !h_report.endpointProbe.versionResponseReceived
+            && lstrcmpA(h_report.stopReason, "endpoint-unavailable") == 0);
+    }
+    ownerAllowed = TRUE; fakeTick = h_started = 1000; h_duration = 50;
+    targetFixture = FALSE; httpAdvance = 50; httpCalls = 0;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("endpoint probe retains HTTP failure beside duration stop reason", !ok && httpCalls == 1
+        && h_report.endpointProbe.lastReason == CX_ENDPOINT_HTTP_FAILED && h_report.endpointProbe.ownershipVerified
+        && h_report.endpointProbe.listenerSeen && !h_report.endpointProbe.versionResponseReceived
+        && lstrcmpA(h_report.stopReason, "duration-before-endpoint") == 0);
+    targetFixture = TRUE; httpAdvance = 0; h_duration = 0;
+    mockVersion = "{\"Browser\":75}"; fakeTick = h_started = 1000;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("endpoint probe separates invalid version from browser mismatch", !ok
+        && h_report.endpointProbe.lastReason == CX_ENDPOINT_INVALID_VERSION && h_report.endpointProbe.versionResponseReceived
+        && lstrcmpA(h_report.stopReason, "browser-mismatch") == 0);
+    mockVersion = "{\"Browser\":\"Other/75\"}"; fakeTick = h_started = 1000;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("endpoint probe records valid but mismatched browser", !ok
+        && h_report.endpointProbe.lastReason == CX_ENDPOINT_BROWSER_MISMATCH
+        && h_report.endpointProbe.reasonCounts[CX_ENDPOINT_BROWSER_MISMATCH] == 1);
+    mockVersion = NULL; targetFixture = FALSE; h_client_pid = 0; h_duration = 0;
 }
 
 static void test_upgrade_deadline_budget(void) {
@@ -412,6 +467,7 @@ void __stdcall InjectionTestMain(void) {
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     test_owned_target_refresh();
     test_http_deadline_budget();
+    test_endpoint_probe();
     test_upgrade_deadline_budget();
     test_normal_stop_cancellation();
     test_config_write_conflict();

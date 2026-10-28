@@ -12,6 +12,23 @@ static DWORD testRowCount, testRowAt, testSnapshotError, testFirstError;
 static DWORD testNextError, testNextFailAt, testSnapshotCalls, testFirstCalls;
 static DWORD testNextCalls, testCloseCalls, testBadCalls, testCreateCalls, failures;
 static WCHAR errorText[512], launchPath[32768];
+static BOOL testTcpEnabled;
+static ULONG testTcpErrorFamily;
+static struct { DWORD count; MIB_TCPROW_OWNER_PID rows[2]; } testTcp4;
+static struct { DWORD count; MIB_TCP6ROW_OWNER_PID rows[1]; } testTcp6;
+
+static DWORD WINAPI test_tcp_table(PVOID table, PDWORD size, BOOL ordered, ULONG family, TCP_TABLE_CLASS kind, ULONG reserved) {
+    DWORD needed;
+    const void *source;
+    if (!testTcpEnabled) return GetExtendedTcpTable(table, size, ordered, family, kind, reserved);
+    if (family == testTcpErrorFamily) return ERROR_ACCESS_DENIED;
+    if (family == AF_INET) { source = &testTcp4; needed = sizeof(testTcp4); }
+    else if (family == AF_INET6) { source = &testTcp6; needed = sizeof(testTcp6); }
+    else return ERROR_NOT_SUPPORTED;
+    if (kind != TCP_TABLE_OWNER_PID_LISTENER || reserved || ordered) ++testBadCalls;
+    if (!table || *size < needed) { *size = needed; return ERROR_INSUFFICIENT_BUFFER; }
+    CopyMemory(table, source, needed); *size = needed; return NO_ERROR;
+}
 
 static HANDLE test_handle(void) { return (HANDLE)(ULONG_PTR)101; }
 
@@ -83,6 +100,7 @@ static BOOL WINAPI test_create_process(LPCWSTR application, LPWSTR command,
 #define CloseHandle test_close
 #define GetCurrentProcessId test_current_pid
 #define CreateProcessW test_create_process
+#define GetExtendedTcpTable test_tcp_table
 #include "../process.c"
 #undef CreateToolhelp32Snapshot
 #undef Process32FirstW
@@ -90,6 +108,7 @@ static BOOL WINAPI test_create_process(LPCWSTR application, LPWSTR command,
 #undef CloseHandle
 #undef GetCurrentProcessId
 #undef CreateProcessW
+#undef GetExtendedTcpTable
 
 static void output(const char *text) {
     DWORD written;
@@ -99,6 +118,40 @@ static void output(const char *text) {
 static void check(BOOL ok, const char *name) {
     output(ok ? "PASS " : "FAIL "); output(name); output("\n");
     if (!ok) ++failures;
+}
+
+static void test_port_classification(void) {
+    CX_PORT_OWNER_REASON reason;
+    DWORD owner = 123;
+    const USHORT port = 38123;
+    testTcpEnabled = TRUE;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_NO_LISTENER, "listener probe classifies absent IPv4 and IPv6 listeners");
+    testTcpErrorFamily = AF_INET;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_QUERY_FAILED, "listener probe classifies IPv4 table query failure");
+    testTcpErrorFamily = AF_INET6;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_QUERY_FAILED, "listener probe classifies IPv6 table query failure");
+    testTcpErrorFamily = 0;
+    testTcp4.count = 1; testTcp4.rows[0].dwLocalPort = p_network_port(port);
+    testTcp4.rows[0].dwLocalAddr = 0; testTcp4.rows[0].dwOwningPid = 456;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_BINDING_REJECTED, "listener probe classifies wildcard binding without permitting it");
+    testTcp4.count = 0; testTcp6.count = 1; testTcp6.rows[0].dwLocalPort = p_network_port(port);
+    testTcp6.rows[0].ucLocalAddr[15] = 1; testTcp6.rows[0].dwOwningPid = 456;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_BINDING_REJECTED, "listener probe classifies IPv6-only binding without permitting it");
+    testTcp4.count = 1; testTcp4.rows[0].dwLocalAddr = 0x0100007fUL;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_BINDING_REJECTED, "listener probe classifies dual-stack binding without permitting it");
+    testTcp6.count = 0;
+    check(!proc_port_owner_ex(port, 456, &owner, &reason, errorText, 512)
+        && !owner && reason == CX_PORT_OWNER_NOT_OWNED, "listener probe classifies unregistered root identity");
+    owner = 123;
+    check(!proc_port_owner(port, 456, &owner, errorText, 512) && !owner,
+        "legacy listener ownership wrapper preserves rejection");
+    testTcpEnabled = FALSE;
 }
 
 static void reset(void) {
@@ -140,6 +193,14 @@ void __stdcall ProcessCheckTestMain(void) {
     BOOL ok;
     int oldCount;
 
+    test_port_classification();
+    {
+        OwnedRoot root;
+        p_zero(&root, sizeof(root)); reset(); add(20, L"unrelated.exe");
+        testNextFailAt = 1; testNextError = ERROR_PARTIAL_COPY;
+        check(!p_refresh(&root) && !root.count && testCloseCalls == 1 && !testBadCalls,
+            "owned process tree rejects incomplete enumeration before trusting identities");
+    }
     reset(); count = 123;
     ok = proc_check_instances(L"C:\\Fixture\\CXExam.exe", &count, errorText, 512);
     check(ok && count == 0 && testSnapshotCalls == 1 && testFirstCalls == 1

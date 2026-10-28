@@ -5,6 +5,16 @@
 
 BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle,
                  WCHAR *err, DWORD cap);
+typedef enum CX_PORT_OWNER_REASON {
+    CX_PORT_OWNER_VERIFIED,
+    CX_PORT_OWNER_NO_LISTENER,
+    CX_PORT_OWNER_NOT_OWNED,
+    CX_PORT_OWNER_QUERY_FAILED,
+    CX_PORT_OWNER_BINDING_REJECTED
+} CX_PORT_OWNER_REASON;
+/* Fixed diagnostic classification; the accepted ownership policy is unchanged. */
+BOOL proc_port_owner_ex(USHORT port, DWORD rootPid, DWORD *owner,
+                        CX_PORT_OWNER_REASON *reason, WCHAR *err, DWORD cap);
 BOOL proc_port_owner(USHORT port, DWORD rootPid, DWORD *owner,
                      WCHAR *err, DWORD cap);
 BOOL proc_port_free(USHORT port);

@@ -61,7 +61,14 @@ test('compiled native injection honors strategy order, retry limits and unique r
     'WebSocket Upgrade receives only the remaining run budget',
     'late Upgrade leaves no session or CDP command',
     'client exit during Upgrade leaves no session or CDP command',
-    'expired run budget performs no WebSocket Upgrade'
+    'expired run budget performs no WebSocket Upgrade',
+    'endpoint probe distinguishes no listener',
+    'endpoint probe distinguishes foreign ownership',
+    'endpoint probe distinguishes listener query failure',
+    'endpoint probe distinguishes rejected binding',
+    'endpoint probe retains HTTP failure beside duration stop reason',
+    'endpoint probe separates invalid version from browser mismatch',
+    'endpoint probe records valid but mismatched browser'
   ]) assert.ok(result.stdout.includes(`PASS ${regression}`), result.stdout);
 });
 

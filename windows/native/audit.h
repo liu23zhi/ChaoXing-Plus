@@ -5,6 +5,29 @@
 
 typedef struct CX_AUDIT CX_AUDIT;
 
+typedef enum CX_ENDPOINT_REASON {
+    CX_ENDPOINT_NOT_STARTED,
+    CX_ENDPOINT_NO_LISTENER,
+    CX_ENDPOINT_LISTENER_NOT_OWNED,
+    CX_ENDPOINT_LISTENER_QUERY_FAILED,
+    CX_ENDPOINT_LISTENER_BINDING_REJECTED,
+    CX_ENDPOINT_HTTP_FAILED,
+    CX_ENDPOINT_INVALID_VERSION,
+    CX_ENDPOINT_BROWSER_MISMATCH,
+    CX_ENDPOINT_READY,
+    CX_ENDPOINT_REASON_COUNT
+} CX_ENDPOINT_REASON;
+
+typedef struct CX_ENDPOINT_PROBE {
+    DWORD attempts;
+    DWORD elapsedMs;
+    DWORD reasonCounts[CX_ENDPOINT_REASON_COUNT];
+    BOOL listenerSeen;
+    BOOL ownershipVerified;
+    BOOL versionResponseReceived;
+    CX_ENDPOINT_REASON lastReason;
+} CX_ENDPOINT_PROBE;
+
 typedef struct CX_AUDIT_REPORT {
     DWORD durationMs;
     DWORD clientPid;
@@ -20,7 +43,11 @@ typedef struct CX_AUDIT_REPORT {
     BOOL success;
     const char *injectStrategy;
     const char *stopReason;
+    CX_ENDPOINT_PROBE endpointProbe;
 } CX_AUDIT_REPORT;
+
+/* Maps only an enum to fixed text; never serializes remote or user text. */
+const char *cx_endpoint_reason_name(CX_ENDPOINT_REASON reason);
 
 /* Only pass fixed, redacted events. Configuration, answers, tokens and URL
    queries must never be passed to the audit module. Strings are UTF-8.
