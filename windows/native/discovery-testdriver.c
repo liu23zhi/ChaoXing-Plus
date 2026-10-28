@@ -23,6 +23,7 @@ int wmain(int argc, wchar_t **argv) {
         return 2;
     }
     mode = parse_mode(argv[2]);
+    ZeroMemory(&options, sizeof(options));
     common[0] = argv[3];
     fixed[0] = argv[4];
     roots.commonRoots = common;

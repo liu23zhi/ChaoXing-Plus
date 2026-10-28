@@ -6,7 +6,7 @@
 #include "discovery.h"
 #include "process.h"
 
-#define D_ROOT_LIMIT 128
+#define D_ROOT_LIMIT 4096
 #define D_ENTRY_LIMIT 65536
 
 typedef struct D_ROOT_LIST {
@@ -25,6 +25,7 @@ typedef struct D_CONTEXT {
     BOOL hostIs32Bit;
     BOOL stopOnX86;
     BOOL stopped;
+    BOOL complete;
     WCHAR *error;
     DWORD errorCap;
 } D_CONTEXT;
@@ -121,6 +122,7 @@ static void d_result_reset(CX_DISCOVERY_RESULT *result) {
     result->fallbackScanned = FALSE;
     result->stoppedOnX86 = FALSE;
     result->truncated = FALSE;
+    result->cacheHit = FALSE;
 }
 
 void cx_discovery_init(CX_DISCOVERY_RESULT *result) {
@@ -155,12 +157,12 @@ static BOOL d_add_candidate(D_CONTEXT *context, const WCHAR *path, WORD machine,
         if (capacity > CX_DISCOVERY_MAX_CANDIDATES) capacity = CX_DISCOVERY_MAX_CANDIDATES;
         if (result->items) resized = (CX_CLIENT_CANDIDATE *)HeapReAlloc(GetProcessHeap(), 0, result->items, sizeof(CX_CLIENT_CANDIDATE) * capacity);
         else resized = (CX_CLIENT_CANDIDATE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLIENT_CANDIDATE) * capacity);
-        if (!resized) { d_error(context, L"out of memory while storing client candidates"); return FALSE; }
+        if (!resized) { context->complete = FALSE; d_error(context, L"out of memory while storing client candidates"); return FALSE; }
         result->items = resized;
         result->capacity = capacity;
     }
     copy = d_dup(path);
-    if (!copy) { d_error(context, L"client path is too long or memory allocation failed"); return FALSE; }
+    if (!copy) { context->complete = FALSE; d_error(context, L"client path is too long or memory allocation failed"); return FALSE; }
     result->items[result->count].path = copy;
     result->items[result->count].machine = machine;
     d_copy(result->items[result->count].version, CX_DISCOVERY_VERSION_CAP, version ? version : L"unknown");
@@ -249,10 +251,14 @@ static D_ENTRY *d_entries_read(D_CONTEXT *context, const WCHAR *directory, DWORD
     DWORD used = 0, capacity = 0;
     if (count) *count = 0;
     pattern = d_join(directory, L"*");
-    if (!pattern) return NULL;
+    if (!pattern) { context->complete = FALSE; return NULL; }
     find = FindFirstFileW(pattern, &data);
     HeapFree(GetProcessHeap(), 0, pattern);
-    if (find == INVALID_HANDLE_VALUE) return NULL;
+    if (find == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) context->complete = FALSE;
+        return NULL;
+    }
     do {
         if (d_equal_ci(data.cFileName, L".") || d_equal_ci(data.cFileName, L"..")) continue;
         if (used >= D_ENTRY_LIMIT) { context->result->truncated = TRUE; d_error(context, L"directory entry limit reached (65536)"); break; }
@@ -260,14 +266,15 @@ static D_ENTRY *d_entries_read(D_CONTEXT *context, const WCHAR *directory, DWORD
             capacity = capacity ? capacity * 2 : 32;
             resized = entries ? (D_ENTRY *)HeapReAlloc(GetProcessHeap(), 0, entries, sizeof(D_ENTRY) * capacity)
                                : (D_ENTRY *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(D_ENTRY) * capacity);
-            if (!resized) { d_entries_free(entries, used); FindClose(find); return NULL; }
+            if (!resized) { context->complete = FALSE; d_entries_free(entries, used); FindClose(find); return NULL; }
             entries = resized;
         }
         entries[used].name = d_dup(data.cFileName);
-        if (!entries[used].name) { d_entries_free(entries, used); FindClose(find); return NULL; }
+        if (!entries[used].name) { context->complete = FALSE; d_entries_free(entries, used); FindClose(find); return NULL; }
         entries[used].attributes = data.dwFileAttributes;
         ++used;
     } while (FindNextFileW(find, &data));
+    if (GetLastError() != ERROR_NO_MORE_FILES) context->complete = FALSE;
     FindClose(find);
     if (entries) {
         DWORD i, j;
@@ -289,8 +296,12 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
     if (context->stopped) return;
     if (!d_safe_root(directory)) return;
     attributes = GetFileAttributesW(directory);
-    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)
-        || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return;
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD code = GetLastError();
+        if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) context->complete = FALSE;
+        return;
+    }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return;
     entries = d_entries_read(context, directory, &count);
     if (!entries) return;
     for (i = 0; i < count && !context->stopped; ++i) {
@@ -299,6 +310,7 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
         if (!d_is_candidate_name(entries[i].name) || (entries[i].attributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
         path = d_join(directory, entries[i].name);
         if (path) { d_add_file(context, path); HeapFree(GetProcessHeap(), 0, path); }
+        else context->complete = FALSE;
     }
     if (depth != 0) {
         for (i = 0; i < count && !context->stopped; ++i) {
@@ -306,6 +318,7 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
             if (!(entries[i].attributes & FILE_ATTRIBUTE_DIRECTORY) || d_skip_directory(entries[i].name, entries[i].attributes)) continue;
             path = d_join(directory, entries[i].name);
             if (path) { d_visit(context, path, depth < 0 ? -1 : depth - 1); HeapFree(GetProcessHeap(), 0, path); }
+            else context->complete = FALSE;
         }
     }
     d_entries_free(entries, count);
@@ -412,6 +425,8 @@ static BOOL d_is_32bit_os(void) {
     return info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL;
 }
 
+#include "discovery-cache.inc"
+
 BOOL cx_discovery_resolve_client(const WCHAR *clientPath, BOOL hostIs32Bit, CX_DISCOVERY_RESULT *result, WCHAR *error, DWORD errorCap) {
     D_CONTEXT context;
     DWORD attributes;
@@ -419,7 +434,7 @@ BOOL cx_discovery_resolve_client(const WCHAR *clientPath, BOOL hostIs32Bit, CX_D
     d_result_reset(result);
     if (error && errorCap) error[0] = 0;
     if (!clientPath || !*clientPath || !result) { if (error && errorCap) d_copy(error, errorCap, L"client path is empty"); return FALSE; }
-    context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.error = error; context.errorCap = errorCap;
+    context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.complete = TRUE; context.error = error; context.errorCap = errorCap;
     attributes = GetFileAttributesW(clientPath);
     if (attributes == INVALID_FILE_ATTRIBUTES) { d_error(&context, L"client path is not accessible"); return FALSE; }
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) { d_error(&context, L"client path is a reparse point"); return FALSE; }
@@ -454,7 +469,10 @@ BOOL cx_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESULT 
     d_zero(&defaultCommon, sizeof(defaultCommon)); d_zero(&defaultFixed, sizeof(defaultFixed));
     if (options && options->roots) roots = options->roots;
     else { d_default_roots(&defaultCommon, &defaultFixed); defaults.commonRoots = (const WCHAR *const *)defaultCommon.items; defaults.commonRootCount = defaultCommon.count; defaults.fixedRoots = (const WCHAR *const *)defaultFixed.items; defaults.fixedRootCount = defaultFixed.count; roots = &defaults; }
-    context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.error = error; context.errorCap = errorCap;
+    if (d_cache_enabled(options, roots) && !options->rescan && d_cache_read(options->cachePath, roots, hostIs32Bit, result)) {
+        d_root_list_free(&defaultCommon); d_root_list_free(&defaultFixed); return TRUE;
+    }
+    context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.complete = TRUE; context.error = error; context.errorCap = errorCap;
     if (scanMode != CX_DISCOVERY_SCAN_ALL) {
         result->commonScanned = TRUE;
         for (i = 0; i < roots->commonRootCount; ++i) d_visit(&context, roots->commonRoots[i], 1);
@@ -466,6 +484,7 @@ BOOL cx_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESULT 
     }
     if (result->count && scanMode != CX_DISCOVERY_SCAN_ALL) {
         d_choose(result, FALSE);
+        if (context.complete && !result->truncated && d_cache_enabled(options, roots)) d_cache_write(options->cachePath, roots, hostIs32Bit, result);
         d_root_list_free(&defaultCommon); d_root_list_free(&defaultFixed);
         return TRUE;
     }

@@ -9,6 +9,7 @@
 #define CX_DISCOVERY_MAX_CANDIDATES 1024
 #define CX_DISCOVERY_MAX_PATH 32768
 #define CX_DISCOVERY_VERSION_CAP 64
+#define CX_DISCOVERY_CACHE_FORMAT_VERSION 1
 
 #define CX_DISCOVERY_MACHINE_X86 0x014c
 #define CX_DISCOVERY_MACHINE_X64 0x8664
@@ -42,6 +43,7 @@ typedef struct CX_DISCOVERY_RESULT {
     BOOL fallbackScanned;
     BOOL stoppedOnX86;
     BOOL truncated;
+    BOOL cacheHit;
 } CX_DISCOVERY_RESULT;
 
 typedef struct CX_DISCOVERY_OPTIONS {
@@ -56,6 +58,10 @@ typedef struct CX_DISCOVERY_OPTIONS {
        fallback traversal.  This is required by --list-clients and GUI
        selection.  Scan-all always enumerates completely regardless of this. */
     BOOL enumerateAll;
+    const WCHAR *cachePath;      /* Optional dedicated native binary cache. */
+    BOOL rescan;
+    BOOL noScanCache;
+    BOOL noDiskWrite;
 } CX_DISCOVERY_OPTIONS;
 
 void cx_discovery_init(CX_DISCOVERY_RESULT *result);

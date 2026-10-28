@@ -75,6 +75,7 @@ static WCHAR h_main_error[HOST_ERROR_CAP];
 static WCHAR h_exe_path[HOST_PATH_CAP];
 static char h_settings[CX_OPTIONS_JSON_CAP];
 static WCHAR h_selected_path[HOST_PATH_CAP];
+static WCHAR h_scan_cache_path[CX_OPTIONS_PATH_CAP + 64];
 static JT h_event_tokens[HOST_REPLY_TOKENS];
 static JT h_page_message_tokens[HOST_REPLY_TOKENS];
 static char h_page_message[CX_OPTIONS_JSON_CAP + 512];
@@ -549,7 +550,18 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             }
         }
         discover.enumerateAll = options->listClients || options->selectClient || options->clientIndexSet || h_equal(options->ui, L"gui") || (!options->clientFirst && !options->quiet);
+        h_copy(h_scan_cache_path, sizeof(h_scan_cache_path) / sizeof(WCHAR), options->dataDir);
+        {
+            DWORD length = (DWORD)h_wlen(h_scan_cache_path);
+            if (length && h_scan_cache_path[length - 1] != L'\\' && h_scan_cache_path[length - 1] != L'/') h_scan_cache_path[length++] = L'\\';
+            h_copy(h_scan_cache_path + length, sizeof(h_scan_cache_path) / sizeof(WCHAR) - length, L"native-scan-cache-v1.bin");
+        }
+        discover.cachePath = h_scan_cache_path;
+        discover.rescan = options->rescan;
+        discover.noScanCache = options->noScanCache || options->listClients;
+        discover.noDiskWrite = options->noDiskWrite;
         if (!cx_discovery_scan(&discover, &result, error, errorCap)) goto done;
+        if (result.cacheHit) h_audit_event("info", "scan-cache", "Validated positive native scan cache hit");
         if (options->listClients) {
             h_print_candidates(&result);
             h_report.stopReason = "list-clients"; ok = TRUE; goto done;
@@ -672,6 +684,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --list-clients --ui auto|gui|cli\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
+            "  --rescan（绕过缓存并更新） --no-scan-cache（禁读写缓存）；缓存有效期 5 分钟，仅扫描列表始终实时。\n"
             "配置: --config <path> --options-json <JSON|@file> --print-effective-config\n"
             "面板: --panel|--no-panel --panel-expanded|--panel-collapsed\n"
             "  --panel-top <0-10000> --panel-right <0-10000> --panel-width <320-800>\n"
@@ -699,7 +712,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.capabilities) {
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
-            "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
+            "\"nativeSelection\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
             "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
