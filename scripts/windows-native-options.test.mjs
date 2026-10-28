@@ -15,7 +15,11 @@ test('compiled native options honor scan aliases and layered client selection', 
     'no-scan-all changes the actual scan mode to common',
     'CLI client-first overrides configured path',
     'same CLI layer path and rescan remain a conflict',
-    'higher JSON auto preserves the original path after gui'
+    'higher JSON auto preserves the original path after gui',
+    'last no-diagnose CLI flag disables diagnostics',
+    'last diagnose CLI flag enables diagnostics',
+    'CLI no-diagnose overrides configured diagnostics',
+    'higher JSON diagnose re-enables diagnostics'
   ]) {
     assert.ok(result.stdout.includes(`PASS ${regression}`), `missing compiled regression: ${regression}`);
   }

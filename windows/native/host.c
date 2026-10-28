@@ -12,6 +12,7 @@
 #include "selection.h"
 #include "audit.h"
 #include "config-store.h"
+#include "diagnostics.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
@@ -21,6 +22,7 @@
 #define HOST_EVAL_SOURCE_CAP ((HOST_COMMAND_CAP - 1024UL) / 6UL)
 #define HOST_REPLY_TOKENS 8192
 #define HOST_MAX_PAGES 16
+#define HOST_DIAGNOSTIC_JSON_CAP 65536
 
 typedef struct H_NATIVE_PAGE {
     char id[128];
@@ -46,6 +48,8 @@ static DWORD h_client_pid, h_started, h_duration;
 static DWORD h_bundles_completed;
 static int h_exit_code;
 static CX_AUDIT *h_audit;
+static CX_DIAGNOSTICS *h_diagnostics;
+static BOOL h_diagnostics_sampled;
 static CX_AUDIT_REPORT h_report;
 static BOOL h_capture_console;
 static BOOL h_quiet;
@@ -71,6 +75,8 @@ static WCHAR h_selected_path[HOST_PATH_CAP];
 static JT h_event_tokens[HOST_REPLY_TOKENS];
 static JT h_page_message_tokens[HOST_REPLY_TOKENS];
 static char h_page_message[CX_OPTIONS_JSON_CAP + 512];
+static char h_diagnostic_json[HOST_DIAGNOSTIC_JSON_CAP + 1];
+static JT h_diagnostic_tokens[HOST_REPLY_TOKENS];
 
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
@@ -211,9 +217,10 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
     char *reply = NULL;
     DWORD started = GetTickCount(), length = 0, elapsed, wait;
     int received, count, result, exception, remote, type, value;
+    if (replyOut) *replyOut = NULL;
+    if (lengthOut) *lengthOut = 0;
     tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * HOST_REPLY_TOKENS);
     if (!tokens) { h_error(error, errorCap, L"out of memory parsing CDP response"); return FALSE; }
-    if (replyOut) *replyOut = NULL;
     for (;;) {
         elapsed = GetTickCount() - started;
         if (!h_operation_active()) { h_error(error, errorCap, L"CDP operation cancelled"); break; }
@@ -252,8 +259,11 @@ static DWORD h_decimal(char *out, DWORD value) {
     while (n) out[at++] = digits[--n];
     out[at] = 0; return at;
 }
-static BOOL h_send_eval_checked(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, BOOL requireTrue, WCHAR *error, DWORD errorCap) {
+static BOOL h_send_eval_result(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, BOOL requireTrue,
+                               char **replyOut, DWORD *replyLengthOut, WCHAR *error, DWORD errorCap) {
     char *command; DWORD at = 0, commandCap; char idText[16]; DWORD n = 0; unsigned int v = id;
+    if (replyOut) *replyOut = NULL;
+    if (replyLengthOut) *replyLengthOut = 0;
     if (!h_operation_active()) { h_error(error, errorCap, L"CDP operation cancelled"); return FALSE; }
     if (!expression || expressionLength > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"CDP expression exceeds native limit"); return FALSE; }
     commandCap = expressionLength * 6UL + 1024UL;
@@ -271,9 +281,12 @@ static BOOL h_send_eval_checked(NET_WS *ws, DWORD id, const char *expression, DW
     if (!h_append_bytes(command, commandCap, &at, "}}", 2)) goto command_error;
     if (!net_ws_send_text(ws, command, at, error, errorCap)) { HeapFree(GetProcessHeap(), 0, command); return FALSE; }
     HeapFree(GetProcessHeap(), 0, command);
-    return h_wait_reply(ws, id, requireTrue, NULL, NULL, error, errorCap);
+    return h_wait_reply(ws, id, requireTrue, replyOut, replyLengthOut, error, errorCap);
 command_error:
     HeapFree(GetProcessHeap(), 0, command); h_error(error, errorCap, L"CDP command exceeds native limit"); return FALSE;
+}
+static BOOL h_send_eval_checked(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, BOOL requireTrue, WCHAR *error, DWORD errorCap) {
+    return h_send_eval_result(ws, id, expression, expressionLength, requireTrue, NULL, NULL, error, errorCap);
 }
 static BOOL h_send_eval(NET_WS *ws, DWORD id, const char *expression, DWORD expressionLength, WCHAR *error, DWORD errorCap) {
     return h_send_eval_checked(ws, id, expression, expressionLength, FALSE, error, errorCap);
@@ -364,6 +377,50 @@ static BOOL h_preflight_assets(const CX_OPTIONS *options, DWORD bootstrapLength,
     }
     return h_set_page_config(NULL, NULL, options, style, styleLength, TRUE, error, errorCap);
 }
+static void h_collect_page_diagnostics(H_NATIVE_PAGE *page) {
+    static const char expression[] =
+        "(function(){var v=window.visualViewport,d=window.devicePixelRatio;"
+        "var p=document.querySelectorAll('#panel-common-work-results,[data-cx-win-panel-shell=\"1\"]');"
+        "var e=p.length?p[0]:null,r=e?e.getBoundingClientRect():null,s=e?getComputedStyle(e):null;"
+        "function n(x){return typeof x==='number'&&isFinite(x)?Math.round(x*1000)/1000:0;}"
+        "function c(x){return typeof x==='string'&&x.length<=256&&!/[^A-Za-z0-9 .,()%#+-]|url\\s*\\(/i.test(x)?x:'';}"
+        "var o={version:'6.2.0',host:'native',source:'native-page',collectedAt:new Date().toISOString(),"
+        "bundleLoaded:window.__CX_WIN_BUNDLE_LOADED__===true,devicePixelRatio:n(d),"
+        "innerWidth:n(window.innerWidth),innerHeight:n(window.innerHeight),"
+        "visualViewport:{width:v?n(v.width):0,height:v?n(v.height):0,scale:v?n(v.scale):1},"
+        "panelCount:Math.min(p.length,64),topPanel:r?{visible:!!(r.width&&r.height),"
+        "rect:{x:n(r.x),y:n(r.y),width:n(r.width),height:n(r.height)},"
+        "fractionalDevicePixel:{x:n(r.x*d),y:n(r.y*d),width:n(r.width*d),height:n(r.height*d)},"
+        "style:{backdropFilter:c(s.backdropFilter||s.webkitBackdropFilter),boxShadow:c(s.boxShadow),"
+        "transform:c(s.transform),backgroundColor:c(s.backgroundColor)}}:null,"
+        "scope:{pageOnly:true,windowDpi:false,screenshots:false}};return JSON.stringify(o);})()";
+    H_NATIVE_PAGE *savedPage;
+    BOOL savedPending, success = FALSE;
+    int savedContext, result, remote, type, value;
+    char *reply = NULL;
+    DWORD replyLength = 0;
+    WCHAR diagnosticError[HOST_ERROR_CAP];
+    if (!page || !h_diagnostics || !cx_diagnostics_enabled(h_diagnostics) || h_diagnostics_sampled) return;
+    h_diagnostics_sampled = TRUE;
+    savedPage = h_current_page; savedContext = h_current_context; savedPending = h_task_pending;
+    h_current_page = page; h_current_context = 0; h_task_pending = FALSE;
+    h_zero(diagnosticError, sizeof(diagnosticError)); h_zero(h_diagnostic_json, sizeof(h_diagnostic_json));
+    if (!h_send_eval_result(page->ws, page->nextId++, expression, sizeof(expression) - 1, FALSE,
+                            &reply, &replyLength, diagnosticError, HOST_ERROR_CAP)) goto done;
+    result = jparse(reply, (int)replyLength, h_diagnostic_tokens, HOST_REPLY_TOKENS);
+    remote = result > 0 ? jkey(reply, h_diagnostic_tokens, 0, "result") : -1;
+    remote = remote >= 0 ? jkey(reply, h_diagnostic_tokens, remote, "result") : -1;
+    type = remote >= 0 ? jkey(reply, h_diagnostic_tokens, remote, "type") : -1;
+    value = remote >= 0 ? jkey(reply, h_diagnostic_tokens, remote, "value") : -1;
+    if (!jeq(reply, h_diagnostic_tokens, type, "string")
+        || !jstr(reply, h_diagnostic_tokens, value, h_diagnostic_json, sizeof(h_diagnostic_json))) goto done;
+    success = cx_diagnostics_write_page_json(h_diagnostics, h_diagnostic_json,
+        (DWORD)h_len(h_diagnostic_json), diagnosticError, HOST_ERROR_CAP);
+done:
+    if (!success) h_audit_event("warn", "diagnostics", "Page diagnostics sample failed; continuing without page diagnostics");
+    if (reply) net_free(reply);
+    h_current_page = savedPage; h_current_context = savedContext; h_task_pending = savedPending;
+}
 static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     USHORT p; WCHAR error[64];
     if (options && options->portSet && options->port > 0 && options->port <= 65535) {
@@ -422,6 +479,8 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
     h_zero(&h_report, sizeof(h_report)); h_exit_code = 0;
+    h_diagnostics = NULL; h_diagnostics_sampled = FALSE;
+    h_zero(h_diagnostic_json, sizeof(h_diagnostic_json));
     h_capture_console = options->captureConsole; h_quiet = options->quiet;
     h_report.attached = options->attachPortSet;
     h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
@@ -469,9 +528,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     }
     h_report.clientPid = h_client_pid; h_report.port = port;
     h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
+    h_zero(auditError, sizeof(auditError));
+    h_diagnostics = cx_diagnostics_create(options, auditError, 256);
+    if (!h_diagnostics) h_audit_event("warn", "diagnostics", "Page diagnostics unavailable; continuing without page diagnostics");
+    else if (auditError[0]) h_audit_event("warn", "diagnostics", "Page diagnostics path unavailable; continuing without page diagnostics");
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
     ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
 done:
+    if (h_diagnostics) { cx_diagnostics_close(h_diagnostics); h_diagnostics = NULL; }
     h_config_close();
     h_report.success = ok && h_exit_code == 0;
     if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }
@@ -523,12 +587,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
             "运行: --execution-mode normal --port <0-65535> --stop-client-on-exit\n"
             "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
+            "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局采样）\n"
             "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
             "  --capture-console|--no-capture-console（只记录页面错误事件，不保存页面文本）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
             "状态: --help --capabilities\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
-            "  日志/写盘策略与启动选项本轮锁定；渲染诊断尚未接入。\n"
+            "  页面布局诊断仅采集一次性页面视口与面板几何/样式，不采集窗口 DPI、正文、URL 或截图。\n"
             "内存执行、删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
         return 0;
     }
@@ -536,7 +601,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }

@@ -58,7 +58,7 @@ try {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
-        $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store') | ForEach-Object { Join-Path $build ($_ + '.obj') }
+        $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','diagnostics') | ForEach-Object { Join-Path $build ($_ + '.obj') }
         $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' }
         & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }

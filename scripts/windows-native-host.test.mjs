@@ -21,6 +21,11 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(host, /net_http_get\s*\(/);
   assert.match(host, /net_ws_open\s*\(/);
   assert.match(host, /Runtime\.evaluate/);
+  assert.ok(/h_collect_page_diagnostics\(page\)/.test(host), 'native host must sample page diagnostics after a top-level bundle');
+  assert.ok(/static void h_collect_page_diagnostics\(/.test(host), 'native host must define the page diagnostics collector');
+  assert.ok(/cx_diagnostics_write_page_json\(/.test(host), 'native host must persist the diagnostics schema through the module');
+  assert.ok(/if \(task\.top\).*h_collect_page_diagnostics/s.test(host), 'only top-level bundle tasks may trigger diagnostics');
+  assert.ok(/Page diagnostics sample failed; continuing without page diagnostics/.test(host), 'diagnostic failure must remain non-fatal');
   assert.match(host, /windows-bootstrap\.js/);
   assert.match(host, /chaoxing-plus\.windows\.js/);
   assert.match(host, /WinMainCRTStartup/);

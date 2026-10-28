@@ -87,6 +87,39 @@ static void test_shared_settings(void) {
     check(!apply("{\"log\":\"true\"}"), "JSON string boolean is rejected");
 }
 
+static void test_diagnostic_switches(void) {
+    WCHAR *disable[] = { L"--diagnose", L"--no-diagnose" };
+    WCHAR *enable[] = { L"--no-diagnose", L"--diagnose" };
+    WCHAR *off[] = { L"--no-diagnose" };
+    WCHAR *on[] = { L"--diagnose" };
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 2, disable, errorText, 512)
+        && !baseOptions.diagnose && baseOptions.noDiagnose, "last no-diagnose CLI flag disables diagnostics");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 2, enable, errorText, 512)
+        && baseOptions.diagnose && !baseOptions.noDiagnose, "last diagnose CLI flag enables diagnostics");
+    reset();
+    check(apply("{\"diagnose\":true}") && cx_options_parse_cli(&cliOptions, 1, off, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512) && !baseOptions.diagnose
+        && baseOptions.noDiagnose, "CLI no-diagnose overrides configured diagnostics");
+    reset();
+    check(apply("{\"noDiagnose\":true}") && cx_options_parse_cli(&cliOptions, 1, on, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512) && baseOptions.diagnose
+        && !baseOptions.noDiagnose, "CLI diagnose overrides configured no-diagnose");
+    reset();
+    check(apply("{\"diagnose\":true}") && apply("{\"noDiagnose\":true}")
+        && !baseOptions.diagnose && baseOptions.noDiagnose, "higher JSON no-diagnose disables diagnostics");
+    reset();
+    check(apply("{\"noDiagnose\":true}") && apply("{\"diagnose\":true}")
+        && baseOptions.diagnose && !baseOptions.noDiagnose, "higher JSON diagnose re-enables diagnostics");
+    reset();
+    check(apply("{\"diagnose\":true}") && apply("{\"diagnose\":false}")
+        && !baseOptions.diagnose && baseOptions.noDiagnose, "JSON diagnose false disables diagnostics");
+    reset();
+    check(apply("{\"noDiagnose\":true}") && apply("{\"noDiagnose\":false}")
+        && baseOptions.diagnose && !baseOptions.noDiagnose, "JSON no-diagnose false enables diagnostics");
+}
+
 static void large_settings_layer(char *out, const char *key, char fill, DWORD count, BOOL duplicate) {
     DWORD used;
     lstrcpyA(out, "{\"settings\":{\"common.settings.keep\":17,");
@@ -260,7 +293,7 @@ static void test_selection_layer_priority(void) {
 }
 
 void WINAPI WinMainCRTStartup(void) {
-    test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_bounded_shared_merges(); test_shortcuts();
+    test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;

@@ -312,13 +312,19 @@ static BOOL diagnostic_string(const char *json, const JT *tokens, int index,
 }
 
 static BOOL diagnostic_css_string(const char *json, const JT *tokens, int index) {
-    char value[257]; int i;
+    char value[257]; int i, after;
     if (!diagnostic_string(json, tokens, index, value, sizeof(value))) return FALSE;
     for (i = 0; value[i]; ++i) {
         unsigned char c = (unsigned char)value[i];
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
             || (c >= '0' && c <= '9') || c == ' ' || c == '.' || c == ','
             || c == '(' || c == ')' || c == '%' || c == '#' || c == '+' || c == '-')) return FALSE;
+        if ((c == 'u' || c == 'U') && (value[i + 1] == 'r' || value[i + 1] == 'R')
+            && (value[i + 2] == 'l' || value[i + 2] == 'L')) {
+            after = i + 3;
+            while (value[after] == ' ') ++after;
+            if (value[after] == '(') return FALSE;
+        }
     }
     return TRUE;
 }

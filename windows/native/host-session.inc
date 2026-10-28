@@ -127,7 +127,10 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
         }
         /* A normal stop can cancel a valid in-flight task without failing it. */
         if ((success || h_operation_active()) && cx_session_complete(page->state, &task, success)) {
-            if (success && task.type == CX_SESSION_TASK_BUNDLE) ++h_bundles_completed;
+            if (success && task.type == CX_SESSION_TASK_BUNDLE) {
+                ++h_bundles_completed;
+                if (task.top) h_collect_page_diagnostics(page);
+            }
             h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_CONFIG ? "config" : (task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap"),
                 task.type == CX_SESSION_TASK_CONFIG ? (success ? "Configuration acknowledged" : "Configuration delivery failed") : (success ? "Injection acknowledged" : "Injection failed"));
         }

@@ -251,8 +251,8 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--no-retain-data")) { o->retainData = FALSE; o->retainDataSet = TRUE; continue; }
         if (cx_streq(a, L"--delete-config")) { o->deleteConfig = TRUE; o->deleteConfigSet = TRUE; continue; }
         if (cx_streq(a, L"--report")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->reportPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->reportPathSet = TRUE; continue; }
-        if (cx_streq(a, L"--diagnose")) { o->diagnose = TRUE; o->diagnoseSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-diagnose")) { o->noDiagnose = TRUE; o->noDiagnoseSet = TRUE; continue; }
+        if (cx_streq(a, L"--diagnose")) { o->diagnose = TRUE; o->noDiagnose = FALSE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
+        if (cx_streq(a, L"--no-diagnose")) { o->diagnose = FALSE; o->noDiagnose = TRUE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
         if (cx_streq(a, L"--diagnostics-dir")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->diagnosticsDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->diagnosticsDirSet = TRUE; continue; }
         if (cx_streq(a, L"--quiet")) { o->quiet = TRUE; o->quietSet = TRUE; continue; }
         if (cx_streq(a, L"--log")) { o->logFileEnabled = TRUE; o->logFileEnabledSet = TRUE; continue; }
@@ -521,6 +521,11 @@ BOOL cx_options_apply_json_utf8(CX_OPTIONS *o, const char *json, int length,
     cx_options_init(layer);
     ok = cx_options_apply_object(layer, json, tokens, 0, error, errorCap);
     if (ok) {
+        if (layer->diagnoseSet || layer->noDiagnoseSet) {
+            if (layer->noDiagnoseSet) layer->diagnose = !layer->noDiagnose;
+            else layer->noDiagnose = !layer->diagnose;
+            layer->diagnoseSet = TRUE; layer->noDiagnoseSet = TRUE;
+        }
         layer->sourceLayerCount = 1;
         if (layer->clientPathSet) layer->clientPathSource = 1;
         if (layer->uiSet) layer->uiSource = 1;

@@ -1,6 +1,6 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
 import { createRequire } from 'node:module';
@@ -10,9 +10,11 @@ import { resolve, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const executable = process.env.CX_NATIVE_HOST_EXE;
+const diagnosticsExecutable = process.env.CX_NATIVE_DIAGNOSTICS_EXE;
 const querySecret = 'native-diagnostics-query-private-70841';
 const questionSecret = 'native-diagnostics-question-private-19307';
 const answerSecret = 'native-diagnostics-answer-private-64022';
+const cssSecret = 'native-diagnostics-css-private-48026';
 const sockets = new Set();
 let browser;
 let server;
@@ -21,6 +23,23 @@ let assets;
 let port;
 let browserPort;
 let serial = 0;
+
+test('compiled native diagnostics enforce the schema and keep file failures non-fatal', {
+  skip: !diagnosticsExecutable
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cx-native-diagnostic-module-'));
+  try {
+    const result = spawnSync(diagnosticsExecutable, [], {
+      env: { ...process.env, CX_DIAGNOSTICS_TEST_DIR: root },
+      encoding: 'utf8', timeout: 10000, windowsHide: true
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /^FAIL /mu);
+    assert.match(result.stdout, /DIAGNOSTICS SELF-TEST PASS/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function exists(path) {
   try {
@@ -137,24 +156,41 @@ async function findDiagnosticsFile(root) {
   return null;
 }
 
-async function runFixture({ noDiskWrite = false } = {}) {
+async function runFixture({ noDiskWrite = false, diagnose = true, fractionalPanel = false, cssUrl = false, blockedDirectory = false } = {}) {
   const caseDir = join(directory, `case-${++serial}`);
   const dataDir = join(caseDir, 'data');
   const diagnosticsDir = join(caseDir, 'diagnostics');
   await mkdir(caseDir);
+  if (blockedDirectory) await writeFile(diagnosticsDir, 'test-owned diagnostic directory blocker');
   const page = await browser.newPage();
   let child;
   let closed;
   let stdout = '';
   let stderr = '';
   try {
+    if (fractionalPanel) await page.setViewport({ width: 803, height: 607, deviceScaleFactor: 1.1 });
     await page.goto(`http://a.chaoxing.com:${port}/exam-ans/diagnostics-${serial}?secret=${querySecret}`);
+    const fixturePanel = fractionalPanel || cssUrl ? await page.evaluate((secret) => {
+      const panel = document.createElement('div');
+      panel.id = 'panel-common-work-results';
+      panel.style.cssText = 'position:fixed;left:20.4px;top:10.3px;width:123.7px;height:45.6px;background:rgba(255, 240, 247, 0.9);box-shadow:0 2px 8px rgba(190, 24, 93, 0.1)';
+      if (secret) panel.style.backdropFilter = `url("#${secret}")`;
+      document.body.appendChild(panel);
+      const rect = panel.getBoundingClientRect();
+      return {
+        dpr: window.devicePixelRatio,
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        backdropFilter: getComputedStyle(panel).backdropFilter
+      };
+    }, cssUrl ? cssSecret : null) : null;
+    if (cssUrl) assert.ok(fixturePanel.backdropFilter.includes(cssSecret), 'the browser fixture must expose the CSS URL canary');
     const args = [
       '--attach', String(browserPort), '--duration', '2500', '--scan-mode', 'common', '--client-index', '2147483647',
       '--assets', assets, '--inject-strategy', 'runtime', '--inject-retries', '0', '--target-poll-interval', '250',
-      '--data-dir', dataDir, '--no-log', '--no-panel', '--diagnose', '--diagnostics-dir', diagnosticsDir
+      '--data-dir', dataDir, '--no-log', '--no-panel', diagnose ? '--diagnose' : '--no-diagnose', '--diagnostics-dir', diagnosticsDir
     ];
     if (noDiskWrite) args.push('--no-disk-write');
+    if (!diagnose) args.push('--options-json', '{"diagnose":true}');
     child = spawn(executable, args, { cwd: caseDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -177,7 +213,7 @@ async function runFixture({ noDiskWrite = false } = {}) {
     assert.equal(result.signal, null, `stdout=${stdout}\nstderr=${stderr}`);
     const bundleCompletedAt = await page.evaluate(() => window.__nativeDiagnosticsBundleCompletedAt);
     await page.close();
-    return { diagnosticsDir, dataDir, bundleCompletedAt, stdout, stderr };
+    return { diagnosticsDir, dataDir, bundleCompletedAt, fixturePanel, stdout, stderr };
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill();
@@ -188,7 +224,7 @@ async function runFixture({ noDiskWrite = false } = {}) {
 }
 
 function assertPrivateBoundary(text) {
-  for (const value of [querySecret, questionSecret, answerSecret, 'a.chaoxing.com', 'http://', 'https://']) {
+  for (const value of [querySecret, questionSecret, answerSecret, cssSecret, 'a.chaoxing.com', 'http://', 'https://']) {
     assert.equal(text.includes(value), false, `diagnostic output must not contain ${value}`);
   }
 }
@@ -247,4 +283,57 @@ test('native --no-disk-write suppresses page render diagnostics without changing
   assert.equal(await exists(result.diagnosticsDir), false, 'no-disk-write must not create diagnostics directory');
   assert.equal(await exists(join(result.diagnosticsDir, 'render-diagnostics.json')), false,
     'no-disk-write must not leave a render diagnostics file');
+});
+
+test('native page diagnostics quantize fractional device scale and panel geometry to the accepted schema', {
+  skip: !executable
+}, async () => {
+  const result = await runFixture({ fractionalPanel: true });
+  const path = await findDiagnosticsFile(result.diagnosticsDir);
+  assert.ok(path, 'fractional layout must still produce a diagnostics file');
+  const text = await readFile(path, 'utf8');
+  assertPrivateBoundary(text);
+  const diagnostic = JSON.parse(text);
+  assertDiagnosticSchema(diagnostic);
+  assert.equal(diagnostic.devicePixelRatio, 1.1);
+  assert.equal(diagnostic.panelCount, 1);
+  assert.equal(diagnostic.topPanel.visible, true);
+  for (const key of ['x', 'y', 'width', 'height']) {
+    const rect = diagnostic.topPanel.rect[key];
+    const devicePixel = diagnostic.topPanel.fractionalDevicePixel[key];
+    assert.ok(Math.abs(rect - result.fixturePanel.rect[key]) <= 0.00051, `${key} must retain millipixel layout precision`);
+    assert.ok(Math.abs(devicePixel - result.fixturePanel.rect[key] * result.fixturePanel.dpr) <= 0.00051,
+      `${key} must retain millipixel device coordinate precision`);
+    for (const value of [rect, devicePixel]) {
+      assert.ok(Math.abs(value * 1000 - Math.round(value * 1000)) < 0.000001, 'geometry must use at most three decimal places');
+    }
+  }
+});
+
+test('native page diagnostics omit URL-bearing CSS rather than leaking a sanitized URL', {
+  skip: !executable
+}, async () => {
+  const result = await runFixture({ cssUrl: true });
+  const path = await findDiagnosticsFile(result.diagnosticsDir);
+  assert.ok(path, 'unsafe CSS must be omitted without discarding the entire diagnostic sample');
+  const text = await readFile(path, 'utf8');
+  assertPrivateBoundary(text);
+  const diagnostic = JSON.parse(text);
+  assertDiagnosticSchema(diagnostic);
+  assert.equal(diagnostic.topPanel.style.backdropFilter, '');
+});
+
+test('native --no-diagnose suppresses page diagnostics while allowing the top-level bundle to complete', {
+  skip: !executable
+}, async () => {
+  const result = await runFixture({ diagnose: false });
+  assert.equal(await exists(result.diagnosticsDir), false, 'CLI no-diagnose must override JSON diagnose:true without creating a directory');
+});
+
+test('native diagnostic directory creation failure preserves the blocker and does not fail business injection', {
+  skip: !executable
+}, async () => {
+  const result = await runFixture({ blockedDirectory: true });
+  assert.equal((await stat(result.diagnosticsDir)).isFile(), true);
+  assert.equal(await readFile(result.diagnosticsDir, 'utf8'), 'test-owned diagnostic directory blocker');
 });
