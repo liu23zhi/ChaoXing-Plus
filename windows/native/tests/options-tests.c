@@ -216,6 +216,37 @@ static void test_invalid_inputs(void) {
     reset(); check(!apply("{\"answerThreads\":5}") || !cx_options_finalize(&baseOptions, errorText, 512), "out-of-range JSON answer threads are rejected");
 }
 
+static void test_nested_unsupported_options(void) {
+    static const char *rejected[] = {
+        "{\"settings\":{\"common.settings.windows-execution-mode\":\"memory\"}}",
+        "{\"settings\":{\"common.settings.windows-memory_exec\":true}}",
+        "{\"settings\":{\"COMMON.SETTINGS.WINDOWS-delete_suspend\":true}}",
+        "{\"settings\":{\"\\u0063ommon.settings.windows-wipe-owned-files-on-start\":false}}",
+        "{\"settings\":{\"common.settings.windows-self-destruct-key\":\"F8\"}}",
+        "{\"settings\":{\"cx.new.study.nested\":{\"self_Destruct_Delay\":0}}}",
+        "{\"settings\":{\"common.settings.nested\":[{\"wipe_retries\":5}]}}",
+        "{\"settings\":{\"common.settings.nested\":{\"execution_Mode\":null}}}",
+        "{\"settings\":{\"common.settings.windows-no-self-destruct-confirm\":true}}"
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof(rejected) / sizeof(rejected[0])); ++i) {
+        reset();
+        check(!apply(rejected[i]), "nested unsupported JSON capability is rejected");
+        check(errorText[0] != 0, "nested unsupported JSON capability has a diagnostic");
+    }
+    reset();
+    check(apply("{\"executionMode\":\"normal\",\"settings\":{\"common.settings.keep\":17,\"common.settings.windows-execution-mode\":\"normal\",\"common.settings.windows-memory-exec\":false,\"common.settings.windows-delete-suspend\":false,\"common.settings.windows-self-destruct-key\":false}}"),
+        "normal mode and disabled optional capabilities preserve shared settings");
+    check(cx_options_effective_settings_json_utf8(&baseOptions, settingsJson, sizeof(settingsJson), 0)
+        && text_contains(settingsJson, "\"common.settings.keep\":17"),
+        "ordinary shared settings still serialize after capability validation");
+    reset();
+    check(apply("{\"panel\":false}"), "transaction fixture parses before rejected capability");
+    check(!apply("{\"panel\":true,\"settings\":{\"common.settings.windows-memory-exec\":true}}")
+        && !baseOptions.panelEnabled,
+        "rejected nested capability leaves previously merged options unchanged");
+}
+
 static void test_selection_conflicts(void) {
     WCHAR *arguments[] = { L"--client", L"D:\\Exam\\CXExam.exe", L"--client-first" };
     reset();
@@ -332,7 +363,7 @@ static void test_elevation_options(void) {
 
 void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
-    test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
+    test_invalid_inputs(); test_nested_unsupported_options(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     test_elevation_options();
     test_dpi_options();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");

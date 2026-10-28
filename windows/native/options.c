@@ -420,23 +420,50 @@ static BOOL cx_reject_unknown_top(const char *s, const JT *t, int object,
     }
     return TRUE;
 }
-static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int object,
-                                       WCHAR *error, DWORD errorCap) {
-    static const char *keys[] = {
-        "memoryExec", "deleteSuspend", "wipeOwnedFilesOnStart",
-        "wipeFailurePolicy", "wipeRetries", "wipeRetryDelayMs",
-        "wipeRuntimeRetry", "wipeRuntimeIntervalSec", "selfDestructKey",
-        "selfDestructOnFullscreenExit", "selfDestructDelay",
-        "noSelfDestructConfirm"
-    };
-    int i, v;
-    for (i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); i++) {
-        if (cx_skey(s, t, object, keys[i], &v)) {
+static BOOL cx_key_prefix(const WCHAR *name, const WCHAR *prefix) {
+    int i = 0;
+    while (prefix[i]) { if (name[i] != prefix[i]) return FALSE; ++i; }
+    return TRUE;
+}
+static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
+                                       int length, WCHAR *error, DWORD errorCap) {
+    WCHAR *name;
+    int object, key, value, read, written;
+    BOOL ok = FALSE;
+    name = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)length + 1) * sizeof(WCHAR));
+    if (!name) { cx_error(error, errorCap, L"out of memory while validating JSON capabilities"); return FALSE; }
+    /* Walk every object token, including objects in arrays, without recursive stack use. */
+    for (object = 0; object < count; ++object) {
+        if (t[object].type != '{') continue;
+        for (key = object + 1; key < t[object].next; key = t[value].next) {
+            BOOL wipe, restricted, disabled;
+            WCHAR mode[7];
+            value = key + 1;
+            if (!jwstr(s, t, key, name, length + 1)) {
+                cx_error(error, errorCap, L"JSON option key cannot be decoded"); goto done;
+            }
+            read = cx_token_eq(name, 24, L"common.settings.windows-") ? 24 : 0;
+            written = 0;
+            while (name[read]) {
+                WCHAR ch = name[read++];
+                if (ch != L'-' && ch != L'_') name[written++] = cx_upper(ch);
+            }
+            name[written] = 0;
+            wipe = cx_key_prefix(name, L"WIPE");
+            restricted = wipe || cx_streq(name, L"EXECUTIONMODE")
+                || cx_streq(name, L"MEMORYEXEC") || cx_streq(name, L"DELETESUSPEND")
+                || cx_key_prefix(name, L"SELFDESTRUCT") || cx_streq(name, L"NOSELFDESTRUCTCONFIRM");
+            if (!restricted) continue;
+            disabled = t[value].type == 'p' && jeq(s, t, value, "false");
+            if (!wipe && (disabled || (cx_streq(name, L"EXECUTIONMODE")
+                && jwstr(s, t, value, mode, 7) && cx_streq(mode, L"normal")))) continue;
             cx_error(error, errorCap, L"wipe, memory and self-destruct options are not supported by native host");
-            return FALSE;
+            goto done;
         }
     }
-    return TRUE;
+    ok = TRUE;
+done:
+    HeapFree(GetProcessHeap(), 0, name); return ok;
 }
 
 static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
@@ -445,7 +472,6 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
     int v, settings;
     if (object < 0 || tokens[object].type != '{') { cx_error(error, errorCap, L"JSON root must be an object"); return FALSE; }
     if (!cx_reject_unknown_top(json, tokens, object, error, errorCap) ||
-        !cx_json_reject_unsupported(json, tokens, object, error, errorCap) ||
         !cx_json_execution_mode(json, tokens, object, error, errorCap)
         || !cx_json_dpi_mode(o, json, tokens, object, error, errorCap)) return FALSE;
     if (!cx_json_wstr_field(json, tokens, object, "clientPath", o->clientPath, CX_OPTIONS_PATH_CAP, &o->clientPathSet, error, errorCap) ||
@@ -532,7 +558,8 @@ BOOL cx_options_apply_json_utf8(CX_OPTIONS *o, const char *json, int length,
     if (!tokens) { cx_error(error, errorCap, L"out of memory while parsing JSON"); return FALSE; }
     count = jparse(json, length, tokens, 1024);
     if (count < 1) { cx_error(error, errorCap, L"invalid JSON"); HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
-    if (!cx_reject_unknown_top(json, tokens, 0, error, errorCap)) { HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
+    if (!cx_json_reject_unsupported(json, tokens, count, length, error, errorCap)
+        || !cx_reject_unknown_top(json, tokens, 0, error, errorCap)) { HeapFree(GetProcessHeap(), 0, tokens); return FALSE; }
     layer = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*layer));
     if (!layer) { HeapFree(GetProcessHeap(), 0, tokens); cx_error(error, errorCap, L"out of memory while applying JSON"); return FALSE; }
     cx_options_init(layer);
