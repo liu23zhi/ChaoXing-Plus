@@ -8,6 +8,58 @@ static DWORD h_io_budget(DWORD maximum) {
     return maximum;
 }
 
+static BOOL h_ui_panel_enabled(const CX_OPTIONS *options) {
+    DWORD length;
+    const char *json = h_config_json(&length);
+    int key;
+    if (!json) return options->panelEnabled;
+    if (jparse(json, (int)length, h_ui_tokens, HOST_REPLY_TOKENS) < 1) return FALSE;
+    key = jkey(json, h_ui_tokens, 0, "common.settings.windows-panel-enabled");
+    return key < 0 ? options->panelEnabled : (h_ui_tokens[key].type != '"' && jeq(json, h_ui_tokens, key, "true"));
+}
+
+static BOOL h_ui_text(DWORD *at, const char *text) {
+    return h_append_bytes(h_ui_expression, HOST_UI_EXPRESSION_CAP, at, text, (DWORD)h_len(text));
+}
+
+/* This runs only between session tasks. Event callbacks only change memory. */
+static void h_ui_send(H_NATIVE_PAGE *page, const CX_OPTIONS *options) {
+    WCHAR error[256];
+    DWORD at = 0, i, sequence, epoch, timeout;
+    char number[16];
+    BOOL ok = FALSE;
+    if (!h_ui_active || !page->uiReady || !page->state || !page->ws) return;
+    if (!h_ui_panel_enabled(options)) { page->uiDelivered = 0; return; }
+    if (!cx_session_can_sync_config(page->state, page->uiContext)) { h_ui_reset_document(page); return; }
+    if (page->uiDelivered == h_ui_sequence || (page->uiRetryAt && (LONG)(GetTickCount() - page->uiRetryAt) < 0)) return;
+    sequence = h_ui_sequence; epoch = page->uiEpoch;
+    if (!h_ui_text(&at, "(function(){if(window.self!==window.top)return false;var h=window.__CX_WIN_HOST__;if(!h||h.instance!==")) goto done;
+    if (!h_json_quote(h_ui_expression, HOST_UI_EXPRESSION_CAP, &at, h_instance, (DWORD)h_len(h_instance))) goto done;
+    if (!h_ui_text(&at, "||typeof h.setDiagnostics!=='function')return false;return h.setDiagnostics({source:'chaoxing-plus-windows-host',instance:")) goto done;
+    if (!h_json_quote(h_ui_expression, HOST_UI_EXPRESSION_CAP, &at, h_instance, (DWORD)h_len(h_instance))) goto done;
+    if (!h_ui_text(&at, ",entries:[")) goto done;
+    for (i = 0; i < h_ui_count; ++i) {
+        const H_UI_ENTRY *entry = &h_ui_entries[(h_ui_head + i) % HOST_UI_HISTORY_CAP];
+        if (i && !h_ui_text(&at, ",")) goto done;
+        h_decimal(number, entry->sequence);
+        if (!h_ui_text(&at, "{sequence:") || !h_ui_text(&at, number)) goto done;
+        h_decimal(number, entry->elapsed);
+        if (!h_ui_text(&at, ",elapsedMs:") || !h_ui_text(&at, number)
+            || !h_ui_text(&at, ",level:'") || !h_ui_text(&at, entry->level)
+            || !h_ui_text(&at, "',code:'") || !h_ui_text(&at, entry->code) || !h_ui_text(&at, "'}")) goto done;
+    }
+    if (!h_ui_text(&at, "]})===true;})()")) goto done;
+    timeout = h_command_timeout;
+    if (h_command_timeout > 1000) h_command_timeout = 1000;
+    h_current_context = page->uiContext; h_ui_epoch = epoch; h_ui_sending = TRUE;
+    ok = h_send_eval_checked(page->ws, page->nextId++, h_ui_expression, at, TRUE, error, 256);
+    h_ui_sending = FALSE; h_current_context = 0; h_command_timeout = timeout;
+    if (ok && page->uiReady && page->uiEpoch == epoch
+        && cx_session_can_sync_config(page->state, page->uiContext)) page->uiDelivered = sequence;
+done:
+    page->uiRetryAt = GetTickCount() + (ok ? 250 : 2000);
+}
+
 static BOOL h_http_get(USHORT port, const char *path, DWORD maximum,
                        char **body, DWORD *length, WCHAR *error, DWORD errorCap) {
     DWORD budget = h_io_budget(maximum < 5000 ? maximum : 5000);
@@ -43,6 +95,7 @@ static BOOL h_send_command(H_NATIVE_PAGE *page, const char *method, const char *
 }
 
 static void h_page_close(H_NATIVE_PAGE *page) {
+    h_ui_reset_document(page);
     h_sample_page(page);
     if (page->state) cx_session_free(page->state);
     if (page->ws) net_ws_close(page->ws);
@@ -158,6 +211,10 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
         }
         /* A normal stop can cancel a valid in-flight task without failing it. */
         if ((success || h_operation_active()) && cx_session_complete(page->state, &task, success)) {
+            if (success && task.top && task.type == CX_SESSION_TASK_BOOTSTRAP) {
+                page->uiReady = TRUE; page->uiContext = task.contextId;
+                ++page->uiEpoch; page->uiDelivered = 0; page->uiRetryAt = 0;
+            }
             if (success && task.type == CX_SESSION_TASK_BUNDLE) {
                 ++h_bundles_completed;
                 if (task.top) h_collect_page_diagnostics(page);
@@ -170,6 +227,7 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
         if (!h_operation_active()) break;
     }
     h_current_context = 0;
+    if (h_operation_active()) h_ui_send(page, options);
     return TRUE;
 }
 
@@ -275,6 +333,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     wrapped = h_bundle_source(bundle, bundleLength, &wrappedLength);
     if (!pages || !wrapped) { h_error(error, errorCap, L"out of memory allocating native sessions"); goto done; }
     h_report.stopReason = "endpoint-unavailable";
+    h_ui_record("info", "endpoint-waiting");
     h_command_timeout = (DWORD)options->bundleTimeoutMs;
     while (h_operation_active() && GetTickCount() - waitStart < (DWORD)options->debugTimeoutMs) {
         DWORD elapsed, remaining;
@@ -301,6 +360,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
                         ready = FALSE; h_probe_record(CX_ENDPOINT_HTTP_FAILED); break;
                     }
                     h_probe_record(versionReason);
+                    if (versionReason == CX_ENDPOINT_READY) h_ui_record("info", "endpoint-ready");
                 }
                 if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
                 break;

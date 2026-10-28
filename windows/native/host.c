@@ -25,6 +25,8 @@
 #define HOST_REPLY_TOKENS 8192
 #define HOST_MAX_PAGES 16
 #define HOST_DIAGNOSTIC_JSON_CAP 65536
+#define HOST_UI_HISTORY_CAP 100
+#define HOST_UI_EXPRESSION_CAP 24576
 
 typedef struct H_NATIVE_PAGE {
     char id[128];
@@ -38,8 +40,21 @@ typedef struct H_NATIVE_PAGE {
     BOOL ensurePending;
     BOOL seen;
     BOOL openedBefore;
+    BOOL uiReady;
+    int uiContext;
+    DWORD uiEpoch, uiDelivered, uiRetryAt;
     CX_SESSION_STATS reported;
 } H_NATIVE_PAGE;
+
+typedef struct H_UI_ENTRY {
+    DWORD sequence, elapsed;
+    const char *level, *code;
+} H_UI_ENTRY;
+static H_UI_ENTRY h_ui_entries[HOST_UI_HISTORY_CAP];
+static DWORD h_ui_count, h_ui_head, h_ui_sequence, h_ui_started, h_ui_epoch;
+static BOOL h_ui_active, h_ui_sending;
+static char h_ui_expression[HOST_UI_EXPRESSION_CAP];
+static JT h_ui_tokens[HOST_REPLY_TOKENS];
 
 static H_NATIVE_PAGE *h_current_page;
 static CX_SESSION_TASK h_current_task;
@@ -125,8 +140,43 @@ static void h_print_utf8(const char *text) {
 static BOOL h_equal(const WCHAR *a, const WCHAR *b) {
     int i = 0; if (!a || !b) return FALSE; while (a[i] && b[i] && a[i] == b[i]) ++i; return a[i] == 0 && b[i] == 0;
 }
+static void h_ui_record(const char *level, const char *code) {
+    H_UI_ENTRY *entry;
+    DWORD slot;
+    if (!h_ui_active || h_ui_sequence == MAXDWORD) return;
+    slot = (h_ui_head + h_ui_count) % HOST_UI_HISTORY_CAP;
+    if (h_ui_count == HOST_UI_HISTORY_CAP) h_ui_head = (h_ui_head + 1) % HOST_UI_HISTORY_CAP;
+    else ++h_ui_count;
+    entry = &h_ui_entries[slot];
+    entry->sequence = ++h_ui_sequence; entry->elapsed = GetTickCount() - h_ui_started;
+    entry->level = level; entry->code = code;
+}
+static void h_ui_reset_document(H_NATIVE_PAGE *page) {
+    page->uiReady = FALSE; page->uiContext = 0;
+    ++page->uiEpoch; page->uiDelivered = 0; page->uiRetryAt = 0;
+}
+static void h_ui_audit_event(const char *level, const char *event, const char *message) {
+    const char *code = NULL;
+    BOOL success = lstrcmpA(level, "info") == 0;
+    if (lstrcmpA(event, "start") == 0) code = "host-started";
+    else if (lstrcmpA(event, "launch") == 0 && lstrcmpA(message, "Owned client started") == 0) code = "client-started";
+    else if (lstrcmpA(event, "session") == 0) {
+        if (lstrcmpA(message, "CDP page connected") == 0) code = "session-connected";
+        else if (lstrcmpA(message, "CDP page reconnected") == 0) code = "session-reconnected";
+        else if (lstrcmpA(message, "CDP connection failed; retry scheduled") == 0
+            || lstrcmpA(message, "CDP connection closed; retry scheduled") == 0) code = "session-retry";
+    } else if (lstrcmpA(event, "bootstrap") == 0) code = success ? "bootstrap-ready" : "bootstrap-failed";
+    else if (lstrcmpA(event, "bundle") == 0) code = success ? "bundle-ready" : "bundle-failed";
+    else if (lstrcmpA(event, "config") == 0) code = success ? "config-updated" : "config-failed";
+    else if (lstrcmpA(event, "page") == 0) code = "page-error";
+    else if (lstrcmpA(event, "nav") == 0) code = "top-navigated";
+    if (success && h_task_pending && !h_current_task.top
+        && (lstrcmpA(event, "bootstrap") == 0 || lstrcmpA(event, "bundle") == 0 || lstrcmpA(event, "config") == 0)) return;
+    if (code) h_ui_record(success ? "info" : (lstrcmpA(level, "error") == 0 ? "error" : "warn"), code);
+}
 static void h_audit_event(const char *level, const char *event, const char *message) {
     WCHAR error[256];
+    h_ui_audit_event(level, event, message);
     if (h_audit && !cx_audit_log(h_audit, level, event, message, error, 256) && !h_quiet)
         h_print(L"[audit] File logging failed; continuing without the log file.\r\n");
 }
@@ -167,6 +217,8 @@ static void h_audit_page_message(const char *json, const JT *tokens, int params)
 static BOOL h_operation_active(void) {
     if (h_client_pid && !proc_alive(h_client_pid)) return FALSE;
     if (h_duration && GetTickCount() - h_started >= h_duration) return FALSE;
+    if (h_ui_sending && (!h_current_page || !h_current_page->uiReady || h_current_page->uiEpoch != h_ui_epoch
+        || !cx_session_can_sync_config(h_current_page->state, h_current_page->uiContext))) return FALSE;
     return !h_task_pending || !h_current_page || cx_session_task_active(h_current_page->state, &h_current_task);
 }
 static void h_dispatch_event(const char *json, DWORD length) {
@@ -174,6 +226,8 @@ static void h_dispatch_event(const char *json, DWORD length) {
     int params, frame, method;
     if (!h_current_page || !h_current_page->state) return;
     cx_session_feed(h_current_page->state, json, length);
+    if (h_current_page->uiReady && !cx_session_can_sync_config(h_current_page->state, h_current_page->uiContext))
+        h_ui_reset_document(h_current_page);
     h_sample_page(h_current_page);
     if (jparse(json, (int)length, tokens, HOST_REPLY_TOKENS) <= 0) return;
     method = jkey(json, tokens, 0, "method");
@@ -181,6 +235,7 @@ static void h_dispatch_event(const char *json, DWORD length) {
         params = jkey(json, tokens, 0, "params");
         frame = jkey(json, tokens, params, "frame");
         if (frame >= 0 && jkey(json, tokens, frame, "parentId") < 0) {
+            h_ui_reset_document(h_current_page);
             h_current_page->ensureAt = GetTickCount() + 2500;
             h_current_page->ensurePending = TRUE;
             h_audit_event("info", "nav", "Top document navigated");
@@ -515,6 +570,8 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
+    h_ui_active = TRUE; h_ui_sending = FALSE; h_ui_started = runStarted;
+    h_ui_count = h_ui_head = h_ui_sequence = 0;
     h_zero(&h_report, sizeof(h_report)); h_exit_code = 0;
     h_needs_elevation = FALSE;
     h_diagnostics = NULL; h_diagnostics_sampled = FALSE;
