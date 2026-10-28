@@ -64,6 +64,7 @@
         <div class="field full" id="nativeLauncherField" hidden><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">请填写已构建的 chaoxing_plus.exe 路径；生成器无法检查文件是否存在。命令直接启动 EXE，不需要 Node.js，并以 EXE 所在目录作为工作目录；相对配置与数据路径均由此解析。原生诊断仅提供页面布局采样，不含窗口 DPI 或截图。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory" disabled>内存执行（未发布）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
+        <div class="field full"><label class="check"><input id="elevateOnStart" type="checkbox">启动宿主时先申请管理员权限（--elevate-on-start）</label><p class="hint">默认不提前申请；只在启动所选 CXExam.exe 确实需要管理员权限时请求 UAC。勾选后在扫描、显示 GUI 前申请；已是管理员时直接继续。帮助、自检、仅扫描和 attach 不申请。</p></div>
       </div></div>
       <div class="section"><h2>CEF 注入兼容性</h2><div class="grid">
         <div class="field full"><label for="expectedBrowser">调试端点 Browser 校验文本</label><input id="expectedBrowser" value="Chrome/" placeholder="例如 Chrome/75"><p class="hint">只连接本次启动客户端的本机 CDP 端点；不匹配时中止，避免误连其它浏览器。</p></div>
@@ -121,7 +122,7 @@
 <script>
 (function () {
   'use strict';
-  var ids = ['hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
+  var ids = ['elevateOnStart','hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
   function el(id) { return document.getElementById(id); }
   function value(id) { var node = el(id); return node.type === 'checkbox' ? node.checked : node.value.trim(); }
   function setValue(id, next) { var node = el(id); if (!node) return; if (node.type === 'checkbox') node.checked = !!next; else node.value = next == null ? '' : next; }
@@ -198,6 +199,7 @@
     setIfEmitted(config, 'retainData', Boolean(s.retainData), emitted);
     setIfEmitted(config, 'deleteConfig', Boolean(s.deleteConfig), emitted);
     setIfEmitted(config, 'stopClientOnExit', Boolean(s.stopClient), emitted);
+    setIfEmitted(config, 'elevateOnStart', Boolean(s.elevateOnStart), emitted);
     setIfEmitted(config, 'expectedBrowser', s.expectedBrowser, emitted);
     setIfEmitted(config, 'injectStrategy', s.injectStrategy, emitted);
     setIfEmitted(config, 'injectRetries', Number(s.injectRetries), emitted);
@@ -275,7 +277,7 @@
   }
   var NATIVE_PATH_CAP = 1024;
   var NATIVE_SHORT_CAP = 128;
-  var NATIVE_JSON_KEYS = ('clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode').split(' ');
+  var NATIVE_JSON_KEYS = ('elevateOnStart clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode').split(' ');
   function validateNativeJson(parsed, errors) {
     Object.keys(parsed).forEach(function (key) {
       var raw = parsed[key];
@@ -320,6 +322,7 @@
     return String(value || '').indexOf('--') === 0;
   }
   var JSON_OPTION_KEYS = {
+    elevateOnStart: 'elevateOnStart', noElevate: 'noElevate',
     port: 'port',
     clientPath: 'clientPath', clientIndex: 'clientIndex', clientFirst: 'clientFirst', listClients: 'listClients', selectClient: 'selectClient',
     scanMode: 'scanMode', scanAll: 'scanMode', ui: 'ui', rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir', expectedBrowser: 'expectedBrowser', injectStrategy: 'injectStrategy', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames', captureConsole: 'captureConsole', debugEndpointTimeoutMs: 'debugEndpointTimeoutMs', targetPollIntervalMs: 'targetPollIntervalMs', bundleTimeoutMs: 'bundleTimeoutMs',
@@ -329,7 +332,7 @@
     wipeOwnedFilesOnStart: 'wipeOwnedFilesOnStart', wipeFailurePolicy: 'wipeFailurePolicy', wipeRetries: 'wipeRetries', wipeRetryDelayMs: 'wipeRetryDelayMs', wipeRuntimeRetry: 'wipeRuntimeRetry', wipeRuntimeIntervalSec: 'wipeRuntimeIntervalSec',
     log: 'logFileEnabled', logFileEnabled: 'logFileEnabled', quiet: 'quiet', diagnose: 'diagnose', noDiagnose: 'diagnose', diagnosticsDir: 'diagnosticsDir', report: 'reportPath', reportPath: 'reportPath', stopClientOnExit: 'stopClientOnExit', dpiAware: 'dpiAware'
   };
-  var JSON_BOOLEAN_KEYS = ['clientFirst', 'listClients', 'selectClient', 'scanAll', 'rescan', 'noScanCache', 'noDiskWrite', 'retainData', 'deleteConfig', 'panelEnabled', 'panelCollapsed', 'showAnswerDialog', 'autoSubmit', 'logFileEnabled', 'quiet', 'diagnose', 'stopClientOnExit', 'dpiAware', 'wipeOwnedFilesOnStart', 'wipeRuntimeRetry', 'injectBlankFrames', 'captureConsole'];
+  var JSON_BOOLEAN_KEYS = ['elevateOnStart', 'noElevate', 'clientFirst', 'listClients', 'selectClient', 'scanAll', 'rescan', 'noScanCache', 'noDiskWrite', 'retainData', 'deleteConfig', 'panelEnabled', 'panelCollapsed', 'showAnswerDialog', 'autoSubmit', 'logFileEnabled', 'quiet', 'diagnose', 'stopClientOnExit', 'dpiAware', 'wipeOwnedFilesOnStart', 'wipeRuntimeRetry', 'injectBlankFrames', 'captureConsole'];
   var JSON_NUMBER_KEYS = ['wipeRetries', 'wipeRetryDelayMs', 'wipeRuntimeIntervalSec', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs'];
   var JSON_ENUM_KEYS = ['wipeFailurePolicy', 'injectStrategy'];
   var JSON_STRING_KEYS = ['clientPath', 'dataDir', 'expectedBrowser', 'panelTheme', 'diagnosticsDir', 'reportPath'];
@@ -348,6 +351,7 @@
     if (s.noDiskWrite) keys.noDiskWrite = true;
     if (!s.retainData) keys.retainData = true;
     if (s.stopClient) keys.stopClientOnExit = true;
+    if (s.elevateOnStart) keys.elevateOnStart = true;
     if (!s.clientPath && s.rescan) keys.rescan = true;
     if (!s.clientPath && s.noScanCache) keys.noScanCache = true;
     if (s.quiet) keys.quiet = true;
@@ -377,6 +381,9 @@
     return keys;
   }
   function validateInlineJsonOptions(s, parsed, errors) {
+    if (parsed.noElevate === true && (s.elevateOnStart || parsed.elevateOnStart === true)) {
+      errors.push('--elevate-on-start 与 --no-elevate 不能同时使用。');
+    }
     if (Object.prototype.hasOwnProperty.call(parsed, 'configPath')) {
       errors.push('内联 JSON 不能改变配置文件路径，请使用 --config。');
       return;
@@ -518,6 +525,7 @@
     if (s.listClients) both('--list-clients', true); if (!s.clientPath) { both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true); if (s.noScanCache) both('--no-scan-cache', true); }
     both('--ui', s.ui);
     both('--execution-mode', 'normal');
+    if (s.elevateOnStart) both('--elevate-on-start', true);
     if (s.expectedBrowser !== 'Chrome/') both('--expected-browser', s.expectedBrowser); if (s.injectStrategy !== 'hybrid') both('--inject-strategy', s.injectStrategy); if (s.injectRetries !== '2') both('--inject-retries', s.injectRetries); if (!s.injectBlankFrames) both('--no-inject-blank-frames', true); if (!s.captureConsole) both('--no-capture-console', true); if (s.debugTimeout !== '30000') both('--debug-timeout', s.debugTimeout); if (s.targetPollInterval !== '1000') both('--target-poll-interval', s.targetPollInterval); if (s.bundleTimeout !== '120000') both('--bundle-timeout', s.bundleTimeout);
     if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== defaultDataDir(s)) both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.noDiskWrite) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
     if (s.optionsJson) both('--options-json', s.optionsJson);
@@ -574,7 +582,7 @@
     if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；数据清理参数不可执行，诊断仅提供页面布局采样。目标 Windows 和真实 CEF75 环境仍需验收。</li>');
   }
   function escapeHtml(text) { return String(text).replace(/[&<>"']/g, function (char) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]; }); }
-  var defaults = { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: 'windows\\data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, expectedBrowser: 'Chrome/', injectStrategy: 'hybrid', injectRetries: '2', debugTimeout: '30000', targetPollInterval: '1000', bundleTimeout: '120000', injectBlankFrames: true, captureConsole: true, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: 'windows\\data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
+  var defaults = { elevateOnStart: false, scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: 'windows\\data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, expectedBrowser: 'Chrome/', injectStrategy: 'hybrid', injectRetries: '2', debugTimeout: '30000', targetPollInterval: '1000', bundleTimeout: '120000', injectBlankFrames: true, captureConsole: true, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: 'windows\\data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
   var selectedPreset = '';
   var lastHostType = 'node';
   function updateHostMode() {

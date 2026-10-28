@@ -6,6 +6,7 @@
 #define SELECTION_LIST 1001
 #define SELECTION_BROWSE 1002
 #define SELECTION_TIMER 1003
+#define SELECTION_SCAN_ALL 1004
 
 static const WCHAR selectionClass[] = L"CXPlusNativeClientSelection";
 static const WCHAR selectionTitle[] = L"超星学习助手 - 选择考试客户端";
@@ -17,7 +18,7 @@ typedef struct SELECTION_WINDOW {
     DWORD outCap;
     WCHAR *error;
     DWORD errorCap;
-    HWND window, heading, columns, list, browse, choose, cancel;
+    HWND window, heading, columns, list, browse, scanAll, choose, cancel;
     HFONT font;
     BOOL finished;
     CX_SELECTION_STATUS result;
@@ -87,6 +88,7 @@ static void selection_layout(SELECTION_WINDOW *state) {
     MoveWindow(state->columns, 20, 52, width - 40, 22, TRUE);
     MoveWindow(state->list, 18, 78, width - 36, height - 146, TRUE);
     MoveWindow(state->browse, 18, height - 52, 138, 32, TRUE);
+    MoveWindow(state->scanAll, 168, height - 52, 138, 32, TRUE);
     MoveWindow(state->choose, width - 238, height - 52, 102, 32, TRUE);
     MoveWindow(state->cancel, width - 120, height - 52, 102, 32, TRUE);
 }
@@ -152,14 +154,15 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
     }
     if (!state) return DefWindowProcW(window, message, wParam, lParam);
     if (message == WM_CREATE) {
-        state->heading = selection_control(state, 0, L"STATIC", L"请选择需要启动的考试客户端，也可手动浏览。", 0);
+        state->heading = selection_control(state, 0, L"STATIC", L"请选择考试客户端；全盘扫描后将重新打开并刷新列表，也可手动浏览。", 0);
         state->columns = selection_control(state, 0, L"STATIC", L"序号 / 架构 / 文件版本 / 完整路径", 0);
         state->list = selection_control(state, WS_TABSTOP | WS_BORDER | WS_VSCROLL | WS_HSCROLL
             | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_USETABSTOPS, L"LISTBOX", L"", SELECTION_LIST);
         state->browse = selection_control(state, WS_TABSTOP | BS_PUSHBUTTON, L"BUTTON", L"手动浏览…", SELECTION_BROWSE);
+        state->scanAll = selection_control(state, WS_TABSTOP | BS_PUSHBUTTON, L"BUTTON", L"全盘扫描…", SELECTION_SCAN_ALL);
         state->choose = selection_control(state, WS_TABSTOP | BS_DEFPUSHBUTTON, L"BUTTON", L"选择并启动", IDOK);
         state->cancel = selection_control(state, WS_TABSTOP | BS_PUSHBUTTON, L"BUTTON", L"取消", IDCANCEL);
-        if (!state->heading || !state->columns || !state->list || !state->browse || !state->choose || !state->cancel
+        if (!state->heading || !state->columns || !state->list || !state->browse || !state->scanAll || !state->choose || !state->cancel
             || !selection_fill(state)) { selection_error(state, L"无法创建原生客户端选择控件。"); return -1; }
         selection_layout(state); return 0;
     }
@@ -172,6 +175,9 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         int command = LOWORD(wParam);
         if (command == IDCANCEL) { DestroyWindow(window); return 0; }
         if (command == SELECTION_BROWSE) { selection_browse(state); return 0; }
+        if (command == SELECTION_SCAN_ALL) {
+            state->result = CX_SELECTION_SCAN_ALL; DestroyWindow(window); return 0;
+        }
         if (command == IDOK || (command == SELECTION_LIST && HIWORD(wParam) == LBN_DBLCLK)) {
             LRESULT index = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
             if (index != LB_ERR && state->candidates && (DWORD)index < state->candidates->count)
@@ -280,6 +286,7 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, CX_SELECTION_PROB
     probe->itemCount = (DWORD)SendMessageW(state.list, LB_GETCOUNT, 0, 0);
     probe->selectedIndex = (LONG)SendMessageW(state.list, LB_GETCURSEL, 0, 0);
     probe->browseAvailable = IsWindow(state.browse) && IsWindowEnabled(state.browse);
+    probe->scanAllAvailable = IsWindow(state.scanAll) && IsWindowEnabled(state.scanAll);
     probe->unicodeWindow = IsWindowUnicode(state.window);
     GetWindowTextW(state.window, title, 128); probe->titleMatches = lstrcmpW(title, selectionTitle) == 0;
     DestroyWindow(state.window);

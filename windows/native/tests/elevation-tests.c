@@ -76,6 +76,17 @@ static void quoting(void) {
     }
     check(same, "Windows argv roundtrip preserves empty Unicode JSON quotes slashes and marker-valued argument");
     if (parsed) LocalFree(parsed);
+    check(cx_elevation_parameters(0, NULL, NULL, argumentBuffer, 32768)
+        && !lstrcmpW(argumentBuffer, L"\"--elevated\""), "early restart preserves empty argv without inventing a selected client");
+    check(cx_elevation_parameters(13, args, NULL, argumentBuffer, 32768), "early restart parameters build without a selected client");
+    lstrcpyW(command, L"\"C:\\host.exe\" "); lstrcatW(command, argumentBuffer);
+    parsed = CommandLineToArgvW(command, &count); same = parsed && count == 15;
+    if (same) {
+        for (i = 0; i < 13; ++i) if (lstrcmpW(parsed[i + 1], args[i])) same = FALSE;
+        if (lstrcmpW(parsed[14], L"--elevated")) same = FALSE;
+    }
+    check(same, "early restart argv roundtrip preserves every argument without an elevated-client marker");
+    if (parsed) LocalFree(parsed);
     check(!cx_elevation_parameters(13, args, L"C:\\CXExam.exe", argumentBuffer, 8) && !argumentBuffer[0], "capacity failure never returns a truncated command");
     for (i = 0; i < 32767; ++i) tooLong[i] = L'x'; tooLong[32767] = 0;
     args[0] = tooLong;
@@ -104,6 +115,11 @@ static void handoff(void) {
     check(!lstrcmpW(capturedDirectory, testDirectory)
         && !lstrcmpW(capturedExecutable, L"C:\\宿主 目录\\chaoxing_plus.exe")
         && shellCalls == 1 && waits == 1, "runas restarts host with original working directory");
+    check(cx_elevation_restart(L"C:\\host.exe", 4, args, NULL, &code, errorText, 256)
+        && code == 17 && !lstrcmpW(capturedDirectory, testDirectory)
+        && lstrlenW(capturedParameters) > 12
+        && !lstrcmpW(capturedParameters + lstrlenW(capturedParameters) - 12, L"\"--elevated\""),
+        "early runas hands off without preselecting a client");
     shellAllowed = FALSE;
     check(!cx_elevation_restart(L"C:\\host.exe", 4, args, L"D:\\CXExam.exe", &code, errorText, 256)
         && GetLastError() == ERROR_CANCELLED && code == 3, "UAC cancel exits 3");

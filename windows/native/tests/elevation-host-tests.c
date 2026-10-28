@@ -16,6 +16,7 @@ LPWSTR WINAPI test_command_line(void);
 #define cx_select_client test_selection
 #define cx_options_load_default test_load_default
 #define cx_audit_write_report test_report
+#define net_http_get_timeout test_http_get_timeout
 #define GetFileAttributesW test_attributes
 #define GetCommandLineW test_command_line
 #define WinMain HostWinMain
@@ -37,7 +38,11 @@ static DWORD processChecks, existingCount;
 static BOOL inspectionAllowed = TRUE;
 static const char *defaultJson;
 static BOOL selectionCancelled, scannedFullCandidates, emptyCandidates;
+static BOOL requestScanAll, failFullScan, explicitFullScanPolicies;
+static CX_DISCOVERY_SCAN_MODE firstScanMode, lastScanMode;
 static DWORD expectedRestartArgc = 5;
+static BOOL earlyRestartExpected, tokenElevated, tokenAvailable = TRUE;
+static DWORD tokenQueries;
 
 BOOL test_load_default(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD cap) {
     (void)exePath;
@@ -63,10 +68,16 @@ BOOL test_dpi_restore(CX_DPI_OVERRIDE *state, WCHAR *error, DWORD cap) {
 DWORD test_stop_owned(DWORD pid) { (void)pid; ++stopped; return 1; }
 
 LPWSTR WINAPI test_command_line(void) { return commandLineFixture; }
-BOOL test_elevation_query(BOOL *elevated) { *elevated = FALSE; return TRUE; }
+BOOL test_elevation_query(BOOL *elevated) { ++tokenQueries; *elevated = tokenAvailable && tokenElevated; return tokenAvailable; }
 BOOL test_restart(const WCHAR *executable, int argc, WCHAR *const *argv,
                   const WCHAR *client, DWORD *exitCode, WCHAR *error, DWORD cap) {
     (void)executable; (void)error; (void)cap; ++restartCalls;
+    if (earlyRestartExpected) {
+        if (h_audit || h_config || h_diagnostics || reports || dpiActive || scans || selections || launches
+            || processChecks || dpiBegins || client != NULL || argc != (int)expectedRestartArgc
+            || (argc && lstrcmpW(argv[0], L"--elevate-on-start"))) ExitProcess(4);
+        *exitCode = restartCancelled ? 3 : 37; return !restartCancelled;
+    }
     if (h_audit || h_config || h_diagnostics || reports || dpiActive || argc != (int)expectedRestartArgc
         || (argc && (lstrcmpW(argv[0], L"--select-client") || lstrcmpW(argv[4], L"child-report.json")))
         || (argc && lstrcmpW(client, L"D:\\用户选定 客户端\\CXExam.exe"))) ExitProcess(4);
@@ -78,6 +89,14 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
                          WCHAR *error, DWORD cap) {
     const WCHAR *path = options->clientPath ? options->clientPath : L"C:\\candidate\\CXExam.exe";
     (void)error; (void)cap; ++scans;
+    if (scans == 1) firstScanMode = options->mode;
+    lastScanMode = options->mode;
+    if (scans > 1 && requestScanAll) {
+        explicitFullScanPolicies = options->mode == CX_DISCOVERY_SCAN_ALL && options->enumerateAll
+            && options->rescan && options->noScanCache && !options->clientPath
+            && options->noDiskWrite == testOptions.noDiskWrite;
+        if (failFullScan) { h_error(error, cap, L"fixture full scan failed"); return FALSE; }
+    }
     scannedFullCandidates = !options->clientPath && options->enumerateAll;
     if (emptyCandidates) return TRUE;
     result->items = (CX_CLIENT_CANDIDATE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLIENT_CANDIDATE));
@@ -91,6 +110,7 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
 CX_SELECTION_STATUS test_selection(const CX_DISCOVERY_RESULT *result, BOOL hostIs32Bit,
                                    WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
     (void)result; (void)hostIs32Bit; (void)error; (void)cap; ++selections;
+    if (requestScanAll && selections == 1) return CX_SELECTION_SCAN_ALL;
     if (selectionCancelled) return CX_SELECTION_CANCELLED;
     return h_copy(out, outCap, L"D:\\用户选定 客户端\\CXExam.exe") ? CX_SELECTION_SELECTED : CX_SELECTION_ERROR;
 }
@@ -111,6 +131,11 @@ BOOL test_can_restart(DWORD code, BOOL noElevate, BOOL restarted) {
 BOOL test_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report, WCHAR *error, DWORD cap) {
     (void)audit; (void)report; (void)error; (void)cap; ++reports; return TRUE;
 }
+BOOL test_http_get_timeout(USHORT port, const char *path, char **body, DWORD *length,
+                           DWORD timeoutMs, WCHAR *error, DWORD cap) {
+    (void)port; (void)path; (void)timeoutMs;
+    *body = NULL; *length = 0; h_error(error, cap, L"fixture blocks HTTP without network I/O"); return FALSE;
+}
 static void check(BOOL ok, const char *name) {
     h_print_utf8(ok ? "PASS " : "FAIL "); h_print_utf8(name); h_print_utf8("\n"); if (!ok) ++failures;
 }
@@ -125,6 +150,10 @@ static void reset(void) {
     dpiActive = FALSE; dpiBeginAllowed = dpiRestoreAllowed = TRUE;
     processChecks = existingCount = 0; inspectionAllowed = TRUE;
     defaultJson = NULL; selectionCancelled = scannedFullCandidates = emptyCandidates = FALSE; expectedRestartArgc = 5;
+    requestScanAll = failFullScan = explicitFullScanPolicies = FALSE;
+    firstScanMode = lastScanMode = CX_DISCOVERY_SCAN_FALLBACK_ALL;
+    h_default_gui = FALSE;
+    earlyRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
 }
 void __stdcall ElevationHostTestMain(void) {
     BOOL result;
@@ -202,8 +231,14 @@ void __stdcall ElevationHostTestMain(void) {
     reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"ui\":\"cli\",\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe"; launchFailure = ERROR_ACCESS_DENIED;
     check(HostWinMain(NULL, NULL, NULL, 0) == 1 && scans == 1 && selections == 1 && launches == 1
-        && scannedFullCandidates && !lstrcmpW(launchedPath, L"D:\\用户选定 客户端\\CXExam.exe"),
-        "no-argument entry scans all candidates and opens GUI despite configured client path or CLI mode");
+        && scannedFullCandidates && firstScanMode == CX_DISCOVERY_SCAN_COMMON
+        && !lstrcmpW(launchedPath, L"D:\\用户选定 客户端\\CXExam.exe"),
+        "no-argument entry scans only common directories and opens GUI despite configured client path or CLI mode");
+    reset(); defaultJson = "{\"scanMode\":\"all\",\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; selectionCancelled = TRUE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 3 && scans == 1 && selections == 1 && !launches
+        && firstScanMode == CX_DISCOVERY_SCAN_COMMON,
+        "no-argument common scan overrides a configured recursive scan mode");
     reset(); defaultJson = "{\"clientFirst\":true,\"ui\":\"cli\",\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe"; selectionCancelled = TRUE; launchFailure = ERROR_ACCESS_DENIED;
     check(HostWinMain(NULL, NULL, NULL, 0) == 3 && scans == 1 && selections == 1 && !launches
@@ -235,6 +270,66 @@ void __stdcall ElevationHostTestMain(void) {
     check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && launches == 1 && !selections
         && !lstrcmpW(launchedPath, testOptions.elevatedClientPath),
         "verified elevated client selection bypasses a no-argument GUI policy without reopening it");
+    reset(); requestScanAll = TRUE; testOptions.noDiskWrite = TRUE; launchFailure = ERROR_ACCESS_DENIED;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && scans == 2 && selections == 2
+        && launches == 1 && explicitFullScanPolicies && lastScanMode == CX_DISCOVERY_SCAN_ALL,
+        "GUI full scan requests an uncached recursive scan and reopens refreshed selection before launch");
+    reset(); requestScanAll = selectionCancelled = TRUE; testOptions.noDiskWrite = TRUE;
+    check(h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && h_exit_code == 3 && scans == 2
+        && selections == 2 && !launches && explicitFullScanPolicies,
+        "cancelling refreshed full scan selection never launches a client");
+    reset(); requestScanAll = failFullScan = TRUE;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && scans == 2 && selections == 1
+        && !launches && explicitFullScanPolicies,
+        "failed requested full scan stops before any client launch");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start";
+    earlyRestartExpected = TRUE; expectedRestartArgc = 1;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 37 && restartCalls == 1 && tokenQueries == 1
+        && !scans && !selections && !launches && !reports && h_default_gui,
+        "early elevation hands off before scanning GUI audit or launch and preserves standalone GUI policy");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start";
+    earlyRestartExpected = restartCancelled = TRUE; expectedRestartArgc = 1;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 3 && restartCalls == 1 && !scans && !reports,
+        "early UAC cancellation exits three without scanning or writing a parent report");
+    reset(); commandLineFixture = L"host.exe";
+    defaultJson = "{\"elevateOnStart\":true,\"noDiskWrite\":true}";
+    earlyRestartExpected = TRUE; expectedRestartArgc = 0;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 37 && restartCalls == 1 && !scans && !reports && h_default_gui,
+        "configured early elevation preserves a truly empty argument list and GUI policy");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start";
+    tokenElevated = TRUE; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !restartCalls && tokenQueries == 1
+        && scans == 1 && selections == 1 && launches == 1 && firstScanMode == CX_DISCOVERY_SCAN_COMMON,
+        "already elevated standalone startup continues with common scan and GUI without another UAC");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start --elevated";
+    tokenElevated = TRUE; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !restartCalls && tokenQueries == 1
+        && scans == 1 && selections == 1 && launches == 1 && firstScanMode == CX_DISCOVERY_SCAN_COMMON,
+        "verified early restart retains common scan and GUI instead of silently choosing a client");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start --elevated";
+    check(HostWinMain(NULL, NULL, NULL, 0) == 2 && !restartCalls && !scans && !launches && tokenQueries == 1,
+        "a forged early restart marker cannot replace the administrator token");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start"; tokenAvailable = FALSE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !restartCalls && !scans && !launches,
+        "unknown early elevation token fails before scanning or launching");
+    reset(); commandLineFixture = L"host.exe --elevate-on-start --no-elevate";
+    check(HostWinMain(NULL, NULL, NULL, 0) == 2 && !restartCalls && !scans && !tokenQueries,
+        "conflicting early elevation flags fail before inspecting the token");
+    {
+        WCHAR *readOnly[] = {
+            L"host.exe --elevate-on-start --help", L"host.exe --elevate-on-start --capabilities",
+            L"host.exe --elevate-on-start --self-check", L"host.exe --elevate-on-start --print-effective-config",
+            L"host.exe --elevate-on-start --list-clients --no-disk-write",
+            L"host.exe --elevate-on-start --attach 38100 --duration 1 --no-disk-write --quiet"
+        };
+        DWORD i; BOOL noEarlyUac = TRUE;
+        for (i = 0; i < sizeof(readOnly) / sizeof(readOnly[0]); ++i) {
+            reset(); commandLineFixture = readOnly[i];
+            HostWinMain(NULL, NULL, NULL, 0);
+            if (restartCalls || tokenQueries || selections || launches || (i < 5 && reports)) noEarlyUac = FALSE;
+        }
+        check(noEarlyUac, "read-only and explicit attach actions never request early elevation");
+    }
     h_print_utf8(failures ? "NATIVE ELEVATION HOST TESTS FAIL\n" : "NATIVE ELEVATION HOST TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);
 }

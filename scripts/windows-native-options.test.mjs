@@ -34,6 +34,12 @@ test('compiled native options honor scan aliases and layered client selection', 
     'CEF75 launch port range rejects reserved and excluded values',
     'attach retains generic TCP port limits',
     'CLI valid launch port overrides lower unsupported JSON port',
+    'elevate-on-start CLI survives layered merging',
+    'higher JSON can disable early elevation',
+    'CLI early elevation overrides configured false',
+    'early elevation conflicts with no-elevate',
+    'configured early elevation conflicts with CLI no-elevate',
+    'early elevation JSON requires a boolean',
     'native F1 through F24 shortcuts remain accepted',
     'native function shortcuts reject leading zeroes and out-of-range keys'
   ]) {

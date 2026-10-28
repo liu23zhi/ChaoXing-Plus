@@ -39,21 +39,24 @@ export async function resolveClientSelection(options, config, {
     || (options.clientIndex === null && !options.clientFirst && options.ui === 'auto' && interactive);
   const mayPrompt = nativeSelectionRequested || (interactive && terminalPromptRequested);
 
-  logger.info('[client] 正在扫描常见安装目录（根目录及一级子目录）');
-  const scanResult = await discover({
-    scanMode: options.scanMode === 'all' ? 'all' : options.scanMode,
+  const scan = (scanMode, forceRescan = options.rescan === true) => discover({
+    scanMode,
     stopOnMachine: options.listClients || mayPrompt || options.clientIndex !== null ? null : 0x014c,
-    onFullScan: () => logger.info('[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描'),
+    onFullScan: () => logger.info(scanMode === 'all'
+      ? '[client] 开始固定磁盘根目录递归扫描'
+      : '[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描'),
     cachePath: scanCachePath,
     noScanCache: options.noScanCache === true,
     noDiskWrite: options.noDiskWrite === true,
-    forceRescan: options.rescan === true,
+    forceRescan,
     ...(cacheFs ? { cacheFs } : {}),
     ...(cacheTtlMs !== undefined ? { cacheTtlMs } : {}),
     onCacheEvent
   });
-  const candidates = scanResult.candidates || [];
-  const preferredIndex = findPreferredClientIndex(candidates);
+  logger.info(options.scanMode === 'all' ? '[client] 正在全盘扫描' : '[client] 正在扫描常见安装目录（根目录及一级子目录）');
+  const scanResult = await scan(options.scanMode);
+  let candidates = scanResult.candidates || [];
+  let preferredIndex = findPreferredClientIndex(candidates);
 
   const printCandidates = () => {
     candidates.forEach((candidate, index) => {
@@ -79,17 +82,37 @@ export async function resolveClientSelection(options, config, {
   };
 
   if (nativeSelectionRequested) {
-    logger.info(`[client] 打开原生选择窗口（共 ${candidates.length} 个候选）`);
     const autoCloseMs = Number.parseInt(String(process.env.CXPLUS_SELECTION_AUTO_CLOSE_MS || ''), 10);
-    const windowResult = await showWindow({
-      candidates: candidates.map((candidate) => ({ path: candidate.path, machine: describeMachine(candidate.machine) })),
-      preferredIndex,
-      ...(Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? { autoCloseMs } : {})
-    });
-    if (windowResult.status === 'selected') return resolveSelectedPath(windowResult.path, { manual: windowResult.manual });
-    if (windowResult.status === 'cancelled') throw new Error('已取消客户端选择，未启动考试客户端');
-    logger.warn(`[client] 原生选择窗口不可用：${windowResult.reason || 'unknown'}${options.ui === 'gui' ? '' : '；回退终端提示/推荐候选'}`);
-    if (options.ui === 'gui') throw new Error(`无法显示原生选择窗口：${windowResult.reason || 'unknown'}。请检查 PowerShell/WinForms 是否可用，或改用 --ui cli`);
+    let notice = '';
+    while (true) {
+      logger.info(`[client] 打开原生选择窗口（共 ${candidates.length} 个候选）`);
+      const windowResult = await showWindow({
+        candidates: candidates.map((candidate) => ({ path: candidate.path, machine: describeMachine(candidate.machine) })),
+        preferredIndex,
+        notice,
+        ...(Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? { autoCloseMs } : {})
+      });
+      if (windowResult.status === 'scan-all') {
+        logger.info('[client] 用户请求全盘扫描；完成后将重新显示选择窗口，请等待');
+        try {
+          const result = await scan('all', true);
+          candidates = result.candidates || [];
+          preferredIndex = findPreferredClientIndex(candidates);
+          notice = `全盘扫描完成，共 ${candidates.length} 个候选。`;
+          logger.info(`[client] ${notice}`);
+          printCandidates();
+        } catch (error) {
+          notice = '全盘扫描失败，保留原候选；可重试或手动浏览。';
+          logger.warn(`[client] ${notice} ${error.message || error}`);
+        }
+        continue;
+      }
+      if (windowResult.status === 'selected') return resolveSelectedPath(windowResult.path, { manual: windowResult.manual });
+      if (windowResult.status === 'cancelled') throw new Error('已取消客户端选择，未启动考试客户端');
+      logger.warn(`[client] 原生选择窗口不可用：${windowResult.reason || 'unknown'}${options.ui === 'gui' ? '' : '；回退终端提示/推荐候选'}`);
+      if (options.ui === 'gui') throw new Error(`无法显示原生选择窗口：${windowResult.reason || 'unknown'}。请检查 PowerShell/WinForms 是否可用，或改用 --ui cli`);
+      break;
+    }
   }
 
   if (candidates.length === 0) {

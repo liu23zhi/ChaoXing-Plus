@@ -39,18 +39,21 @@ try {
   exit 4
 }
 
-# Render at system DPI to keep the native chooser sharp on scaled displays.
+# Explicit visibility APIs are required because the PowerShell process is hidden.
 try {
-  Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
-  [void][Win32Dpi.DpiAwareness]::SetProcessDPIAware()
+  Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);'
 } catch {
+  Write-ResultFile @{ error = "native-window-api-unavailable: $($_.Exception.Message)" }
+  exit 5
 }
+try { [void][Win32Dpi.DpiAwareness]::SetProcessDPIAware() } catch {}
 
 $candidates = @($payload.candidates)
 $title = Get-Text $payload.title 'Chaoxing Plus - Select Exam Client'
 $hintText = Get-Text $payload.hint 'Select the CXExam.exe client to launch. Use Browse to pick another location.'
 $okText = Get-Text $payload.selectButtonText 'Use selected client'
 $browseText = Get-Text $payload.browseButtonText 'Browse...'
+$scanAllText = Get-Text $payload.scanAllButtonText 'Scan all drives...'
 $cancelText = Get-Text $payload.cancelButtonText 'Cancel'
 $fontName = Get-Text $payload.fontName 'Microsoft YaHei UI'
 $messages = $payload.messages
@@ -79,7 +82,7 @@ function New-SelectionForm {
   $hint.Text = $hintText
   $hint.AutoSize = $false
   $hint.Dock = 'Top'
-  $hint.Height = 46
+  $hint.Height = 64
   $hint.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 0)
   $form.Controls.Add($hint)
 
@@ -122,6 +125,11 @@ function New-SelectionForm {
   $browse.Width = 110
   $browse.Height = 32
 
+  $scanAll = New-Object System.Windows.Forms.Button
+  $scanAll.Text = $scanAllText
+  $scanAll.Width = 120
+  $scanAll.Height = 32
+
   $cancel = New-Object System.Windows.Forms.Button
   $cancel.Text = $cancelText
   $cancel.Width = 90
@@ -130,12 +138,13 @@ function New-SelectionForm {
 
   [void]$buttons.Controls.Add($ok)
   [void]$buttons.Controls.Add($browse)
+  [void]$buttons.Controls.Add($scanAll)
   [void]$buttons.Controls.Add($cancel)
   $form.Controls.Add($buttons)
   $form.AcceptButton = $ok
   $form.CancelButton = $cancel
 
-  return @{ form = $form; list = $list; ok = $ok; browse = $browse; cancel = $cancel; buttons = $buttons }
+  return @{ form = $form; list = $list; ok = $ok; browse = $browse; scanAll = $scanAll; cancel = $cancel; buttons = $buttons }
 }
 
 try {
@@ -154,6 +163,7 @@ if ($Probe) {
     candidateCount = $candidates.Count
     hasListView = ($null -ne $ui.list)
     hasBrowseButton = ($null -ne $ui.browse)
+    hasScanAllButton = ($null -ne $ui.scanAll)
   }
   exit 0
 }
@@ -190,6 +200,11 @@ $ui.cancel.Add_Click({
   $ui.form.Close()
 })
 
+$ui.scanAll.Add_Click({
+  $script:selection = @{ action = 'scan-all' }
+  $ui.form.Close()
+})
+
 $ui.list.Add_DoubleClick({
   $ui.ok.PerformClick()
 })
@@ -206,6 +221,13 @@ if ($AutoCloseMs -gt 0) {
   $timer.Start()
 }
 
+# The hidden PowerShell startup flag can hide the first GUI window as well.
+# ShowDialog still runs its message loop in that case, so explicitly show it.
+$ui.form.Add_Shown({
+  [void][Win32Dpi.DpiAwareness]::ShowWindow($ui.form.Handle, 1)
+  [void][Win32Dpi.DpiAwareness]::SetForegroundWindow($ui.form.Handle)
+  $ui.form.Activate()
+})
 [void]$ui.form.ShowDialog()
 $ui.form.Dispose()
 Write-ResultFile $script:selection

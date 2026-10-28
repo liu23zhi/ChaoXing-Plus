@@ -329,7 +329,7 @@ test('普通启动流程校验有效 PE 后能到达 spawnClient，不启动真�
     const launch = await import(${JSON.stringify(launchUrl)});
     mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
       ...launch,
-      isElevated: async () => true,
+      isElevated: async () => { throw new Error('ordinary launch must not query elevation before CreateProcess'); },
       listProcessIdsByName: async () => [],
       chooseBindablePort: async () => ({ port: 38100, rejected: [] }),
       spawnClient() { throw new Error(${JSON.stringify(sentinel)}); }
@@ -374,12 +374,15 @@ test('Windows 无参数 main 入口先选择 GUI，UAC 接续传递实际选择�
     } });
     mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
       ...launch, isElevated: async () => false,
+      readPeMachine: async () => 0x014c,
+      listProcessIdsByName: async () => [],
+      chooseBindablePort: async () => ({ port: 38100, rejected: [] }),
       relaunchElevated: async (options) => {
-        assert.deepEqual(options.args, ['--ui', 'gui']);
+        assert.deepEqual(options.args, ['--ui', 'gui', '--scan-mode', 'common']);
         assert.equal(options.selectedClientPath, selected);
         console.log('NO_ARGS_GUI_HANDOFF_CONFIRMED');
       },
-      spawnClient() { throw new Error('No client may be started by this test'); }
+      spawnClient() { throw Object.assign(new Error('No client may be started by this test'), { win32Code: 740 }); }
     } });
     process.argv = [process.execPath, ${JSON.stringify(mainUrl)}];
     await import(${JSON.stringify(mainUrl)});
@@ -389,6 +392,148 @@ test('Windows 无参数 main 入口先选择 GUI，UAC 接续传递实际选择�
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /NO_ARGS_GUI_HANDOFF_CONFIRMED/u);
     assert.deepEqual(await fs.readdir(directory), ['config.json']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('启动提权在扫描前执行，遵守 quiet、真实 token 和只读模式，并且取消不会循环', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-early-uac-'));
+  const configPath = path.join(directory, 'config.json');
+  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const cases = [
+    { args: ['--elevate-on-start'], config: {}, token: false, expected: 'UAC_REQUESTED', code: 0, selected: false },
+    { args: ['--ui', 'gui'], config: { elevateOnStart: true }, token: false, expected: 'UAC_REQUESTED', code: 0, selected: false },
+    { args: ['--elevate-on-start'], config: {}, token: true, expected: 'SELECTION_REACHED', code: 0, selected: true },
+    { args: ['--elevate-on-start', '--elevated'], config: {}, token: false, expected: 'TOKEN_CHECK', code: 3, selected: false, noUac: true },
+    { args: ['--elevate-on-start'], config: {}, token: false, cancel: true, expected: 'UAC_REQUESTED', code: 3, selected: false },
+    { args: ['--elevate-on-start', '--list-clients'], config: {}, token: false, expected: 'SELECTION_REACHED', code: 0, selected: true, noUac: true, noTokenCheck: true }
+  ];
+  try {
+    for (const item of cases) {
+      await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, quiet: true, ...item.config }), 'utf8');
+      const source = `
+        import { mock } from 'node:test';
+        import assert from 'node:assert/strict';
+        const config = await import(${JSON.stringify(configUrl)});
+        const launch = await import(${JSON.stringify(launchUrl)});
+        mock.module(${JSON.stringify(configUrl)}, { namedExports: { ...config, defaultConfigPath: () => ${JSON.stringify(configPath)} } });
+        mock.module(${JSON.stringify(selectionUrl)}, { namedExports: {
+          resolveClientSelection: async () => { console.log('SELECTION_REACHED'); return null; }
+        } });
+        mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
+          ...launch,
+          isElevated: async () => { console.log('TOKEN_CHECK'); return ${JSON.stringify(item.token)}; },
+          relaunchElevated: async (options) => {
+            assert.equal(options.cwd, process.cwd());
+            assert.ok(options.args.includes('--elevate-on-start') || ${JSON.stringify(!!item.config.elevateOnStart)});
+            console.log('UAC_REQUESTED');
+            if (${JSON.stringify(!!item.cancel)}) throw Object.assign(new Error('cancelled UAC'), { win32Code: 1223 });
+          },
+          spawnClient() { throw new Error('must not start any client'); }
+        } });
+        process.argv = [process.execPath, ${JSON.stringify(mainUrl)}, ...${JSON.stringify(item.args)}];
+        await import(${JSON.stringify(mainUrl)});
+      `;
+      const result = await runCommand(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source]);
+      assert.equal(result.code, item.code, result.stdout + result.stderr);
+      assert.match(result.stdout, new RegExp(item.expected, 'u'));
+      assert.equal(result.stdout.includes('SELECTION_REACHED'), item.selected);
+      assert.doesNotMatch(result.stdout + result.stderr, /\[windows-host\]/u, 'JSON quiet applies before early UAC output');
+      if (item.noUac) assert.doesNotMatch(result.stdout, /UAC_REQUESTED/u);
+      if (item.noTokenCheck) assert.doesNotMatch(result.stdout, /TOKEN_CHECK/u);
+    }
+    assert.deepEqual(await fs.readdir(directory), ['config.json']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('客户端默认仅 Win32 740 可触发提权，权限禁用及其他错误直接停止', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-demand-uac-'));
+  const configPath = path.join(directory, 'config.json');
+  const client = path.join(directory, 'CXExam.exe');
+  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, quiet: true }), 'utf8');
+  const cases = [
+    { win32Code: 5, code: 'EACCES', args: [], token: false, uac: false },
+    { win32Code: 0, code: 'UNKNOWN', args: [], token: false, uac: false },
+    { win32Code: 740, args: ['--no-elevate'], token: false, uac: false },
+    { win32Code: 740, args: ['--elevated'], token: false, uac: false },
+    { win32Code: 740, args: [], token: true, uac: false },
+    { win32Code: 740, args: [], token: false, uac: true }
+  ];
+  try {
+    for (const item of cases) {
+      const source = `
+        import { mock } from 'node:test';
+        import assert from 'node:assert/strict';
+        const config = await import(${JSON.stringify(configUrl)});
+        const launch = await import(${JSON.stringify(launchUrl)});
+        mock.module(${JSON.stringify(configUrl)}, { namedExports: { ...config, defaultConfigPath: () => ${JSON.stringify(configPath)} } });
+        mock.module(${JSON.stringify(selectionUrl)}, { namedExports: { resolveClientSelection: async () => ${JSON.stringify(client)} } });
+        mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
+          ...launch,
+          isElevated: async () => ${JSON.stringify(item.token)},
+          readPeMachine: async () => 0x014c,
+          listProcessIdsByName: async () => [],
+          chooseBindablePort: async () => ({ port: 38100, rejected: [] }),
+          relaunchElevated: async (options) => {
+            assert.equal(options.selectedClientPath, ${JSON.stringify(client)});
+            console.log('UAC_REQUESTED');
+          },
+          spawnClient() { throw Object.assign(new Error('expected ordinary launch failure'), ${JSON.stringify({ win32Code: item.win32Code, code: item.code })}); }
+        } });
+        process.argv = [process.execPath, ${JSON.stringify(mainUrl)}, ...${JSON.stringify(['--client-first', ...item.args])}];
+        await import(${JSON.stringify(mainUrl)});
+      `;
+      const result = await runCommand(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source]);
+      assert.equal(result.code, item.uac ? 0 : 3, result.stdout + result.stderr);
+      assert.equal(result.stdout.includes('UAC_REQUESTED'), item.uac, JSON.stringify(item));
+    }
+    assert.deepEqual(await fs.readdir(directory), ['config.json']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('help、capabilities、self-check 和 attach 不执行启动提权', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-readonly-uac-'));
+  const configPath = path.join(directory, 'config.json');
+  await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, quiet: true }), 'utf8');
+  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
+  const cdpUrl = new URL('../windows/host/cdp.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  try {
+    for (const args of [['--help'], ['--capabilities'], ['--self-check', '--no-disk-write'], ['--attach', '9333']]) {
+      const source = `
+        import { mock } from 'node:test';
+        const config = await import(${JSON.stringify(configUrl)});
+        const launch = await import(${JSON.stringify(launchUrl)});
+        const cdp = await import(${JSON.stringify(cdpUrl)});
+        mock.module(${JSON.stringify(configUrl)}, { namedExports: { ...config, defaultConfigPath: () => ${JSON.stringify(configPath)} } });
+        mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
+          ...launch, isElevated: async () => false,
+          relaunchElevated: async () => { console.log('UNEXPECTED_UAC_REQUEST'); throw new Error('must not request UAC'); }
+        } });
+        mock.module(${JSON.stringify(cdpUrl)}, { namedExports: {
+          ...cdp, fetchJson: async () => { console.log('READONLY_ATTACH_REACHED'); throw new Error('expected attach test stop'); }
+        } });
+        process.argv = [process.execPath, ${JSON.stringify(mainUrl)}, '--elevate-on-start', ...${JSON.stringify(args)}];
+        await import(${JSON.stringify(mainUrl)});
+      `;
+      const result = await runCommand(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source]);
+      assert.equal(result.code, args.includes('--attach') ? 3 : 0, result.stdout + result.stderr);
+      assert.doesNotMatch(result.stdout + result.stderr, /UNEXPECTED_UAC_REQUEST/u);
+      if (args.includes('--attach')) assert.match(result.stdout, /READONLY_ATTACH_REACHED/u);
+    }
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

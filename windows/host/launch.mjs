@@ -3,6 +3,9 @@ import { promises as fs } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { EventEmitter } from 'node:events';
+import { StringDecoder } from 'node:string_decoder';
+import { fileURLToPath } from 'node:url';
 import { validateLaunchPort } from './options.mjs';
 export { getListenerOwnerPid } from './listener-owner.mjs';
 
@@ -172,7 +175,7 @@ export async function waitForDebugEndpoint(port, { timeoutMs = 30000, child = nu
   throw new Error(`等待 127.0.0.1:${port} 调试端点超时：${lastError ? lastError.message : 'unknown'}`);
 }
 
-export function spawnClient({ exePath, port, logger = () => {} }) {
+export function spawnClient({ exePath, port, logger = () => {}, platform = process.platform, spawnImpl = spawn }) {
   port = validateLaunchPort(port);
   if (port === 0) throw new Error('启动客户端前必须先选择实际调试端口，不能使用自动端口 0');
   const args = [
@@ -181,13 +184,80 @@ export function spawnClient({ exePath, port, logger = () => {} }) {
   ];
   logger(`[launch] 启动客户端：${exePath}`);
   logger(`[launch] 调试参数：${args.join(' ')}`);
-  const child = spawn(exePath, args, {
+  if (platform === 'win32') return spawnWindowsClient({ exePath, args, spawnImpl });
+  const child = spawnImpl(exePath, args, {
     cwd: path.dirname(exePath),
     stdio: 'ignore',
     windowsHide: false,
     detached: false
   });
   return { child, args };
+}
+
+export function spawnWindowsClient({ exePath, args, spawnImpl = spawn, timeoutMs = 20000 }) {
+  const helper = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    fileURLToPath(new URL('./launch-client.ps1', import.meta.url))], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = new EventEmitter();
+  child.pid = undefined;
+  child.exitCode = null;
+  child.signalCode = null;
+  let pending = '', stderr = '', ready = false, completed = false, disconnected = false;
+  let resolveStarted, rejectStarted;
+  const started = new Promise((resolve, reject) => { resolveStarted = resolve; rejectStarted = reject; });
+  const decoder = new StringDecoder('utf8');
+  const fail = (error) => {
+    if (completed || disconnected) return;
+    completed = true;
+    clearTimeout(timer);
+    if (ready) queueMicrotask(() => child.emit('error', error));
+    else rejectStarted(error);
+  };
+  const timer = setTimeout(() => {
+    fail(new Error('等待客户端普通启动结果超时'));
+    helper.kill();
+  }, timeoutMs);
+  child.disconnect = () => {
+    if (disconnected) return;
+    disconnected = true;
+    clearTimeout(timer);
+    if (!ready && !completed) rejectStarted(Object.assign(new Error('客户端普通启动已取消'), { code: 'ABORT_ERR' }));
+    helper.kill(); // Closing the observer must not terminate the client it created.
+  };
+  helper.on('error', fail);
+  helper.stdin.on('error', () => {});
+  helper.stderr.on('data', (chunk) => { if (stderr.length < 65536) stderr += String(chunk); });
+  helper.stdout.on('data', (chunk) => {
+    pending += decoder.write(chunk);
+    if (pending.length > 65536) { fail(new Error('客户端启动响应过大')); helper.kill(); return; }
+    for (let newline; (newline = pending.indexOf('\n')) >= 0;) {
+      const line = pending.slice(0, newline).trim();
+      pending = pending.slice(newline + 1);
+      if (!line || completed || disconnected) continue;
+      let event;
+      try { event = JSON.parse(line); } catch { fail(new Error('客户端启动响应不是合法 JSON')); helper.kill(); return; }
+      if (event.kind === 'started' && !ready && Number.isInteger(event.pid) && event.pid > 0) {
+        ready = true;
+        child.pid = event.pid;
+        clearTimeout(timer);
+        resolveStarted();
+      } else if (event.kind === 'error') {
+        fail(Object.assign(new Error(String(event.message || '客户端普通启动失败')), { win32Code: event.win32Code }));
+      } else if (event.kind === 'exit' && ready && Number.isInteger(event.code)) {
+        completed = true;
+        child.exitCode = event.code;
+        child.emit('exit', event.code, null);
+      } else {
+        fail(new Error('客户端启动响应状态无效'));
+        helper.kill();
+      }
+    }
+  });
+  helper.on('close', (code) => {
+    if (!completed && !disconnected) fail(new Error(`客户端启动观察器异常结束（${code}）：${stderr.trim()}`));
+  });
+  const quoteArgument = (value) => '"' + String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"';
+  helper.stdin.end(JSON.stringify({ exePath, arguments: args.map(quoteArgument).join(' '), cwd: path.dirname(exePath) }), 'utf8');
+  return { child, args, started };
 }
 
 export async function killProcessTree(pid, logger = () => {}) {

@@ -357,6 +357,8 @@ static void test_dpi_options(void) {
 
 static void test_elevation_options(void) {
     WCHAR *disable[] = { L"--no-elevate" };
+    WCHAR *early[] = { L"--elevate-on-start" };
+    WCHAR *conflict[] = { L"--elevate-on-start", L"--no-elevate" };
     WCHAR *value[] = { L"--expected-browser", L"--elevated" };
     WCHAR *resume[] = { L"--client-index", L"2", L"--elevated", L"--elevated-client", L"D:\\选定\\CXExam.exe" };
     reset();
@@ -374,6 +376,31 @@ static void test_elevation_options(void) {
         && baseOptions.elevated && baseOptions.elevatedClientSet && baseOptions.clientIndex == 2
         && wide_equal(baseOptions.elevatedClientPath, L"D:\\选定\\CXExam.exe"),
         "internal resume preserves original selection flags in a separate CLI field");
+    reset();
+    check(cx_options_parse_cli(&cliOptions, 1, early, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.elevateOnStart,
+        "elevate-on-start CLI survives layered merging");
+    reset();
+    check(apply("{\"elevateOnStart\":true}") && baseOptions.elevateOnStart
+        && apply("{\"elevateOnStart\":false}") && !baseOptions.elevateOnStart
+        && cx_options_finalize(&baseOptions, errorText, 512), "higher JSON can disable early elevation");
+    reset();
+    check(apply("{\"elevateOnStart\":false}")
+        && cx_options_parse_cli(&cliOptions, 1, early, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.elevateOnStart,
+        "CLI early elevation overrides configured false");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 2, conflict, errorText, 512)
+        && !cx_options_finalize(&baseOptions, errorText, 512), "early elevation conflicts with no-elevate");
+    reset();
+    check(apply("{\"elevateOnStart\":true}")
+        && cx_options_parse_cli(&cliOptions, 1, disable, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && !cx_options_finalize(&baseOptions, errorText, 512), "configured early elevation conflicts with CLI no-elevate");
+    reset();
+    check(!apply("{\"elevateOnStart\":\"true\"}"), "early elevation JSON requires a boolean");
 }
 
 static void test_launch_ports(void) {

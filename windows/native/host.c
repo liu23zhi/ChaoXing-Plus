@@ -522,8 +522,28 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
     if (gui) {
         SYSTEM_INFO info;
         CX_SELECTION_STATUS status;
+        CX_DISCOVERY_RESULT fullResult;
+        const CX_DISCOVERY_RESULT *shown = result;
         GetNativeSystemInfo(&info);
-        status = cx_select_client(result, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, h_selected_path, HOST_PATH_CAP, error, errorCap);
+        cx_discovery_init(&fullResult);
+        for (;;) {
+            status = cx_select_client(shown, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, h_selected_path, HOST_PATH_CAP, error, errorCap);
+            if (status != CX_SELECTION_SCAN_ALL) break;
+            {
+                CX_DISCOVERY_OPTIONS scan;
+                ZeroMemory(&scan, sizeof(scan));
+                scan.mode = CX_DISCOVERY_SCAN_ALL; scan.enumerateAll = TRUE;
+                scan.hostIs32Bit = info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL;
+                scan.rescan = TRUE; scan.noScanCache = TRUE; scan.noDiskWrite = options->noDiskWrite;
+                cx_discovery_free(&fullResult);
+                h_audit_event("info", "scan", "Full disk scan requested from client selection");
+                if (!cx_discovery_scan(&scan, &fullResult, error, errorCap)) {
+                    cx_discovery_free(&fullResult); return FALSE;
+                }
+                shown = &fullResult;
+            }
+        }
+        cx_discovery_free(&fullResult);
         if (status == CX_SELECTION_CANCELLED) { h_exit_code = 3; return FALSE; }
         return status == CX_SELECTION_SELECTED;
     }
@@ -597,7 +617,8 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     }
     h_client_pid = 0; h_duration = 0; h_bundles_completed = 0;
     if (!options->attachPortSet) {
-        discover.mode = h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL);
+        discover.mode = h_default_gui && !options->elevatedClientSet ? CX_DISCOVERY_SCAN_COMMON
+            : (h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL));
         discover.clientPath = options->elevatedClientSet ? options->elevatedClientPath
             : (!h_default_gui && options->clientPathSet ? options->clientPath : NULL);
         if (options->elevatedClientSet) {
@@ -719,7 +740,7 @@ done:
     return ok;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
-    LPWSTR *argv; int argc; BOOL ok; WSADATA data; (void)instance; (void)previous; (void)commandLine; (void)show;
+    LPWSTR *argv; int argc, argument; BOOL ok, elevated = FALSE; WSADATA data; (void)instance; (void)previous; (void)commandLine; (void)show;
     h_zero(h_main_error, sizeof(h_main_error)); h_zero(h_exe_path, sizeof(h_exe_path)); GetModuleFileNameW(NULL, h_exe_path, HOST_PATH_CAP);
     cx_options_init(&h_base_options); cx_options_init(&h_cli_options); cx_options_init(&h_config_options); cx_options_init(&h_json_options);
     if (!cx_options_load_default(&h_base_options, h_exe_path, h_main_error, HOST_ERROR_CAP)) return 2;
@@ -727,16 +748,20 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     ok = cx_options_parse_cli(&h_cli_options, argc - 1, argv + 1, h_main_error, HOST_ERROR_CAP);
     if (!ok) { if (!h_cli_options.quiet) h_print(h_main_error); LocalFree(argv); return 2; }
     /* A double-click must allow choosing a client even when defaults name one. */
-    h_default_gui = argc == 1;
+    h_default_gui = TRUE;
+    for (argument = 1; argument < argc; ++argument) {
+        if (!h_equal(argv[argument], L"--elevate-on-start") && !h_equal(argv[argument], L"--elevated")) {
+            h_default_gui = FALSE; break;
+        }
+    }
     LocalFree(argv);
     if (h_cli_options.configPathSet && !cx_options_load_file(&h_config_options, h_cli_options.configPath, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
-    if (h_base_options.elevatedClientSet) {
-        BOOL elevated = FALSE;
+    if (h_base_options.elevated) {
         if (!cx_elevation_query(&elevated) || !elevated) {
-            if (!h_base_options.quiet) h_print(L"Internal elevated client requires a verified administrator token");
+            if (!h_base_options.quiet) h_print(L"Internal elevated restart requires a verified administrator token");
             return 2;
         }
     }
@@ -745,6 +770,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --list-clients --ui auto|gui|cli\n"
+            "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  --rescan（绕过缓存并更新） --no-scan-cache（禁读写缓存）；缓存有效期 5 分钟，仅扫描列表始终实时。\n"
             "配置: --config <path> --options-json <JSON|@file> --print-effective-config\n"
@@ -759,6 +785,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "运行: --execution-mode normal --port <0|1024-65534> --stop-client-on-exit\n"
             "  启动前检查已有 CXExam 进程；请先关闭已有客户端，宿主不会结束它们。\n"
             "  --no-elevate（禁止启动遇到 740 时通过 Windows UAC 重启宿主）\n"
+            "  --elevate-on-start（扫描及窗口前请求管理员权限；与 --no-elevate 互斥）\n"
             "  --dpi-aware（启动时临时使用 HIGHDPIAWARE，随后恢复原值；与 no-disk-write/attach 互斥）\n"
             "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
             "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局采样）\n"
@@ -775,7 +802,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }
@@ -784,6 +811,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         DWORD settingsLength = 0;
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;
         h_print_utf8(h_settings); h_print_utf8("\n"); return 0;
+    }
+    if (h_base_options.elevateOnStart && !h_base_options.listClients && !h_base_options.attachPortSet) {
+        DWORD childCode = 1;
+        if (!h_base_options.elevated && !cx_elevation_query(&elevated)) {
+            if (!h_base_options.quiet) h_print(L"Cannot determine administrator token for elevate-on-start");
+            return 1;
+        }
+        if (!elevated) {
+            argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+            if (!argv) { if (!h_base_options.quiet) h_print(L"Cannot preserve administrator restart arguments"); return 1; }
+            ok = cx_elevation_restart(h_exe_path, argc - 1, argv + 1, NULL, &childCode, h_main_error, HOST_ERROR_CAP);
+            LocalFree(argv);
+            if (!ok && !h_base_options.quiet) h_print(h_main_error);
+            return (int)childCode;
+        }
     }
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2;
     ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP); WSACleanup();

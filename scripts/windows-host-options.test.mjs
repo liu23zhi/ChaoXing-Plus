@@ -552,6 +552,18 @@ test('spawnClient 在创建进程前拒绝不支持的 CEF75 端口', async () =
   }
 });
 
+test('elevate-on-start 参数可解析并拒绝与 no-elevate 冲突', () => {
+  assert.equal(parseHostArgs(['--elevate-on-start']).elevateOnStart, true);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { elevateOnStart: true }).elevateOnStart, true);
+  assert.throws(() => parseHostArgs(['--elevate-on-start', '--no-elevate']), /不能同时使用/u);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { elevateOnStart: 'true' }), /布尔值/u);
+  assert.throws(() => applyHostOptionLayers(parseHostArgs(['--no-elevate']), { elevateOnStart: true }), /不能同时使用/u);
+  assert.equal(applyHostOptionLayers(parseHostArgs([]), { elevateOnStart: true, noElevate: true }, { elevateOnStart: false }).noElevate, true);
+  const startup = parseHostArgs(['--elevate-on-start'], { startup: true, platform: 'win32' });
+  assert.equal(startup.ui, 'gui');
+  assert.equal(startup.scanMode, 'common');
+});
+
 test('Windows 业务 runtime 使用宿主下发的面板和答题设置', async () => {
   const { readFile } = await import('node:fs/promises');
   const [commonSource, cxSource] = await Promise.all([

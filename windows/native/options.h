@@ -32,6 +32,8 @@ typedef struct CX_OPTIONS {
     BOOL elevatedClientSet;
     BOOL elevated;
     BOOL noElevate;
+    BOOL elevateOnStart;
+    BOOL elevateOnStartSet;
     char optionsJson[CX_OPTIONS_JSON_CAP];
     DWORD optionsJsonLength;
     char sharedSettingsJson[CX_OPTIONS_JSON_CAP];

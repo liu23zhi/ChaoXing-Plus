@@ -33,6 +33,35 @@ async function openGenerator() {
   return page;
 }
 
+test('两种宿主均可选择启动时申请管理员权限，默认按需申请', async () => {
+  const page = await openGenerator();
+  try {
+    assert.equal(await page.$eval('#elevateOnStart', (node) => node.checked), false);
+    for (const hostType of ['node', 'native']) {
+      const output = await page.evaluate((hostType) => {
+        const generator = window.__CX_PARAMETER_GENERATOR__;
+        const state = { ...generator.state(), hostType, nativePath: 'C:\\Tools\\chaoxing_plus.exe', elevateOnStart: true };
+        return { errors: generator.validate(state).errors, args: generator.commandFor(state).args, config: generator.configFor(state) };
+      }, hostType);
+      assert.deepEqual(output.errors, [], hostType);
+      assert.ok(output.args.includes('--elevate-on-start'), hostType);
+      assert.equal(output.config.elevateOnStart, true);
+      if (hostType === 'node') assert.equal(parseHostArgs(output.args).elevateOnStart, true);
+    }
+    const conflicts = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      return [
+        { elevateOnStart: true, optionsJson: '{"noElevate":true}' },
+        { elevateOnStart: false, optionsJson: '{"noElevate":true,"elevateOnStart":true}' },
+        { elevateOnStart: false, optionsJson: '{"noElevate":"true"}' }
+      ].map((change) => generator.validate({ ...generator.state(), ...change }).errors);
+    });
+    assert.match(conflicts[0].join(' '), /elevate-on-start.*no-elevate/u);
+    assert.match(conflicts[1].join(' '), /elevate-on-start.*no-elevate/u);
+    assert.match(conflicts[2].join(' '), /noElevate.*布尔值/u);
+  } finally { await page.close(); }
+});
+
 test('两种宿主均可生成方向键规范名称和兼容别名', async () => {
   const page = await openGenerator();
   try {

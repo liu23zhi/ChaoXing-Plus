@@ -292,6 +292,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
             o->unsupportedRequested = TRUE; return FALSE;
         }
         if (cx_streq(a, L"--no-elevate")) { o->noElevate = TRUE; continue; }
+        if (cx_streq(a, L"--elevate-on-start")) { o->elevateOnStart = TRUE; o->elevateOnStartSet = TRUE; continue; }
         if (cx_streq(a, L"--elevated")) { o->elevated = TRUE; continue; }
         if (cx_streq(a, L"--elevated-client")) {
             if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)
@@ -407,7 +408,7 @@ static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
         "answerMode", "answerKey", "showAnswerDialog", "answerThreads",
         "answerCountdown", "answerRetry", "autoSubmit", "clientIndex", "clientFirst",
         "scanClients", "listClients", "selectClient", "scanMode", "scanAll", "rescan",
-        "noScanCache", "ui", "settings", "executionMode"
+        "noScanCache", "ui", "settings", "executionMode", "elevateOnStart"
     };
     char name[CX_OPTIONS_SHORT_CAP * 4]; int i;
     if (key < 0 || t[key].type != 's' || !jstr(s, t, key, name, sizeof(name))) return FALSE;
@@ -490,7 +491,8 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
         !cx_json_wstr_field(json, tokens, object, "panelTheme", o->panelTheme, CX_OPTIONS_SHORT_CAP, &o->panelThemeSet, error, errorCap) ||
         !cx_json_wstr_field(json, tokens, object, "answerKey", o->answerKey, CX_OPTIONS_SHORT_CAP, &o->answerKeySet, error, errorCap) ||
         !cx_json_mode(json, tokens, object, &o->answerModeAuto, &o->answerModeSet, error, errorCap)) return FALSE;
-    if (!cx_json_bool_field(json, tokens, object, "clientFirst", &o->clientFirst, &o->clientFirstSet, error, errorCap) ||
+    if (!cx_json_bool_field(json, tokens, object, "elevateOnStart", &o->elevateOnStart, &o->elevateOnStartSet, error, errorCap) ||
+        !cx_json_bool_field(json, tokens, object, "clientFirst", &o->clientFirst, &o->clientFirstSet, error, errorCap) ||
         !cx_json_bool_field(json, tokens, object, "scanClients", &o->scanClients, &o->scanClientsSet, error, errorCap) ||
         !cx_json_bool_field(json, tokens, object, "listClients", &o->listClients, &o->listClientsSet, error, errorCap) ||
         !cx_json_bool_field(json, tokens, object, "selectClient", &o->selectClient, &o->selectClientSet, error, errorCap) ||
@@ -698,6 +700,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_BOOL_IF(noDiskWriteSet, noDiskWrite); CX_BOOL_IF(retainDataSet, retainData);
     CX_BOOL_IF(deleteConfigSet, deleteConfig); CX_BOOL_IF(diagnoseSet, diagnose); CX_BOOL_IF(noDiagnoseSet, noDiagnose);
     CX_BOOL_IF(quietSet, quiet); CX_BOOL_IF(logFileEnabledSet, logFileEnabled);
+    CX_BOOL_IF(elevateOnStartSet, elevateOnStart);
     CX_BOOL_IF(panelEnabledSet, panelEnabled); CX_BOOL_IF(panelCollapsedSet, panelCollapsed);
     CX_BOOL_IF(answerModeSet, answerModeAuto); CX_BOOL_IF(showAnswerDialogSet, showAnswerDialog);
     CX_BOOL_IF(autoSubmitSet, autoSubmit); CX_BOOL_IF(stopClientOnExitSet, stopClientOnExit); CX_BOOL_IF(dpiAwareSet, dpiAware);
@@ -723,6 +726,9 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
+    if (o->elevateOnStart && o->noElevate) {
+        cx_error(error, errorCap, L"elevate-on-start conflicts with no-elevate"); return FALSE;
+    }
     if (o->dpiAware && (o->noDiskWrite || o->attachPortSet)) {
         cx_error(error, errorCap, L"dpi-aware requires an owned launch and conflicts with no-disk-write or attach"); return FALSE;
     }

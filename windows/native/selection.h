@@ -6,13 +6,15 @@
 typedef enum CX_SELECTION_STATUS {
     CX_SELECTION_ERROR = -1,
     CX_SELECTION_CANCELLED = 0,
-    CX_SELECTION_SELECTED = 1
+    CX_SELECTION_SELECTED = 1,
+    CX_SELECTION_SCAN_ALL = 2
 } CX_SELECTION_STATUS;
 
 typedef struct CX_SELECTION_PROBE {
     DWORD itemCount;
     LONG selectedIndex;
     BOOL browseAvailable;
+    BOOL scanAllAvailable;
     BOOL unicodeWindow;
     BOOL titleMatches;
 } CX_SELECTION_PROBE;

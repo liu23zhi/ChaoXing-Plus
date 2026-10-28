@@ -57,6 +57,7 @@ export function parseSelectionWindowResult(text) {
   if (value.error) {
     return { status: 'unavailable', reason: String(value.error) };
   }
+  if (value.action === 'scan-all') return { status: 'scan-all' };
   if (value.cancelled === true) {
     return { status: 'cancelled', autoClosed: value.autoClosed === true };
   }
@@ -73,9 +74,10 @@ export function parseSelectionWindowResult(text) {
 
 const WINDOW_LABELS = {
   title: '超星学习助手 - 选择考试客户端',
-  hint: '请选择要启动的 CXExam.exe 客户端；也可以点击“手动浏览”指定其他位置的 CXExam.exe。',
+  hint: '请选择客户端或手动浏览。未找到时可点击“全盘扫描”；扫描完成后重新显示候选列表。',
   selectButtonText: '使用所选客户端',
   browseButtonText: '手动浏览…',
+  scanAllButtonText: '全盘扫描…',
   cancelButtonText: '取消',
   fontName: 'Microsoft YaHei UI',
   messages: {
@@ -90,6 +92,7 @@ const WINDOW_LABELS = {
 async function invokeSelectionWindow({
   candidates,
   title,
+  notice = '',
   probe = false,
   autoCloseMs = 0,
   labels = WINDOW_LABELS,
@@ -101,9 +104,10 @@ async function invokeSelectionWindow({
   try {
     const payload = {
       title: title || labels.title,
-      hint: labels.hint,
+      hint: notice ? `${notice}\n${labels.hint}` : labels.hint,
       selectButtonText: labels.selectButtonText,
       browseButtonText: labels.browseButtonText,
+      scanAllButtonText: labels.scanAllButtonText,
       cancelButtonText: labels.cancelButtonText,
       fontName: labels.fontName,
       messages: labels.messages,
@@ -132,7 +136,7 @@ async function invokeSelectionWindow({
   }
 }
 
-// 显示原生客户端选择窗口；返回 { status: 'selected'|'cancelled'|'unavailable', ... }。
+// 显示原生客户端选择窗口；scan-all 由宿主执行扫描后重新打开窗口。
 export async function showClientSelectionWindow(options = {}) {
   if (!isNativeSelectionWindowSupported()) {
     return { status: 'unavailable', reason: 'not-windows' };

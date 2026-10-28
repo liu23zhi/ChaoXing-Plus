@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 import {
   defaultSelectionWindowScript,
@@ -32,6 +34,7 @@ test('parseSelectionWindowResult 处理选中、取消、自动关闭、错误�
     { status: 'selected', path: 'C:\\Browsed\\CXExam.exe', index: 0, manual: true });
   assert.deepEqual(parseSelectionWindowResult('{"cancelled":true}'), { status: 'cancelled', autoClosed: false });
   assert.deepEqual(parseSelectionWindowResult('{"cancelled":true,"autoClosed":true}'), { status: 'cancelled', autoClosed: true });
+  assert.deepEqual(parseSelectionWindowResult('{"action":"scan-all"}'), { status: 'scan-all' });
   assert.deepEqual(parseSelectionWindowResult('{"cancelled":true,"error":"winforms-unavailable: x"}'),
     { status: 'unavailable', reason: 'winforms-unavailable: x' });
   assert.equal(parseSelectionWindowResult('not-json').status, 'unavailable');
@@ -174,6 +177,45 @@ test('probeClientSelectionWindow 可构建 WinForms 窗口控件（Windows 冒�
   const result = await probeClientSelectionWindow({ timeoutMs: 60000 });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.candidateCount, 1);
+});
+
+test('真实选择窗口对操作系统可见，全盘按钮返回请求（自动操作，不启动客户端）', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'cx-selection-visibility-'));
+  try {
+    const source = await readFile(defaultSelectionWindowScript, 'utf8');
+    for (const scanAll of [false, true]) {
+      const instrumented = source.replace("$script:selection = @{ cancelled = $true }", `
+Add-Type -Name WindowProbe -Namespace SelectionTest -MemberDefinition '[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle);'
+$script:selection = @{ cancelled = $true }
+`).replace('$script:selection = @{ cancelled = $true; autoClosed = $true }', scanAll
+        ? '$ui.scanAll.PerformClick(); return'
+        : '$script:selection = @{ cancelled = $true; autoClosed = $true; visible = [SelectionTest.WindowProbe]::IsWindowVisible($ui.form.Handle) }');
+    const scriptPath = resolve(directory, 'visibility.ps1');
+    await writeFile(scriptPath, instrumented, 'ascii');
+    const result = await showClientSelectionWindow({
+      candidates: [], scriptPath, autoCloseMs: 500, timeoutMs: 30000,
+      execFileImpl: async (command, args, options) => new Promise((resolveResult, rejectResult) => {
+        const child = spawn(command, args, { windowsHide: options.windowsHide, stdio: ['pipe', 'pipe', 'pipe'] });
+        const stdout = [], stderr = [];
+        const timer = setTimeout(() => { child.kill(); rejectResult(new Error('visibility probe timed out')); }, options.timeout);
+        child.stdout.on('data', (chunk) => stdout.push(chunk));
+        child.stderr.on('data', (chunk) => stderr.push(chunk));
+        child.on('error', (error) => { clearTimeout(timer); rejectResult(error); });
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          if (code !== 0) { rejectResult(new Error(Buffer.concat(stderr).toString('utf8'))); return; }
+          const raw = JSON.parse(Buffer.concat(stdout).toString('utf8'));
+          try { if (!scanAll) assert.equal(raw.visible, true, 'IsWindowVisible returned false for the chooser'); } catch (error) { rejectResult(error); return; }
+          resolveResult({ stdout: JSON.stringify(raw) });
+        });
+        child.stdin.end(options.input, 'utf8');
+      })
+    });
+      assert.deepEqual(result, scanAll ? { status: 'scan-all' } : { status: 'cancelled', autoClosed: true });
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('真实原生选择窗口可显示并按定时器关闭', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {

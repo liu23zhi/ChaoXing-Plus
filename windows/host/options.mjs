@@ -266,7 +266,8 @@ const JSON_OPTION_KEYS = {
   report: 'reportPath',
   reportPath: 'reportPath',
   stopClientOnExit: 'stopClientOnExit',
-  dpiAware: 'dpiAware'
+  dpiAware: 'dpiAware',
+  elevateOnStart: 'elevateOnStart', noElevate: 'noElevate'
 };
 
 const CLI_OPTION_KEYS = {
@@ -292,7 +293,8 @@ const CLI_OPTION_KEYS = {
   '--wipe-runtime-interval': 'wipeRuntimeIntervalSec',
   '--log': 'logFileEnabled', '--no-log': 'logFileEnabled', '--quiet': 'quiet', '--diagnose': 'diagnose',
   '--no-diagnose': 'diagnose', '--diagnostics-dir': 'diagnosticsDir', '--report': 'reportPath',
-  '--stop-client-on-exit': 'stopClientOnExit', '--dpi-aware': 'dpiAware'
+  '--stop-client-on-exit': 'stopClientOnExit', '--dpi-aware': 'dpiAware',
+  '--elevate-on-start': 'elevateOnStart', '--no-elevate': 'noElevate'
 };
 
 export function applyOptionsJsonToOptions(options, value, { deferValidation = false } = {}) {
@@ -384,6 +386,8 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
       case 'wipeRuntimeRetry':
       case 'injectBlankFrames':
       case 'captureConsole':
+      case 'elevateOnStart':
+      case 'noElevate':
         next[optionKey] = readBoolean(raw, jsonKey);
         if ((optionKey === 'rescan' || optionKey === 'noScanCache') && raw) next.scanClients = true;
         break;
@@ -397,6 +401,7 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
 
 function finalizeHostOptions(options) {
   const next = { ...options };
+  if (next.elevateOnStart && next.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   if (next.port !== null && next.port !== undefined) next.port = validateLaunchPort(next.port);
   if (next.noDiskWrite) {
     next.logFileEnabled = false;
@@ -516,7 +521,8 @@ function validateClientSelectionOptions(options) {
 
 export function parseHostArgs(argv, { startup = false, platform = process.platform } = {}) {
   // Keep the interactive entry choice explicit through configuration merging and UAC restart.
-  if (startup && platform === 'win32' && argv.length === 0) argv = ['--ui', 'gui'];
+  if (startup && platform === 'win32' && argv.length === 0) argv = ['--ui', 'gui', '--scan-mode', 'common'];
+  if (startup && platform === 'win32' && argv.length === 1 && argv[0] === '--elevate-on-start') argv = ['--elevate-on-start', '--ui', 'gui', '--scan-mode', 'common'];
   const options = {
     rawArgs: argv.slice(),
     configPath: '',
@@ -551,6 +557,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
     reportPath: '',
     selfCheck: false,
     noElevate: false,
+    elevateOnStart: false,
     elevated: false,
     stopClientOnExit: false,
     diagnose: false,
@@ -655,6 +662,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--report': options.reportPath = readValue(argv, index, argument); index += 1; break;
       case '--self-check': options.selfCheck = true; break;
       case '--no-elevate': options.noElevate = true; break;
+      case '--elevate-on-start': options.elevateOnStart = true; break;
       case '--elevated': options.elevated = true; break;
       case '--stop-client-on-exit': options.stopClientOnExit = true; break;
       case '--diagnose': options.diagnose = true; options.noDiagnose = false; break;
@@ -709,6 +717,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
   options.cliOptionKeys = new Set(argv.map((argument) => CLI_OPTION_KEYS[argument]).filter(Boolean));
   if (options.port !== null) options.port = validateLaunchPort(options.port);
   validateClientSelectionOptions(options);
+  if (options.elevateOnStart && options.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   validateDataLifecycleOptions(options);
   validateWipeOptions(options);
   if (options.noDiskWrite) {

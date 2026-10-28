@@ -78,7 +78,8 @@ function usage() {
     '  --attach <port>      测试/调试：连接已存在的调试端点，不启动、不校验归属',
     '  --report <path>      退出时把运行报告写入指定 JSON 文件',
     '  --self-check         只做环境/资源检查，不启动客户端',
-    '  --no-elevate         不自动申请 UAC（非管理员时直接报错）',
+    '  --elevate-on-start   启动时先申请管理员权限，再扫描和显示选择窗口',
+    '  --no-elevate         不自动申请 UAC；客户端实际需要管理员权限时才报错',
     '  --elevated           内部标记：表示当前进程由 UAC 自动重启而来',
     '  --stop-client-on-exit 退出时结束本次启动的客户端进程树',
     '  --diagnose           强制开启渲染诊断（默认启动模式开启、attach 模式关闭）',
@@ -273,7 +274,7 @@ async function runSelfCheck(options, logger) {
   }
 
   const elevated = await isElevated();
-  checks.push({ name: '当前权限', ok: true, detail: elevated ? '管理员' : '普通用户（正式运行会申请 UAC）' });
+  checks.push({ name: '当前权限', ok: true, detail: elevated ? '管理员' : '普通用户（仅客户端需要管理员权限时申请 UAC）' });
 
   try {
     const selected = await chooseBindablePort(DEFAULT_PORT_CANDIDATES);
@@ -493,6 +494,21 @@ async function main() {
     );
     options = resolveLayeredOptions();
     options.optionsJsonObject = inlineConfig;
+    if (loggerQuiet !== options.quiet) {
+      await logger.close();
+      logger = createLogger({ quiet: options.quiet });
+      loggerQuiet = options.quiet;
+    }
+    if (options.elevateOnStart && !options.attachPort && !options.listClients) {
+      if (process.platform !== 'win32') throw new Error('--elevate-on-start 需要 Windows');
+      if (!(await isElevated())) {
+        if (options.elevated) throw new Error('管理员重启未获得提升后的权限，停止重复申请 UAC');
+        logger.info('[launch] --elevate-on-start：正在通过系统 UAC 请求管理员宿主，确认后继续扫描和选择');
+        await relaunchElevated({ scriptPath: hostScriptPath, args: options.rawArgs, cwd: process.cwd() });
+        await logger.close();
+        return;
+      }
+    }
     refreshDeleteConfigTarget();
     dataDirectory = options.dataDirExplicit
       ? path.resolve(options.dataDir)
@@ -705,6 +721,7 @@ async function main() {
         detachClientProcessObserver();
         detachClientProcessObserver = null;
       }
+      if (clientChild && typeof clientChild.disconnect === 'function') clientChild.disconnect();
       if (targetTimer) clearInterval(targetTimer);
       if (configWatcherOff) configWatcherOff();
       collectStats();
@@ -762,19 +779,6 @@ async function main() {
     // ---- 启动阶段 ----
     let port = options.attachPort;
     if (!options.attachPort) {
-      if (!(await isElevated())) {
-        if (options.elevated || options.noElevate) {
-          throw new Error('启动客户端需要管理员权限：请以管理员身份运行 start-windows.cmd，或去掉 --no-elevate 让宿主自动申请 UAC');
-        }
-        logger.warn('[launch] 当前不是管理员，正在通过 UAC 重新启动宿主（会弹出系统确认框）');
-        const passthrough = options.rawArgs.filter((argument) => argument !== '--elevated');
-        await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd(), selectedClientPath: config.clientPath });
-        logger.info('[launch] 已请求管理员实例启动，当前窗口退出');
-        await logger.close();
-        await finalizeDataLifecycle();
-        return;
-      }
-
       const clientPath = config.clientPath;
       if (!clientPath) throw new Error(`配置文件缺少 clientPath：${configPath}`);
       if (!isCxExamExecutablePath(clientPath)) throw new Error('客户端文件名必须是 CXExam.exe');
@@ -795,11 +799,14 @@ async function main() {
         logger.info('[launch] dpiAwareness=system：临时使用 HIGHDPIAWARE 兼容层启动客户端（启动后立即恢复注册表原值）');
       }
       let dpiOverridePrevious;
+      let launchError;
       try {
         if (config.dpiAwareness === 'system') {
           dpiOverridePrevious = await setDpiAwarenessOverride(clientPath, (message) => logger.info(message));
         }
-        clientChild = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) }).child;
+        const launch = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) });
+        clientChild = launch.child;
+        if (launch.started) await launch.started;
         if (Number.isInteger(clientChild.pid) && clientChild.pid > 0) diagnostics.record('client-started');
         detachClientProcessObserver = observeClientProcess(clientChild, {
           onExit: ({ code, signal }) => {
@@ -811,10 +818,27 @@ async function main() {
             if (!stopping) void stop('本次启动的 CXExam 进程启动失败');
           }
         });
+      } catch (error) {
+        launchError = error;
       } finally {
         if (dpiOverridePrevious !== undefined) {
           await restoreDpiAwarenessOverride(clientPath, dpiOverridePrevious, (message) => logger.info(message));
         }
+      }
+      if (launchError) {
+        if (clientChild && typeof clientChild.disconnect === 'function') clientChild.disconnect();
+        if (launchError.win32Code !== 740) throw launchError;
+        if (options.elevated || options.noElevate || await isElevated()) {
+          throw new Error('启动客户端需要管理员权限：自动提权已禁用或本轮已申请，请检查权限或 --no-elevate 设置');
+        }
+        logger.warn('[launch] 客户端普通启动返回 Win32 740，正在通过系统 UAC 重新启动宿主');
+        const passthrough = options.rawArgs.filter((argument) => argument !== '--elevated');
+        await configStore.close();
+        await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd(), selectedClientPath: config.clientPath });
+        logger.info('[launch] 已请求管理员实例启动，保留本次选择，当前窗口退出');
+        await logger.close();
+        await finalizeDataLifecycle();
+        return;
       }
       report.clientPid = clientChild.pid;
       logger.info(`[launch] 客户端已启动 pid=${clientChild.pid}，等待调试端点（首次启动通常需要 10-20 秒）`);

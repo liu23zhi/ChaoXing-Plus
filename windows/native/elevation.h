@@ -5,6 +5,7 @@
 
 BOOL cx_elevation_query(BOOL *elevated);
 BOOL cx_elevation_can_restart(DWORD launchError, BOOL noElevate, BOOL restarted);
+/* A NULL client preserves ordinary startup selection for an early restart. */
 BOOL cx_elevation_parameters(int argc, WCHAR *const *argv, const WCHAR *client,
                              WCHAR *out, DWORD capacity);
 BOOL cx_elevation_restart(const WCHAR *executable, int argc, WCHAR *const *argv,

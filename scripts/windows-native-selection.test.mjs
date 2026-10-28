@@ -13,7 +13,20 @@ test('compiled native client selection builds its real hidden controls', { skip:
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /NATIVE SELECTION TESTS PASS/);
+  assert.match(result.stdout, /full disk scan remains available/);
   assert.doesNotMatch(result.stdout, /^FAIL /mu);
+});
+
+test('native full scan button returns a scan request without selecting or launching a client', {
+  skip: !executable || process.env.CX_TEST_NATIVE_WINDOW !== '1'
+}, () => {
+  const result = spawnSync(executable, ['--request-scan-all'], {
+    encoding: 'utf8', timeout: 10_000, windowsHide: true,
+    env: { ...process.env, CXPLUS_NATIVE_SELECTION_AUTO_CLOSE_MS: '3000' }
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /the full scan button requests scanning without selecting or launching a client/);
+  assert.match(result.stdout, /NATIVE SELECTION TESTS PASS/);
 });
 
 test('native client selection displays and cancels without launching a client', {

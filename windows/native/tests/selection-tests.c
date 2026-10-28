@@ -8,6 +8,7 @@ static WCHAR errorText[512];
 static WCHAR selectedPath[CX_DISCOVERY_MAX_PATH];
 static WCHAR fixturePath[CX_DISCOVERY_MAX_PATH];
 static UINT_PTR chooseTimer;
+static BOOL requestFullScan;
 
 static void output(const char *text) {
     DWORD written;
@@ -37,11 +38,12 @@ static void probe_tests(void) {
     check(probe.itemCount == 2, "every scanned candidate is listed");
     check(probe.selectedIndex == 1, "the recommended candidate is selected initially");
     check(probe.browseAvailable, "manual browse remains available");
+    check(probe.scanAllAvailable, "full disk scan remains available");
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
     candidates.items = NULL; candidates.count = 0;
     ZeroMemory(&probe, sizeof(probe));
     check(cx_selection_probe(&candidates, &probe, errorText, 512) && probe.itemCount == 0
-          && probe.selectedIndex == -1 && probe.browseAvailable, "an empty scan still permits manual browsing");
+          && probe.selectedIndex == -1 && probe.browseAvailable && probe.scanAllAvailable, "an empty scan still permits manual browsing and full scanning");
     check(!cx_selection_probe(&candidates, NULL, errorText, 512), "a missing probe output is rejected");
 }
 
@@ -52,7 +54,7 @@ static VOID CALLBACK choose_row(HWND owner, UINT message, UINT_PTR timer, DWORD 
     if (window) GetWindowThreadProcessId(window, &pid);
     if (pid != GetCurrentProcessId()) return;
     KillTimer(NULL, timer); chooseTimer = 0;
-    SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(requestFullScan ? 1004 : IDOK, BN_CLICKED), 0);
 }
 
 void WINAPI SelectionTestMain(void) {
@@ -60,9 +62,20 @@ void WINAPI SelectionTestMain(void) {
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     BOOL visible = argv && argc == 2 && lstrcmpW(argv[1], L"--show-cancel") == 0;
     BOOL choose = argv && argc == 3 && lstrcmpW(argv[1], L"--choose") == 0;
+    requestFullScan = argv && argc == 2 && lstrcmpW(argv[1], L"--request-scan-all") == 0;
     if (choose) lstrcpynW(fixturePath, argv[2], CX_DISCOVERY_MAX_PATH);
     if (argv) LocalFree(argv);
-    if (choose) {
+    if (requestFullScan) {
+        CX_DISCOVERY_RESULT empty;
+        CX_SELECTION_STATUS status;
+        ZeroMemory(&empty, sizeof(empty));
+        lstrcpyW(selectedPath, L"must be cleared");
+        chooseTimer = SetTimer(NULL, 0, 100, choose_row);
+        check(chooseTimer != 0, "a test-only timer can request a full scan");
+        status = cx_select_client(&empty, FALSE, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
+        if (chooseTimer) KillTimer(NULL, chooseTimer);
+        check(status == CX_SELECTION_SCAN_ALL && !selectedPath[0], "the full scan button requests scanning without selecting or launching a client");
+    } else if (choose) {
         CX_DISCOVERY_RESULT candidates;
         CX_CLIENT_CANDIDATE item;
         CX_SELECTION_STATUS status;

@@ -58,7 +58,7 @@ BOOL cx_elevation_parameters(int argc, WCHAR *const *argv, const WCHAR *client,
                              WCHAR *out, DWORD capacity) {
     E_WRITER w; int i;
     if (out && capacity) out[0] = 0;
-    if (argc < 0 || (argc && !argv) || !client || !*client || !out || capacity < 2) {
+    if (argc < 0 || (argc && !argv) || (client && !*client) || !out || capacity < 2) {
         SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
     }
     w.out = out; w.capacity = capacity; w.used = 0; w.ok = TRUE;
@@ -68,8 +68,10 @@ BOOL cx_elevation_parameters(int argc, WCHAR *const *argv, const WCHAR *client,
         e_quote(&w, argv[i]);
     }
     if (argc) e_put(&w, L' ');
-    e_quote(&w, L"--elevated"); e_put(&w, L' ');
-    e_quote(&w, L"--elevated-client"); e_put(&w, L' '); e_quote(&w, client);
+    e_quote(&w, L"--elevated");
+    if (client) {
+        e_put(&w, L' '); e_quote(&w, L"--elevated-client"); e_put(&w, L' '); e_quote(&w, client);
+    }
     if (!w.ok) { out[0] = 0; SetLastError(ERROR_BUFFER_OVERFLOW); return FALSE; }
     out[w.used] = 0; return TRUE;
 }

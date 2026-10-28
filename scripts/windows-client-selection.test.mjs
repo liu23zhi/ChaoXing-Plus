@@ -38,16 +38,54 @@ const candidates = [
 ];
 
 test('Windows 无参数入口在已保存客户端路径和交互终端下仍显示 GUI', async () => {
-  const stored = { clientPath: 'C:\\Configured\\CXExam.exe', ui: 'auto' };
+  const stored = { clientPath: 'C:\\Configured\\CXExam.exe', ui: 'auto', scanMode: 'all' };
   const startup = parseHostArgs([], { startup: true, platform: 'win32' });
   const options = applyHostOptionLayers(startup, stored);
   const deps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true });
   assert.equal(options.ui, 'gui');
   assert.equal(options.clientPath, '');
-  assert.deepEqual(startup.rawArgs, ['--ui', 'gui']);
+  assert.deepEqual(startup.rawArgs, ['--ui', 'gui', '--scan-mode', 'common']);
   assert.equal(await resolveClientSelection(options, stored, deps), candidates[1].path);
   assert.equal(deps.calls.show.length, 1);
   assert.equal(deps.calls.discover.length, 1);
+  assert.equal(deps.calls.discover[0].scanMode, 'common');
+});
+
+test('GUI 全盘扫描按钮执行实时全盘扫描并刷新列表，不自动选择或启动', async () => {
+  const deps = makeDeps({ candidates: [] });
+  let windowCalls = 0;
+  deps.showWindow = async (options) => {
+    deps.calls.show.push(options);
+    return ++windowCalls === 1 ? { status: 'scan-all' } : { status: 'cancelled' };
+  };
+  deps.discover = async (options) => {
+    deps.calls.discover.push(options);
+    return { candidates: options.scanMode === 'all' ? candidates : [], source: options.scanMode };
+  };
+  await assert.rejects(resolveClientSelection(makeOptions({ ui: 'gui', scanMode: 'common' }), {}, deps), /已取消客户端选择/u);
+  assert.deepEqual(deps.calls.discover.map((call) => call.scanMode), ['common', 'all']);
+  assert.equal(deps.calls.discover[1].stopOnMachine, null);
+  assert.equal(deps.calls.discover[1].forceRescan, true);
+  assert.deepEqual(deps.calls.show[0].candidates, []);
+  assert.equal(deps.calls.show[1].candidates.length, 2);
+  assert.equal(deps.calls.show[1].preferredIndex, 1);
+});
+
+test('GUI 全盘扫描失败仍可返回原列表手动选择', async () => {
+  const deps = makeDeps({ candidates });
+  let windowCalls = 0;
+  deps.showWindow = async (options) => {
+    deps.calls.show.push(options);
+    return ++windowCalls === 1 ? { status: 'scan-all' } : { status: 'selected', path: candidates[1].path };
+  };
+  deps.discover = async (options) => {
+    deps.calls.discover.push(options);
+    if (options.scanMode === 'all') throw new Error('scan failed');
+    return { candidates };
+  };
+  assert.equal(await resolveClientSelection(makeOptions({ ui: 'gui', scanMode: 'common' }), {}, deps), candidates[1].path);
+  assert.equal(deps.calls.show[1].candidates.length, 2);
+  assert.match(deps.calls.warnings.join('\n'), /scan failed/u);
 });
 
 test('无参数 GUI 取消不会沿用保存路径直接启动', async () => {
