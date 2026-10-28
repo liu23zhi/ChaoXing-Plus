@@ -292,9 +292,31 @@ static void test_selection_layer_priority(void) {
     check(apply("{\"clientIndex\":-1}") && !cx_options_finalize(&baseOptions, errorText, 512), "negative JSON client index is rejected before launch");
 }
 
+static void test_elevation_options(void) {
+    WCHAR *disable[] = { L"--no-elevate" };
+    WCHAR *value[] = { L"--expected-browser", L"--elevated" };
+    WCHAR *resume[] = { L"--client-index", L"2", L"--elevated", L"--elevated-client", L"D:\\选定\\CXExam.exe" };
+    reset();
+    check(cx_options_parse_cli(&cliOptions, 1, disable, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && baseOptions.noElevate, "no-elevate is an effective CLI policy after merge");
+    reset();
+    check(cx_options_parse_cli(&cliOptions, 2, value, errorText, 512)
+        && !cliOptions.elevated && wide_equal(cliOptions.expectedBrowser, L"--elevated"),
+        "marker text inside an option value never marks the host elevated");
+    reset();
+    check(cx_options_parse_cli(&cliOptions, 5, resume, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.elevated && baseOptions.elevatedClientSet && baseOptions.clientIndex == 2
+        && wide_equal(baseOptions.elevatedClientPath, L"D:\\选定\\CXExam.exe"),
+        "internal resume preserves original selection flags in a separate CLI field");
+}
+
 void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
+    test_elevation_options();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;
     ExitProcess(failures ? 1 : 0);

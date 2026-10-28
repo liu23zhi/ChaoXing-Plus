@@ -13,6 +13,7 @@
 #include "audit.h"
 #include "config-store.h"
 #include "diagnostics.h"
+#include "elevation.h"
 
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
@@ -53,6 +54,7 @@ static BOOL h_diagnostics_sampled;
 static CX_AUDIT_REPORT h_report;
 static BOOL h_capture_console;
 static BOOL h_quiet;
+static BOOL h_needs_elevation;
 typedef struct H_CONFIG H_CONFIG;
 static H_CONFIG *h_config;
 static char h_instance[64] = "native";
@@ -480,6 +482,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
     h_zero(&h_report, sizeof(h_report)); h_exit_code = 0;
+    h_needs_elevation = FALSE;
     h_diagnostics = NULL; h_diagnostics_sampled = FALSE;
     h_zero(h_diagnostic_json, sizeof(h_diagnostic_json));
     h_capture_console = options->captureConsole; h_quiet = options->quiet;
@@ -502,7 +505,17 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_client_pid = 0; h_duration = 0; h_bundles_completed = 0;
     if (!options->attachPortSet) {
         discover.mode = h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL);
-        discover.clientPath = options->clientPathSet ? options->clientPath : NULL;
+        discover.clientPath = options->elevatedClientSet ? options->elevatedClientPath
+            : (options->clientPathSet ? options->clientPath : NULL);
+        if (options->elevatedClientSet) {
+            const WCHAR *path = options->elevatedClientPath;
+            DWORD attributes = GetFileAttributesW(path);
+            BOOL absolute = (path[0] && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'))
+                || (path[0] == L'\\' && path[1] == L'\\');
+            if (!absolute || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                h_error(error, errorCap, L"Internal elevated client must be an accessible absolute executable path"); goto done;
+            }
+        }
         discover.enumerateAll = options->listClients || options->selectClient || options->clientIndexSet || h_equal(options->ui, L"gui") || (!options->clientFirst && !options->quiet);
         if (!cx_discovery_scan(&discover, &result, error, errorCap)) goto done;
         if (options->listClients) {
@@ -511,7 +524,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         }
         if (!result.count && options->quiet && options->clientFirst) { h_report.stopReason = "no-client"; ok = TRUE; goto done; }
         h_report.stopReason = "selection-failed";
-        if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) { h_report.stopReason = "cancelled"; ok = TRUE; } goto done; }
+        if (options->elevatedClientSet) {
+            if (result.count != 1 || !h_copy(h_selected_path, HOST_PATH_CAP, result.items[0].path)) {
+                h_error(error, errorCap, L"Cannot resolve the selected elevated client"); goto done;
+            }
+        } else if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) { h_report.stopReason = "cancelled"; ok = TRUE; } goto done; }
     }
     h_report.stopReason = "assets-failed";
     if (!h_config_begin(options, error, errorCap)) goto done;
@@ -525,7 +542,19 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     else {
         h_report.stopReason = "launch-failed";
         if (!h_choose_port(options, &port)) { h_error(error, errorCap, L"no usable loopback CDP port"); goto done; }
-        if (!proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap)) goto done;
+        if (!proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap)) {
+            DWORD launchError = GetLastError();
+            if (launchError == ERROR_ELEVATION_REQUIRED) {
+                if (cx_elevation_can_restart(launchError, options->noElevate, options->elevated)) {
+                    h_needs_elevation = TRUE; ok = TRUE;
+                    h_report.stopReason = "elevation-requested";
+                    h_audit_event("info", "elevation", "Client requires administrator rights; requesting Windows UAC for the host");
+                } else h_error(error, errorCap, options->noElevate
+                    ? L"Client requires administrator rights; --no-elevate disables the Windows UAC restart"
+                    : L"Client requires administrator rights; cannot restart again or verify permissions. Run the host as administrator");
+            }
+            goto done;
+        }
     }
     h_report.clientPid = h_client_pid; h_report.port = port;
     h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
@@ -538,7 +567,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
 done:
     if (h_diagnostics) { cx_diagnostics_close(h_diagnostics); h_diagnostics = NULL; }
     h_config_close();
-    h_report.success = ok && h_exit_code == 0;
+    h_report.success = ok && h_exit_code == 0 && !h_needs_elevation;
     if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }
     else h_audit_event("info", "stop", h_report.stopReason);
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");
@@ -550,7 +579,7 @@ done:
     cx_discovery_free(&result);
     h_report.durationMs = GetTickCount() - runStarted;
     if (h_audit) {
-        if (!cx_audit_write_report(h_audit, &h_report, auditError, 256)) {
+        if (!h_needs_elevation && !cx_audit_write_report(h_audit, &h_report, auditError, 256)) {
             h_audit_event("error", "report", "Run report could not be written; execution result retained");
             if (options->listClients && !options->quiet) h_print(L"[report] Run report could not be written.\r\n");
         }
@@ -571,6 +600,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    if (h_base_options.elevatedClientSet) {
+        BOOL elevated = FALSE;
+        if (!cx_elevation_query(&elevated) || !elevated) {
+            if (!h_base_options.quiet) h_print(L"Internal elevated client requires a verified administrator token");
+            return 2;
+        }
+    }
     if (h_base_options.help) {
         h_print_utf8("超星学习助手 Windows 宿主 6.2.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
@@ -587,6 +623,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --debug-timeout <1000-120000 ms> --bundle-timeout <1000-300000 ms>\n"
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
             "运行: --execution-mode normal --port <0-65535> --stop-client-on-exit\n"
+            "  --no-elevate（禁止启动遇到 740 时通过 Windows UAC 重启宿主）\n"
             "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
             "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局采样）\n"
             "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
@@ -602,7 +639,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
             "\"nativeSelection\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,"
             "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }
@@ -612,7 +649,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;
         h_print_utf8(h_settings); h_print_utf8("\n"); return 0;
     }
-    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2; ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP); WSACleanup(); return ok ? h_exit_code : 1;
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2;
+    ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP); WSACleanup();
+    if (h_needs_elevation) {
+        DWORD childCode = 1;
+        argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv) { if (!h_base_options.quiet) h_print(L"Cannot preserve administrator restart arguments"); return 1; }
+        ok = cx_elevation_restart(h_exe_path, argc - 1, argv + 1, h_selected_path,
+                                  &childCode, h_main_error, HOST_ERROR_CAP);
+        LocalFree(argv);
+        if (!ok && !h_base_options.quiet) h_print(h_main_error);
+        return (int)childCode;
+    }
+    return ok ? h_exit_code : 1;
 }
 
 void __stdcall WinMainCRTStartup(void) {

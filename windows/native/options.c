@@ -287,7 +287,13 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
             cx_error(error, errorCap, L"wipe, memory and self-destruct options are not supported by native host");
             o->unsupportedRequested = TRUE; return FALSE;
         }
-        if (cx_streq(a, L"--no-elevate") || cx_streq(a, L"--elevated")) continue;
+        if (cx_streq(a, L"--no-elevate")) { o->noElevate = TRUE; continue; }
+        if (cx_streq(a, L"--elevated")) { o->elevated = TRUE; continue; }
+        if (cx_streq(a, L"--elevated-client")) {
+            if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)
+                || !cx_copy_arg(o, o->elevatedClientPath, 32768, raw, error, errorCap)) return FALSE;
+            o->elevatedClientSet = TRUE; continue;
+        }
         if (a[0] == L'-') { cx_error(error, errorCap, L"unknown command line option"); return FALSE; }
         cx_error(error, errorCap, L"unexpected positional argument"); return FALSE;
     }
@@ -662,6 +668,11 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
     destination->help = layer->help; destination->capabilities = layer->capabilities;
     destination->printEffectiveConfig = layer->printEffectiveConfig; destination->selfCheck = layer->selfCheck;
+    if (layer->commandLineLayer) {
+        destination->noElevate = layer->noElevate; destination->elevated = layer->elevated;
+        destination->elevatedClientSet = layer->elevatedClientSet;
+        cx_copy_field(destination->elevatedClientPath, 32768, layer->elevatedClientPath);
+    }
     if (layer->optionsJsonSet) { destination->optionsJsonSet = TRUE; destination->optionsJsonFile = layer->optionsJsonFile; destination->optionsJsonLength = layer->optionsJsonLength; cx_scopy(destination->optionsJson, CX_OPTIONS_JSON_CAP, layer->optionsJson, (int)layer->optionsJsonLength); cx_copy_field(destination->optionsJsonPath, CX_OPTIONS_PATH_CAP, layer->optionsJsonPath); }
     return TRUE;
 }
@@ -670,6 +681,11 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
+    if (o->elevatedClientSet && (!o->elevated || !o->elevatedClientPath[0]
+        || o->attachPortSet || o->help || o->capabilities || o->selfCheck
+        || o->printEffectiveConfig || o->listClients)) {
+        cx_error(error, errorCap, L"internal elevated client requires a marked ordinary launch"); return FALSE;
+    }
     if (o->clientPathSuppressedByUi) { o->clientPathSet = TRUE; o->clientPathSuppressedByUi = FALSE; }
     if (o->clientPathSet && !o->clientPath[0]) o->clientPathSet = FALSE;
     /* Defer UI suppression until the final layer, preserving the path if a later auto overrides it. */

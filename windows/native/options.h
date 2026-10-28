@@ -27,6 +27,11 @@ typedef struct CX_OPTIONS {
     WCHAR injectStrategy[CX_OPTIONS_SHORT_CAP];
     WCHAR scanMode[CX_OPTIONS_SHORT_CAP];
     WCHAR ui[CX_OPTIONS_SHORT_CAP];
+    /* CLI-only handoff state; never accepted as a configuration setting. */
+    WCHAR elevatedClientPath[32768];
+    BOOL elevatedClientSet;
+    BOOL elevated;
+    BOOL noElevate;
     char optionsJson[CX_OPTIONS_JSON_CAP];
     DWORD optionsJsonLength;
     char sharedSettingsJson[CX_OPTIONS_JSON_CAP];
