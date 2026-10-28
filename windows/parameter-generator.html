@@ -52,14 +52,14 @@
       </div></div>
       <div class="section"><h2>配置与数据</h2><div class="grid">
         <div class="field"><label for="configPath">配置文件</label><input id="configPath" placeholder="可选 JSON 路径"></div>
-        <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value="windows\data"><p class="hint">宿主默认目录为 `windows\data`；启动脚本会先切换到项目根目录。</p></div>
+        <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value="windows\data"><p class="hint">宿主默认目录为 `windows\data`；生成的命令以项目根目录为工作目录。</p></div>
         <div class="field full"><label for="optionsJson">内联 JSON 或 @JSON 文件</label><textarea id="optionsJson" placeholder='例如 {"panelTop":24,"panelWidth":520} 或 @C:\\Tools\\options.json'></textarea><p class="hint">支持 JSON 对象或 @文件路径；独立命令行参数优先级更高。</p></div>
         <div class="field"><label for="report">运行报告</label><input id="report" placeholder="可选路径"></div>
         <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">--no-retain-data 只清理本次运行创建的宿主数据；--delete-config 必须搭配 --config；两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
         <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、内存执行、删除挂起和自毁字段会被拒绝。</p></div>
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
-        <div class="field full"><label for="launcherPath">宿主启动脚本路径</label><input id="launcherPath" placeholder="自动定位到项目目录中的 start-windows.cmd"><p class="hint">默认根据此 HTML 的位置生成绝对路径；如果启动脚本单独移动，请在此修改。该路径只用于命令文本，不会写入 JSON。</p></div>
+        <div class="field full"><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\host\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\host\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory" disabled>内存执行（未发布）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
       </div></div>
@@ -127,13 +127,18 @@
   function resetForm() { ids.forEach(function (id) { var node = el(id); if (node.disabled) return; if (node.type === 'checkbox') node.checked = node.defaultChecked; else node.value = node.defaultValue; }); }
   function quotePowerShell(text) { return "'" + String(text).replace(/'/g, "''") + "'"; }
   function quoteCmd(text) { return '"' + String(text) + '"'; }
+  function quoteWindowsArgument(text) { return '"' + String(text).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"'; }
   function addArg(list, name, item, quote) { if (item === true) list.push(name); else if (item !== false && item !== '' && item != null) list.push(name + ' ' + quote(item)); }
+  function launcherProjectRoot(text) {
+    var match = String(text).match(/^(.*[\\/])windows[\\/]host[\\/]main\.mjs$/i);
+    return match && /^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/])/i.test(match[1]) ? match[1] : '';
+  }
   function defaultLauncherPath() {
     var pagePath;
     try { pagePath = decodeURIComponent(window.location.pathname || ''); } catch (error) { return ''; }
     pagePath = pagePath.replace(/^\/([a-z]:)/i, '$1');
     var match = pagePath.match(/^(.*)[\\/]windows[\\/]parameter-generator\.html$/i);
-    return match ? match[1].replace(/[\\/]+$/u, '') + '\\start-windows.cmd' : '';
+    return match ? match[1].replace(/[\\/]+$/u, '') + '\\windows\\host\\main.mjs' : '';
   }
   function parsedInlineConfig(s) {
     var text = String(s.optionsJson || '').trim();
@@ -324,7 +329,7 @@
         return;
       }
       if (JSON_NUMBER_KEYS.indexOf(optionKey) >= 0) {
-        var minimum = optionKey === 'wipeRetryDelayMs' ? 50 : optionKey === 'injectRetries' ? 0 : optionKey === 'targetPollIntervalMs' ? 250 : 1;
+        var minimum = optionKey === 'wipeRetryDelayMs' ? 50 : optionKey === 'injectRetries' ? 0 : optionKey === 'targetPollIntervalMs' ? 250 : (optionKey === 'debugEndpointTimeoutMs' || optionKey === 'bundleTimeoutMs') ? 1000 : 1;
         var maximum = optionKey === 'wipeRetryDelayMs' ? 5000 : optionKey === 'wipeRetries' ? 20 : optionKey === 'wipeRuntimeIntervalSec' ? 86400 : optionKey === 'debugEndpointTimeoutMs' ? 120000 : optionKey === 'targetPollIntervalMs' ? 10000 : optionKey === 'bundleTimeoutMs' ? 300000 : 5;
         if (!validBoundedInteger(raw, minimum, maximum)) errors.push('内联 JSON 的 ' + key + ' 超出宿主允许范围。');
         return;
@@ -353,7 +358,7 @@
   }
   function validate(s) {
     var errors = [], warnings = [];
-    if (!s.launcherPath || !/\.cmd$/iu.test(s.launcherPath)) errors.push('请指定有效的 start-windows.cmd 启动脚本路径。');
+    if (!launcherProjectRoot(s.launcherPath)) errors.push('请指定项目中 windows\\host\\main.mjs 的 Windows 驱动器绝对路径或完整 UNC 路径。');
     if (s.clientPath && (s.clientIndex || s.selection === 'first')) errors.push('--client 不能与 --client-index 或首个推荐同时指定。');
     if (s.clientPath && (s.rescan || s.noScanCache)) errors.push('--client 不能与 --rescan 或 --no-scan-cache 同时指定。');
     if (s.clientIndex && s.selection === 'first') errors.push('--client-index 不能与首个推荐同时指定。');
@@ -419,9 +424,9 @@
     return { errors: errors, warnings: warnings };
   }
   function commandFor(s) {
-    if (capabilityBlocked(s)) return { powershell: '', cmd: '', cmdWarning: '', args: [] };
-    var ps = ['& ' + quotePowerShell(s.launcherPath)], cmd = [quoteCmd(s.launcherPath)], args = [];
-    function both(name, item) { addArg(ps, name, item, quotePowerShell); addArg(cmd, name, item, quoteCmd); if (item === true) args.push(name); else if (item !== false && item !== '' && item != null) args.push(name, String(item)); }
+    if (capabilityBlocked(s) || !launcherProjectRoot(s.launcherPath)) return { powershell: '', cmd: '', cmdWarning: '', args: [] };
+    var psArguments = [quoteWindowsArgument(s.launcherPath)], cmd = ['node.exe ' + quoteCmd(s.launcherPath)], args = [];
+    function both(name, item) { addArg(psArguments, name, item, quoteWindowsArgument); addArg(cmd, name, item, quoteCmd); if (item === true) args.push(name); else if (item !== false && item !== '' && item != null) args.push(name, String(item)); }
     if (s.clientPath) both('--client', s.clientPath); else if (s.clientIndex) both('--client-index', s.clientIndex); else if (!s.listClients && s.selection === 'first') both('--client-first', true); else if (!s.listClients && s.selection === 'interactive') both('--select-client', true);
     if (s.listClients) both('--list-clients', true); if (!s.clientPath) { both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true); if (s.noScanCache) both('--no-scan-cache', true); }
     both('--ui', s.ui);
@@ -436,8 +441,13 @@
     var optionsText = String(s.optionsJson || '').trim();
     var inlineJson = optionsText && optionsText.charAt(0) !== '@';
     var unsafeTrailingPath = args.some(function (argument) { return /[\\/]$/u.test(argument); });
-    var cmdSafe = !inlineJson && !unsafeTrailingPath && !/[!%&|<>^()\r\n"]/u.test(s.launcherPath) && args.every(function (argument) { return !/[!%&|<>^()\r\n"]/u.test(argument); });
-    return { powershell: ps.join(' `\n  '), cmd: cmdSafe ? cmd.join(' ^\n  ') : '', cmdWarning: cmdSafe ? '' : 'cmd 输出不可安全表示当前参数（含内联 JSON、命令解释符、路径末尾反斜杠、百分号、感叹号、引号或换行）；请使用 PowerShell 或配置文件。', args: args };
+    var projectRoot = launcherProjectRoot(s.launcherPath);
+    var cmdSafe = !inlineJson && !unsafeTrailingPath && !/^[\\/]{2}/u.test(projectRoot) && !/[!%&|<>^()\r\n"]/u.test(s.launcherPath) && args.every(function (argument) { return !/[!%&|<>^()\r\n"]/u.test(argument); });
+    // Use a Win32 command line directly; PowerShell 5.1 native quoting drops JSON quotes.
+    var ps = ['& {', '  $global:LASTEXITCODE = 1', '  $cxStart = New-Object System.Diagnostics.ProcessStartInfo', '  $cxStart.FileName = (Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source', '  $cxStart.UseShellExecute = $false', '  $cxStart.WorkingDirectory = ' + quotePowerShell(projectRoot), '  $cxStart.Arguments = @('];
+    psArguments.forEach(function (argument) { ps.push('    ' + quotePowerShell(argument)); });
+    ps.push("  ) -join ' '", '  $cxProcess = $null', '  try {', '    $cxProcess = [System.Diagnostics.Process]::Start($cxStart)', '    $cxProcess.WaitForExit()', '    $global:LASTEXITCODE = $cxProcess.ExitCode', '  } finally {', '    if ($null -ne $cxProcess) { $cxProcess.Dispose() }', '  }', '}');
+    return { powershell: ps.join('\n'), cmd: cmdSafe ? 'cd /d ' + quoteCmd(projectRoot) + ' && ' + cmd.join(' ') : '', cmdWarning: cmdSafe ? '' : 'cmd 输出不可安全表示当前参数（含内联 JSON、命令解释符、路径末尾反斜杠、UNC 项目目录、百分号、感叹号、引号或换行）；请使用 PowerShell 或配置文件。', args: args };
   }
   function hasRestrictedOption(value) {
     var restricted = /^(?:selfdestruct.*|memoryexec|deletesuspend)$/i;

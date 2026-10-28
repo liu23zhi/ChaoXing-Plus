@@ -1,5 +1,6 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -36,12 +37,77 @@ test('参数生成器离线加载并暴露当前宿主能力接口', async () =>
   assert.equal(await page.title(), '超星学习助手 Windows 参数生成器');
   assert.equal(await page.evaluate(() => Boolean(window.__CX_PARAMETER_GENERATOR__)), true);
   const launcherPath = await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.state().launcherPath);
-  assert.equal(launcherPath.replaceAll('\\', '/'), `${resolve('windows', '..').replaceAll('\\', '/')}/start-windows.cmd`);
-  assert.match(await page.$eval('#powershell', (node) => node.value), /& '.*start-windows\.cmd'/u);
-  assert.match(await page.$eval('#cmd', (node) => node.value), /^".*start-windows\.cmd"/u);
+  assert.equal(launcherPath.replaceAll('\\', '/'), `${resolve('windows', '..').replaceAll('\\', '/')}/windows/host/main.mjs`);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /ProcessStartInfo/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /UseShellExecute = \$false/u);
+  assert.doesNotMatch(await page.$eval('#powershell', (node) => node.value), /start-windows\.cmd/u);
+  assert.match(await page.$eval('#cmd', (node) => node.value), /^cd \/d .* && node\.exe /u);
   assert.equal(await page.$eval('#powershell', (node) => node.value.includes('--scan-mode')), true);
   assert.equal(await page.$eval('#json', (node) => JSON.parse(node.value).settings['common.settings.windows-panel-enabled']), true);
   await page.close();
+});
+
+test('生成的 PowerShell 文本在 Windows PowerShell 5.1 和 PowerShell 7 保留内联 JSON', { skip: process.platform !== 'win32' }, async (t) => {
+  const page = await openGenerator();
+  const optionsJson = JSON.stringify({
+    expectedBrowser: '中 文 O\'Brien "quoted" %CXPLUS_GENERATOR_SENTINEL% & | < > ^ ! ( ) $HOME $(throw "must stay text")',
+    settings: { 'common.settings.fixture': 'line1\nline2\\"quoted"\\' }
+  }, null, 2);
+  await page.evaluate((values) => {
+    for (const [id, value] of Object.entries(values)) {
+      const node = document.getElementById(id);
+      node.value = value;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }, { optionsJson, selection: 'none', clientPath: "D:\\考试 O'Brien & (%CXPLUS_GENERATOR_SENTINEL%)!\\CXExam.exe", dataDir: "D:\\缓存 O'Brien\\" });
+  const output = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    if (generator.validate(generator.state()).errors.length) throw new Error(document.getElementById('status').textContent);
+    return generator.commandFor(generator.state());
+  });
+  await page.close();
+
+  // Force the real host to stop at help, before discovery, launch, or any file output.
+  const preload = "process.stdout.write('CXPLUS_ARGV:' + JSON.stringify(process.argv.slice(2)) + '\\n'); process.stdout.write('CXPLUS_CWD:' + JSON.stringify(process.cwd()) + '\\n'); process.argv.push('--help');";
+  for (const shell of ['powershell.exe', 'pwsh.exe']) {
+    await t.test(shell, (t) => {
+      const script = `[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)\n${output.powershell}\nexit $LASTEXITCODE`;
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+        encoding: 'utf8', windowsHide: true, timeout: 15000, input: '\r\n',
+        env: { ...process.env, CXPLUS_GENERATOR_SENTINEL: 'THIS_MUST_NOT_REPLACE_THE_LITERAL', NODE_OPTIONS: `--import=data:text/javascript;base64,${Buffer.from(preload).toString('base64')}` }
+      });
+      if (shell === 'pwsh.exe' && result.error?.code === 'ENOENT') return t.skip('PowerShell 7 is not installed');
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, `${shell}\n${result.stdout}\n${result.stderr}`);
+      const argvLine = result.stdout.split(/\r?\n/u).find((line) => line.startsWith('CXPLUS_ARGV:'));
+      assert.ok(argvLine, result.stdout);
+      assert.deepEqual(JSON.parse(argvLine.slice('CXPLUS_ARGV:'.length)), output.args);
+      const cwdLine = result.stdout.split(/\r?\n/u).find((line) => line.startsWith('CXPLUS_CWD:'));
+      assert.ok(cwdLine, result.stdout);
+      assert.equal(JSON.parse(cwdLine.slice('CXPLUS_CWD:'.length)), resolve('.'));
+      assert.match(result.stdout, /--options-json/u);
+    });
+  }
+});
+
+test('生成的安全 cmd 文本直接启动 Node 并保留参数和项目工作目录', { skip: process.platform !== 'win32' }, async () => {
+  const page = await openGenerator();
+  await page.click('[data-preset="lazy"]');
+  const output = await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.commandFor(window.__CX_PARAMETER_GENERATOR__.state()));
+  await page.close();
+  const preload = "process.stdout.write('CXPLUS_ARGV:' + JSON.stringify(process.argv.slice(2)) + '\\n'); process.stdout.write('CXPLUS_CWD:' + JSON.stringify(process.cwd()) + '\\n'); process.argv.push('--help');";
+  const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${output.cmd}"`], {
+    encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 15000, input: '\r\n',
+    env: { ...process.env, NODE_OPTIONS: `--import=data:text/javascript;base64,${Buffer.from(preload).toString('base64')}` }
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const argvLine = result.stdout.split(/\r?\n/u).find((line) => line.startsWith('CXPLUS_ARGV:'));
+  assert.ok(argvLine, result.stdout);
+  assert.deepEqual(JSON.parse(argvLine.slice('CXPLUS_ARGV:'.length)), output.args);
+  const cwdLine = result.stdout.split(/\r?\n/u).find((line) => line.startsWith('CXPLUS_CWD:'));
+  assert.ok(cwdLine, result.stdout);
+  assert.equal(JSON.parse(cwdLine.slice('CXPLUS_CWD:'.length)), resolve('.'));
 });
 
 test('预设覆盖关键扫描、面板和普通运行参数', async () => {
@@ -122,6 +188,61 @@ test('生成器导出 CEF 多路径注入参数并可由宿主重新解析', asy
   assert.equal(fromCommand.captureConsole, false);
   assert.equal(fromJson.injectStrategy, 'script');
   assert.equal(fromJson.bundleTimeoutMs, 90000);
+  await page.close();
+});
+
+test('生成器内联注入超时采用宿主下限，并允许独立 CLI 覆盖无效 JSON 值', async () => {
+  const page = await openGenerator();
+  for (const [key, field] of [['debugEndpointTimeoutMs', 'debugTimeout'], ['bundleTimeoutMs', 'bundleTimeout']]) {
+    for (const timeout of [1, 999]) {
+      await page.click('#reset');
+      const source = { [key]: timeout };
+      await page.$eval('#optionsJson', (node, value) => {
+        node.value = JSON.stringify(value);
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+      }, source);
+      const blocked = await page.evaluate(() => {
+        const generator = window.__CX_PARAMETER_GENERATOR__;
+        const state = generator.state();
+        return { errors: generator.validate(state).errors, args: generator.commandFor(state).args,
+          outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value) };
+      });
+      assert.throws(() => applyOptionsJsonToOptions(parseHostArgs(blocked.args), source), /1000/u);
+      assert.ok(blocked.errors.some((error) => error.includes(key)), `${key}=${timeout} must be rejected`);
+      assert.deepEqual(blocked.outputs, ['', '', '']);
+    }
+
+    await page.$eval('#optionsJson', (node, key) => {
+      node.value = JSON.stringify({ [key]: 1000 });
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, key);
+    const minimum = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { errors: generator.validate(state).errors, args: generator.commandFor(state).args,
+        config: JSON.parse(document.getElementById('json').value) };
+    });
+    assert.deepEqual(minimum.errors, []);
+    assert.equal(applyOptionsJsonToOptions(parseHostArgs(minimum.args), minimum.config)[key], 1000);
+
+    await page.$eval('#optionsJson', (node, key) => {
+      node.value = JSON.stringify({ [key]: 1 });
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, key);
+    await page.$eval(`#${field}`, (node) => {
+      node.value = '45000';
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const overridden = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { errors: generator.validate(state).errors, args: generator.commandFor(state).args,
+        config: JSON.parse(document.getElementById('json').value) };
+    });
+    assert.deepEqual(overridden.errors, []);
+    assert.equal(applyOptionsJsonToOptions(parseHostArgs(overridden.args), { [key]: 1 })[key], 45000);
+    assert.equal(overridden.config[key], 45000);
+  }
   await page.close();
 });
 
@@ -215,9 +336,9 @@ test('生成器阻止序号和首选策略冲突，并用 PowerShell 单引号�
   await page.select('#selection', 'none');
   await page.$eval('#clientPath', (node) => { node.value = 'D:\\Exam\\$old\\Client.exe'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   const output = await page.$eval('#powershell', (node) => node.value);
-  assert.match(output, /'D:\\Exam\\\$old\\Client\.exe'/u);
+  assert.match(output, /D:\\Exam\\\$old\\Client\.exe/u);
   await page.$eval('#clientPath', (node) => { node.value = "D:\\Exam\\O'Brien\\CXExam.exe"; node.dispatchEvent(new Event('input', { bubbles: true })); });
-  assert.match(await page.$eval('#powershell', (node) => node.value), /'D:\\Exam\\O''Brien\\CXExam\.exe'/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /D:\\Exam\\O''Brien\\CXExam\.exe/u);
   await page.close();
 });
 
@@ -231,12 +352,66 @@ test('生成器不为包含 cmd 命令解释符的路径输出 cmd 命令', asyn
   await page.close();
 });
 
-test('生成器对启动脚本路径使用 PowerShell 安全引用，并在 cmd 不安全时隐藏输出', async () => {
+test('生成器对 Node 宿主路径使用 PowerShell 安全引用，并在 cmd 不安全时隐藏输出', async () => {
   const page = await openGenerator();
-  await page.$eval('#launcherPath', (node) => { node.value = "C:\\Tools\\O'Brien&Co\\start-windows.cmd"; node.dispatchEvent(new Event('input', { bubbles: true })); });
-  assert.match(await page.$eval('#powershell', (node) => node.value), /'C:\\Tools\\O''Brien&Co\\start-windows\.cmd'/u);
+  await page.$eval('#launcherPath', (node) => { node.value = "C:\\Tools\\O'Brien&Co\\windows\\host\\main.mjs"; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.match(await page.$eval('#powershell', (node) => node.value), /C:\\Tools\\O''Brien&Co\\windows\\host\\main\.mjs/u);
   assert.equal(await page.$eval('#cmd', (node) => node.value), '');
   assert.match(await page.$eval('#status', (node) => node.textContent), /cmd 输出不可安全表示/u);
+  await page.close();
+});
+
+test('生成器拒绝相对、驱动器相对和仅根目录相对的 Node 宿主路径', async () => {
+  const page = await openGenerator();
+  for (const launcherPath of [
+    'chaoxing_plus\\windows\\host\\main.mjs', '.\\windows\\host\\main.mjs',
+    '..\\chaoxing_plus\\windows\\host\\main.mjs', 'C:chaoxing_plus\\windows\\host\\main.mjs',
+    '\\chaoxing_plus\\windows\\host\\main.mjs', '/chaoxing_plus/windows/host/main.mjs',
+    '\\\\server\\windows\\host\\main.mjs', '\\\\server\\\\windows\\host\\main.mjs'
+  ]) {
+    await page.$eval('#launcherPath', (node, value) => {
+      node.value = value;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, launcherPath);
+    const result = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { errors: generator.validate(state).errors, command: generator.commandFor(state),
+        outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value) };
+    });
+    assert.ok(result.errors.some((error) => error.includes('绝对路径')), launcherPath);
+    assert.deepEqual(result.outputs, ['', '', ''], launcherPath);
+    assert.equal(result.command.powershell, '', launcherPath);
+    assert.equal(result.command.cmd, '', launcherPath);
+  }
+  await page.close();
+});
+
+test('生成器接受驱动器绝对路径及正斜杠，并为完整 UNC 只生成 PowerShell', async () => {
+  const page = await openGenerator();
+  for (const launcherPath of [
+    'C:\\Tools\\chaoxing_plus\\windows\\host\\main.mjs',
+    'C:/学习助手/windows/host/main.mjs', 'Z:\\windows\\host\\main.mjs',
+    '\\\\server\\share\\学习助手\\windows\\host\\main.mjs', '//server/share/windows/host/main.mjs'
+  ]) {
+    await page.$eval('#launcherPath', (node, value) => {
+      node.value = value;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, launcherPath);
+    const result = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { errors: generator.validate(state).errors, command: generator.commandFor(state), powershell: document.getElementById('powershell').value };
+    });
+    assert.deepEqual(result.errors, [], launcherPath);
+    assert.ok(result.powershell, launcherPath);
+    if (/^[\\/]{2}/u.test(launcherPath)) {
+      assert.equal(result.command.cmd, '', launcherPath);
+      assert.match(result.command.cmdWarning, /UNC/u);
+    } else {
+      assert.ok(result.command.cmd, launcherPath);
+    }
+  }
   await page.close();
 });
 
@@ -246,7 +421,7 @@ test('生成器不为以反斜杠结尾的目录输出有歧义的 cmd 引号', 
   await page.$eval('#dataDir', (node) => { node.value = 'D:\\'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   assert.equal(await page.$eval('#cmd', (node) => node.value), '');
   assert.match(await page.$eval('#status', (node) => node.textContent), /cmd 输出不可安全表示/u);
-  assert.match(await page.$eval('#powershell', (node) => node.value), /'D:\\'/u);
+  assert.ok(await page.$eval('#powershell', (node) => node.value.includes('"D:' + '\\'.repeat(2) + '"')));
   await page.close();
 });
 
@@ -400,7 +575,7 @@ test('生成器归一化快捷键别名，修改设计预设后仍不降级输�
     };
   });
   assert.equal(info.args.includes('--no-scan-cache'), true);
-  assert.match(info.powershell, /--panel-theme 'pink'/u);
+  assert.match(info.powershell, /--panel-theme "pink"/u);
   assert.doesNotThrow(() => parseHostArgs(info.args));
   assert.match(info.summary, /运行数据/u);
   assert.match(info.summary, /启动清理/u);
