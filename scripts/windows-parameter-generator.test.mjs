@@ -2,8 +2,9 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseHostArgs } from '../windows/host/options.mjs';
 import { normalizeConfig } from '../windows/host/config.mjs';
 import { RENDER_DIAGNOSTICS_EXPRESSION } from '../windows/host/diagnostics.mjs';
@@ -31,6 +32,220 @@ async function openGenerator() {
   await page.goto(`file:///${generatorPath.replaceAll('\\', '/')}`);
   return page;
 }
+
+test('生成器可切换原生单文件入口并直接导出 EXE 命令，预设保留宿主选择', async () => {
+  const page = await openGenerator();
+  assert.equal(await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.state().hostType), 'node');
+  await page.select('#hostType', 'native');
+  await page.$eval('#nativePath', (node) => { node.value = "C:\\学习助手 O'Brien\\chaoxing_plus.exe"; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.click('[data-preset="lazy"]');
+  const output = await page.evaluate(() => {
+    const generator = window.__CX_PARAMETER_GENERATOR__;
+    const state = generator.state();
+    return { state, command: generator.commandFor(state), errors: generator.validate(state).errors, json: JSON.parse(document.getElementById('json').value) };
+  });
+  assert.equal(output.state.hostType, 'native');
+  assert.equal(output.state.dataDir, '.data');
+  assert.deepEqual(output.errors, []);
+  assert.doesNotMatch(output.command.powershell, /node\.exe|main\.mjs/u);
+  assert.match(output.command.powershell, /\$cxStart\.FileName = 'C:\\学习助手 O''Brien\\chaoxing_plus\.exe'/u);
+  assert.match(output.command.powershell, /\$cxStart\.WorkingDirectory = 'C:\\学习助手 O''Brien\\'/u);
+  assert.match(output.command.cmd, /&& "C:\\学习助手 O'Brien\\chaoxing_plus\.exe"/u);
+  assert.equal(output.json.retainData, undefined);
+  assert.equal(output.json.deleteConfig, undefined);
+  assert.equal(await page.$eval('#retainData', (node) => node.disabled), true);
+  assert.equal(await page.$eval('#deleteConfig', (node) => node.disabled), true);
+  await page.close();
+});
+
+test('原生模式拒绝数据清理、无效 EXE 路径、小数面板与未知 JSON 字段', async () => {
+  const page = await openGenerator();
+  await page.select('#hostType', 'native');
+  for (const nativePath of ['chaoxing_plus.exe', 'C:chaoxing_plus.exe', '\\Tools\\chaoxing_plus.exe', 'C:\\Tools\\main.mjs']) {
+    await page.$eval('#nativePath', (node, path) => { node.value = path; node.dispatchEvent(new Event('input', { bubbles: true })); }, nativePath);
+    assert.equal(await page.$eval('#powershell', (node) => node.value), '', nativePath);
+  }
+  await page.$eval('#nativePath', (node) => { node.value = 'C:\\Tools\\chaoxing_plus.exe'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  for (const optionsJson of ['{"retainData":false}', '{"deleteConfig":true}', '{"unknown":true}', '{"panelTop":1.5}', '{"answerKey":"Ctrl+Ctrl+A"}', '{"settings":{"common.settings.windows-panel-enabled":"true"}}', '{"settings":{"common.settings.extension-enabled":"true"}}', '{"dpiAware":true,"settings":{"common.settings.windows-no-disk-write":true}}']) {
+    await page.$eval('#optionsJson', (node, text) => { node.value = text; node.dispatchEvent(new Event('input', { bubbles: true })); }, optionsJson);
+    assert.equal(await page.$eval('#powershell', (node) => node.value), '', optionsJson);
+    assert.equal(await page.$eval('#json', (node) => node.value), '', optionsJson);
+  }
+  await page.$eval('#optionsJson', (node) => { node.value = ''; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.$eval('#panelTop', (node) => { node.value = '1.5'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  await page.close();
+});
+
+test('切换宿主不会静默丢弃已有清理请求或自定义数据目录', async () => {
+  const page = await openGenerator();
+  await page.evaluate(() => {
+    document.getElementById('retainData').checked = false;
+    document.getElementById('dataDir').value = 'D:\\自定义缓存';
+  });
+  await page.select('#hostType', 'native');
+  await page.$eval('#nativePath', (node) => { node.value = 'C:\\Tools\\chaoxing_plus.exe'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.equal(await page.$eval('#dataDir', (node) => node.value), 'D:\\自定义缓存');
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  assert.match(await page.$eval('#status', (node) => node.textContent), /原生宿主当前不可执行/u);
+  await page.click('#reset');
+  assert.equal(await page.$eval('#hostType', (node) => node.value), 'native');
+  assert.equal(await page.$eval('#dataDir', (node) => node.value), '.data');
+  assert.ok(await page.$eval('#powershell', (node) => node.value));
+  await page.close();
+});
+
+test('原生预设命令和 JSON 均通过已编译入口只读解析', { skip: !process.env.CX_NATIVE_HOST_EXE }, async () => {
+  const page = await openGenerator();
+  try {
+    await page.select('#hostType', 'native');
+    await page.$eval('#nativePath', (node, path) => { node.value = path; node.dispatchEvent(new Event('input', { bubbles: true })); }, resolve(process.env.CX_NATIVE_HOST_EXE));
+    for (const preset of ['silent', 'friendly', 'lazy', 'manual', 'scan', 'path', 'all']) {
+      await page.click(`[data-preset="${preset}"]`);
+      const output = await page.evaluate(() => {
+        const generator = window.__CX_PARAMETER_GENERATOR__;
+        return { ...generator.commandFor(generator.state()), json: document.getElementById('json').value };
+      });
+      assert.ok(output.json, preset);
+      for (const args of [output.args, ['--options-json', output.json]]) {
+        const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, [...args, '--help'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+        assert.ifError(result.error);
+        assert.equal(result.status, 0, `${preset}\n${result.stdout}\n${result.stderr}`);
+        assert.match(result.stdout, /6\.2\.0/u);
+      }
+      assert.ok(output.cmd, preset);
+      const cmdResult = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${output.cmd} --help"`], {
+        encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 10000
+      });
+      assert.ifError(cmdResult.error);
+      assert.equal(cmdResult.status, 0, `${preset}\n${cmdResult.stdout}\n${cmdResult.stderr}`);
+    }
+  } finally { await page.close(); }
+});
+
+test('原生 JSON 导出与 CLI 一致覆盖客户端选择族和诊断反向别名', { skip: !process.env.CX_NATIVE_HOST_EXE }, async () => {
+  const page = await openGenerator();
+  try {
+    for (const scenario of [
+      { inline: { clientPath: 'D:\\Example\\CXExam.exe' }, form: { selection: 'interactive' }, expected: 'selectClient' },
+      { inline: { clientFirst: true }, form: { selection: 'interactive' }, expected: 'selectClient' },
+      { inline: { clientIndex: 2 }, form: { selection: 'first' }, expected: 'clientFirst' },
+      { inline: { selectClient: true }, form: { clientPath: 'D:\\Example\\CXExam.exe', selection: 'none' }, expected: 'clientPath' },
+      { inline: { scanClients: true }, form: { clientPath: 'D:\\Example\\CXExam.exe', selection: 'none' }, expected: 'clientPath' },
+      { inline: { noDiagnose: true }, form: { diagnose: true }, expected: 'diagnose' }
+    ]) {
+      const output = await page.evaluate(({ scenario, nativePath }) => {
+        const generator = window.__CX_PARAMETER_GENERATOR__;
+        const state = { ...generator.state(), hostType: 'native', nativePath, ...scenario.form, optionsJson: JSON.stringify(scenario.inline) };
+        return { validation: generator.validate(state), command: generator.commandFor(state), config: generator.configFor(state) };
+      }, { scenario, nativePath: resolve(process.env.CX_NATIVE_HOST_EXE) });
+      assert.deepEqual(output.validation.errors, [], JSON.stringify(scenario));
+      assert.ok(output.config[scenario.expected]);
+      assert.equal(output.config.noDiagnose, undefined);
+      for (const args of [output.command.args, ['--options-json', JSON.stringify(output.config)]]) {
+        const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, [...args, '--help'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+        assert.ifError(result.error);
+        assert.equal(result.status, 0, `${JSON.stringify(scenario)}\n${result.stdout}\n${result.stderr}`);
+      }
+    }
+  } finally { await page.close(); }
+});
+
+test('原生生成器按实际 UTF-16 缓冲区限制校验表单和内联 JSON', async () => {
+  const page = await openGenerator();
+  try {
+    const results = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const base = { ...generator.state(), hostType: 'native', nativePath: 'C:\\Tools\\chaoxing_plus.exe' };
+      return [
+        ['expectedBrowser', 'x'.repeat(127), true], ['expectedBrowser', 'x'.repeat(128), false],
+        ['dataDir', 'x'.repeat(1023), true], ['dataDir', 'x'.repeat(1024), false],
+        ['configPath', 'x'.repeat(1024), false], ['clientPath', 'D:\\' + 'x'.repeat(1024) + '\\CXExam.exe', false],
+        ['optionsJson', JSON.stringify({ expectedBrowser: 'x'.repeat(128) }), false],
+        ['optionsJson', JSON.stringify({ dataDir: 'x'.repeat(1024) }), false],
+        ['optionsJson', '@' + 'x'.repeat(1024), false],
+        ['optionsJson', JSON.stringify({ settings: { 'common.settings.windows-panel-theme': 'x'.repeat(128) } }), false]
+      ].map(([key, value, valid]) => ({ key, valid, errors: generator.validate({ ...base, [key]: value }).errors }));
+    });
+    for (const result of results) assert.equal(result.errors.length === 0, result.valid, JSON.stringify(result));
+  } finally { await page.close(); }
+});
+
+test('原生 PowerShell 5.1/7 输出保留 JSON、中文、引号和工作目录且不启动客户端', { skip: process.platform !== 'win32' || !process.env.CX_NATIVE_HOST_EXE }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "cx-generator-中文 O'Brien & (%CX_GENERATOR_SENTINEL%)! "));
+  const nativePath = join(directory, 'chaoxing_plus.exe');
+  const configName = "配置 O'Brien.json";
+  const canary = '中文 "quoted" O\'Brien %CX_GENERATOR_SENTINEL% & | < > ^ ! ( ) $HOME $(throw "must stay text")\n尾反斜杠\\';
+  const page = await openGenerator();
+  try {
+    await copyFile(resolve(process.env.CX_NATIVE_HOST_EXE), nativePath);
+    await writeFile(join(directory, configName), JSON.stringify({ settings: { 'common.settings.generator-cwd': 'relative-config-read' } }), 'utf8');
+    await page.select('#hostType', 'native');
+    await page.evaluate((values) => {
+      for (const [id, value] of Object.entries(values)) {
+        const node = document.getElementById(id);
+        node.value = value;
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }, { nativePath, configPath: configName, optionsJson: JSON.stringify({ settings: { 'common.settings.generator-canary': canary } }), dataDir: "D:\\缓存 O'Brien\\" });
+    const output = await page.$eval('#powershell', (node) => node.value);
+    assert.ok(output, await page.$eval('#status', (node) => node.textContent));
+    // This read-only entry returns before discovery, UAC, launch, CDP, audit or file output.
+    const readOnlyCommand = output.replace('  $cxProcess = $null', "  $cxStart.Arguments += ' --print-effective-config'\n  $cxProcess = $null");
+    assert.notEqual(readOnlyCommand, output);
+    for (const shell of ['powershell.exe', 'pwsh.exe']) {
+      await t.test(shell, (t) => {
+        const script = `[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)\n${readOnlyCommand}\nexit $LASTEXITCODE`;
+        const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+          encoding: 'utf8', windowsHide: true, timeout: 15000,
+          env: { ...process.env, CX_GENERATOR_SENTINEL: 'THIS_MUST_NOT_REPLACE_THE_LITERAL' }
+        });
+        if (shell === 'pwsh.exe' && result.error?.code === 'ENOENT') return t.skip('PowerShell 7 is not installed');
+        assert.ifError(result.error);
+        assert.equal(result.status, 0, `${shell}\n${result.stdout}\n${result.stderr}`);
+        const settings = JSON.parse(result.stdout.trim());
+        assert.equal(settings['common.settings.generator-canary'], canary);
+        assert.equal(settings['common.settings.generator-cwd'], 'relative-config-read');
+      });
+    }
+  } finally {
+    await page.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('原生宿主切换在桌面与手机宽度保持表单和校验提示可见', async () => {
+  const page = await openGenerator();
+  try {
+    await page.select('#hostType', 'native');
+    for (const width of [1280, 390]) {
+      await page.setViewport({ width, height: 900 });
+      const layout = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewport: window.innerWidth,
+        fieldVisible: !document.getElementById('nativeLauncherField').hidden,
+        nodeHidden: document.getElementById('nodeLauncherField').hidden,
+        error: document.getElementById('status').textContent,
+        controls: ['hostType', 'nativePath', 'status'].map((id) => {
+          const rect = document.getElementById(id).getBoundingClientRect();
+          return { id, left: rect.left, right: rect.right, width: rect.width };
+        })
+      }));
+      assert.ok(layout.scrollWidth <= layout.viewport, JSON.stringify(layout));
+      assert.equal(layout.fieldVisible, true);
+      assert.equal(layout.nodeHidden, true);
+      assert.match(layout.error, /原生宿主 EXE.*绝对路径/u);
+      for (const control of layout.controls) {
+        assert.ok(control.left >= 0 && control.right <= width && control.width > 0, JSON.stringify(control));
+      }
+      if (process.env.CX_GENERATOR_SCREENSHOT_DIR) {
+        await mkdir(process.env.CX_GENERATOR_SCREENSHOT_DIR, { recursive: true });
+        await page.$eval('#hostType', (node) => node.scrollIntoView({ block: 'start' }));
+        await page.screenshot({ path: join(process.env.CX_GENERATOR_SCREENSHOT_DIR, `native-${width}.png`) });
+      }
+    }
+  } finally { await page.close(); }
+});
 
 test('参数生成器离线加载并暴露当前宿主能力接口', async () => {
   const page = await openGenerator();
