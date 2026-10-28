@@ -18,6 +18,10 @@ static DWORD scriptReplyMode;
 static BOOL emitRequest;
 static BOOL targetFixture, ownerAllowed, mockClientAlive;
 static DWORD ownerChecks, httpCalls, openCalls, closeCalls, fakeTick;
+static DWORD httpBudget, httpAdvance;
+static BOOL httpExitClient;
+static DWORD openBudget, openAdvance;
+static BOOL openExitClient;
 static DWORD cancelReadMode;
 static BOOL multipleTargets;
 
@@ -98,7 +102,13 @@ void net_free(void *memory) { HeapFree(GetProcessHeap(), 0, memory); }
 NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD cap) {
     (void)port; (void)url; (void)error; (void)cap;
     ++openCalls;
+    fakeTick += openAdvance;
+    if (openExitClient) mockClientAlive = FALSE;
     return targetFixture ? (NET_WS *)1 : NULL;
+}
+NET_WS *net_ws_open_timeout(USHORT port, const char *url, DWORD timeoutMs, WCHAR *error, DWORD cap) {
+    openBudget = timeoutMs;
+    return net_ws_open(port, url, error, cap);
 }
 void net_ws_close(NET_WS *ws) { (void)ws; ++closeCalls; }
 BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length, WCHAR *error, DWORD cap) {
@@ -114,6 +124,86 @@ BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length, WCH
     if (!*body) return FALSE;
     CopyMemory(*body, fixture, *length + 1);
     return TRUE;
+}
+BOOL net_http_get_timeout(USHORT port, const char *path, char **body, DWORD *length,
+                          DWORD timeoutMs, WCHAR *error, DWORD cap) {
+    BOOL ok;
+    httpBudget = timeoutMs;
+    ok = net_http_get(port, path, body, length, error, cap);
+    fakeTick += httpAdvance;
+    if (httpExitClient) mockClientAlive = FALSE;
+    return ok;
+}
+
+static void test_http_deadline_budget(void) {
+    WCHAR error[HOST_ERROR_CAP];
+    char *body = NULL;
+    DWORD length = 0;
+    BOOL ok;
+    targetFixture = TRUE; mockClientAlive = TRUE; ownerAllowed = TRUE;
+    h_client_pid = 123; h_current_page = NULL; h_task_pending = FALSE;
+    h_started = 1000; h_duration = 100; fakeTick = 1050;
+    httpCalls = httpBudget = httpAdvance = 0; httpExitClient = FALSE;
+    ok = h_http_get(38100, "/json/version", 5000, &body, &length, error, HOST_ERROR_CAP);
+    check("HTTP transport receives only the remaining run budget", ok && httpBudget == 50 && body != NULL);
+    net_free(body); body = NULL; length = 0;
+    httpAdvance = 50;
+    ok = h_http_get(38100, "/json/version", 5000, &body, &length, error, HOST_ERROR_CAP);
+    check("late HTTP response is discarded at the run deadline", !ok && !body && !length);
+    httpCalls = 0;
+    ok = h_http_get(38100, "/json/version", 5000, &body, &length, error, HOST_ERROR_CAP);
+    check("expired run budget performs no HTTP request", !ok && httpCalls == 0);
+    cx_options_init(&h_base_options); h_base_options.debugTimeoutMs = 1000;
+    h_started = fakeTick = 1000; h_duration = 5000;
+    httpCalls = 0; httpAdvance = 1000;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("late version response cannot pass the endpoint deadline", !ok && httpCalls == 1 && httpBudget == 1000
+        && lstrcmpA(h_report.stopReason, "endpoint-unavailable") == 0);
+    h_started = fakeTick = 1000; h_duration = 50;
+    httpCalls = 0; httpAdvance = 50;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("run expiry before endpoint has a distinct stop reason", !ok && httpCalls == 1 && httpBudget == 50
+        && lstrcmpA(h_report.stopReason, "duration-before-endpoint") == 0);
+    h_started = fakeTick = 1000; h_duration = 5000; mockClientAlive = TRUE;
+    httpCalls = 0; httpAdvance = 0; httpExitClient = TRUE;
+    ok = h_watch_targets(38100, &h_base_options, "true;", 5, "true;", 5, "body{}", 6, "true;", 5, error, HOST_ERROR_CAP);
+    check("owned client exit before endpoint is not reported as timeout", !ok && httpCalls == 1
+        && lstrcmpA(h_report.stopReason, "client-exit-before-endpoint") == 0);
+    httpExitClient = FALSE; mockClientAlive = TRUE;
+    httpAdvance = 0; targetFixture = FALSE; h_client_pid = 0; h_duration = 0;
+}
+
+static void test_upgrade_deadline_budget(void) {
+    H_NATIVE_PAGE *page;
+    WCHAR error[HOST_ERROR_CAP];
+    BOOL ok;
+    DWORD mode;
+    page = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE));
+    if (!page) { check("upgrade fixture allocation", FALSE); return; }
+    cx_options_init(&h_base_options); h_base_options.quiet = TRUE;
+    targetFixture = TRUE; mockClientAlive = TRUE; ownerAllowed = TRUE;
+    h_client_pid = 123; h_current_page = NULL; h_task_pending = FALSE;
+    h_started = 1000; h_duration = 100; fakeTick = 1050;
+    openCalls = openBudget = openAdvance = closeCalls = calls = failures = 0;
+    openExitClient = FALSE;
+    lstrcpynA(page->url, "https://a.chaoxing.com/exam-ans/", sizeof(page->url));
+    lstrcpynA(page->websocket, "ws://127.0.0.1:38100/devtools/page/fixture", sizeof(page->websocket));
+    ok = h_page_open(page, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("WebSocket Upgrade receives only the remaining run budget", ok && openBudget == 50 && page->state && page->ws);
+    h_page_close(page);
+    for (mode = 0; mode < 2; ++mode) {
+        fakeTick = 1050; mockClientAlive = TRUE;
+        openAdvance = mode ? 0 : 50; openExitClient = mode != 0;
+        openCalls = closeCalls = calls = 0;
+        ok = h_page_open(page, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+        check(mode ? "client exit during Upgrade leaves no session or CDP command" : "late Upgrade leaves no session or CDP command",
+            !ok && openCalls == 1 && closeCalls == 1 && calls == 0 && !page->state && !page->ws && !h_current_page);
+    }
+    fakeTick = 1100; mockClientAlive = TRUE; openAdvance = 0; openExitClient = FALSE; openCalls = 0;
+    ok = h_page_open(page, 38100, &h_base_options, "true;", 5, error, HOST_ERROR_CAP);
+    check("expired run budget performs no WebSocket Upgrade", !ok && openCalls == 0 && !page->state && !page->ws);
+    HeapFree(GetProcessHeap(), 0, page);
+    openAdvance = 0; openExitClient = FALSE; targetFixture = FALSE; h_client_pid = 0; h_duration = 0;
 }
 
 static void prepare_stop_fixture(DWORD mode) {
@@ -321,6 +411,8 @@ void __stdcall InjectionTestMain(void) {
     check("script exception falls back to runtime", run_replies(L"script", 0, 0, 3, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     test_owned_target_refresh();
+    test_http_deadline_budget();
+    test_upgrade_deadline_budget();
     test_normal_stop_cancellation();
     test_config_write_conflict();
     {

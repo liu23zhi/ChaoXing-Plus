@@ -1,4 +1,28 @@
 /* Private adapter: the session model schedules tasks; only this layer performs I/O. */
+static DWORD h_io_budget(DWORD maximum) {
+    if (h_duration) {
+        DWORD elapsed = GetTickCount() - h_started;
+        DWORD remaining = elapsed < h_duration ? h_duration - elapsed : 0;
+        if (remaining < maximum) maximum = remaining;
+    }
+    return maximum;
+}
+
+static BOOL h_http_get(USHORT port, const char *path, DWORD maximum,
+                       char **body, DWORD *length, WCHAR *error, DWORD errorCap) {
+    DWORD budget = h_io_budget(maximum < 5000 ? maximum : 5000);
+    BOOL ok;
+    if (!budget || !h_operation_active()) {
+        h_error(error, errorCap, L"HTTP operation cancelled at its deadline"); return FALSE;
+    }
+    ok = net_http_get_timeout(port, path, body, length, budget, error, errorCap);
+    if (!h_operation_active()) {
+        net_free(*body); *body = NULL; *length = 0;
+        h_error(error, errorCap, L"HTTP operation cancelled at its deadline"); return FALSE;
+    }
+    return ok;
+}
+
 static BOOL h_send_command(H_NATIVE_PAGE *page, const char *method, const char *params,
                            char **reply, DWORD *replyLength, WCHAR *error, DWORD errorCap) {
     DWORD id = page->nextId++, at = 0, size = (DWORD)h_len(params ? params : "{}") + 256;
@@ -44,8 +68,9 @@ static BOOL h_page_open(H_NATIVE_PAGE *page, USHORT port, const CX_OPTIONS *opti
     BOOL ok = FALSE;
     if (!h_operation_active()) return FALSE;
     if (!h_endpoint_owned(port, options, error, errorCap)) { h_page_close(page); return FALSE; }
-    page->ws = net_ws_open(port, page->websocket, error, errorCap);
+    page->ws = net_ws_open_timeout(port, page->websocket, h_io_budget(5000), error, errorCap);
     if (!page->ws) return FALSE;
+    if (!h_operation_active()) { h_error(error, errorCap, L"WebSocket operation cancelled at its deadline"); goto done; }
     page->state = cx_session_create(page->url, options->injectBlankFrames, h_config_enabled(options));
     if (!page->state) { h_error(error, errorCap, L"out of memory creating page session"); goto done; }
     h_current_page = page; h_task_pending = FALSE; h_current_context = 0;
@@ -173,7 +198,7 @@ static BOOL h_targets_refresh(H_NATIVE_PAGE *pages, USHORT port, const CX_OPTION
         for (i = 0; i < HOST_MAX_PAGES; ++i) h_page_close(&pages[i]);
         goto done;
     }
-    if (!entry || !net_http_get(port, "/json/list", &body, &length, error, errorCap)) goto done;
+    if (!entry || !h_http_get(port, "/json/list", 5000, &body, &length, error, errorCap)) goto done;
     tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * HOST_REPLY_TOKENS);
     if (!tokens) goto done;
     count = jparse(body, (int)length, tokens, HOST_REPLY_TOKENS);
@@ -226,16 +251,40 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     h_report.stopReason = "endpoint-unavailable";
     h_command_timeout = (DWORD)options->bundleTimeoutMs;
     while (h_operation_active() && GetTickCount() - waitStart < (DWORD)options->debugTimeoutMs) {
-        if (h_endpoint_owned(port, options, error, errorCap)
-            && net_http_get(port, "/json/version", &body, &length, error, errorCap)) {
-            ready = h_browser_matches(body, length, options->expectedBrowser);
-            net_free(body); body = NULL;
-            if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
-            break;
+        DWORD elapsed, remaining;
+        if (h_endpoint_owned(port, options, error, errorCap)) {
+            elapsed = GetTickCount() - waitStart;
+            if (elapsed >= (DWORD)options->debugTimeoutMs) break;
+            remaining = (DWORD)options->debugTimeoutMs - elapsed;
+            if (h_http_get(port, "/json/version", remaining, &body, &length, error, errorCap)) {
+                if (GetTickCount() - waitStart >= (DWORD)options->debugTimeoutMs) {
+                    net_free(body); body = NULL; break;
+                }
+                ready = h_browser_matches(body, length, options->expectedBrowser);
+                net_free(body); body = NULL;
+                if (!h_operation_active() || GetTickCount() - waitStart >= (DWORD)options->debugTimeoutMs) { ready = FALSE; break; }
+                if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
+                break;
+            }
         }
-        Sleep(100);
+        elapsed = GetTickCount() - waitStart;
+        if (!h_operation_active() || elapsed >= (DWORD)options->debugTimeoutMs) break;
+        remaining = h_io_budget((DWORD)options->debugTimeoutMs - elapsed);
+        if (remaining) Sleep(remaining < 100 ? remaining : 100);
     }
-    if (!ready) { h_error(error, errorCap, L"CXExam CDP endpoint did not become ready before its deadline"); goto done; }
+    if (!ready) {
+        if (h_client_pid && !proc_alive(h_client_pid)) {
+            h_report.stopReason = "client-exit-before-endpoint";
+            h_error(error, errorCap, L"Owned client exited before the CDP endpoint became ready");
+        } else if (h_duration && GetTickCount() - h_started >= h_duration) {
+            h_report.stopReason = "duration-before-endpoint";
+            h_error(error, errorCap, L"Run duration elapsed before the CDP endpoint became ready");
+        } else {
+            h_report.stopReason = "endpoint-unavailable";
+            h_error(error, errorCap, L"CXExam CDP endpoint did not become ready before its deadline");
+        }
+        goto done;
+    }
     do {
         DWORD now = GetTickCount();
         h_current_page = NULL; h_task_pending = FALSE;

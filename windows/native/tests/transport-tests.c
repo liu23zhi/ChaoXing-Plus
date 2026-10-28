@@ -82,6 +82,31 @@ static DWORD WINAPI write_controls(void *context) {
     }
     return 0;
 }
+static void test_upgrade_zero_deadline(void) {
+    SOCKET listener;
+    struct sockaddr_in address;
+    int size = sizeof(address);
+    DWORD started, elapsed;
+    char url[100], number[11], *out;
+    WCHAR error[256];
+    NET_WS *ws;
+    listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) { check("create Upgrade deadline listener", FALSE); return; }
+    ZeroMemory(&address, sizeof(address));
+    address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener, (struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR
+        || listen(listener, 1) == SOCKET_ERROR
+        || getsockname(listener, (struct sockaddr *)&address, &size) == SOCKET_ERROR) {
+        closesocket(listener); check("bind Upgrade deadline listener", FALSE); return;
+    }
+    decimal(number, ntohs(address.sin_port));
+    out = append(url, "ws://127.0.0.1:"); out = append(out, number); append(out, "/devtools/page/fixture");
+    started = GetTickCount();
+    ws = net_ws_open_timeout(ntohs(address.sin_port), url, 0, error, 256);
+    elapsed = GetTickCount() - started;
+    check("zero Upgrade timeout performs no connection", !ws && elapsed < 50 && socket_ready(listener, FALSE, 0) == 0);
+    net_ws_close(ws); closesocket(listener);
+}
 static void test_deadlines(void) {
     TestPair pair; char *text = NULL; DWORD length = 0, started, elapsed; int result;
     if (!pair_open(&pair)) { check("create timing loopback pair", FALSE); return; }
@@ -203,7 +228,7 @@ void __stdcall TransportTestMain(void) {
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) ExitProcess(2);
     http_get_mode();
-    test_deadlines(); test_frames(); test_poll_fairness(); test_failures();
+    test_upgrade_zero_deadline(); test_deadlines(); test_frames(); test_poll_fairness(); test_failures();
     WSACleanup();
     output(failedChecks ? "PROTOCOL SELF TEST FAIL\n" : "PROTOCOL SELF TEST PASS\n");
     ExitProcess(failedChecks ? 1 : 0);

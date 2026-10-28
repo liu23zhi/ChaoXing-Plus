@@ -12,7 +12,13 @@ typedef struct NET_WS NET_WS;
 /* Initialize Winsock once before using these functions. */
 BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length,
                   WCHAR *error, DWORD errorCap);
+/* timeoutMs bounds connect, send and receive together; zero fails without I/O. */
+BOOL net_http_get_timeout(USHORT port, const char *path, char **body, DWORD *length,
+                          DWORD timeoutMs, WCHAR *error, DWORD errorCap);
 NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap);
+/* One total budget includes connect, upgrade send, receive and validation; zero does no I/O. */
+NET_WS *net_ws_open_timeout(USHORT port, const char *url, DWORD timeoutMs,
+                            WCHAR *error, DWORD errorCap);
 BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length,
                       WCHAR *error, DWORD errorCap);
 /* 1: complete text message, 0: timeout, -1: closed or failed. */

@@ -67,7 +67,7 @@ static char *append(char *out, const char *text) {
     return out;
 }
 
-static SOCKET open_loopback(USHORT port, WCHAR *error, DWORD errorCap) {
+static SOCKET open_loopback_timeout(USHORT port, DWORD timeoutMs, WCHAR *error, DWORD errorCap) {
     SOCKET sock;
     struct sockaddr_in address;
     u_long nonblocking = 1;
@@ -75,7 +75,7 @@ static SOCKET open_loopback(USHORT port, WCHAR *error, DWORD errorCap) {
     struct timeval timeout;
     int result, code, codeLength;
     DWORD ioTimeout = 2000;
-    if (!port) { set_error(error, errorCap, L"Invalid loopback port."); return INVALID_SOCKET; }
+    if (!port || !timeoutMs) { set_error(error, errorCap, L"Invalid loopback port or expired deadline."); return INVALID_SOCKET; }
     sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) { set_error(error, errorCap, L"socket() failed."); return INVALID_SOCKET; }
     address.sin_family = AF_INET;
@@ -90,7 +90,7 @@ static SOCKET open_loopback(USHORT port, WCHAR *error, DWORD errorCap) {
         if (code != WSAEWOULDBLOCK && code != WSAEINPROGRESS) goto failed;
         FD_ZERO(&writing); FD_ZERO(&errors);
         FD_SET(sock, &writing); FD_SET(sock, &errors);
-        timeout.tv_sec = 2; timeout.tv_usec = 0;
+        timeout.tv_sec = (long)(timeoutMs / 1000); timeout.tv_usec = (long)((timeoutMs % 1000) * 1000);
         result = select(0, NULL, &writing, &errors, &timeout);
         if (result <= 0 || FD_ISSET(sock, &errors)) goto failed;
         code = 0; codeLength = sizeof(code);
@@ -105,16 +105,6 @@ failed:
     closesocket(sock);
     set_error(error, errorCap, L"Loopback connection failed or timed out.");
     return INVALID_SOCKET;
-}
-
-static BOOL send_all(SOCKET sock, const BYTE *data, DWORD length) {
-    DWORD sent = 0;
-    while (sent < length) {
-        int count = send(sock, (const char *)data + sent, (int)(length - sent), 0);
-        if (count <= 0) return FALSE;
-        sent += (DWORD)count;
-    }
-    return TRUE;
 }
 
 static DWORD header_end(const BYTE *data, DWORD length) {
@@ -161,12 +151,21 @@ static BOOL header_has_token(const char *headers, DWORD length, const char *key,
     return FALSE;
 }
 
-BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length,
-                  WCHAR *error, DWORD errorCap) {
+static int socket_ready(SOCKET socket, BOOL writing, DWORD timeoutMs);
+static BOOL send_ws_all(NET_WS *ws, const BYTE *data, DWORD length, DWORD started, DWORD timeoutMs);
+
+static DWORD io_remaining(DWORD started, DWORD timeoutMs) {
+    DWORD elapsed = GetTickCount() - started;
+    return elapsed < timeoutMs ? timeoutMs - elapsed : 0;
+}
+
+BOOL net_http_get_timeout(USHORT port, const char *path, char **body, DWORD *length,
+                          DWORD timeoutMs, WCHAR *error, DWORD errorCap) {
     SOCKET sock = INVALID_SOCKET;
     BYTE *buffer = NULL;
     char request[512], portText[11], *out;
-    DWORD used = 0, offset = 0, expected = 0, n, i, begin;
+    DWORD used = 0, offset = 0, expected = 0, n, i, begin = GetTickCount(), remaining, sent = 0, requestLength;
+    u_long nonblocking = 1;
     BOOL hasLength = FALSE, okay = FALSE;
     const char *value;
     DWORD valueLength;
@@ -178,24 +177,39 @@ BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length,
     for (i = 0; path[i]; i++) if ((BYTE)path[i] < 0x21 || (BYTE)path[i] > 0x7e) {
         set_error(error, errorCap, L"Invalid HTTP request path."); return FALSE;
     }
-    sock = open_loopback(port, error, errorCap);
+    remaining = io_remaining(begin, timeoutMs);
+    if (!remaining) { set_error(error, errorCap, L"HTTP response deadline exceeded."); return FALSE; }
+    sock = open_loopback_timeout(port, remaining < 2000 ? remaining : 2000, error, errorCap);
     if (sock == INVALID_SOCKET) return FALSE;
+    if (ioctlsocket(sock, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+        set_error(error, errorCap, L"HTTP socket setup failed."); goto done;
+    }
     decimal(portText, port);
     out = request; out = append(out, "GET "); out = append(out, path);
     out = append(out, " HTTP/1.1\r\nHost: 127.0.0.1:"); out = append(out, portText);
     out = append(out, "\r\nConnection: close\r\nAccept: application/json\r\n\r\n");
-    if (!send_all(sock, (const BYTE *)request, (DWORD)(out - request))) {
-        set_error(error, errorCap, L"HTTP send failed."); goto done;
+    requestLength = (DWORD)(out - request);
+    while (sent < requestLength) {
+        int count;
+        remaining = io_remaining(begin, timeoutMs);
+        if (!remaining) { set_error(error, errorCap, L"HTTP response deadline exceeded."); goto done; }
+        count = send(sock, request + sent, (int)(requestLength - sent), 0);
+        if (count > 0) { sent += (DWORD)count; continue; }
+        if (count == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK
+            && socket_ready(sock, TRUE, remaining) > 0) continue;
+        set_error(error, errorCap, L"HTTP send failed or timed out."); goto done;
     }
     buffer = (BYTE *)HeapAlloc(GetProcessHeap(), 0, BODY_LIMIT + HEADER_LIMIT + 1);
     if (!buffer) { set_error(error, errorCap, L"Out of memory."); goto done; }
-    begin = GetTickCount();
     for (;;) {
         int received;
-        if (GetTickCount() - begin > 5000) { set_error(error, errorCap, L"HTTP response deadline exceeded."); goto done; }
+        remaining = io_remaining(begin, timeoutMs);
+        if (!remaining) { set_error(error, errorCap, L"HTTP response deadline exceeded."); goto done; }
         if (offset && hasLength && used - offset >= expected) break;
         if (used >= BODY_LIMIT + HEADER_LIMIT) { set_error(error, errorCap, L"HTTP response exceeds limit."); goto done; }
+        if (socket_ready(sock, FALSE, remaining) <= 0) { set_error(error, errorCap, L"HTTP receive failed or timed out."); goto done; }
         received = recv(sock, (char *)buffer + used, (int)(BODY_LIMIT + HEADER_LIMIT - used), 0);
+        if (received == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
         if (received == SOCKET_ERROR) { set_error(error, errorCap, L"HTTP receive failed or timed out."); goto done; }
         if (!received) {
             if (!offset || (hasLength && used - offset != expected)) { set_error(error, errorCap, L"Truncated HTTP response."); goto done; }
@@ -230,15 +244,26 @@ BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length,
         }
         if (offset && used - offset > BODY_LIMIT) { set_error(error, errorCap, L"HTTP body exceeds 8 MiB."); goto done; }
     }
+    if (!io_remaining(begin, timeoutMs)) { set_error(error, errorCap, L"HTTP response deadline exceeded."); goto done; }
     n = hasLength ? expected : used - offset;
     *body = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
     if (!*body) { set_error(error, errorCap, L"Out of memory."); goto done; }
     copy_bytes(*body, buffer + offset, n);
-    (*body)[n] = 0; *length = n; okay = TRUE;
+    (*body)[n] = 0;
+    if (!io_remaining(begin, timeoutMs)) {
+        net_free(*body); *body = NULL;
+        set_error(error, errorCap, L"HTTP response deadline exceeded."); goto done;
+    }
+    *length = n; okay = TRUE;
 done:
     if (sock != INVALID_SOCKET) closesocket(sock);
     net_free(buffer);
     return okay;
+}
+
+BOOL net_http_get(USHORT port, const char *path, char **body, DWORD *length,
+                  WCHAR *error, DWORD errorCap) {
+    return net_http_get_timeout(port, path, body, length, 5000, error, errorCap);
 }
 
 static DWORD base64(char *out, const BYTE *bytes, DWORD count) {
@@ -292,13 +317,15 @@ static BOOL websocket_path(USHORT port, const char *url, const char **path) {
     return TRUE;
 }
 
-NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) {
+NET_WS *net_ws_open_timeout(USHORT port, const char *url, DWORD timeoutMs,
+                            WCHAR *error, DWORD errorCap) {
     NET_WS *ws;
     const char *path, *value;
-    DWORD valueLength, offset = 0, begin;
+    DWORD valueLength, offset = 0, begin = GetTickCount(), remaining;
     char *request = NULL, *out, portText[11], key[25], expectedAccept[29];
     BYTE nonce[16];
     u_long nonblocking = 1;
+    if (!timeoutMs) { set_error(error, errorCap, L"WebSocket upgrade deadline exceeded."); return NULL; }
     if (!url || !websocket_path(port, url, &path)) { set_error(error, errorCap, L"Rejected non-loopback or mismatched WebSocket URL."); return NULL; }
     ws = (NET_WS *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NET_WS));
     if (!ws) { set_error(error, errorCap, L"Out of memory."); return NULL; }
@@ -313,19 +340,30 @@ NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) 
     ws->message = (BYTE *)HeapAlloc(GetProcessHeap(), 0, BODY_LIMIT + 1);
     request = (char *)HeapAlloc(GetProcessHeap(), 0, 2600);
     if (!ws->rx || !ws->message || !request) { set_error(error, errorCap, L"Out of memory."); goto failed; }
-    ws->socket = open_loopback(port, error, errorCap);
+    remaining = io_remaining(begin, timeoutMs);
+    if (!remaining) { set_error(error, errorCap, L"WebSocket upgrade deadline exceeded."); goto failed; }
+    ws->socket = open_loopback_timeout(port, remaining < 2000 ? remaining : 2000, error, errorCap);
     if (ws->socket == INVALID_SOCKET) goto failed;
+    if (ioctlsocket(ws->socket, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+        set_error(error, errorCap, L"Cannot enable nonblocking WebSocket I/O."); goto failed;
+    }
     decimal(portText, port);
     out = request; out = append(out, "GET "); out = append(out, path);
     out = append(out, " HTTP/1.1\r\nHost: 127.0.0.1:"); out = append(out, portText);
     out = append(out, "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: "); out = append(out, key);
     out = append(out, "\r\nSec-WebSocket-Version: 13\r\n\r\n");
-    if (!send_all(ws->socket, (const BYTE *)request, (DWORD)(out - request))) { set_error(error, errorCap, L"WebSocket upgrade send failed."); goto failed; }
-    begin = GetTickCount();
+    if (!send_ws_all(ws, (const BYTE *)request, (DWORD)(out - request), begin, timeoutMs)) {
+        set_error(error, errorCap, L"WebSocket upgrade send failed or timed out."); goto failed;
+    }
     while (!offset) {
         int received;
-        if (ws->rxLength >= HEADER_LIMIT || GetTickCount() - begin > 5000) { set_error(error, errorCap, L"WebSocket upgrade headers exceed limit or deadline."); goto failed; }
+        remaining = io_remaining(begin, timeoutMs);
+        if (!remaining || ws->rxLength >= HEADER_LIMIT) { set_error(error, errorCap, L"WebSocket upgrade headers exceed limit or deadline."); goto failed; }
+        if (socket_ready(ws->socket, FALSE, remaining) <= 0) {
+            set_error(error, errorCap, L"WebSocket upgrade receive failed or timed out."); goto failed;
+        }
         received = recv(ws->socket, (char *)ws->rx + ws->rxLength, (int)(HEADER_LIMIT - ws->rxLength), 0);
+        if (received == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) continue;
         if (received <= 0) { set_error(error, errorCap, L"WebSocket upgrade receive failed."); goto failed; }
         ws->rxLength += (DWORD)received;
         offset = header_end(ws->rx, ws->rxLength);
@@ -339,15 +377,17 @@ NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) 
     }
     ws->rxLength -= offset;
     copy_bytes(ws->rx, ws->rx + offset, ws->rxLength);
-    if (ioctlsocket(ws->socket, FIONBIO, &nonblocking) == SOCKET_ERROR) {
-        set_error(error, errorCap, L"Cannot enable nonblocking WebSocket I/O."); goto failed;
-    }
+    if (!io_remaining(begin, timeoutMs)) { set_error(error, errorCap, L"WebSocket upgrade deadline exceeded."); goto failed; }
     net_free(request);
     return ws;
 failed:
     net_free(request);
     net_ws_close(ws);
     return NULL;
+}
+
+NET_WS *net_ws_open(USHORT port, const char *url, WCHAR *error, DWORD errorCap) {
+    return net_ws_open_timeout(port, url, 5000, error, errorCap);
 }
 
 static int socket_ready(SOCKET socket, BOOL writing, DWORD timeoutMs) {

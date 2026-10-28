@@ -18,8 +18,8 @@ test('native host sources expose ordinary auditable execution boundaries', async
   ]);
   const host = main + adapter;
   assert.match(host, /proc_launch\s*\(/);
-  assert.match(host, /net_http_get\s*\(/);
-  assert.match(host, /net_ws_open\s*\(/);
+  assert.match(host, /net_http_get_timeout\s*\(/);
+  assert.match(host, /net_ws_open_timeout\s*\(/);
   assert.match(host, /Runtime\.evaluate/);
   assert.ok(/h_collect_page_diagnostics\(page\)/.test(host), 'native host must sample page diagnostics after a top-level bundle');
   assert.ok(/static void h_collect_page_diagnostics\(/.test(host), 'native host must define the page diagnostics collector');
@@ -51,6 +51,18 @@ test('compiled native injection honors strategy order, retry limits and unique r
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /NATIVE INJECTION TESTS PASS/);
+  for (const regression of [
+    'HTTP transport receives only the remaining run budget',
+    'late HTTP response is discarded at the run deadline',
+    'expired run budget performs no HTTP request',
+    'late version response cannot pass the endpoint deadline',
+    'run expiry before endpoint has a distinct stop reason',
+    'owned client exit before endpoint is not reported as timeout',
+    'WebSocket Upgrade receives only the remaining run budget',
+    'late Upgrade leaves no session or CDP command',
+    'client exit during Upgrade leaves no session or CDP command',
+    'expired run budget performs no WebSocket Upgrade'
+  ]) assert.ok(result.stdout.includes(`PASS ${regression}`), result.stdout);
 });
 
 test('native host build output is not treated as a checked-in artifact', async () => {
