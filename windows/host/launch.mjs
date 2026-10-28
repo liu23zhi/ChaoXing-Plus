@@ -51,15 +51,20 @@ export async function isElevated() {
   }
 }
 
-export async function relaunchElevated({ scriptPath, args, cwd }) {
-  const nodeExecutable = process.execPath;
-  const argumentList = [scriptPath, ...args, '--elevated'].map(psQuote).join(',');
-  const command = [
+export function buildElevatedRelaunchCommand({ scriptPath, args, cwd, nodeExecutable = process.execPath }) {
+  // Start-Process joins array items without Win32 quoting, losing JSON and paths.
+  const quoteArgument = (value) => '"' + String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"';
+  const argumentList = [scriptPath, ...args, '--elevated'].map(quoteArgument).join(' ');
+  return [
     `Start-Process -FilePath ${psQuote(nodeExecutable)}`,
-    `-ArgumentList @(${argumentList})`,
+    `-ArgumentList ${psQuote(argumentList)}`,
     `-WorkingDirectory ${psQuote(cwd)}`,
     '-Verb RunAs -WindowStyle Normal'
   ].join(' ');
+}
+
+export async function relaunchElevated(options) {
+  const command = buildElevatedRelaunchCommand(options);
   await runPowerShell(command, { timeoutMs: 20000 });
 }
 
