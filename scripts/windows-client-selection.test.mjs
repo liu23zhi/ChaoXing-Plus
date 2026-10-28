@@ -37,6 +37,48 @@ const candidates = [
   { path: 'D:\\Exam32\\CXExam.exe', machine: 0x014c }
 ];
 
+test('Windows 无参数入口在已保存客户端路径和交互终端下仍显示 GUI', async () => {
+  const stored = { clientPath: 'C:\\Configured\\CXExam.exe', ui: 'auto' };
+  const startup = parseHostArgs([], { startup: true, platform: 'win32' });
+  const options = applyHostOptionLayers(startup, stored);
+  const deps = makeDeps({ candidates, stdinIsTTY: true, stdoutIsTTY: true });
+  assert.equal(options.ui, 'gui');
+  assert.equal(options.clientPath, '');
+  assert.deepEqual(startup.rawArgs, ['--ui', 'gui']);
+  assert.equal(await resolveClientSelection(options, stored, deps), candidates[1].path);
+  assert.equal(deps.calls.show.length, 1);
+  assert.equal(deps.calls.discover.length, 1);
+});
+
+test('无参数 GUI 取消不会沿用保存路径直接启动', async () => {
+  const stored = { clientPath: 'C:\\Configured\\CXExam.exe' };
+  const options = applyHostOptionLayers(parseHostArgs([], { startup: true, platform: 'win32' }), stored);
+  const deps = makeDeps({ candidates, showResult: { status: 'cancelled' } });
+  await assert.rejects(resolveClientSelection(options, stored, deps), /已取消客户端选择/u);
+  assert.equal(deps.calls.show.length, 1);
+});
+
+test('GUI 默认仅用于 Windows 真正无参数入口，显式配置与调试参数保留原语义', () => {
+  assert.equal(parseHostArgs([]).ui, 'auto');
+  assert.equal(parseHostArgs([], { startup: true, platform: 'linux' }).ui, 'auto');
+  const argSets = [
+    ['--client-first'], ['--client', 'C:\\Explicit\\CXExam.exe'],
+    ['--ui', 'auto'], ['--config', 'local.json'], ['--help'], ['--self-check'], ['--attach', '9222']
+  ];
+  for (const args of argSets) {
+    const options = parseHostArgs(args, { startup: true, platform: 'win32' });
+    assert.deepEqual(options, parseHostArgs(args), args.join(' '));
+  }
+});
+
+test('UAC 的明确已选路径覆盖配置和内联 JSON 中已完成的重扫请求', () => {
+  for (const request of [{ rescan: true }, { noScanCache: true }]) {
+    const options = applyHostOptionLayers(parseHostArgs(['--client', 'C:\\Selected\\CXExam.exe', '--elevated']), request);
+    assert.equal(options.clientPath, 'C:\\Selected\\CXExam.exe');
+    assert.equal(options.scanClients, false);
+  }
+});
+
 test('显式 --client 在 auto/gui/cli 下均跳过扫描和选择窗口', async () => {
   const clientPath = 'C:\\Explicit\\CXExam.exe';
   for (const ui of ['auto', 'gui', 'cli']) {

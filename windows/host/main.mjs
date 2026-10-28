@@ -374,7 +374,7 @@ async function main() {
   let options;
   let cliOptions;
   try {
-    cliOptions = parseHostArgs(process.argv.slice(2));
+    cliOptions = parseHostArgs(process.argv.slice(2), { startup: true });
     options = cliOptions;
     const optionJson = options.optionsJsonFile
       ? await readOptionalJson(path.resolve(options.optionsJsonFile), '--options-json 配置', { allowMissing: false })
@@ -768,7 +768,7 @@ async function main() {
         }
         logger.warn('[launch] 当前不是管理员，正在通过 UAC 重新启动宿主（会弹出系统确认框）');
         const passthrough = options.rawArgs.filter((argument) => argument !== '--elevated');
-        await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd() });
+        await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd(), selectedClientPath: config.clientPath });
         logger.info('[launch] 已请求管理员实例启动，当前窗口退出');
         await logger.close();
         await finalizeDataLifecycle();

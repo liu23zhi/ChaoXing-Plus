@@ -63,4 +63,8 @@ test('compiled host transfers a 740 launch after cleanup and keeps the selected 
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /NATIVE ELEVATION HOST TESTS PASS/);
+  assert.match(result.stdout, /PASS no-argument entry scans all candidates and opens GUI despite configured client path or CLI mode/);
+  assert.match(result.stdout, /PASS no-argument GUI cancellation cannot launch the recommended configured client/);
+  assert.match(result.stdout, /PASS any user argument preserves configured direct-client selection semantics/);
+  assert.match(result.stdout, /PASS no-argument GUI selection hands off its chosen path while preserving an empty original argv/);
 });

@@ -71,6 +71,7 @@ static CX_AUDIT_REPORT h_report;
 static BOOL h_capture_console;
 static BOOL h_quiet;
 static BOOL h_needs_elevation;
+static BOOL h_default_gui;
 typedef struct H_CONFIG H_CONFIG;
 static H_CONFIG *h_config;
 static char h_instance[64] = "native";
@@ -515,8 +516,9 @@ static BOOL h_selection_space(WCHAR value) {
 static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *result, WCHAR *error, DWORD errorCap) {
     DWORD index = result->recommendedIndex, mode = 0;
     BOOL console = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode);
-    BOOL gui = !options->clientPathSet && !options->clientIndexSet && (options->selectClient || h_equal(options->ui, L"gui")
-        || (h_equal(options->ui, L"auto") && !options->quiet && !options->clientFirst && !console));
+    BOOL gui = (h_default_gui && !options->elevatedClientSet)
+        || (!options->clientPathSet && !options->clientIndexSet && (options->selectClient || h_equal(options->ui, L"gui")
+            || (h_equal(options->ui, L"auto") && !options->quiet && !options->clientFirst && !console)));
     if (gui) {
         SYSTEM_INFO info;
         CX_SELECTION_STATUS status;
@@ -597,7 +599,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     if (!options->attachPortSet) {
         discover.mode = h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL);
         discover.clientPath = options->elevatedClientSet ? options->elevatedClientPath
-            : (options->clientPathSet ? options->clientPath : NULL);
+            : (!h_default_gui && options->clientPathSet ? options->clientPath : NULL);
         if (options->elevatedClientSet) {
             const WCHAR *path = options->elevatedClientPath;
             DWORD attributes = GetFileAttributesW(path);
@@ -607,7 +609,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
                 h_error(error, errorCap, L"Internal elevated client must be an accessible absolute executable path"); goto done;
             }
         }
-        discover.enumerateAll = options->listClients || options->selectClient || options->clientIndexSet || h_equal(options->ui, L"gui") || (!options->clientFirst && !options->quiet);
+        discover.enumerateAll = h_default_gui || options->listClients || options->selectClient || options->clientIndexSet || h_equal(options->ui, L"gui") || (!options->clientFirst && !options->quiet);
         h_copy(h_scan_cache_path, sizeof(h_scan_cache_path) / sizeof(WCHAR), options->dataDir);
         {
             DWORD length = (DWORD)h_wlen(h_scan_cache_path);
@@ -624,7 +626,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_print_candidates(&result);
             h_report.stopReason = "list-clients"; ok = TRUE; goto done;
         }
-        if (!result.count && options->quiet && options->clientFirst) { h_report.stopReason = "no-client"; ok = TRUE; goto done; }
+        if (!result.count && !h_default_gui && options->quiet && options->clientFirst) { h_report.stopReason = "no-client"; ok = TRUE; goto done; }
         h_report.stopReason = "selection-failed";
         if (options->elevatedClientSet) {
             if (result.count != 1 || !h_copy(h_selected_path, HOST_PATH_CAP, result.items[0].path)) {
@@ -724,6 +726,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     argv = CommandLineToArgvW(GetCommandLineW(), &argc); if (!argv) return 2;
     ok = cx_options_parse_cli(&h_cli_options, argc - 1, argv + 1, h_main_error, HOST_ERROR_CAP);
     if (!ok) { if (!h_cli_options.quiet) h_print(h_main_error); LocalFree(argv); return 2; }
+    /* A double-click must allow choosing a client even when defaults name one. */
+    h_default_gui = argc == 1;
     LocalFree(argv);
     if (h_cli_options.configPathSet && !cx_options_load_file(&h_config_options, h_cli_options.configPath, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }

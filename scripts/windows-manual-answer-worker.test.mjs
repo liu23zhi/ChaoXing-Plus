@@ -82,6 +82,21 @@ before(async () => {
           },
           answerer: async () => {
             state.calls++;
+            if (options.closeInFlight) {
+              const pending = new Promise((done) => { window.releaseSearch = done; });
+              window.searchCompletion = pending.then(() => {
+                state.searchReturned = true;
+                return [{ name: 'fixture', results: [{ question: 'fixture', answer: ' A ' }] }];
+              });
+              // Close in this renderer turn, before the shortened search timer can run.
+              queueMicrotask(() => {
+                state.searchStartedBeforeClose = state.calls === 1 && !worker.isClose;
+                worker.emit('stop');
+                state.pausedBeforeClose = worker.isStop;
+                worker.emit('close');
+              });
+              return window.searchCompletion;
+            }
             if (options.search === 'never') return new Promise(() => {});
             if (options.delay) await new Promise((done) => actualSetTimeout(done, options.delay));
             return [{ name: 'fixture', results: [{ question: 'fixture', answer: ' A ' }] }];
@@ -105,6 +120,7 @@ before(async () => {
           state.done = false;
           window.flow = worker.doWork().then((results) => {
             state.done = true;
+            state.rawResults = results;
             state.results = results.map((result) => ({
               requested: result.requested, resolved: result.resolved,
               finish: result.result?.finish, error: result.error,
@@ -200,13 +216,23 @@ for (const extension of ['ts', 'js']) {
   });
 
   test(`${extension}: close cancels paused in-flight work and suppresses its late answer`, async (t) => {
-    const page = await pageFor(t, extension, { manual: false, delay: 250 });
-    await page.waitForFunction(() => window.state.calls === 1);
-    await page.evaluate(() => { window.worker.emit('stop'); window.worker.emit('close'); });
+    const page = await pageFor(t, extension, { manual: false, closeInFlight: true });
     await page.waitForFunction(() => window.state.done);
-    await page.evaluate(() => new Promise((done) => setTimeout(done, 300)));
-    assert.deepEqual(await page.evaluate(() => ({ applied: window.state.applied, resolved: window.state.results[0].resolved })),
-      { applied: 0, resolved: false });
+    assert.deepEqual(await page.evaluate(() => ({
+      calls: window.state.calls, started: window.state.searchStartedBeforeClose,
+      paused: window.state.pausedBeforeClose, returned: Boolean(window.state.searchReturned),
+      deadlines: window.searchDeadlines, applied: window.state.applied, resolved: window.state.rawResults[0].resolved
+    })), { calls: 1, started: true, paused: true, returned: false, deadlines: 1, applied: 0, resolved: false });
+    await page.evaluate(async () => {
+      window.releaseSearch();
+      await window.searchCompletion;
+      await Promise.resolve();
+    });
+    assert.deepEqual(await page.evaluate(() => ({
+      returned: window.state.searchReturned, applied: window.state.applied,
+      resolved: window.state.rawResults[0].resolved, answers: window.state.rawResults[0].ctx.searchInfos,
+      completedUpdates: window.state.updates.filter((result) => result.resolved).length
+    })), { returned: true, applied: 0, resolved: false, answers: [], completedUpdates: 0 });
   });
 
   test(`${extension}: hook failures finish each question and ordinary automatic answers still apply`, async (t) => {

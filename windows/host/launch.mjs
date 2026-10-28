@@ -4,6 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { validateLaunchPort } from './options.mjs';
+export { getListenerOwnerPid } from './listener-owner.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -52,7 +53,18 @@ export async function isElevated() {
   }
 }
 
-export function buildElevatedRelaunchCommand({ scriptPath, args, cwd, nodeExecutable = process.execPath }) {
+export function buildElevatedRelaunchCommand({ scriptPath, args, cwd, selectedClientPath, nodeExecutable = process.execPath }) {
+  if (selectedClientPath) {
+    const selectionValues = new Set(['--client', '--client-index', '--scan-mode']);
+    const selectionFlags = new Set(['--client-first', '--scan-clients', '--select-client', '--list-clients', '--rescan', '--no-scan-cache', '--scan-all', '--no-scan-all', '--elevated']);
+    const resumed = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (selectionValues.has(args[index])) index += 1;
+      else if (!selectionFlags.has(args[index])) resumed.push(args[index]);
+    }
+    // Carry the actual selection across UAC instead of reopening the selector or reapplying its index.
+    args = [...resumed, '--client', selectedClientPath];
+  }
   // Start-Process joins array items without Win32 quoting, losing JSON and paths.
   const quoteArgument = (value) => '"' + String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"';
   const argumentList = [scriptPath, ...args, '--elevated'].map(quoteArgument).join(' ');
@@ -117,18 +129,6 @@ export async function listProcessIdsByName(imageName) {
     return output.split(',').map((item) => Number.parseInt(item.trim(), 10)).filter((value) => Number.isInteger(value));
   } catch {
     return [];
-  }
-}
-
-export async function getListenerOwnerPid(port) {
-  try {
-    const output = await runPowerShell(
-      `$conn = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($conn) { $conn.OwningProcess } else { '' }`
-    );
-    const pid = Number.parseInt(output, 10);
-    return Number.isInteger(pid) ? pid : null;
-  } catch {
-    return null;
   }
 }
 

@@ -14,6 +14,7 @@ LPWSTR WINAPI test_command_line(void);
 #define cx_dpi_begin test_dpi_begin
 #define cx_dpi_restore test_dpi_restore
 #define cx_select_client test_selection
+#define cx_options_load_default test_load_default
 #define cx_audit_write_report test_report
 #define GetFileAttributesW test_attributes
 #define GetCommandLineW test_command_line
@@ -34,6 +35,14 @@ static DWORD dpiBegins, dpiRestores, stopped, sequence, dpiAt, launchAt, restore
 static BOOL dpiActive, dpiBeginAllowed = TRUE, dpiRestoreAllowed = TRUE;
 static DWORD processChecks, existingCount;
 static BOOL inspectionAllowed = TRUE;
+static const char *defaultJson;
+static BOOL selectionCancelled, scannedFullCandidates, emptyCandidates;
+static DWORD expectedRestartArgc = 5;
+
+BOOL test_load_default(CX_OPTIONS *options, const WCHAR *exePath, WCHAR *error, DWORD cap) {
+    (void)exePath;
+    return !defaultJson || cx_options_apply_json_utf8(options, defaultJson, h_len(defaultJson), error, cap);
+}
 
 BOOL test_check_instances(const WCHAR *path, DWORD *count, WCHAR *error, DWORD cap) {
     (void)path; ++processChecks; *count = inspectionAllowed ? existingCount : 0;
@@ -58,9 +67,9 @@ BOOL test_elevation_query(BOOL *elevated) { *elevated = FALSE; return TRUE; }
 BOOL test_restart(const WCHAR *executable, int argc, WCHAR *const *argv,
                   const WCHAR *client, DWORD *exitCode, WCHAR *error, DWORD cap) {
     (void)executable; (void)error; (void)cap; ++restartCalls;
-    if (h_audit || h_config || h_diagnostics || reports || dpiActive || argc != 5
-        || lstrcmpW(argv[0], L"--select-client") || lstrcmpW(argv[4], L"child-report.json")
-        || lstrcmpW(client, L"D:\\用户选定 客户端\\CXExam.exe")) ExitProcess(4);
+    if (h_audit || h_config || h_diagnostics || reports || dpiActive || argc != (int)expectedRestartArgc
+        || (argc && (lstrcmpW(argv[0], L"--select-client") || lstrcmpW(argv[4], L"child-report.json")))
+        || (argc && lstrcmpW(client, L"D:\\用户选定 客户端\\CXExam.exe"))) ExitProcess(4);
     *exitCode = restartCancelled ? 3 : 37; return !restartCancelled;
 }
 
@@ -69,6 +78,8 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
                          WCHAR *error, DWORD cap) {
     const WCHAR *path = options->clientPath ? options->clientPath : L"C:\\candidate\\CXExam.exe";
     (void)error; (void)cap; ++scans;
+    scannedFullCandidates = !options->clientPath && options->enumerateAll;
+    if (emptyCandidates) return TRUE;
     result->items = (CX_CLIENT_CANDIDATE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLIENT_CANDIDATE));
     if (!result->items) return FALSE;
     result->count = result->capacity = 1;
@@ -80,6 +91,7 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
 CX_SELECTION_STATUS test_selection(const CX_DISCOVERY_RESULT *result, BOOL hostIs32Bit,
                                    WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
     (void)result; (void)hostIs32Bit; (void)error; (void)cap; ++selections;
+    if (selectionCancelled) return CX_SELECTION_CANCELLED;
     return h_copy(out, outCap, L"D:\\用户选定 客户端\\CXExam.exe") ? CX_SELECTION_SELECTED : CX_SELECTION_ERROR;
 }
 BOOL test_bindable(USHORT port, WCHAR *error, DWORD cap) { (void)port; (void)error; (void)cap; return TRUE; }
@@ -112,6 +124,7 @@ static void reset(void) {
     dpiBegins = dpiRestores = stopped = sequence = dpiAt = launchAt = restoreAt = 0;
     dpiActive = FALSE; dpiBeginAllowed = dpiRestoreAllowed = TRUE;
     processChecks = existingCount = 0; inspectionAllowed = TRUE;
+    defaultJson = NULL; selectionCancelled = scannedFullCandidates = emptyCandidates = FALSE; expectedRestartArgc = 5;
 }
 void __stdcall ElevationHostTestMain(void) {
     BOOL result;
@@ -186,6 +199,42 @@ void __stdcall ElevationHostTestMain(void) {
     reset(); commandLineFixture = L"host.exe --self-check --dpi-aware --quiet";
     check(HostWinMain(NULL, NULL, NULL, 0) == 0 && !dpiBegins && !launches && !processChecks,
         "self-check never creates a DPI override or checks for running client conflicts");
+    reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"ui\":\"cli\",\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && scans == 1 && selections == 1 && launches == 1
+        && scannedFullCandidates && !lstrcmpW(launchedPath, L"D:\\用户选定 客户端\\CXExam.exe"),
+        "no-argument entry scans all candidates and opens GUI despite configured client path or CLI mode");
+    reset(); defaultJson = "{\"clientFirst\":true,\"ui\":\"cli\",\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; selectionCancelled = TRUE; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 3 && scans == 1 && selections == 1 && !launches
+        && scannedFullCandidates && !restartCalls,
+        "no-argument GUI cancellation cannot launch the recommended configured client");
+    reset(); defaultJson = "{\"clientFirst\":true,\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; emptyCandidates = selectionCancelled = TRUE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 3 && scans == 1 && selections == 1 && !launches
+        && scannedFullCandidates && !restartCalls,
+        "no-argument entry opens GUI browsing even when a quiet configured scan has no candidates");
+    reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --quiet"; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && scans == 1 && !selections && launches == 1
+        && !lstrcmpW(launchedPath, L"C:\\Configured\\CXExam.exe"),
+        "any user argument preserves configured direct-client selection semantics");
+    reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --client D:\\Explicit\\CXExam.exe --quiet"; launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && scans == 1 && !selections && launches == 1
+        && !lstrcmpW(launchedPath, L"D:\\Explicit\\CXExam.exe"),
+        "explicit client arguments retain direct launch without GUI");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; expectedRestartArgc = 0;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 37 && scans == 1 && selections == 1
+        && launches == 1 && restartCalls == 1 && scannedFullCandidates
+        && !lstrcmpW(h_selected_path, L"D:\\用户选定 客户端\\CXExam.exe"),
+        "no-argument GUI selection hands off its chosen path while preserving an empty original argv");
+    reset(); testOptions.elevated = TRUE; testOptions.elevatedClientSet = TRUE;
+    h_copy(testOptions.elevatedClientPath, 32768, L"D:\\原始选择\\CXExam.exe");
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && launches == 1 && !selections
+        && !lstrcmpW(launchedPath, testOptions.elevatedClientPath),
+        "verified elevated client selection bypasses a no-argument GUI policy without reopening it");
     h_print_utf8(failures ? "NATIVE ELEVATION HOST TESTS FAIL\n" : "NATIVE ELEVATION HOST TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);
 }

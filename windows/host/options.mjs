@@ -311,7 +311,7 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
   for (const [jsonKey, optionKey] of Object.entries(JSON_OPTION_KEYS)) {
     if (selectedByCli && selectionKeys.has(optionKey)) continue;
     if (scanSelectionByCli && optionKey === 'clientPath') continue;
-    if (selectedByCli === 'clientPath' && ['scanMode', 'scanAll'].includes(optionKey)) continue;
+    if (selectedByCli === 'clientPath' && ['scanMode', 'scanAll', 'rescan', 'noScanCache'].includes(optionKey)) continue;
     if (!Object.prototype.hasOwnProperty.call(value, jsonKey) || cliKeys.has(optionKey)) continue;
     const raw = value[jsonKey];
     switch (optionKey) {
@@ -514,7 +514,9 @@ function validateClientSelectionOptions(options) {
   }
 }
 
-export function parseHostArgs(argv) {
+export function parseHostArgs(argv, { startup = false, platform = process.platform } = {}) {
+  // Keep the interactive entry choice explicit through configuration merging and UAC restart.
+  if (startup && platform === 'win32' && argv.length === 0) argv = ['--ui', 'gui'];
   const options = {
     rawArgs: argv.slice(),
     configPath: '',

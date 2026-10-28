@@ -349,6 +349,51 @@ test('普通启动流程校验有效 PE 后能到达 spawnClient，不启动真�
   }
 });
 
+test('Windows 无参数 main 入口先选择 GUI，UAC 接续传递实际选择且不启动客户端', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-default-gui-'));
+  const configPath = path.join(directory, 'config.json');
+  const selectedClientPath = path.join(directory, 'CXExam.exe');
+  await fs.writeFile(configPath, JSON.stringify({ clientPath: selectedClientPath, ui: 'auto', noDiskWrite: true, quiet: true }), 'utf8');
+  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const source = `
+    import { mock } from 'node:test';
+    import assert from 'node:assert/strict';
+    const config = await import(${JSON.stringify(configUrl)});
+    const launch = await import(${JSON.stringify(launchUrl)});
+    const selected = ${JSON.stringify(selectedClientPath)};
+    mock.module(${JSON.stringify(configUrl)}, { namedExports: { ...config, defaultConfigPath: () => ${JSON.stringify(configPath)} } });
+    mock.module(${JSON.stringify(selectionUrl)}, { namedExports: {
+      resolveClientSelection: async (options) => {
+        assert.equal(options.ui, 'gui');
+        assert.equal(options.clientPath, '');
+        return selected;
+      }
+    } });
+    mock.module(${JSON.stringify(launchUrl)}, { namedExports: {
+      ...launch, isElevated: async () => false,
+      relaunchElevated: async (options) => {
+        assert.deepEqual(options.args, ['--ui', 'gui']);
+        assert.equal(options.selectedClientPath, selected);
+        console.log('NO_ARGS_GUI_HANDOFF_CONFIRMED');
+      },
+      spawnClient() { throw new Error('No client may be started by this test'); }
+    } });
+    process.argv = [process.execPath, ${JSON.stringify(mainUrl)}];
+    await import(${JSON.stringify(mainUrl)});
+  `;
+  try {
+    const result = await runCommand(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /NO_ARGS_GUI_HANDOFF_CONFIRMED/u);
+    assert.deepEqual(await fs.readdir(directory), ['config.json']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('config 只持久化共享键并保留默认结构', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-config-'));
   const filePath = path.join(directory, 'config.json');
