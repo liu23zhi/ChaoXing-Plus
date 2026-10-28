@@ -143,11 +143,19 @@ function readPort(value, name, allowZero = false) {
   return parsed;
 }
 
+export function validateLaunchPort(value, name = '--port') {
+  const parsed = readBoundedInteger(value, name, 0, 65535);
+  if (parsed !== 0 && (parsed < 1024 || parsed > 65534)) {
+    throw new Error(`参数 ${name} 的 CEF 75 启动端口必须是 0（自动）或 1024 到 65534`);
+  }
+  return parsed;
+}
+
 function readAnswerKey(value) {
   const parts = String(value || '').split('+').map((part) => part.trim()).filter(Boolean);
   const modifiers = new Set(['ctrl', 'control', 'alt', 'shift', 'meta', 'win', 'windows', 'command']);
   const keys = parts.filter((part) => !modifiers.has(part.toLowerCase()));
-  if (keys.length !== 1 || !/^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|arrow(?:up|down|left|right))$/iu.test(keys[0])) {
+  if (keys.length !== 1 || !/^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|(?:arrow)?(?:up|down|left|right))$/iu.test(keys[0])) {
     throw new Error('参数 --answer-key 必须是单个按键或组合键，例如 F8 或 Ctrl+Shift+A');
   }
   return parts.join('+');
@@ -206,6 +214,7 @@ export function parseOptionsJson(value) {
 }
 
 const JSON_OPTION_KEYS = {
+  port: 'port',
   clientPath: 'clientPath',
   clientIndex: 'clientIndex',
   clientFirst: 'clientFirst',
@@ -261,6 +270,7 @@ const JSON_OPTION_KEYS = {
 };
 
 const CLI_OPTION_KEYS = {
+  '--port': 'port',
   '--client': 'clientPath', '--client-index': 'clientIndex', '--client-first': 'clientFirst',
   '--scan-clients': 'scanClients', '--list-clients': 'listClients', '--select-client': 'selectClient', '--scan-mode': 'scanMode',
   '--scan-all': 'scanMode', '--no-scan-all': 'scanMode', '--ui': 'ui', '--rescan': 'rescan',
@@ -305,6 +315,7 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
     if (!Object.prototype.hasOwnProperty.call(value, jsonKey) || cliKeys.has(optionKey)) continue;
     const raw = value[jsonKey];
     switch (optionKey) {
+      case 'port': next.port = readBoundedInteger(raw, 'options-json.port', 0, 65535); break;
       case 'scanMode':
         if (jsonKey === 'scanAll') {
           if (Object.prototype.hasOwnProperty.call(value, 'scanMode')) break;
@@ -386,6 +397,7 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
 
 function finalizeHostOptions(options) {
   const next = { ...options };
+  if (next.port !== null && next.port !== undefined) next.port = validateLaunchPort(next.port);
   if (next.noDiskWrite) {
     next.logFileEnabled = false;
     next.noDiagnose = true;
@@ -634,7 +646,7 @@ export function parseHostArgs(argv) {
       case '--delete-config':
         options.deleteConfig = true;
         break;
-      case '--port': options.port = readPort(readValue(argv, index, argument), argument, true); index += 1; break;
+      case '--port': options.port = readBoundedInteger(readValue(argv, index, argument), argument, 0, 65535); index += 1; break;
       case '--assets': options.assetsDir = readValue(argv, index, argument); index += 1; break;
       case '--duration': options.durationMs = readBoundedInteger(readValue(argv, index, argument), argument, 0, 2147483647); index += 1; break;
       case '--attach': options.attachPort = readPort(readValue(argv, index, argument), argument); index += 1; break;
@@ -693,6 +705,7 @@ export function parseHostArgs(argv) {
     }
   }
   options.cliOptionKeys = new Set(argv.map((argument) => CLI_OPTION_KEYS[argument]).filter(Boolean));
+  if (options.port !== null) options.port = validateLaunchPort(options.port);
   validateClientSelectionOptions(options);
   validateDataLifecycleOptions(options);
   validateWipeOptions(options);

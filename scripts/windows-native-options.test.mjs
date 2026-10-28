@@ -30,7 +30,12 @@ test('compiled native options honor scan aliases and layered client selection', 
     'higher JSON diagnose re-enables diagnostics',
     'nested unsupported JSON capability is rejected',
     'normal mode and disabled optional capabilities preserve shared settings',
-    'rejected nested capability leaves previously merged options unchanged'
+    'rejected nested capability leaves previously merged options unchanged',
+    'CEF75 launch port range rejects reserved and excluded values',
+    'attach retains generic TCP port limits',
+    'CLI valid launch port overrides lower unsupported JSON port',
+    'native F1 through F24 shortcuts remain accepted',
+    'native function shortcuts reject leading zeroes and out-of-range keys'
   ]) {
     assert.ok(result.stdout.includes(`PASS ${regression}`), `missing compiled regression: ${regression}`);
   }
@@ -84,4 +89,49 @@ test('compiled native ordinary JSON and disabled optional capability values rema
   }));
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.deepEqual(JSON.parse(result.stdout)['common.settings.keep'], { enabled: true });
+});
+
+test('compiled native direction shortcuts accept canonical browser keys and legacy aliases', {
+  skip: !host
+}, () => {
+  for (const direction of ['Up', 'Down', 'Left', 'Right']) {
+    for (const key of [direction, `Arrow${direction}`]) {
+      const shortcut = `Ctrl+${key}`;
+      for (const args of [['--answer-key', shortcut], ['--options-json', JSON.stringify({ answerKey: shortcut })]]) {
+        const result = invoke(...args);
+        assert.equal(result.status, 0, `${JSON.stringify(args)}: ${result.stdout}${result.stderr}`);
+        assert.equal(JSON.parse(result.stdout)['common.settings.windows-answer-key'], shortcut);
+      }
+    }
+  }
+});
+
+test('compiled native CEF75 launch port limits apply to CLI and JSON without limiting attach', {
+  skip: !host
+}, () => {
+  for (const port of [0, 1024, 9333, 65534, 1, 1023, 65535]) {
+    const expected = port === 0 || (port >= 1024 && port <= 65534) ? 0 : 2;
+    for (const args of [['--port', String(port)], ['--options-json', JSON.stringify({ port })]]) {
+      const result = invoke(...args);
+      assert.equal(result.status, expected, `${JSON.stringify(args)}: ${result.stdout}${result.stderr}`);
+      if (expected) assert.match(result.stdout, /1024.*65534/u);
+    }
+  }
+  for (const port of [1, 1023, 65535]) {
+    const result = invoke('--attach', String(port));
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
+  assert.equal(invoke('--options-json', '{"port":1023}', '--port', '9333').status, 0);
+});
+
+test('compiled native function shortcuts reject leading zeros without losing F1 through F24', {
+  skip: !host
+}, () => {
+  for (const key of ['F1', 'F8', 'F24', 'F01', 'F08', 'F00000008', 'F25']) {
+    const expected = ['F1', 'F8', 'F24'].includes(key) ? 0 : 2;
+    for (const args of [['--answer-key', key], ['--options-json', JSON.stringify({ answerKey: key })]]) {
+      const result = invoke(...args);
+      assert.equal(result.status, expected, `${JSON.stringify(args)}: ${result.stdout}${result.stderr}`);
+    }
+  }
 });

@@ -33,6 +33,44 @@ async function openGenerator() {
   return page;
 }
 
+test('两种宿主均可生成方向键规范名称和兼容别名', async () => {
+  const page = await openGenerator();
+  try {
+    for (const hostType of ['node', 'native']) {
+      await page.select('#hostType', hostType);
+      for (const direction of ['Up', 'Down', 'Left', 'Right']) {
+        for (const key of [direction, `Arrow${direction}`]) {
+          const output = await page.evaluate((answerKey) => {
+            const generator = window.__CX_PARAMETER_GENERATOR__;
+            const state = { ...generator.state(), nativePath: 'C:\\Tools\\chaoxing_plus.exe', answerKey };
+            return { errors: generator.validate(state).errors, command: generator.commandFor(state) };
+          }, `Ctrl+${key}`);
+          assert.deepEqual(output.errors, [], `${hostType}: ${key}`);
+          assert.ok(output.command.args.includes(`Ctrl+${key}`), `${hostType}: ${key}`);
+          if (hostType === 'node') assert.equal(parseHostArgs(output.command.args).answerKey, `Ctrl+${key}`);
+        }
+      }
+    }
+  } finally { await page.close(); }
+});
+
+test('两种宿主的内联 JSON 均遵守 CEF75 启动端口边界', async () => {
+  const page = await openGenerator();
+  try {
+    for (const hostType of ['node', 'native']) {
+      for (const port of [0, 1024, 9333, 65534, 1, 1023, 65535]) {
+        const result = await page.evaluate(({ hostType, port }) => {
+          const generator = window.__CX_PARAMETER_GENERATOR__;
+          const state = { ...generator.state(), hostType, nativePath: 'C:\\Tools\\chaoxing_plus.exe', optionsJson: JSON.stringify({ port }) };
+          return generator.validate(state);
+        }, { hostType, port });
+        if (port === 0 || (port >= 1024 && port <= 65534)) assert.deepEqual(result.errors, [], `${hostType}: ${port}`);
+        else assert.ok(result.errors.some((error) => /1024.*65534/u.test(error)), `${hostType}: ${port}: ${result.errors}`);
+      }
+    }
+  } finally { await page.close(); }
+});
+
 test('生成器可切换原生单文件入口并直接导出 EXE 命令，预设保留宿主选择', async () => {
   const page = await openGenerator();
   assert.equal(await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.state().hostType), 'node');
@@ -767,6 +805,9 @@ test('生成器归一化快捷键别名，修改设计预设后仍不降级输�
 
   await setField('selfDestructKey', "node.value = 'Ctrl+Shift+A';");
   await setField('answerKey', "node.value = 'Control+Shift+A';");
+  assert.match(await page.$eval('#status', (node) => node.textContent), /不能与自毁快捷键相同/u);
+  await setField('selfDestructKey', "node.value = 'Ctrl+ArrowUp';");
+  await setField('answerKey', "node.value = 'Ctrl+Up';");
   assert.match(await page.$eval('#status', (node) => node.textContent), /不能与自毁快捷键相同/u);
   await page.click('#reset');
 

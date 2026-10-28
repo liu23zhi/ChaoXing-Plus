@@ -427,7 +427,8 @@ done:
 }
 static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
     USHORT p; WCHAR error[64];
-    if (options && options->portSet && options->port > 0 && options->port <= 65535) {
+    if (options && options->portSet && options->port != 0) {
+        if (options->port < 1024 || options->port > 65534) return FALSE;
         p = (USHORT)options->port;
         if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
         return FALSE;
@@ -694,7 +695,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --inject-blank-frames|--no-inject-blank-frames\n"
             "  --debug-timeout <1000-120000 ms> --bundle-timeout <1000-300000 ms>\n"
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
-            "运行: --execution-mode normal --port <0-65535> --stop-client-on-exit\n"
+            "运行: --execution-mode normal --port <0|1024-65534> --stop-client-on-exit\n"
             "  启动前检查已有 CXExam 进程；请先关闭已有客户端，宿主不会结束它们。\n"
             "  --no-elevate（禁止启动遇到 740 时通过 Windows UAC 重启宿主）\n"
             "  --dpi-aware（启动时临时使用 HIGHDPIAWARE，随后恢复原值；与 no-disk-write/attach 互斥）\n"

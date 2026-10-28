@@ -365,7 +365,7 @@ test('compiled native selected-file hot reload reaches current/new documents and
     const changed = fixtureConfig('external-update');
     changed.answerMode = 'auto';
     changed.panelWidth = 480;
-    changed.port = 1;
+    changed.port = 1024;
     changed.settings[countdownKey] = 17;
     const expected = { [markerKey]: 'external-update', [countdownKey]: 17, [modeKey]: 'manual', [widthKey]: 375 };
     await writeFile(value.configPath, JSON.stringify(changed));
@@ -374,6 +374,9 @@ test('compiled native selected-file hot reload reaches current/new documents and
     await delay(1700);
     await waitConfig(value, value.page, expected);
     await writeFile(value.configPath, JSON.stringify({ ...changed, settings: { ...changed.settings, [markerKey]: 'invalid-typed', [countdownKey]: 'wrong' } }));
+    await delay(1700);
+    await waitConfig(value, value.page, expected);
+    await writeFile(value.configPath, JSON.stringify({ ...changed, port: 1, settings: { ...changed.settings, [markerKey]: 'invalid-port' } }));
     await delay(1700);
     await waitConfig(value, value.page, expected);
     await rm(value.configPath);

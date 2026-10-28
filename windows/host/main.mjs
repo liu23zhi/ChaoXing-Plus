@@ -24,7 +24,7 @@ import {
   waitForDebugEndpoint
 } from './launch.mjs';
 import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, mergeHostConfigLayers } from './config.mjs';
-import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateSupportedJsonOptions } from './options.mjs';
+import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateLaunchPort, validateSupportedJsonOptions } from './options.mjs';
 import { probeClientSelectionWindow } from './selection-window.mjs';
 import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
 import { isCxExamExecutablePath, resolveExplicitClientPath } from './client-discovery.mjs';
@@ -71,7 +71,7 @@ function usage() {
     '  --debug-timeout <ms> 调试端点等待超时（1000-120000）',
     '  --target-poll-interval <ms> CDP target 轮询间隔（250-10000）',
     '  --bundle-timeout <ms> 业务 bundle 执行超时（1000-300000）',
-    '  --port <n>           固定调试端口（0 = 自动选择可绑定端口）',
+    '  --port <n>           CEF 75 调试端口：0 自动选择，或 1024-65534',
     '  --assets <dir>       注入资源目录（默认 dist-windows）',
     '  --duration <ms>      运行指定毫秒后自动退出（测试用）',
     '  --attach <port>      测试/调试：连接已存在的调试端点，不启动、不校验归属',
@@ -327,7 +327,7 @@ function resolveHostConfigPath(options) {
 }
 
 async function resolvePort(config, options, logger) {
-  const configured = options.port !== null ? options.port : config.port;
+  const configured = validateLaunchPort(options.port !== null ? options.port : config.port);
   if (configured && configured > 0) {
     const bindable = await canBindPort(configured);
     if (!bindable.ok) {

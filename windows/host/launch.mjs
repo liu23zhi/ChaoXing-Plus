@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { validateLaunchPort } from './options.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -172,6 +173,8 @@ export async function waitForDebugEndpoint(port, { timeoutMs = 30000, child = nu
 }
 
 export function spawnClient({ exePath, port, logger = () => {} }) {
+  port = validateLaunchPort(port);
+  if (port === 0) throw new Error('启动客户端前必须先选择实际调试端口，不能使用自动端口 0');
   const args = [
     `--remote-debugging-port=${port}`,
     '--remote-debugging-address=127.0.0.1'

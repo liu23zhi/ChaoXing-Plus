@@ -117,11 +117,15 @@ static BOOL cx_shortcut(const WCHAR *value) {
                 cx_token_eq(value + begin, end - begin, L"End") ||
                 cx_token_eq(value + begin, end - begin, L"PageUp") ||
                 cx_token_eq(value + begin, end - begin, L"PageDown") ||
+                cx_token_eq(value + begin, end - begin, L"ArrowUp") ||
+                cx_token_eq(value + begin, end - begin, L"ArrowDown") ||
+                cx_token_eq(value + begin, end - begin, L"ArrowLeft") ||
+                cx_token_eq(value + begin, end - begin, L"ArrowRight") ||
                 cx_token_eq(value + begin, end - begin, L"Up") ||
                 cx_token_eq(value + begin, end - begin, L"Down") ||
                 cx_token_eq(value + begin, end - begin, L"Left") ||
                 cx_token_eq(value + begin, end - begin, L"Right")) base = 1;
-            if (end - begin >= 2 && cx_upper(value[begin]) == L'F') {
+            if (end - begin >= 2 && end - begin <= 3 && cx_upper(value[begin]) == L'F' && value[begin + 1] >= L'1' && value[begin + 1] <= L'9') {
                 for (k = begin + 1; k < end; k++) {
                     if (value[k] < L'0' || value[k] > L'9') break;
                     fnum = fnum * 10 + (value[k] - L'0');
@@ -743,6 +747,7 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (o->panelTop < 0 || o->panelTop > 10000 || o->panelRight < 0 || o->panelRight > 10000 || o->panelWidth < 320 || o->panelWidth > 800) { cx_error(error, errorCap, L"panel dimensions are outside their allowed range"); return FALSE; }
     if (o->answerThreads < 1 || o->answerThreads > 4 || o->answerCountdown < 0 || o->answerCountdown > 3600 || o->answerRetry < 0 || o->answerRetry > 20) { cx_error(error, errorCap, L"answer settings are outside their allowed range"); return FALSE; }
     if (o->injectRetries < 0 || o->injectRetries > 5 || o->debugTimeoutMs < 1000 || o->debugTimeoutMs > 120000 || o->targetPollIntervalMs < 250 || o->targetPollIntervalMs > 10000 || o->bundleTimeoutMs < 1000 || o->bundleTimeoutMs > 300000 || o->port < 0 || o->port > 65535) { cx_error(error, errorCap, L"host settings are outside their allowed range"); return FALSE; }
+    if (o->port != 0 && (o->port < 1024 || o->port > 65534)) { cx_error(error, errorCap, L"CEF75 launch port must be 0 (automatic) or 1024 to 65534"); return FALSE; }
     if (o->answerKey[0] && !cx_shortcut(o->answerKey)) { cx_error(error, errorCap, L"answer-key must contain one base key"); return FALSE; }
     if (o->noDiskWrite) { o->logFileEnabled = FALSE; o->diagnose = FALSE; o->noDiagnose = TRUE; o->reportPath[0] = 0; o->noScanCache = TRUE; }
     return TRUE;

@@ -245,7 +245,7 @@
     var allowedModifiers = { ctrl: true, control: true, alt: true, shift: true, win: true, windows: true, meta: true, command: true };
     var parts = String(value || '').split('+').map(function (part) { return part.trim(); }).filter(Boolean);
     var keys = parts.filter(function (part) { return !allowedModifiers[part.toLowerCase()]; });
-    return keys.length === 1 && /^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|arrow(?:up|down|left|right))$/i.test(keys[0]);
+    return keys.length === 1 && /^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|(?:arrow)?(?:up|down|left|right))$/i.test(keys[0]);
   }
   function canonicalShortcut(value) {
     var modifiers = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', shift: 'shift', win: 'win', windows: 'win', meta: 'win', command: 'win' };
@@ -256,6 +256,7 @@
       if (modifiers[lower]) parts.push(modifiers[lower]);
       else base = lower;
     });
+    if (/^(up|down|left|right)$/.test(base)) base = 'arrow' + base;
     return parts.sort().join('+') + '+' + base;
   }
   function validNativeShortcut(value) {
@@ -269,7 +270,7 @@
         return true;
       }
       bases += 1;
-      return /^(?:[a-z0-9]|f(?:[1-9]|1[0-9]|2[0-4])|space|enter|escape|tab|insert|delete|home|end|pageup|pagedown|up|down|left|right)$/i.test(part);
+      return /^(?:[a-z0-9]|f(?:[1-9]|1[0-9]|2[0-4])|space|enter|escape|tab|insert|delete|home|end|pageup|pagedown|(?:arrow)?(?:up|down|left|right))$/i.test(part);
     }) && bases === 1;
   }
   var NATIVE_PATH_CAP = 1024;
@@ -282,7 +283,6 @@
       if (key === 'retainData' && raw === false || key === 'deleteConfig' && raw === true) errors.push('原生宿主当前不可执行数据清理字段：' + key + '。');
       if (['panelTop', 'panelRight', 'panelWidth', 'clientIndex', 'port', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs', 'answerThreads', 'answerCountdown', 'answerRetry'].indexOf(key) >= 0 && (typeof raw !== 'number' || !Number.isInteger(raw))) errors.push('原生宿主内联 JSON 的 ' + key + ' 必须是整数。');
       if (key === 'clientIndex' && (raw < 1 || raw > 2147483647)) errors.push('原生宿主内联 JSON 的 clientIndex 必须是 1 到 2147483647 的整数。');
-      if (key === 'port' && (raw < 0 || raw > 65535)) errors.push('原生宿主内联 JSON 的 port 必须是 0 到 65535 的整数。');
       if (key === 'answerKey' && (typeof raw !== 'string' || !validNativeShortcut(raw))) errors.push('原生宿主内联 JSON 的 answerKey 格式不支持。');
       if (['panel', 'scanClients'].indexOf(key) >= 0 && typeof raw !== 'boolean') errors.push('原生宿主内联 JSON 的 ' + key + ' 必须是布尔值。');
       if (key === 'assetsDir' && typeof raw !== 'string') errors.push('原生宿主内联 JSON 的 assetsDir 必须是字符串。');
@@ -320,6 +320,7 @@
     return String(value || '').indexOf('--') === 0;
   }
   var JSON_OPTION_KEYS = {
+    port: 'port',
     clientPath: 'clientPath', clientIndex: 'clientIndex', clientFirst: 'clientFirst', listClients: 'listClients', selectClient: 'selectClient',
     scanMode: 'scanMode', scanAll: 'scanMode', ui: 'ui', rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir', expectedBrowser: 'expectedBrowser', injectStrategy: 'injectStrategy', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames', captureConsole: 'captureConsole', debugEndpointTimeoutMs: 'debugEndpointTimeoutMs', targetPollIntervalMs: 'targetPollIntervalMs', bundleTimeoutMs: 'bundleTimeoutMs',
     noDiskWrite: 'noDiskWrite', retainData: 'retainData', deleteConfig: 'deleteConfig',
@@ -408,6 +409,7 @@
         return;
       }
       switch (optionKey) {
+        case 'port': if (!validBoundedInteger(raw, 0, 65535) || Number(raw) !== 0 && (Number(raw) < 1024 || Number(raw) > 65534)) errors.push('内联 JSON 的 CEF 75 启动端口 port 必须是 0（自动）或 1024 到 65534。'); break;
         case 'clientIndex': if (!validBoundedInteger(raw, 1, Number.MAX_SAFE_INTEGER)) errors.push('内联 JSON 的 clientIndex 必须是大于等于 1 的整数。'); break;
         case 'scanMode': if (['common', 'fallback-all', 'all'].indexOf(raw) < 0) errors.push('内联 JSON 的 scanMode 只支持 common、fallback-all 或 all。'); break;
         case 'ui': if (['auto', 'gui', 'cli'].indexOf(raw) < 0) errors.push('内联 JSON 的 ui 只支持 auto、gui 或 cli。'); break;

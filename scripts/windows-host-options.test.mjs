@@ -517,6 +517,41 @@ test('attach 参数与快捷键不合法时直接报错，不得落入普通启�
   assert.equal(parseHostArgs(['--answer-key', 'Ctrl+Shift+A']).answerKey, 'Ctrl+Shift+A');
 });
 
+test('方向键快捷键同时接受页面规范名称与原生旧别名', () => {
+  for (const direction of ['Up', 'Down', 'Left', 'Right']) {
+    for (const key of [direction, `Arrow${direction}`]) {
+      const shortcut = `Ctrl+${key}`;
+      assert.equal(parseHostArgs(['--answer-key', shortcut]).answerKey, shortcut);
+      assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { answerKey: shortcut }).answerKey, shortcut);
+    }
+  }
+});
+
+test('CEF75 普通启动端口只接受自动或 1024 到 65534，attach 保持通用范围', () => {
+  for (const port of [0, 1024, 9333, 65534]) {
+    assert.equal(parseHostArgs(['--port', String(port)]).port, port);
+    assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { port }).port, port);
+  }
+  for (const port of [1, 1023, 65535]) {
+    assert.throws(() => parseHostArgs(['--port', String(port)]), /1024.*65534/u);
+    assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { port }), /1024.*65534/u);
+  }
+  assert.equal(parseHostArgs(['--port', '1023', '--port', '9333']).port, 9333);
+  for (const port of [1, 1023, 65535]) assert.equal(parseHostArgs(['--attach', String(port)]).attachPort, port);
+  assert.equal(applyHostOptionLayers(parseHostArgs(['--port', '9333']), { port: 1023 }).port, 9333);
+  assert.equal(applyHostOptionLayers(parseHostArgs([]), { port: 1023 }, { port: 9333 }).port, 9333);
+});
+
+test('spawnClient 在创建进程前拒绝不支持的 CEF75 端口', async () => {
+  const { spawnClient } = await import('../windows/host/launch.mjs');
+  for (const port of [0, 1, 1023, 65535]) {
+    assert.throws(() => {
+      const result = spawnClient({ exePath: 'must-not-start-CXExam.exe', port });
+      result.child.on('error', () => {});
+    }, /端口/u);
+  }
+});
+
 test('Windows 业务 runtime 使用宿主下发的面板和答题设置', async () => {
   const { readFile } = await import('node:fs/promises');
   const [commonSource, cxSource] = await Promise.all([

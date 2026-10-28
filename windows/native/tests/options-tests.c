@@ -195,10 +195,25 @@ static void test_bounded_shared_merges(void) {
 static void test_shortcuts(void) {
     WCHAR *valid[] = { L"--answer-key", L"Ctrl+Alt+Shift+S" };
     WCHAR *invalid[] = { L"--answer-key", L"Ctrl+A+B" };
+    WCHAR *functionKey[] = { L"--answer-key", NULL };
+    WCHAR *functionKeys[] = { L"F1", L"F8", L"F24", L"F01", L"F08", L"F00000008", L"F25" };
+    const char *functionJson[] = { "{\"answerKey\":\"F1\"}", "{\"answerKey\":\"F8\"}", "{\"answerKey\":\"F24\"}", "{\"answerKey\":\"F01\"}", "{\"answerKey\":\"F08\"}", "{\"answerKey\":\"F00000008\"}", "{\"answerKey\":\"F25\"}" };
+    int i, accepted, validFunctionKeys = 1, rejectedFunctionKeys = 1;
     reset();
     check(cx_options_parse_cli(&baseOptions, 2, valid, errorText, 512) && cx_options_finalize(&baseOptions, errorText, 512), "one base key with modifiers is accepted");
     reset();
     check(!cx_options_parse_cli(&baseOptions, 2, invalid, errorText, 512) || !cx_options_finalize(&baseOptions, errorText, 512), "two base keys are rejected");
+    for (i = 0; i < 7; i++) {
+        reset(); functionKey[1] = functionKeys[i];
+        accepted = cx_options_parse_cli(&baseOptions, 2, functionKey, errorText, 512) && cx_options_finalize(&baseOptions, errorText, 512);
+        if (i < 3) validFunctionKeys = validFunctionKeys && accepted;
+        else rejectedFunctionKeys = rejectedFunctionKeys && !accepted;
+        reset(); accepted = apply(functionJson[i]) && cx_options_finalize(&baseOptions, errorText, 512);
+        if (i < 3) validFunctionKeys = validFunctionKeys && accepted;
+        else rejectedFunctionKeys = rejectedFunctionKeys && !accepted;
+    }
+    check(validFunctionKeys, "native F1 through F24 shortcuts remain accepted");
+    check(rejectedFunctionKeys, "native function shortcuts reject leading zeroes and out-of-range keys");
 }
 
 static void test_invalid_inputs(void) {
@@ -361,11 +376,45 @@ static void test_elevation_options(void) {
         "internal resume preserves original selection flags in a separate CLI field");
 }
 
+static void test_launch_ports(void) {
+    WCHAR *valid[] = { L"0", L"1024", L"9333", L"65534" };
+    WCHAR *invalid[] = { L"1", L"1023", L"65535" };
+    const char *validJson[] = { "{\"port\":0}", "{\"port\":1024}", "{\"port\":9333}", "{\"port\":65534}" };
+    const char *invalidJson[] = { "{\"port\":1}", "{\"port\":1023}", "{\"port\":65535}" };
+    WCHAR *arguments[] = { L"--port", NULL };
+    DWORD i; BOOL rejected = TRUE, attached = TRUE;
+    for (i = 0; i < 4; ++i) {
+        reset(); arguments[1] = valid[i];
+        check(cx_options_parse_cli(&baseOptions, 2, arguments, errorText, 512)
+            && cx_options_finalize(&baseOptions, errorText, 512), "valid CEF75 launch port CLI finalizes");
+        reset(); check(apply(validJson[i]) && cx_options_finalize(&baseOptions, errorText, 512), "valid CEF75 launch port JSON finalizes");
+    }
+    for (i = 0; i < 3; ++i) {
+        reset(); arguments[0] = L"--port"; arguments[1] = invalid[i];
+        rejected = rejected && cx_options_parse_cli(&baseOptions, 2, arguments, errorText, 512)
+            && !cx_options_finalize(&baseOptions, errorText, 512);
+        reset(); rejected = rejected && apply(invalidJson[i]) && !cx_options_finalize(&baseOptions, errorText, 512);
+        reset(); arguments[0] = L"--attach";
+        attached = attached && cx_options_parse_cli(&baseOptions, 2, arguments, errorText, 512)
+            && cx_options_finalize(&baseOptions, errorText, 512);
+    }
+    check(rejected, "CEF75 launch port range rejects reserved and excluded values");
+    check(attached, "attach retains generic TCP port limits");
+    reset(); arguments[0] = L"--port"; arguments[1] = L"9333";
+    check(apply("{\"port\":1023}") && cx_options_parse_cli(&cliOptions, 2, arguments, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.port == 9333,
+        "CLI valid launch port overrides lower unsupported JSON port");
+    reset(); check(apply("{\"port\":65535}") && apply("{\"port\":9333}")
+        && cx_options_finalize(&baseOptions, errorText, 512), "higher JSON valid launch port overrides earlier unsupported value");
+}
+
 void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_nested_unsupported_options(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     test_elevation_options();
     test_dpi_options();
+    test_launch_ports();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;
     ExitProcess(failures ? 1 : 0);
