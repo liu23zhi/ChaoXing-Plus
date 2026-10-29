@@ -317,6 +317,7 @@ static CX_SILENT h_silent;
 static BOOL h_silent_active = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
+static BOOL h_proxy_auto_installed;
 static BOOL h_silent_simulate = FALSE;
 static BOOL h_silent_done = FALSE;
 static CX_CLEANUP_PLAN *h_silent_plan = NULL;
@@ -2116,7 +2117,16 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_report.commandLineInjected = TRUE;
             if (!options->quiet) { h_print(L"auto selected dll-proxy: proxy installed at "); h_print(autoDll); h_print(L"\n"); }
         }
-    }    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
+    }    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy") && !h_pe_section_named(h_selected_path, ".themida")) {
+        if (!options->quiet) {
+            h_print(L"非加壳客户端无需 dll-proxy：它支持命令行开关，请改用默认的 cdp-port\n");
+            h_print(L"（实测 4.1.4 客户端装代理后会在 libcef.dll 内 0xC0000005 崩溃）\n");
+        }
+        h_report.stopReason = "inject-proxy-not-needed";
+        h_exit_code = 4;
+        goto done;
+    }
+    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
         WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
         BOOL dirOk = options->injectProxyDirSet
             ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
@@ -2124,6 +2134,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
                        h_cat(proxyDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
                        GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
+        if (!present) {
+            /* 自动安装：本次运行临时装入，结束后（含失败路径）自动还原。 */
+            if (h_install_proxy(options)) {
+                h_proxy_auto_installed = TRUE;
+                present = TRUE;
+                if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
+            }
+        }
         if (!present) {
             if (!options->quiet) {
                 h_print(L"dll-proxy requires the proxy DLL at ");
@@ -2137,7 +2155,6 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_dll_proxy_mode = TRUE;
         h_report.commandLineInjected = TRUE;
         if (!options->quiet) {
-                h_print(L"注意：实测 dll-proxy 在 CEF 75 客户端上无效（命令行早于 winmm 加载即被读取），仅作研究保留\n");
             h_print(L"dll-proxy: proxy found at ");
             h_print(proxyDll);
             h_print(L"; launching without --remote-debugging-port and letting the proxy append it\n");
@@ -2154,7 +2171,23 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         goto done;
     }
     /* 加壳客户端忽略命令行开关：auto 模式下自动切到 dll-proxy（需代理已安装）。 */
-    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida")) {
+    /* dll-proxy 模式下若客户端目录没有代理，自动安装并在本次运行结束（含错误路径）时还原。 */
+    if (h_dll_proxy_mode) {
+        WCHAR proxyPath[CX_CLEANUP_PATH_CAP];
+        BOOL present = FALSE;
+        if (h_copy(proxyPath, CX_CLEANUP_PATH_CAP, h_selected_path)) {
+            WCHAR dirOnly[CX_CLEANUP_PATH_CAP];
+            DWORD cut = 0, k;
+            for (k = 0; proxyPath[k]; ++k) if (proxyPath[k] == L'\\') cut = k;
+            for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = proxyPath[k];
+            dirOnly[k] = 0;
+            if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) present = TRUE;
+        }
+        if (!present && h_install_proxy(options)) {
+            h_proxy_auto_installed = TRUE;
+            if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
+        }
+    }    if (!options->attachPortSet && !h_dll_proxy_mode && h_pe_section_named(h_selected_path, ".themida")) {
         {
             WCHAR probeWinmm[CX_CLEANUP_PATH_CAP];
             BOOL proxyReady = FALSE;
@@ -2276,6 +2309,10 @@ done:
         cx_audit_close(h_audit); h_audit = NULL;
     }
     /* File handles are closed above; only now remove this run's own artifacts. */
+    if (h_proxy_auto_installed) {
+        h_uninstall_proxy(options);
+        h_proxy_auto_installed = FALSE;
+    }
     h_cleanup_run_data(options, h_needs_elevation);
 
     return ok;
@@ -2485,6 +2522,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
 
 
 

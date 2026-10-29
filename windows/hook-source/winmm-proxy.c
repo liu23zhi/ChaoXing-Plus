@@ -835,7 +835,8 @@ static DWORD WINAPI proxy_warmup(LPVOID unused) {
             void *target = (void *)GetProcAddress(cef, "cef_command_line_get_global");
             if (target) {
                 int n = proxy_patch_all_by_value(target, (void *)proxy_cmdline_get_global_hook, (void **)&g_realCmdlineGetGlobal);
-                if (n > 0) proxy_append("winmm proxy: command line getter hooked");
+                /* vtable append 会在部分客户端触发 libcef 0xC0000005，默认关闭；端口由 cef_initialize 设置。 */
+                if (n > 0) (void)0;
             }
         }
     }
@@ -893,6 +894,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
 
 
 
