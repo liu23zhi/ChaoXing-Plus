@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 浏览器/扩展构建入口：安装依赖 -> 类型检查 -> 构建 dist -> 校验产物。
+# Windows 原生宿主与发布包请用 build-windows.cmd / build-windows.sh。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,3 +80,4 @@ fi
 echo ">>> 请在浏览器中加载该目录作为“已解压的扩展程序”："
 echo "    Chrome：打开 chrome://extensions -> 开启“开发者模式” -> 点击“加载已解压的扩展程序” -> 选择输出目录"
 echo "    Edge：  打开 edge://extensions   -> 开启“开发者模式” -> 点击“加载已解压的扩展程序” -> 选择输出目录"
+

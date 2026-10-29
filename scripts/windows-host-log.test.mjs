@@ -14,7 +14,7 @@ let renderRuntime;
 let keepAliveRuntime;
 
 before(async () => {
-  bootstrap = await readFile('windows/bootstrap/windows-bootstrap.js', 'utf8');
+  bootstrap = await readFile('windows/share-file/windows-bootstrap.js', 'utf8');
   uiRuntime = ts.transpileModule(await readFile('src/runtime/windows-host-log.ts', 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2019, module: ts.ModuleKind.CommonJS }
   }).outputText;
@@ -357,3 +357,4 @@ test('the built Windows business bundle obeys its injection-log flag without reb
   await mkdir('.tmp-tests-windows-host-log', { recursive: true });
   await page.screenshot({ path: '.tmp-tests-windows-host-log/panel.png', fullPage: true });
 });
+

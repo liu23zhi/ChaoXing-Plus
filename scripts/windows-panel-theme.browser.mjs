@@ -13,7 +13,7 @@ let bootstrap;
 let bundle;
 
 before(async () => {
-  bootstrap = await readFile('windows/bootstrap/windows-bootstrap.js', 'utf8');
+  bootstrap = await readFile('windows/share-file/windows-bootstrap.js', 'utf8');
   bundle = await readFile('dist-windows/chaoxing-plus.windows.js', 'utf8');
   browser = await puppeteer.launch({
     headless: true,
@@ -106,3 +106,4 @@ test('运行中热更新 --panel-theme 会重新取色并保持默认回退', { 
     { timeout: 10000 }, PANEL);
   assert.deepEqual(await panelThemeState(page), { theme: 'pink', border: 'rgba(219, 39, 119, 0.34)' });
 });
+

@@ -300,7 +300,7 @@ async function writeFixtureAssets(directory, { bootstrap, bundle }) {
   await fs.mkdir(path.join(directory, 'vendor'), { recursive: true });
   await fs.writeFile(path.join(directory, 'windows-bootstrap.js'), bootstrap, 'utf8');
   await fs.writeFile(path.join(directory, 'chaoxing-plus.windows.js'), bundle, 'utf8');
-  await fs.copyFile(path.resolve(root, 'windows', 'host', 'trampoline.js'), path.join(directory, 'trampoline.js'));
+  await fs.copyFile(path.resolve(root, 'windows', 'share-file', 'trampoline.js'), path.join(directory, 'trampoline.js'));
   await fs.writeFile(path.join(directory, 'vendor', 'sweetalert2.min.css'), '/*mock*/', 'utf8');
 }
 

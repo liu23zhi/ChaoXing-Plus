@@ -49,14 +49,14 @@ before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'cx-native-config-'));
   assets = join(directory, 'assets');
   await mkdir(join(assets, 'vendor'), { recursive: true });
-  const bootstrap = await readFile('windows/bootstrap/windows-bootstrap.js', 'utf8');
+  const bootstrap = await readFile('windows/share-file/windows-bootstrap.js', 'utf8');
   syncEvent = /var SYNC_EVENT = '([^']+)'/u.exec(bootstrap)?.[1];
   assert.ok(syncEvent, 'the test must use the actual bootstrap sync event');
   await writeFile(join(assets, 'windows-bootstrap.js'),
     'window.__nativeConfigBootstrapRuns=(window.__nativeConfigBootstrapRuns||0)+1;\n' + bootstrap);
   await writeFile(join(assets, 'chaoxing-plus.windows.js'),
     'window.__nativeConfigBundleRuns=(window.__nativeConfigBundleRuns||0)+1;');
-  await writeFile(join(assets, 'trampoline.js'), await readFile('windows/host/trampoline.js'));
+  await writeFile(join(assets, 'trampoline.js'), await readFile('windows/share-file/trampoline.js'));
   await writeFile(join(assets, 'vendor/sweetalert2.min.css'), await readFile('dist-windows/vendor/sweetalert2.min.css'));
   server = createServer((_request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -546,3 +546,4 @@ test('compiled native no-disk-write locks the launch policy while still broadcas
     assert.equal(await value.page.evaluate((key) => localStorage.getItem(key), markerKey), null);
   } finally { await value.close(); }
 });
+

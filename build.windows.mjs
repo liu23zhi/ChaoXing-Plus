@@ -67,8 +67,8 @@ async function main() {
   });
 
   console.log('[build:windows] 复制页面 bootstrap / trampoline / SweetAlert2 样式 …');
-  await copyAsset(path.resolve(__dirname, 'windows/bootstrap/windows-bootstrap.js'), path.join(outDir, 'windows-bootstrap.js'));
-  await copyAsset(path.resolve(__dirname, 'windows/host/trampoline.js'), path.join(outDir, 'trampoline.js'));
+  await copyAsset(path.resolve(__dirname, 'windows/share-file/windows-bootstrap.js'), path.join(outDir, 'windows-bootstrap.js'));
+  await copyAsset(path.resolve(__dirname, 'windows/share-file/trampoline.js'), path.join(outDir, 'trampoline.js'));
   await copyAsset(
     path.resolve(__dirname, 'node_modules/sweetalert2/dist/sweetalert2.min.css'),
     path.join(outDir, 'vendor', 'sweetalert2.min.css')
@@ -115,3 +115,4 @@ main().catch((error) => {
   console.error('[build:windows] 失败：', error && error.message ? error.message : error);
   process.exitCode = 1;
 });
+

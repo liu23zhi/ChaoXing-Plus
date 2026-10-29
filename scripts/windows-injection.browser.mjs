@@ -394,7 +394,7 @@ test('reconnecting the real bootstrap in the same instance hydrates the new conf
   const configStore = { isEnabled: () => true, settingsSnapshot: () => snapshot };
   const assets = {
     ...fixtureAssets(),
-    bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8')
+    bootstrap: await readFile(resolve('windows/share-file/windows-bootstrap.js'), 'utf8')
   };
   const fixture = await openFixture({ strategy: 'runtime', assets, configStore });
   let reconnected;
@@ -463,7 +463,7 @@ test('reconnecting the real bootstrap in the same instance hydrates the new conf
 test('real bootstrap receives bounded memory history, replays it after navigation and adopts a reconnected host', async () => {
   const diagnostics = createHostDiagnostics();
   for (const code of ['host-started', 'client-started', 'endpoint-waiting', 'endpoint-ready']) diagnostics.record(code);
-  const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') };
+  const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/share-file/windows-bootstrap.js'), 'utf8') };
   const configStore = { isEnabled: () => true, settingsSnapshot: () => ({ 'common.settings.windows-no-disk-write': true }) };
   const fixture = await openFixture({ strategy: 'runtime', assets, configStore, diagnostics, pathname: `/exam-ans/diagnostics-${++sequence}` });
   let reconnected;
@@ -508,7 +508,7 @@ test('real bootstrap with a hidden panel receives no memory history despite succ
   diagnostics.record('host-started');
   const fixture = await openFixture({
     strategy: 'runtime', diagnostics,
-    assets: { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') },
+    assets: { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/share-file/windows-bootstrap.js'), 'utf8') },
     configStore: { isEnabled: () => true, settingsSnapshot: () => ({
       'common.settings.windows-panel-enabled': false, 'common.settings.windows-no-disk-write': true
     }) }
@@ -528,7 +528,7 @@ test('production Node attach exposes memory diagnostics with quiet no-disk-write
   let child;
   try {
     await mkdir(join(assetsDir, 'vendor'), { recursive: true });
-    const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/bootstrap/windows-bootstrap.js'), 'utf8') };
+    const assets = { ...fixtureAssets(), bootstrap: await readFile(resolve('windows/share-file/windows-bootstrap.js'), 'utf8') };
     await Promise.all([
       writeFile(join(assetsDir, 'windows-bootstrap.js'), assets.bootstrap),
       writeFile(join(assetsDir, 'chaoxing-plus.windows.js'), assets.bundle),
@@ -570,3 +570,4 @@ test('production Node attach exposes memory diagnostics with quiet no-disk-write
     await rm(directory, { recursive: true, force: true });
   }
 });
+

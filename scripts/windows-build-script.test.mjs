@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = path.resolve('.');
@@ -65,4 +65,31 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /build-windows-node\.sh/u);
 });
+test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD 入口', async () => {
+  const cases = [
+    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native\\build.ps1', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe']],
+    ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'start-windows-node.cmd', 'verify-release.mjs']]
+  ];
+  for (const [name, expected] of cases) {
+    const bytes = await readFile(path.join(root, name));
+    assert.equal(bytes.includes(13), false, `${name} 必须使用 LF 换行`);
+    assert.equal(bytes.filter((value) => value > 127).length, 0, `${name} 必须保持纯 ASCII`);
+    const text = bytes.toString('utf8');
+    for (const token of expected) assert.equal(text.includes(token), true, `${name} 缺少步骤：${token}`);
+    assert.doesNotMatch(text, /bash build-windows/u, `${name} 不得依赖 Git Bash`);
+    assert.match(text, /--skip-tests/u, `${name} 必须支持 --skip-tests`);
+  }
+});
 
+test('扩展构建脚本已改名为 build-browser.sh，Windows 入口保持独立', async () => {
+  const browser = await readFile(path.join(root, 'build-browser.sh'), 'utf8');
+  assert.match(browser, /^#!\/usr\/bin\/env bash\n/u);
+  assert.match(browser, /npm run build/u);
+  assert.match(browser, /dist/u);
+  const entries = await readdir(root);
+  assert.equal(entries.includes('build.sh'), false, 'build.sh 应改名为 build-browser.sh');
+  assert.equal(entries.includes('build-browser.sh'), true);
+  for (const name of ['build-windows.cmd', 'build-windows-node.cmd', 'windows/README.md']) {
+    assert.equal(entries.includes(name.split('/')[0]), true, `缺少 ${name}`);
+  }
+});

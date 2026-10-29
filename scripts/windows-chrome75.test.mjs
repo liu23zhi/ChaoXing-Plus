@@ -82,8 +82,8 @@ test('内置题库 handler 字符串全部是 Chrome 75 可解析语法', async 
 
 test('Windows 页面 bootstrap 与 trampoline 是 Chrome 75 可解析语法', async () => {
   const files = [
-    ['windows/bootstrap/windows-bootstrap.js', 'windows-bootstrap.js'],
-    ['windows/host/trampoline.js', 'trampoline.js']
+    ['windows/share-file/windows-bootstrap.js', 'windows-bootstrap.js'],
+    ['windows/share-file/trampoline.js', 'trampoline.js']
   ];
   for (const [relative, label] of files) {
     const source = await readFile(resolve(root, relative), 'utf8');
@@ -93,7 +93,7 @@ test('Windows 页面 bootstrap 与 trampoline 是 Chrome 75 可解析语法', as
 });
 
 test('bootstrap 保持关键约定：消息前缀、去重标记、共享配置过滤与 polyfill', async () => {
-  const source = await readFile(resolve(root, 'windows/bootstrap/windows-bootstrap.js'), 'utf8');
+  const source = await readFile(resolve(root, 'windows/share-file/windows-bootstrap.js'), 'utf8');
   assert.equal(source.includes("var MESSAGE_PREFIX = '__CX_WIN_MSG__';"), true);
   assert.equal(source.includes("var MARK_KEY = '__CX_WIN_MARK__';"), true);
   assert.equal(source.includes("var HOST_KEY = '__CX_WIN_HOST__';"), true);
@@ -120,3 +120,4 @@ test('windows 构建脚本与入口脚本约定', async () => {
 test.after(async () => {
   await rm(outDir, { recursive: true, force: true });
 });
+

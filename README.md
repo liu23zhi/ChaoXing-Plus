@@ -24,6 +24,8 @@ npm install
 npm run typecheck
 npm run build
 npm run dev
+# 扩展（浏览器）完整构建：依赖安装 + 类型检查 + 构建 + dist 校验
+bash build-browser.sh
 ```
 
 Windows 端（超星考试客户端 / CEF 75）额外命令：
@@ -45,12 +47,13 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 
 ## Windows 端（CEF 75 客户端注入）
 
-仓库新增 `windows/host` 宿主：以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/bootstrap/windows-bootstrap.js` 替代扩展平台能力（配置水合、资源注入、Chrome75 API 补丁）。
+仓库新增 `windows/host` 宿主：以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 替代扩展平台能力（配置水合、资源注入、Chrome75 API 补丁）。
 
 ```powershell
 npm run build:windows
-# 构建 Windows 单文件 x86 发布包（Git Bash）：bash build-windows.sh
-# 备用（已弃用，仅兼容/对照）：bash build-windows-node.sh  # 只构建 Node 包，不含原生 EXE
+# 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）：.\build-windows.cmd
+# 备用（已弃用，仅兼容/对照）：.\build-windows-node.cmd  # 只打 Node 包，不含原生 EXE
+# Git Bash 等价入口：bash build-windows.sh / bash build-windows-node.sh
 # 首次运行会创建 windows/data/config.json，把 clientPath 指向 CXExam.exe
 .\start-windows.cmd
 # 需要可见控制台日志时使用调试入口（控制台 + GUI）
@@ -119,4 +122,6 @@ chaoxing_plus/
 ## License
 
 MIT
+
+
 

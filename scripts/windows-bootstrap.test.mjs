@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 
-const bootstrapPath = resolve(process.cwd(), 'windows', 'bootstrap', 'windows-bootstrap.js');
+const bootstrapPath = resolve(process.cwd(), 'windows', 'share-file', 'windows-bootstrap.js');
 
 class FakeElement {
   constructor(tagName) {
@@ -789,3 +789,4 @@ test('没有 __CX_WIN_SILENT__ 时扩展注入不安装静默控制', async () =
     .filter((message) => message.kind === 'silent-hotkey' || message.kind === 'silent-fullscreen');
   assert.deepEqual(silentMessages, []);
 });
+
