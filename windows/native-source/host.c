@@ -449,7 +449,7 @@ static BOOL h_silent_stage(void) {
 }
 /* 诊断用：用匿名管道启动 cmd 并读回 stdout，验证"继承句柄启动"在本机可用。 */
 /* 诊断：以 --remote-debugging-pipe 启动客户端，发一条 Browser.getVersion 并读回响应。 */
-static BOOL h_pipe_client_test(const WCHAR *clientPath) {
+static int h_pipe_client_test(const WCHAR *clientPath) {
     WCHAR command[1024];
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOW si;
@@ -460,8 +460,9 @@ static BOOL h_pipe_client_test(const WCHAR *clientPath) {
     DWORD index = 0;
     int status;
     BOOL ok = FALSE;
+    int elevationRequired = 0;
     static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
-    if (!clientPath || !*clientPath) { h_print(L"pipe-client: missing client path"); return FALSE; }
+    if (!clientPath || !*clientPath) { h_print(L"pipe-client: missing client path"); return 0; }
     {
         static const WCHAR tail[] = L" --remote-debugging-pipe";
         DWORD k = 0;
@@ -475,8 +476,8 @@ static BOOL h_pipe_client_test(const WCHAR *clientPath) {
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = NULL;
     sa.bInheritHandle = TRUE;
-    if (!CreatePipe(&childIn, &parentWrite, &sa, 65536)) { h_print(L"pipe-client: stdin pipe failed"); return FALSE; }
-    if (!CreatePipe(&parentRead, &childOut, &sa, 65536)) { h_print(L"pipe-client: stdout pipe failed"); CloseHandle(childIn); CloseHandle(parentWrite); return FALSE; }
+    if (!CreatePipe(&childIn, &parentWrite, &sa, 65536)) { h_print(L"pipe-client: stdin pipe failed"); return 0; }
+    if (!CreatePipe(&parentRead, &childOut, &sa, 65536)) { h_print(L"pipe-client: stdout pipe failed"); CloseHandle(childIn); CloseHandle(parentWrite); return 0; }
     SetHandleInformation(parentWrite, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(parentRead, HANDLE_FLAG_INHERIT, 0);
     ZeroMemory(&si, sizeof(si));
@@ -488,7 +489,9 @@ static BOOL h_pipe_client_test(const WCHAR *clientPath) {
     ZeroMemory(&pi, sizeof(pi));
     if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
         WCHAR msg[96];
-        wsprintfW(msg, L"pipe-client: CreateProcess failed (%lu): ", (unsigned long)GetLastError()); h_print(msg); h_print(command); msg[0] = 0;
+        DWORD launchCode = GetLastError();
+        wsprintfW(msg, L"pipe-client: CreateProcess failed (%lu): ", (unsigned long)launchCode); h_print(msg); h_print(command);
+        if (launchCode == ERROR_ELEVATION_REQUIRED) { elevationRequired = 1; goto done; }
         if (msg[0]) h_print(msg);
         goto done;
     }
@@ -519,7 +522,8 @@ done:
     if (childOut) CloseHandle(childOut);
     if (parentWrite) CloseHandle(parentWrite);
     if (parentRead) CloseHandle(parentRead);
-    return ok;
+    if (elevationRequired) return 740;
+    return ok ? 1 : 0;
 }
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
@@ -1402,6 +1406,7 @@ done:
     }
     /* File handles are closed above; only now remove this run's own artifacts. */
     h_cleanup_run_data(options, h_needs_elevation);
+
     return ok;
 }
 /* 命令行里是否带 --console（选项尚未解析，先按原始命令行判断）。 */
@@ -1518,7 +1523,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
-    if (h_base_options.pipeClientPathSet) { return h_pipe_client_test(h_base_options.pipeClientPath) ? 0 : 1; }
+    if (h_base_options.pipeClientPathSet) {
+        int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
+        if (pipeCode == 740) {
+            LPWSTR *pipeArgv = CommandLineToArgvW(GetCommandLineW(), &argc);
+            DWORD childCode = 1;
+            BOOL restarted = FALSE;
+            if (pipeArgv) {
+                restarted = cx_elevation_restart(h_exe_path, argc - 1, pipeArgv + 1, NULL, &childCode, h_main_error, HOST_ERROR_CAP);
+                LocalFree(pipeArgv);
+            }
+            if (restarted) return (int)childCode;
+            h_print(L"pipe-client: elevation required; run this command as administrator");
+            return 3;
+        }
+        return pipeCode == 1 ? 0 : 1;
+    }
     if (h_base_options.selfCheck) return h_self_check(&h_base_options);
     if (h_base_options.printEffectiveConfig) {
         DWORD settingsLength = 0;
@@ -1579,6 +1599,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
