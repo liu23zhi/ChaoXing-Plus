@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -255,4 +255,24 @@ test('--probe-all 输出通道汇总 plan 行', { skip: process.platform !== 'wi
   assert.match(result.output, /probe-all: candidates=\d+/u);
   assert.match(result.output, /plan: clients=\d+ cdp-port=\d+ dll-proxy=\d+/u);
 });
+test('实例检查按完整路径：不同目录的同名 CXExam.exe 不互相拦截', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const dirA = await mkdtemp(join(tmpdir(), 'cx-inst-a-'));
+  const dirB = await mkdtemp(join(tmpdir(), 'cx-inst-b-'));
+  let running;
+  try {
+    const clientA = join(dirA, 'CXExam.exe');
+    const clientB = join(dirB, 'CXExam.exe');
+    await copyFile(fixtureExe, clientA);
+    await copyFile(fixtureExe, clientB);
+    running = spawn(clientA, [], { windowsHide: true, stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 800));
+    const result = run(['--client', clientB, '--no-elevate', '--no-log', '--no-disk-write', '--duration', '1']);
+    assert.doesNotMatch(result.output, /client-already-running/u, `不同路径不应被判为同实例: ${result.output}`);
+  } finally {
+    if (running) running.kill();
+    await rm(dirA, { recursive: true, force: true });
+    await rm(dirB, { recursive: true, force: true });
+  }
+});
+
 

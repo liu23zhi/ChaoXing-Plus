@@ -267,7 +267,23 @@ static BOOL p_instances(const WCHAR *exePath, DWORD *pids, DWORD pidCap, DWORD *
         code = GetLastError(); ok = code == ERROR_NO_MORE_FILES; goto done;
     }
     for (;;) {
+        /* 只把"同一路径"的进程视为同实例：不同客户端目录下的同名 CXExam.exe 可以并存。 */
+        BOOL sameInstance = FALSE;
         if (entry.th32ProcessID && entry.th32ProcessID != self && p_name_equal(entry.szExeFile, name)) {
+            HANDLE candidate = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+            if (candidate) {
+                WCHAR candidatePath[1024];
+                WCHAR targetPath[1024];
+                DWORD candidateLength = 1024;
+                DWORD targetLength = GetFullPathNameW(exePath, 1024, targetPath, NULL);
+                if (targetLength && targetLength < 1024 &&
+                    QueryFullProcessImageNameW(candidate, 0, candidatePath, &candidateLength)) {
+                    sameInstance = p_name_equal(candidatePath, targetPath);
+                }
+                CloseHandle(candidate);
+            }
+        }
+        if (sameInstance) {
             if (count == MAXDWORD) { code = ERROR_ARITHMETIC_OVERFLOW; goto done; }
             if (pids && count < pidCap) pids[count] = entry.th32ProcessID;
             ++count;
@@ -543,3 +559,4 @@ BOOL proc_launch_env(const WCHAR *path, USHORT port, BOOL includePortArgument,
 BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
     return proc_launch_core(path, port, TRUE, pid, handle, err, cap);
 }
+

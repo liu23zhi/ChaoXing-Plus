@@ -2131,7 +2131,18 @@ static BOOL h_choose_port(const CX_OPTIONS *options, USHORT *port) {
         if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
         return FALSE;
     }
-    for (p = 38100; p < 38200; ++p) if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
+    /* 多实例并发时固定从 38100 开始会撞车：用进程相关的随机起点分散端口。 */
+    {
+        DWORD seed = GetTickCount() * 1103515245u + GetCurrentProcessId() * 12345u;
+        int i;
+        USHORT start = (USHORT)(30000 + (seed % 28000));
+        for (i = 0; i < 400; ++i) {
+            int candidate = (int)start + i * 37;
+            if (candidate > 65500) candidate = 30000 + (candidate - 65500);
+            p = (USHORT)candidate;
+            if (proc_port_bindable(p, error, 64)) { *port = p; return TRUE; }
+        }
+    }
     return FALSE;
 }
 #include "host-config.inc"
@@ -2828,6 +2839,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
