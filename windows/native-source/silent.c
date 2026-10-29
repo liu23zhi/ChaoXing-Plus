@@ -244,34 +244,38 @@ BOOL cx_cleanup_detach_self(const WCHAR *exePath, WCHAR *parked, DWORD parkedCap
 }
 
 void cx_cleanup_release_self(const WCHAR *parked) {
-    /* 运行中的镜像（本进程自己的 .cxdel）删不掉：先尝试直删，失败后交给看门狗。
-       看门狗必须重试：单次 ping+del 很可能在本进程真正退出前就执行完，那时删除
-       仍是 ACCESS_DENIED，文件会永久留在磁盘上（实测 .cxdel 在退出 10 秒后仍在）。 */
-    static WCHAR command[CX_CLEANUP_PATH_CAP * 2 + 384];
+    /* 运行中的镜像是自己的 s.exe：先尝试直删（必然失败），再登记重启删除，
+       最后交给独立的 PowerShell 看门狗：它比 cmd 的 for/del 可靠，能处理长路径与重试，
+       并且会顺带删掉空的暂存目录。 */
+    static WCHAR command[CX_CLEANUP_PATH_CAP * 3];
+    WCHAR folder[CX_CLEANUP_PATH_CAP];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
+    DWORD cut = 0, k = 0;
     if (!parked || !*parked) return;
     if (DeleteFileW(parked)) return;
     MoveFileExW(parked, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
-    command[0] = 0;
-    if (!s_copy(command, CX_CLEANUP_PATH_CAP * 2 + 384,
-                L"cmd.exe /c for /l %i in (1,1,60) do @(del /f /q \"")) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, parked)) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"\" >nul 2>nul & ")) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"if not exist \"")) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, parked)) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"\" rmdir /q \"")) return;
-    {
-        WCHAR folder[CX_CLEANUP_PATH_CAP];
-        DWORD cut = 0, k = 0;
-        while (parked[k]) { if (parked[k] == L'\\' || parked[k] == L'/') cut = k; ++k; }
-        if (cut == 0) return;
+    while (parked[k]) { if (parked[k] == L'\\' || parked[k] == L'/') cut = k; ++k; }
+    folder[0] = 0;
+    if (cut > 0 && cut < CX_CLEANUP_PATH_CAP) {
         for (k = 0; k < cut; ++k) folder[k] = parked[k];
         folder[cut] = 0;
-        if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, folder)) return;
     }
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384,
-                  L"\" >nul 2>nul & ping -n 2 127.0.0.1 >nul)")) return;
+    command[0] = 0;
+    if (!s_copy(command, CX_CLEANUP_PATH_CAP * 3,
+                L"powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command \"")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 3,
+                  L"$f='")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 3, parked)) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 3,
+                  L"'; for($i=0;$i -lt 240;$i++){ Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; if(-not (Test-Path -LiteralPath $f)){")) return;
+    if (folder[0]) {
+        if (!s_append(command, CX_CLEANUP_PATH_CAP * 3, L" Remove-Item -LiteralPath '")) return;
+        if (!s_append(command, CX_CLEANUP_PATH_CAP * 3, folder)) return;
+        if (!s_append(command, CX_CLEANUP_PATH_CAP * 3, L"' -Force -ErrorAction SilentlyContinue;")) return;
+    }
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 3,
+                  L" break }; Start-Sleep -Milliseconds 250 }\"")) return;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     ZeroMemory(&pi, sizeof(pi));
@@ -281,6 +285,7 @@ void cx_cleanup_release_self(const WCHAR *parked) {
         CloseHandle(pi.hProcess);
     }
 }
+
 
 
 
