@@ -886,7 +886,20 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     }
     h_client_pid = state.pid;
     Sleep(1200);
-    if (h_pipe_call(&state, "Target.getTargets", NULL, &reply, 8000) != 1) { h_error(error, errorCap, L"cdp-pipe: Target.getTargets failed"); goto done; }
+    {
+        int attempt = 0, status = 0;
+        for (attempt = 0; attempt < 4; ++attempt) {
+            status = h_pipe_call(&state, "Target.getTargets", NULL, &reply, 6000);
+            if (status == 1) break;
+            if (!options->quiet) {
+                WCHAR diag[96];
+                wsprintfW(diag, L"cdp-pipe: Target.getTargets attempt %d status %d\n", attempt + 1, status);
+                h_print(diag);
+            }
+            Sleep(1500);
+        }
+        if (status != 1) { h_error(error, errorCap, L"cdp-pipe: Target.getTargets failed"); goto done; }
+    }
     offset = h_find_offset(reply, "\"targetId\":\"");
     if (offset >= 0) {
         const char *cursor = reply + offset + (int)sizeof("\"targetId\":\"") - 1;
@@ -2225,7 +2238,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":true,\"dll-proxy\":false,\"input\":false}}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":false,\"input\":false}}\n");
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2310,6 +2323,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
