@@ -11,7 +11,12 @@ cd /d "%CXPLUS_ROOT%" || exit /b 1
 rem Native silent debug entry: same scenario with --silent-delete-simulate (report only).
 rem Node fallback: start-windows-node-silent-debug.cmd
 if not exist "%CXPLUS_EXE%" (echo [windows] chaoxing_plus.exe is missing next to this launcher.& echo [windows] Build it with: windows\native-source\build-windows.cmd& exit /b 9009)
+for %%d in ("%CXPLUS_EXE%") do set "CXPLUS_EXE_DIR=%%~dpd"
+echo [silent-debug] simulate mode: this entry reports the deletion plan only and deletes no file.
+echo [silent-debug] Task Manager shows the path used at process creation; renaming or deleting the file cannot change it.
+if not exist "%CXPLUS_EXE_DIR%SHA256SUMS.txt" echo [silent-debug] not a release layout (no SHA256SUMS.txt): real deletion would be skipped too.
 start "" /wait "%CXPLUS_EXE%" --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" pause
 exit /b %EXIT_CODE%
+
