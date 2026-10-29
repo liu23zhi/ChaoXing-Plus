@@ -153,6 +153,9 @@ typedef struct CX_OPTIONS {
     BOOL printEffectiveConfig;
     BOOL selfCheck;
     BOOL pipeTest;
+    BOOL installProxy;
+    WCHAR proxySource[CX_OPTIONS_PATH_CAP];
+    BOOL proxySourceSet;
     WCHAR pipeClientPath[CX_OPTIONS_PATH_CAP];
     BOOL pipeClientPathSet;
     /* Resolve path/UI precedence only after the complete configuration is merged. */
@@ -183,6 +186,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *options,
                                              DWORD *length);
 
 #endif
+
 
 
 
