@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -93,6 +93,46 @@ test('原生静默模拟模式只报告计划，不删除任何文件', { skip: 
     assert.equal(files.includes('README.md'), true, '模拟模式必须保留程序文件');
     assert.equal(files.includes('CXExam.exe'), true);
   } finally {
+    killOwnedClients(directory);
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  }
+});
+
+test('CXExam 进程结束触发自毁并提前结束等待', { skip: process.platform !== 'win32' }, async (t) => {
+  if (!existsSync(hostExe) || !existsSync(fixtureExe)) {
+    t.skip('未构建 chaoxing_plus.exe / process-fixture.exe');
+    return;
+  }
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-native-silent-exit-'));
+  let child = null;
+  try {
+    await copyFile(hostExe, path.join(directory, 'chaoxing_plus.exe'));
+    await copyFile(fixtureExe, path.join(directory, 'CXExam.exe'));
+    await writeFile(path.join(directory, 'SHA256SUMS.txt'), 'deadbeef *chaoxing_plus.exe\n', 'utf8');
+    await writeFile(path.join(directory, 'README.md'), '# fixture\n', 'utf8');
+    child = spawn(path.join(directory, 'chaoxing_plus.exe'), [
+      '--silent-scenario',
+      '--silent-client', path.join(directory, 'CXExam.exe'),
+      '--quiet', '--no-log', '--no-disk-write', '--no-panel',
+      '--debug-timeout', '1000', '--duration', '30000', '--no-elevate', '--port', '0'
+    ], { stdio: 'ignore', windowsHide: true });
+    const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+    // 等宿主完成清理并拉起假客户端，然后结束客户端进程。
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    killOwnedClients(directory);
+    const startedAt = Date.now();
+    const code = await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 15000))
+    ]);
+    const elapsed = Date.now() - startedAt;
+    assert.notEqual(code, 'timeout', 'CXExam 退出后宿主必须自行结束，而不是等满 duration');
+    assert.equal(elapsed < 10000, true, `退出耗时 ${elapsed}ms 过长`);
+    const files = await listFiles(directory);
+    assert.equal(files.includes('README.md'), false, '自毁必须删除程序痕迹');
+    assert.equal(files.includes('CXExam.exe'), true, '自毁不得删除 CXExam');
+  } finally {
+    if (child && child.exitCode === null) child.kill();
     killOwnedClients(directory);
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
   }

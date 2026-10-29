@@ -1148,6 +1148,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;
         h_print_utf8(h_settings); h_print_utf8("\n"); return 0;
     }
+    /* 静默场景启动后会把自身改名为 .cxdel；提权重启必须指向仍然存在的镜像。 */
+    const WCHAR *h_restart_path = h_silent_parked[0] ? h_silent_parked : h_exe_path;
     if (h_base_options.elevateOnStart && !h_base_options.listClients && !h_base_options.attachPortSet) {
         DWORD childCode = 1;
         if (!h_base_options.elevated && !cx_elevation_query(&elevated)) {
@@ -1157,7 +1159,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!elevated) {
             argv = CommandLineToArgvW(GetCommandLineW(), &argc);
             if (!argv) { if (!h_base_options.quiet) h_print(L"Cannot preserve administrator restart arguments"); return 1; }
-            ok = cx_elevation_restart(h_exe_path, argc - 1, argv + 1, NULL, &childCode, h_main_error, HOST_ERROR_CAP);
+            ok = cx_elevation_restart(h_restart_path, argc - 1, argv + 1, NULL, &childCode, h_main_error, HOST_ERROR_CAP);
             LocalFree(argv);
             if (!ok && !h_base_options.quiet) h_print(h_main_error);
             return (int)childCode;
@@ -1169,7 +1171,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         DWORD childCode = 1;
         argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (!argv) { if (!h_base_options.quiet) h_print(L"Cannot preserve administrator restart arguments"); return 1; }
-        ok = cx_elevation_restart(h_exe_path, argc - 1, argv + 1, h_selected_path,
+        ok = cx_elevation_restart(h_restart_path, argc - 1, argv + 1, h_selected_path,
                                   &childCode, h_main_error, HOST_ERROR_CAP);
         LocalFree(argv);
         if (!ok && !h_base_options.quiet) h_print(h_main_error);
@@ -1181,6 +1183,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
