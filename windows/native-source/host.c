@@ -873,7 +873,12 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     }
     if (h_pipe_call(&state, "Runtime.evaluate", params, &reply, 15000) != 1) { h_error(error, errorCap, L"cdp-pipe: bootstrap evaluate failed"); goto done; }
     net_free(reply); reply = NULL;
-    h_report.bootstraps += 1;
+    if (options->panelAllPages) {
+        static const char panelExpr[] = "{\"expression\":\"window.__CX_WIN_PANEL_ALL_PAGES__=true\",\"returnByValue\":true}";
+        char *panelReply = NULL;
+        h_pipe_call(&state, "Runtime.evaluate", panelExpr, &panelReply, 8000);
+        if (panelReply) net_free(panelReply);
+    }    h_report.bootstraps += 1;
     if (!options->quiet) h_print(L"cdp-pipe: bootstrap injected\n");
     if (bundle && bundleLength) {
         char *wrapped = NULL;
@@ -1892,7 +1897,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
-    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（默认 auto，按顺序探测）\n"
+    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto 有代理时优先 dll-proxy；cdp-pipe 目前注入 bootstrap+bundle，无配置同步）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
@@ -2028,6 +2033,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
