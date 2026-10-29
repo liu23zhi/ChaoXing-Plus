@@ -563,4 +563,40 @@ void net_ws_close(NET_WS *ws) {
     net_free(ws->rx); net_free(ws->message); net_free(ws);
 }
 
+BOOL net_pipe_frame_encode(const char *payload, DWORD length, char *out, DWORD cap, DWORD *written) {
+    DWORD i;
+    if (written) *written = 0;
+    if (!out || !written) return FALSE;
+    if (length && !payload) return FALSE;
+    if (length > CX_PIPE_MAX_FRAME) return FALSE;
+    if (cap < length + 4) return FALSE;
+    out[0] = (char)(length & 0xFF);
+    out[1] = (char)((length >> 8) & 0xFF);
+    out[2] = (char)((length >> 16) & 0xFF);
+    out[3] = (char)((length >> 24) & 0xFF);
+    for (i = 0; i < length; ++i) out[4 + i] = payload[i];
+    *written = length + 4;
+    return TRUE;
+}
+
+int net_pipe_frame_parse(const char *buffer, DWORD available,
+                         DWORD *payloadOffset, DWORD *payloadLength, DWORD *frameLength) {
+    DWORD length;
+    if (payloadOffset) *payloadOffset = 0;
+    if (payloadLength) *payloadLength = 0;
+    if (frameLength) *frameLength = 0;
+    if (!buffer) return -1;
+    if (available < 4) return 0;
+    length = (DWORD)(BYTE)buffer[0]
+           | ((DWORD)(BYTE)buffer[1] << 8)
+           | ((DWORD)(BYTE)buffer[2] << 16)
+           | ((DWORD)(BYTE)buffer[3] << 24);
+    if (length > CX_PIPE_MAX_FRAME) return -1;
+    if (available - 4 < length) return 0;
+    if (payloadOffset) *payloadOffset = 4;
+    if (payloadLength) *payloadLength = length;
+    if (frameLength) *frameLength = length + 4;
+    return 1;
+}
+
 

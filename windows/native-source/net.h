@@ -30,6 +30,14 @@ int net_ws_read_timeout(NET_WS *ws, char **text, DWORD *length, DWORD timeoutMs,
 void net_ws_close(NET_WS *ws);
 void net_free(void *memory);
 
+/* Chromium --remote-debugging-pipe 帧：4 字节小端长度 + JSON 正文。 */
+#define CX_PIPE_MAX_FRAME (64u * 1024u * 1024u)
+BOOL net_pipe_frame_encode(const char *payload, DWORD length, char *out, DWORD cap, DWORD *written);
+/* 1 完整帧；0 数据不足；-1 非法（超长或参数错误）。 */
+int net_pipe_frame_parse(const char *buffer, DWORD available,
+                         DWORD *payloadOffset, DWORD *payloadLength, DWORD *frameLength);
+
 #endif
+
 
 

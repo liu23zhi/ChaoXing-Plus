@@ -224,12 +224,38 @@ static BOOL http_get_mode(void) {
     WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), body, length, &written, NULL);
     net_free(body); WSACleanup(); ExitProcess(0);
 }
+static void test_pipe_frames(void) {
+    char frame[64];
+    char two[64];
+    DWORD written = 0, offset = 0, length = 0, whole = 0;
+    int status;
+    check("encode pipe frame", net_pipe_frame_encode("hello", 5, frame, sizeof(frame), &written) && written == 9);
+    check("encode length prefix little endian", frame[0] == 5 && frame[1] == 0 && frame[2] == 0 && frame[3] == 0);
+    status = net_pipe_frame_parse(frame, written, &offset, &length, &whole);
+    check("parse complete pipe frame", status == 1 && offset == 4 && length == 5 && whole == 9);
+    check("parse rejects short header", net_pipe_frame_parse(frame, 3, &offset, &length, &whole) == 0);
+    check("parse waits for full payload", net_pipe_frame_parse(frame, 7, &offset, &length, &whole) == 0);
+    frame[0] = (char)0xFF; frame[1] = (char)0xFF; frame[2] = (char)0xFF; frame[3] = (char)0xFF;
+    check("parse rejects oversized length", net_pipe_frame_parse(frame, 9, &offset, &length, &whole) == -1);
+    check("encode rejects small buffer", !net_pipe_frame_encode("hello", 5, frame, 8, &written));
+    check("encode zero length frame", net_pipe_frame_encode(NULL, 0, frame, sizeof(frame), &written) && written == 4);
+    check("parse zero length frame", net_pipe_frame_parse(frame, 4, &offset, &length, &whole) == 1 && length == 0 && whole == 4);
+    net_pipe_frame_encode("ab", 2, two, sizeof(two), &written);
+    net_pipe_frame_encode("cd", 2, two + written, sizeof(two) - written, &length);
+    status = net_pipe_frame_parse(two, written + length, &offset, &whole, &written);
+    check("parse first of two frames", status == 1 && whole == 2 && written == 6);
+    status = net_pipe_frame_parse(two + 6, 6, &offset, &length, &whole);
+    check("parse second of two frames", status == 1 && length == 2 && two[6 + 4] == 'c');
+}
 void __stdcall TransportTestMain(void) {
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) ExitProcess(2);
     http_get_mode();
+    test_pipe_frames();
     test_upgrade_zero_deadline(); test_deadlines(); test_frames(); test_poll_fairness(); test_failures();
     WSACleanup();
     output(failedChecks ? "PROTOCOL SELF TEST FAIL\n" : "PROTOCOL SELF TEST PASS\n");
     ExitProcess(failedChecks ? 1 : 0);
 }
+
+
