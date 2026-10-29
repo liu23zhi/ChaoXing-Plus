@@ -448,6 +448,79 @@ static BOOL h_silent_stage(void) {
     return ok;
 }
 /* 诊断用：用匿名管道启动 cmd 并读回 stdout，验证"继承句柄启动"在本机可用。 */
+/* 诊断：以 --remote-debugging-pipe 启动客户端，发一条 Browser.getVersion 并读回响应。 */
+static BOOL h_pipe_client_test(const WCHAR *clientPath) {
+    WCHAR command[1024];
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    HANDLE childIn = NULL, parentWrite = NULL, parentRead = NULL, childOut = NULL;
+    char *reply = NULL;
+    DWORD replyLength = 0;
+    DWORD index = 0;
+    int status;
+    BOOL ok = FALSE;
+    static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
+    if (!clientPath || !*clientPath) { h_print(L"pipe-client: missing client path"); return FALSE; }
+    {
+        static const WCHAR tail[] = L" --remote-debugging-pipe";
+        DWORD k = 0;
+        index = 0;
+        command[index++] = L'"';
+        for (k = 0; clientPath[k] && index < 800; ++k) command[index++] = clientPath[k];
+        command[index++] = L'"';
+        for (k = 0; tail[k] && index < 1000; ++k) command[index++] = tail[k];
+        command[index] = 0;
+    }
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&childIn, &parentWrite, &sa, 65536)) { h_print(L"pipe-client: stdin pipe failed"); return FALSE; }
+    if (!CreatePipe(&parentRead, &childOut, &sa, 65536)) { h_print(L"pipe-client: stdout pipe failed"); CloseHandle(childIn); CloseHandle(parentWrite); return FALSE; }
+    SetHandleInformation(parentWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(parentRead, HANDLE_FLAG_INHERIT, 0);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = childIn;
+    si.hStdOutput = childOut;
+    si.hStdError = childOut;
+    ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        WCHAR msg[96];
+        wsprintfW(msg, L"pipe-client: CreateProcess failed (%lu): ", (unsigned long)GetLastError()); h_print(msg); h_print(command); msg[0] = 0;
+        if (msg[0]) h_print(msg);
+        goto done;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(childIn); childIn = NULL;
+    CloseHandle(childOut); childOut = NULL;
+    Sleep(1500);
+    if (!net_pipe_send_frame(parentWrite, request, (DWORD)sizeof(request) - 1)) {
+        h_print(L"pipe-client: send failed");
+        goto done;
+    }
+    status = net_pipe_recv_frame(parentRead, &reply, &replyLength, 8000);
+    if (status == 1 && reply && replyLength) {
+        WCHAR wide[512];
+        int wideLength = MultiByteToWideChar(CP_UTF8, 0, reply, (int)replyLength, wide, 500);
+        if (wideLength > 0) { wide[wideLength] = 0; h_print(L"pipe-client: "); h_print(wide); }
+        ok = TRUE;
+    } else if (status == 0) {
+        h_print(L"pipe-client: timeout waiting for response");
+    } else {
+        h_print(L"pipe-client: read failed");
+    }
+    TerminateProcess(pi.hProcess, 0);
+    CloseHandle(pi.hProcess);
+done:
+    if (reply) net_free(reply);
+    if (childIn) CloseHandle(childIn);
+    if (childOut) CloseHandle(childOut);
+    if (parentWrite) CloseHandle(parentWrite);
+    if (parentRead) CloseHandle(parentRead);
+    return ok;
+}
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOW si;
@@ -477,7 +550,7 @@ static BOOL h_pipe_test(void) {
     if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
         WCHAR msg[64];
         wsprintfW(msg, L"pipe-test: CreateProcess failed (%lu)", (unsigned long)GetLastError());
-        h_print(msg);
+        if (msg[0]) h_print(msg);
         goto done;
     }
     CloseHandle(pi.hThread);
@@ -1445,6 +1518,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
+    if (h_base_options.pipeClientPathSet) { return h_pipe_client_test(h_base_options.pipeClientPath) ? 0 : 1; }
     if (h_base_options.selfCheck) return h_self_check(&h_base_options);
     if (h_base_options.printEffectiveConfig) {
         DWORD settingsLength = 0;
@@ -1505,6 +1579,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
 
 
 
