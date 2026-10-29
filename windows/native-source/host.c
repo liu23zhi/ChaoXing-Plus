@@ -375,11 +375,15 @@ static BOOL h_silent_stage(void) {
         if (command[0] && h_cat(command, CX_CLEANUP_PATH_CAP * 3, L" --staged-boot")) {
             ZeroMemory(&si, sizeof(si));
             si.cb = sizeof(si);
+                si.dwFlags = STARTF_USESTDHANDLES;
+                si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+                si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+                si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
             ZeroMemory(&pi, sizeof(pi));
-            if (CreateProcessW(staged, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            if (CreateProcessW(staged, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
                 CloseHandle(pi.hThread);
                 /* 模拟/调试模式：父进程等待副本，否则副本还没附加控制台父进程就已退出，日志全丢。 */
-                if (h_silent_simulate) WaitForSingleObject(pi.hProcess, INFINITE);
+                /* 副本通过 STARTF_USESTDHANDLES 继承控制台，父进程无需等待，避免以编译目录路径常驻。 */
                 CloseHandle(pi.hProcess);
                 ok = TRUE;
             }
