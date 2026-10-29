@@ -330,6 +330,18 @@ static BOOL h_silent_stage(void) {
     if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     if (!h_copy(staged, CX_CLEANUP_PATH_CAP, dir) || !h_cat(staged, CX_CLEANUP_PATH_CAP, L"\\s.exe")) return FALSE;
     if (!CopyFileW(h_exe_path, staged, FALSE)) { RemoveDirectoryW(dir); return FALSE; }
+    /* 原位配置（chaoxing-plus.json）必须跟着副本走，否则暂存启动会丢掉 clientPath 而转为全盘扫描。 */
+    {
+        WCHAR srcCfg[CX_CLEANUP_PATH_CAP], dstCfg[CX_CLEANUP_PATH_CAP], srcRoot[CX_CLEANUP_PATH_CAP];
+        if (h_silent_root(srcRoot, CX_CLEANUP_PATH_CAP) &&
+            h_copy(srcCfg, CX_CLEANUP_PATH_CAP, srcRoot) &&
+            h_cat(srcCfg, CX_CLEANUP_PATH_CAP, L"\\chaoxing-plus.json") &&
+            GetFileAttributesW(srcCfg) != INVALID_FILE_ATTRIBUTES &&
+            h_copy(dstCfg, CX_CLEANUP_PATH_CAP, dir) &&
+            h_cat(dstCfg, CX_CLEANUP_PATH_CAP, L"\\chaoxing-plus.json")) {
+            CopyFileW(srcCfg, dstCfg, FALSE);
+        }
+    }
     argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) { DeleteFileW(staged); RemoveDirectoryW(dir); return FALSE; }
     if (h_copy(command, CX_CLEANUP_PATH_CAP * 3, L"\"") &&
