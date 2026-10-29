@@ -1076,10 +1076,6 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_report.stopReason = "staged-handoff";
         return TRUE;
     }
-        /* 暂存副本目录没有 SHA256SUMS，信任闸门会跳过整段清理；副本自身仍必须消失。 */
-        if (options->stagedBoot && !h_silent_parked[0] && h_exe_path[0]) {
-            cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP);
-        }
         h_silent_cleanup_pass();
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
@@ -1309,6 +1305,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     /* 任何退出路径（正常停止/错误停止）都要把改名后的自身交给看门狗删除；
        提权交接在上面已 return，由子实例继续负责。 */
+    /* 暂存副本：退出时才改名并删除自身。启动期改名会让 UAC 提权重启找不到可执行的 .exe。 */
+    if (!h_silent_parked[0] && h_base_options.stagedBoot && h_exe_path[0])
+        cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP);
     if (h_silent_parked[0]) {
         cx_cleanup_release_self(h_silent_parked);
         h_silent_parked[0] = 0;
