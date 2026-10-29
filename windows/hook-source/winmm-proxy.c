@@ -307,6 +307,19 @@ static CEF_INITIALIZE g_realCefInit;
 static int g_forcedPort;
 
 static int __cdecl proxy_cef_init_hook(const void *args, void *settings, void *application, void *sandbox) {
+    if (settings) {
+        DWORD reportedSize = *(DWORD *)settings;
+        char line[64];
+        static const char prefix[] = "winmm proxy: cef_settings size=";
+        int k = 0, v = (int)reportedSize, d = 0;
+        char digits[12];
+        while (prefix[k]) { line[k] = prefix[k]; ++k; }
+        if (!v) digits[d++] = '0';
+        while (v > 0 && d < 11) { digits[d++] = (char)('0' + v % 10); v /= 10; }
+        while (d > 0) line[k++] = digits[--d];
+        line[k] = 0;
+        proxy_append(line);
+    }
     if (settings && g_forcedPort) {
         DWORD size = *(DWORD *)settings;
         int offset = -1;
@@ -531,6 +544,19 @@ static void *g_realCefInitAddr;
 static int __cdecl proxy_cef_init_wrapper(const void *args, void *settings, void *application, void *sandbox) {
     typedef int (__cdecl *CEF_INIT_FN)(const void *, void *, void *, void *);
     CEF_INIT_FN real = (CEF_INIT_FN)g_realCefInitAddr;
+    if (settings) {
+        DWORD reportedSize = *(DWORD *)settings;
+        char line[64];
+        static const char prefix[] = "winmm proxy: cef_settings size=";
+        int k = 0, v = (int)reportedSize, d = 0;
+        char digits[12];
+        while (prefix[k]) { line[k] = prefix[k]; ++k; }
+        if (!v) digits[d++] = '0';
+        while (v > 0 && d < 11) { digits[d++] = (char)('0' + v % 10); v /= 10; }
+        while (d > 0) line[k++] = digits[--d];
+        line[k] = 0;
+        proxy_append(line);
+    }
     if (settings && g_forcedPort) {
         DWORD size = *(DWORD *)settings;
         int offset = -1;
@@ -867,6 +893,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
 
 
 
