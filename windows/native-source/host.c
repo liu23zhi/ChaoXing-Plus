@@ -634,8 +634,13 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         h_print(L" -> ");
         h_print(target);
     } else {
-        WCHAR message[96];
-        wsprintfW(message, L"install-proxy: copy failed (%lu)", (unsigned long)GetLastError());
+        DWORD code = GetLastError();
+        WCHAR message[192];
+        if (code == ERROR_ACCESS_DENIED || code == ERROR_PRIVILEGE_NOT_HELD || code == ERROR_WRITE_PROTECT) {
+            wsprintfW(message, L"install-proxy: access denied writing %s (run the host as administrator, or pick a user-writable client copy)", target);
+        } else {
+            wsprintfW(message, L"install-proxy: copy failed (%lu) -> %s", (unsigned long)code, target);
+        }
         h_print(message);
     }
     return ok;
@@ -659,6 +664,13 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     }
     if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
     if (DeleteFileW(dll)) removed = TRUE;
+    else {
+        DWORD code = GetLastError();
+        if (code == ERROR_ACCESS_DENIED) {
+            h_print(L"uninstall-proxy: access denied removing winmm.dll (run the host as administrator)");
+            return FALSE;
+        }
+    }
     DeleteFileW(marker);
     { WCHAR portPath[CX_CLEANUP_PATH_CAP]; if (h_copy(portPath, CX_CLEANUP_PATH_CAP, targetDir) && h_cat(portPath, CX_CLEANUP_PATH_CAP, L"\\cxhook-port.txt")) DeleteFileW(portPath); }
     if (removed) { h_print(L"uninstall-proxy: removed "); h_print(dll); }
@@ -2224,6 +2236,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
