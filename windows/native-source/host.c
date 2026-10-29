@@ -2486,10 +2486,10 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_proxy_auto_installed = TRUE;
             if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
         }
-    }    if (!options->attachPortSet && !h_dll_proxy_mode && !h_pe_section_named(h_selected_path, ".themida")) {
+    }    if (!options->attachPortSet && !h_dll_proxy_mode && (!options->injectModeSet || h_same(options->injectMode, L"auto")) && !h_pe_section_named(h_selected_path, ".themida")) {
         h_report.injectMode = "cdp-port";
     }
-    if (!options->attachPortSet && !h_dll_proxy_mode && h_pe_section_named(h_selected_path, ".themida")) {
+    if (!options->attachPortSet && !h_dll_proxy_mode && (!options->injectModeSet || h_same(options->injectMode, L"auto")) && h_pe_section_named(h_selected_path, ".themida")) {
         {
             WCHAR probeWinmm[CX_CLEANUP_PATH_CAP];
             BOOL proxyReady = FALSE;
@@ -2839,6 +2839,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
