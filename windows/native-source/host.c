@@ -241,6 +241,14 @@ static void h_print(const WCHAR *text) {
     if (!out || out == INVALID_HANDLE_VALUE) return;
     wideLength = h_wlen(text);
     if (wideLength <= 0) return;
+    {
+        /* 控制台直接用宽字符输出，避免 UTF-8 字节被 GBK 代码页解释成乱码（中文路径显示为"娌冲崡"）。 */
+        DWORD consoleMode = 0;
+        if (GetConsoleMode(out, &consoleMode)) {
+            WriteConsoleW(out, text, (DWORD)wideLength, &written, NULL);
+            return;
+        }
+    }
     utf8Length = WideCharToMultiByte(CP_UTF8, 0, text, wideLength, NULL, 0, NULL, NULL);
     if (utf8Length <= 0) return;
     utf8 = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)utf8Length);
@@ -2557,6 +2565,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
