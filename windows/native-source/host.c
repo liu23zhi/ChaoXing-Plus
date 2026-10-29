@@ -112,6 +112,14 @@ static JT h_diagnostic_tokens[HOST_REPLY_TOKENS];
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static void h_zero(void *p, SIZE_T n) { volatile BYTE *b = (volatile BYTE *)p; while (n--) *b++ = 0; }
+static const char *h_inject_mode_name(const WCHAR *mode) {
+    if (!mode) return "auto";
+    if (h_same(mode, L"cdp-port")) return "cdp-port";
+    if (h_same(mode, L"cdp-pipe")) return "cdp-pipe";
+    if (h_same(mode, L"dll-proxy")) return "dll-proxy";
+    if (h_same(mode, L"input")) return "input";
+    return "auto";
+}
 static BOOL h_parent_dir(const WCHAR *path, WCHAR *out, DWORD cap) {
     DWORD i = 0, cut = 0;
     if (!path || !out || cap < 4) return FALSE;
@@ -1280,6 +1288,8 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     }
     /* 注入方式分派：auto / cdp-port / dll-proxy 已接入主流程；
    cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
+    h_report.injectMode = "auto";
+    if (options->injectModeSet) h_report.injectMode = h_inject_mode_name(options->injectMode);
     if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
         WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
         BOOL dirOk = options->injectProxyDirSet
@@ -1299,6 +1309,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             goto done;
         }
         h_dll_proxy_mode = TRUE;
+        h_report.commandLineInjected = TRUE;
         if (!options->quiet) {
             h_print(L"dll-proxy: proxy found at ");
             h_print(proxyDll);
@@ -1611,6 +1622,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

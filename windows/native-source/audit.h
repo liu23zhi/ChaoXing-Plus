@@ -44,6 +44,8 @@ typedef struct CX_AUDIT_REPORT {
     const char *injectStrategy;
     const char *executionMode;
     const char *stopReason;
+    const char *injectMode;
+    BOOL commandLineInjected;
     CX_ENDPOINT_PROBE endpointProbe;
 } CX_AUDIT_REPORT;
 
@@ -66,3 +68,4 @@ void cx_audit_close(CX_AUDIT *audit);
 const WCHAR *cx_audit_log_path(const CX_AUDIT *audit);
 
 #endif
+

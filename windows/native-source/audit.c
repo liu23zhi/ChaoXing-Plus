@@ -281,6 +281,8 @@ BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
     append(&out, ",\"executionMode\":"); json_string(&out, report->executionMode ? report->executionMode : "normal");
     append(&out, ",\"injectStrategy\":"); json_string(&out, report->injectStrategy);
     append(&out, ",\"stopReason\":"); json_string(&out, report->stopReason);
+    append(&out, ",\"injectMode\":"); json_string(&out, report->injectMode ? report->injectMode : "unknown");
+    append(&out, ",\"commandLineInjected\":"); append(&out, report->commandLineInjected ? "true" : "false");
     json_endpoint_probe(&out, &report->endpointProbe);
     append(&out, ",\"totals\":{\"contexts\":"); number(&out, report->contexts, 0);
     json_number(&out, "bootstraps", report->bootstraps); json_number(&out, "bundles", report->bundles);
@@ -310,3 +312,4 @@ void cx_audit_close(CX_AUDIT *audit) {
     HeapFree(GetProcessHeap(), 0, audit);
 }
 const WCHAR *cx_audit_log_path(const CX_AUDIT *audit) { return audit ? audit->logPath : L""; }
+
