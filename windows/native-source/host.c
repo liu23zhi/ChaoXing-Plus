@@ -561,6 +561,16 @@ done:
     return ok ? 1 : 0;
 }
 /* 把 winmm 代理安装到客户端目录（默认取宿主同目录的 winmm.dll）。 */
+static BOOL h_proxy_file_present(const WCHAR *clientPath) {
+    WCHAR path[CX_CLEANUP_PATH_CAP];
+    DWORD cut = 0, k;
+    if (!clientPath || !h_copy(path, CX_CLEANUP_PATH_CAP, clientPath)) return FALSE;
+    for (k = 0; path[k]; ++k) if (path[k] == L'\\') cut = k;
+    for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) { }
+    path[cut] = 0;
+    if (!h_cat(path, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
     WCHAR hostDir[CX_CLEANUP_PATH_CAP];
@@ -641,6 +651,7 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         h_print(source);
         h_print(L" -> ");
         h_print(target);
+        h_print(L"\n");
     } else {
         DWORD code = GetLastError();
         WCHAR message[192];
@@ -671,11 +682,19 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
         return FALSE;
     }
     if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
-    if (DeleteFileW(dll)) removed = TRUE;
-    else {
+    /* 客户端子进程可能短暂占用 winmm.dll：重试约 5 秒再判定失败。 */
+    {
+        int attempt;
+        for (attempt = 0; attempt < 25 && !removed; ++attempt) {
+            if (DeleteFileW(dll)) { removed = TRUE; break; }
+            if (GetLastError() == ERROR_FILE_NOT_FOUND) { removed = TRUE; break; }
+            Sleep(200);
+        }
+    }
+    if (!removed) {
         DWORD code = GetLastError();
         if (code == ERROR_ACCESS_DENIED) {
-            h_print(L"uninstall-proxy: access denied removing winmm.dll (run the host as administrator)");
+            h_print(L"uninstall-proxy: winmm.dll 仍被占用（客户端仍在运行？），请关闭客户端后重试，或以管理员身份运行\n");
             return FALSE;
         }
     }
@@ -2207,9 +2226,9 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
                 h_print(L"auto: 检测到加壳客户端，但它忽略命令行开关；请先 --install-proxy 安装代理\n");
             }
         }
-    }    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida") && !options->quiet) {
-        h_print(L"提示：该客户端带 Themida 壳并禁用命令行开关；请用 --install-proxy 安装代理后再启动（代理会在 cef_initialize 里强制调试端口）\n");
     }
+
+
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
         CX_DPI_OVERRIDE *dpi = NULL;
@@ -2522,6 +2541,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
 
 
 
