@@ -200,6 +200,12 @@ static void header_copy(const char *request, const char *name, char *out, int ca
     }
 }
 
+static void ws_send_events(SOCKET client) {
+    static const char contextEvent[] = "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"id\":1,\"origin\":\"https://mooc1.chaoxing.com\",\"name\":\"\",\"auxData\":{\"frameId\":\"CXFIXTURE\",\"isDefault\":true,\"type\":\"default\"}}}}";
+    static const char navEvent[] = "{\"method\":\"Page.frameNavigated\",\"params\":{\"frame\":{\"id\":\"CXFIXTURE\",\"url\":\"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/fixture\",\"mimeType\":\"text/html\",\"securityOrigin\":\"https://mooc1.chaoxing.com\",\"loaderId\":\"1\"}}}";
+    write_frame(client, contextEvent, (int)lstrlenA(contextEvent));
+    write_frame(client, navEvent, (int)lstrlenA(navEvent));
+}
 static void ws_serve(SOCKET client, const char *request) {
     char key[128];
     char combined[256];
@@ -219,6 +225,7 @@ static void ws_serve(SOCKET client, const char *request) {
     lstrcatA(response, accept);
     lstrcatA(response, "\r\n\r\n");
     if (send(client, response, lstrlenA(response), 0) <= 0) return;
+    ws_send_events(client);
     started = GetTickCount();
     while (GetTickCount() - started < 20000) {
         static char reply[1024];
@@ -289,6 +296,7 @@ void __stdcall CdpServerMain(void) {
     WSACleanup();
     ExitProcess(0);
 }
+
 
 
 
