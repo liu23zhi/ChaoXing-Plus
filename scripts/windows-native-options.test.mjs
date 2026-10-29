@@ -48,8 +48,6 @@ test('compiled native options honor scan aliases and layered client selection', 
 });
 
 const restrictedConfigurations = [
-  '{"executionMode":"memory"}',
-  '{"memoryExec":true}',
   '{"wipeOwnedFilesOnStart":false}',
   '{"selfDestructKey":"F8"}',
   '{"settings":{"common.settings.windows-execution-mode":"memory"}}',
@@ -77,6 +75,31 @@ test('compiled native inline and file JSON reject unavailable capabilities throu
       assert.match(result.stdout, /not supported/u);
     }
   }
+});
+
+test('compiled native memory execution mode is supported and forces zero-disk-write', {
+  skip: !host
+}, () => {
+  for (const args of [
+    ['--execution-mode', 'memory', '--print-effective-config'],
+    ['--memory-exec', '--print-effective-config'],
+    ['--options-json', '{"executionMode":"memory"}', '--print-effective-config'],
+    ['--options-json', '{"memoryExec":true}', '--print-effective-config']
+  ]) {
+    const result = invoke(...args);
+    assert.equal(result.status, 0, JSON.stringify(args) + ': ' + result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout)['common.settings.windows-no-disk-write'], true,
+      'memory execution must imply host-side zero-disk-write');
+  }
+  const capabilities = invoke('--memory-exec', '--capabilities');
+  assert.equal(capabilities.status, 0, capabilities.stdout + capabilities.stderr);
+  const parsed = JSON.parse(capabilities.stdout);
+  assert.equal(parsed.executionMode, 'memory');
+  assert.deepEqual(parsed.executionModes, ['normal', 'memory']);
+  assert.equal(parsed.memory, true);
+  const unsupported = invoke('--execution-mode', 'delete-suspend', '--quiet');
+  assert.equal(unsupported.status, 2);
+  assert.match(unsupported.stdout, /normal or memory|not supported/u);
 });
 
 test('compiled native ordinary JSON and disabled optional capability values remain valid', {

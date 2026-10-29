@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 
 import {
   applyHostOptionsToConfig,
@@ -326,7 +328,11 @@ test('no-diagnose CLI 开关覆盖 options-json，且禁用的 JSON 能力显式
   assert.equal(parseHostArgs(['--diagnose', '--no-diagnose']).diagnose, false);
   assert.equal(parseHostArgs(['--no-diagnose', '--diagnose']).diagnose, true);
 
-  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { executionMode: 'memory' }), /尚未实现/u);
+  const memoryJson = applyOptionsJsonToOptions(parseHostArgs([]), { executionMode: 'memory' });
+  assert.equal(memoryJson.executionMode, 'memory');
+  assert.equal(memoryJson.noDiskWrite, true);
+  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { memoryExec: 'yes' }), /布尔值/u);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { memoryExec: true }).executionMode, 'memory');
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { wipeOwnedFilesOnStart: true }), /尚未实现/u);
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { settings: { selfDestructOnFullscreenExit: true } }), /尚未实现/u);
   assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /尚未实现/u);
@@ -358,12 +364,18 @@ test('数据保留和删除外部配置参数按方案解析，删除外部配�
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { ui: 'bogus' }), /只支持/u);
 });
 
+test('--version 开关可解析且默认关闭', () => {
+  assert.equal(parseHostArgs([]).version, false);
+  assert.equal(parseHostArgs(['--version']).version, true);
+  assert.equal(parseHostArgs(['-v']).version, true);
+});
+
 test('未实现能力暴露机器可读 schema / capability 标记', () => {
   assert.equal(parseHostArgs(['--capabilities']).capabilities, true);
   assert.equal(UNSUPPORTED_CAPABILITIES.implemented, false);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.implemented, false);
-  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal']);
-  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues], ['memory', 'delete-suspend']);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal', 'memory']);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues], ['delete-suspend']);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.min, 1);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.max, 20);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min, 50);
@@ -416,7 +428,11 @@ test('终端客户端选择输入支持序号或带引号的手动路径', () =>
   assert.deepEqual(parseClientSelectionInput("'D:\\Exam Files\\CXExam.exe'", 0), { index: 0, path: 'D:\\Exam Files\\CXExam.exe' });
 });
 
-test('第一阶段启动清理、自毁和内存执行的 CLI 参数都显式拒绝', () => {
+test('第一阶段启动清理、自毁和删除挂起的 CLI 参数都显式拒绝', () => {
+  const memory = parseHostArgs(['--memory-exec']);
+  assert.equal(memory.executionMode, 'memory');
+  assert.equal(memory.noDiskWrite, true);
+  assert.equal(parseHostArgs(['--execution-mode', 'memory']).executionMode, 'memory');
   for (const argument of [
     '--wipe-owned-files-on-start',
     '--wipe-failure-policy',
@@ -425,7 +441,6 @@ test('第一阶段启动清理、自毁和内存执行的 CLI 参数都显式拒
     '--wipe-runtime-retry',
     '--no-wipe-runtime-retry',
     '--wipe-runtime-interval',
-    '--memory-exec',
     '--delete-suspend',
     '--self-destruct-key',
     '--self-destruct-on-fullscreen-exit',
@@ -500,8 +515,15 @@ test('宿主参数写入共享配置，供 bootstrap 和业务 runtime 使用', 
   assert.equal(noDiskWriteConfig.settings['common.settings.windows-no-disk-write'], true);
 });
 
-test('内存执行、删除挂起和自毁参数显式拒绝，不静默降级为普通运行', () => {
-  assert.throws(() => parseHostArgs(['--execution-mode', 'memory']), /尚未实现/u);
+test('内存执行可用且强制零落盘；删除挂起与自毁仍显式拒绝', () => {
+  const memory = parseHostArgs(['--execution-mode', 'memory']);
+  assert.equal(memory.executionMode, 'memory');
+  assert.equal(memory.noDiskWrite, true);
+  assert.equal(memory.logFileEnabled, false);
+  assert.equal(memory.noDiagnose, true);
+  assert.equal(memory.noScanCache, true);
+  assert.equal(memory.reportPath, '');
+  assert.equal(parseHostArgs(['--memory-exec', '--report', 'x.json']).reportPath, '');
   assert.throws(() => parseHostArgs(['--execution-mode', 'delete-suspend']), /尚未实现/u);
   assert.throws(() => parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X']), /尚未实现/u);
   assert.throws(() => parseHostArgs(['--self-destruct-on-fullscreen-exit']), /尚未实现/u);
@@ -586,4 +608,14 @@ test('Windows 业务 runtime 使用宿主下发的面板和答题设置', async 
   assert.match(cxSource, /pendingTokens/u);
   assert.match(cxSource, /common\.settings\.windows-\$\{name\}/u);
   assert.match(cxSource, /'answer-mode'/u);
+});
+
+test('host usage lists scan fallback and client scan controls, including --no-scan-all', () => {
+  const result = spawnSync(process.execPath, [resolve('windows/host/main.mjs'), '--help'], {
+    cwd: resolve('.'), encoding: 'utf8', timeout: 15000, windowsHide: true
+  });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  for (const flag of ['--scan-clients', '--scan-all', '--no-scan-all']) {
+    assert.ok(result.stdout.includes(flag), 'missing host usage flag: ' + flag);
+  }
 });

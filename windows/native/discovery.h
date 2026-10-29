@@ -44,6 +44,7 @@ typedef struct CX_DISCOVERY_RESULT {
     BOOL stoppedOnX86;
     BOOL truncated;
     BOOL cacheHit;
+    BOOL cancelled;
 } CX_DISCOVERY_RESULT;
 
 typedef struct CX_DISCOVERY_OPTIONS {
@@ -62,6 +63,11 @@ typedef struct CX_DISCOVERY_OPTIONS {
     BOOL rescan;
     BOOL noScanCache;
     BOOL noDiskWrite;
+    /* Optional progress/cancel hooks for long recursive scans. Both run on the
+       scan thread; progress is an observer, cancel must be cheap and safe. */
+    void *progressContext;
+    void (*onProgress)(void *progressContext, DWORD directoriesVisited, DWORD candidatesFound);
+    BOOL (*cancelRequested)(void *progressContext);
 } CX_DISCOVERY_OPTIONS;
 
 void cx_discovery_init(CX_DISCOVERY_RESULT *result);

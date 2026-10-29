@@ -378,6 +378,16 @@ async function ownershipFixture({ attach = false, owner = 101, queryError = null
       state.queries += 1;
       if (state.queryError) throw state.queryError;
       return typeof state.owner === 'function' ? state.owner() : state.owner;
+    },
+    listenerOwnershipVerifier: {
+      // Mirrors the production contract: only the launched PID (or a stub
+      // descendant) passes; real parent-chain logic is covered by
+      // windows-listener-owner.test.mjs.
+      verify: async (ownerPid, clientPid) => ({
+        verified: Number.isInteger(ownerPid) && ownerPid === clientPid,
+        reason: 'stub',
+        depth: ownerPid === clientPid ? 0 : -1
+      })
     }
   };
   const verify = vm.runInNewContext(`(${match[1]})`, context);

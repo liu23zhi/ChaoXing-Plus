@@ -5,11 +5,13 @@ import { describeMachine, readPeMachine } from './launch.mjs';
 import { parseClientSelectionInput } from './options.mjs';
 import { isCxExamExecutablePath, findPreferredClientIndex, discoverClientCandidates, resolveExplicitClientPath } from './client-discovery.mjs';
 import { showClientSelectionWindow } from './selection-window.mjs';
+import { openScanProgressWindow, SCAN_PROGRESS_LABELS } from './scan-progress-window.mjs';
 
 export async function resolveClientSelection(options, config, {
   logger = { info() {}, warn() {} },
   discover = discoverClientCandidates,
   showWindow = showClientSelectionWindow,
+  showProgressWindow = openScanProgressWindow,
   readMachine = readPeMachine,
   assertMachine = () => {},
   parseInput = parseClientSelectionInput,
@@ -21,7 +23,8 @@ export async function resolveClientSelection(options, config, {
   scanCachePath = '',
   cacheFs,
   cacheTtlMs,
-  onCacheEvent = () => {}
+  onCacheEvent = () => {},
+  onListCandidates = null
 } = {}) {
   if (options.clientPath) return config.clientPath || options.clientPath;
   if (!options.scanClients && options.clientIndex === null && !options.selectClient && !options.clientFirst && options.ui !== 'cli' && options.ui !== 'gui' && config.clientPath) {
@@ -39,7 +42,7 @@ export async function resolveClientSelection(options, config, {
     || (options.clientIndex === null && !options.clientFirst && options.ui === 'auto' && interactive);
   const mayPrompt = nativeSelectionRequested || (interactive && terminalPromptRequested);
 
-  const scan = (scanMode, forceRescan = options.rescan === true) => discover({
+  const scan = (scanMode, forceRescan = options.rescan === true, overrides = {}) => discover({
     scanMode,
     stopOnMachine: options.listClients || mayPrompt || options.clientIndex !== null ? null : 0x014c,
     onFullScan: () => logger.info(scanMode === 'all'
@@ -51,7 +54,8 @@ export async function resolveClientSelection(options, config, {
     forceRescan,
     ...(cacheFs ? { cacheFs } : {}),
     ...(cacheTtlMs !== undefined ? { cacheTtlMs } : {}),
-    onCacheEvent
+    onCacheEvent,
+    ...overrides
   });
   logger.info(options.scanMode === 'all' ? '[client] 正在全盘扫描' : '[client] 正在扫描常见安装目录（根目录及一级子目录）');
   const scanResult = await scan(options.scanMode);
@@ -67,7 +71,16 @@ export async function resolveClientSelection(options, config, {
     if (options.listClients && candidates.length === 0) stdout.write('[client] 未扫描到可用的 CXExam.exe\n');
   };
   printCandidates();
-  if (options.listClients) return null;
+  if (options.listClients) {
+    if (typeof onListCandidates === 'function') {
+      onListCandidates(candidates.map(({ path: candidatePath, name, machine }) => ({
+        path: candidatePath,
+        name,
+        machine: describeMachine(machine)
+      })));
+    }
+    return null;
+  }
 
   const resolveSelectedPath = async (selectedPath, { manual = false } = {}) => {
     const absolute = path.resolve(selectedPath);
@@ -93,17 +106,59 @@ export async function resolveClientSelection(options, config, {
         ...(Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? { autoCloseMs } : {})
       });
       if (windowResult.status === 'scan-all') {
-        logger.info('[client] 用户请求全盘扫描；完成后将重新显示选择窗口，请等待');
+        logger.info('[client] 用户请求全盘扫描；扫描期间显示进度窗口，可随时取消');
+        const controller = new AbortController();
+        let progressWindow = { status: 'unavailable', reason: 'not-requested' };
         try {
-          const result = await scan('all', true);
+          progressWindow = await showProgressWindow({
+            labels: {
+              ...SCAN_PROGRESS_LABELS,
+              message: '正在全盘扫描固定磁盘根目录以查找 CXExam.exe，请稍候…'
+            },
+            platform
+          });
+        } catch (error) {
+          logger.warn(`[client] 无法显示扫描进度窗口，继续无界面全盘扫描：${error.message || error}`);
+        }
+        if (progressWindow.status !== 'ok') {
+          logger.info('[client] 扫描进度窗口不可用，继续无界面全盘扫描');
+        }
+        const watching = progressWindow.status === 'ok'
+          ? progressWindow.cancelled.then((cancelled) => { if (cancelled) controller.abort(); })
+          : Promise.resolve();
+        let lastProgressLogAt = 0;
+        try {
+          const result = await scan('all', true, {
+            signal: controller.signal,
+            onProgress: (update) => {
+              if (progressWindow.status === 'ok') void progressWindow.update(update);
+              const now = Date.now();
+              if (now - lastProgressLogAt >= 2000) {
+                lastProgressLogAt = now;
+                logger.info(`[client] 全盘扫描进行中：已检查 ${update.directoriesVisited} 个目录，发现 ${update.candidatesFound} 个候选`);
+              }
+            }
+          });
           candidates = result.candidates || [];
           preferredIndex = findPreferredClientIndex(candidates);
           notice = `全盘扫描完成，共 ${candidates.length} 个候选。`;
           logger.info(`[client] ${notice}`);
           printCandidates();
         } catch (error) {
-          notice = '全盘扫描失败，保留原候选；可重试或手动浏览。';
-          logger.warn(`[client] ${notice} ${error.message || error}`);
+          if (error && (error.name === 'AbortError' || error.code === 'ABORT_ERR')) {
+            notice = '已取消全盘扫描，保留原候选；可重试或手动浏览。';
+            logger.warn(`[client] ${notice}`);
+          } else {
+            notice = '全盘扫描失败，保留原候选；可重试或手动浏览。';
+            logger.warn(`[client] ${notice} ${error.message || error}`);
+          }
+        } finally {
+          if (progressWindow.status === 'ok') {
+            try { await progressWindow.close(); } catch (error) {
+              logger.warn(`[client] 关闭扫描进度窗口失败：${error.message || error}`);
+            }
+          }
+          await watching;
         }
         continue;
       }

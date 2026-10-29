@@ -856,3 +856,83 @@ test('提前停止的全盘扫描结果不会污染需要完整候选列表的�
   const cacheText = cacheFs.files.get('C:\\cache\\scan-cache.json');
   assert.equal(JSON.parse(cacheText).complete, true);
 });
+
+test('discoverClientExecutables 报告目录进度并支持 AbortSignal 取消', async () => {
+  const tree = createTree({
+    'C:\\Root': [
+      { name: 'Alpha', directory: true },
+      { name: 'Beta', directory: true }
+    ],
+    'C:\\Root\\Alpha': [{ name: 'CXExam.exe' }],
+    'C:\\Root\\Beta': []
+  }, new Map([['C:\\Root\\Alpha\\CXExam.exe', 0x014c]]));
+  const progress = [];
+  const candidates = await discoverClientExecutables({
+    roots: ['C:\\Root'],
+    scanMode: 'all',
+    maxDepth: 3,
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    progressIntervalMs: 0,
+    onProgress: (update) => progress.push(update)
+  });
+  assert.equal(candidates.length, 1);
+  assert.ok(progress.length >= 3, JSON.stringify(progress));
+  const last = progress[progress.length - 1];
+  assert.equal(last.directoriesVisited, 3);
+  assert.equal(last.candidatesFound, 1);
+  assert.equal(typeof last.elapsedMs, 'number');
+
+  const abortedBeforeStart = new AbortController();
+  abortedBeforeStart.abort();
+  await assert.rejects(discoverClientExecutables({
+    roots: ['C:\\Root'],
+    scanMode: 'all',
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    signal: abortedBeforeStart.signal
+  }), { name: 'AbortError', code: 'ABORT_ERR' });
+
+  const abortedMidScan = new AbortController();
+  const observed = [];
+  await assert.rejects(discoverClientExecutables({
+    roots: ['C:\\Root'],
+    scanMode: 'all',
+    maxDepth: 3,
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    progressIntervalMs: 0,
+    signal: abortedMidScan.signal,
+    onProgress: (update) => {
+      observed.push(update);
+      abortedMidScan.abort();
+    }
+  }), { name: 'AbortError', code: 'ABORT_ERR' });
+  assert.equal(observed.length, 1);
+});
+
+test('discoverClientCandidates 把进度与取消信号传递给全盘扫描', async () => {
+  const tree = createTree({
+    'C:\\Root': [{ name: 'CXExam.exe' }]
+  }, new Map([['C:\\Root\\CXExam.exe', 0x014c]]));
+  const scans = [];
+  const run = (extra = {}) => discoverClientCandidates({
+    scanMode: 'all',
+    driveRootProvider: async () => ['C:\\Root'],
+    fsProvider: tree.fsProvider,
+    peMachineReader: tree.peMachineReader,
+    stopOnMachine: null,
+    progressIntervalMs: 0,
+    onProgress: (update) => scans.push(update),
+    ...extra
+  });
+  const result = await run();
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.source, 'full');
+  assert.ok(scans.length >= 1);
+  assert.equal(scans[scans.length - 1].candidatesFound, 1);
+
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(run({ signal: aborted.signal }), { name: 'AbortError' });
+});

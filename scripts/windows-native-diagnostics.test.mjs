@@ -6,6 +6,7 @@ import { createConnection } from 'node:net';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { inflateSync } from 'node:zlib';
 import { resolve, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -36,10 +37,46 @@ test('compiled native diagnostics enforce the schema and keep file failures non-
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.doesNotMatch(result.stdout, /^FAIL /mu);
     assert.match(result.stdout, /DIAGNOSTICS SELF-TEST PASS/);
+    const pngPath = await findFileNamed(root, 'window-capture.png');
+    assert.ok(pngPath, 'the compiled window capture test must publish a PNG snapshot');
+    const png = await readFile(pngPath);
+    assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    assert.equal(png.subarray(12, 16).toString('latin1'), 'IHDR');
+    const pngWidth = png.readUInt32BE(16);
+    const pngHeight = png.readUInt32BE(20);
+    assert.ok(pngWidth > 0 && pngHeight > 0);
+    assert.equal(png.readUInt8(24), 8, 'window PNG must use 8-bit channels');
+    assert.equal(png.readUInt8(25), 2, 'window PNG must use truecolor RGB');
+    let offset = 8;
+    let idat = Buffer.alloc(0);
+    while (offset + 12 <= png.length) {
+      const length = png.readUInt32BE(offset);
+      const type = png.subarray(offset + 4, offset + 8).toString('latin1');
+      if (type === 'IDAT') idat = Buffer.concat([idat, png.subarray(offset + 8, offset + 8 + length)]);
+      offset += 12 + length;
+    }
+    const raw = inflateSync(idat);
+    assert.equal(raw.length, pngHeight * (1 + pngWidth * 3),
+      'Node zlib must decode the stored PNG rows to the expected size');
+    for (let row = 0; row < pngHeight; row += 1) assert.equal(raw[row * (1 + pngWidth * 3)], 0, 'PNG rows must use filter 0');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function findFileNamed(root, fileName) {
+  if (!await exists(root)) return null;
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isFile() && entry.name === fileName) return path;
+    if (entry.isDirectory()) {
+      const nested = await findFileNamed(path, fileName);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
 
 async function exists(path) {
   try {
@@ -143,13 +180,17 @@ after(async () => {
 });
 
 async function findDiagnosticsFile(root) {
+  return findDiagnosticsFileNamed(root, 'render-diagnostics.json');
+}
+
+async function findDiagnosticsFileNamed(root, fileName) {
   if (!await exists(root)) return null;
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     const path = join(root, entry.name);
-    if (entry.isFile() && entry.name === 'render-diagnostics.json') return path;
+    if (entry.isFile() && entry.name === fileName) return path;
     if (entry.isDirectory()) {
-      const nested = await findDiagnosticsFile(path);
+      const nested = await findDiagnosticsFileNamed(path, fileName);
       if (nested) return nested;
     }
   }
@@ -274,6 +315,40 @@ test('native page diagnostics are collected after top-level bundle ACK with a fl
   assert.equal(diagnostic.panelCount, 0);
   assert.equal(diagnostic.topPanel, null);
   assert.deepEqual(diagnostic.scope, { pageOnly: true, windowDpi: false, screenshots: false });
+  const pngPath = await findDiagnosticsFileNamed(result.diagnosticsDir, 'render-diagnostics-page.png');
+  assert.ok(pngPath, 'Page.captureScreenshot must publish render-diagnostics-page.png');
+  const png = await readFile(pngPath);
+  assert.ok(png.length > 33 && png.length <= 16 * 1024 * 1024, 'page screenshot must be bounded');
+  assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    'page screenshot must be a PNG file');
+  assert.equal(png.subarray(12, 16).toString('latin1'), 'IHDR', 'page screenshot must start with an IHDR chunk');
+  const screenshotWidth = png.readUInt32BE(16);
+  const screenshotHeight = png.readUInt32BE(20);
+  assert.ok(screenshotWidth > 0 && screenshotHeight > 0
+    && screenshotWidth <= 16384 && screenshotHeight <= 16384,
+  `page screenshot dimensions must be bounded, got ${screenshotWidth}x${screenshotHeight}`);
+  const summaryPath = await findDiagnosticsFileNamed(result.diagnosticsDir, 'render-diagnostics-host.json');
+  assert.ok(summaryPath, 'the host diagnostics summary must be published');
+  const summary = JSON.parse(await readFile(summaryPath, 'utf8'));
+  assert.equal(summary.version, '6.2.0');
+  assert.equal(summary.host, 'native');
+  assert.equal(summary.source, 'native-host');
+  assert.equal(typeof summary.collectedAt, 'string');
+  assert.ok(Number.isFinite(Date.parse(summary.collectedAt)));
+  assert.equal(summary.launchMode, 'attach');
+  assert.equal(summary.clientPid, 0);
+  assert.equal(summary.window.recorded, false);
+  assert.equal(summary.window.screenshot, 'unavailable');
+  assert.equal(summary.window.dpiStatus, 'unknown');
+  assert.equal(summary.artifacts.pageDiagnostics, true);
+  assert.equal(summary.artifacts.pageScreenshot, true);
+  assert.equal(summary.artifacts.windowDiagnostics, false);
+  assert.equal(summary.artifacts.windowCaptureBmp, false);
+  assert.equal(summary.artifacts.windowCapturePng, false);
+  assert.deepEqual(Object.keys(summary.files).sort(), [
+    'pageDiagnostics', 'pageScreenshot', 'windowCaptureBmp', 'windowCapturePng', 'windowDiagnostics'
+  ].sort());
+  assert.equal(summary.files.pageScreenshot, 'render-diagnostics-page.png');
 });
 
 test('native --no-disk-write suppresses page render diagnostics without changing the bundle ACK path', {
@@ -283,6 +358,10 @@ test('native --no-disk-write suppresses page render diagnostics without changing
   assert.equal(await exists(result.diagnosticsDir), false, 'no-disk-write must not create diagnostics directory');
   assert.equal(await exists(join(result.diagnosticsDir, 'render-diagnostics.json')), false,
     'no-disk-write must not leave a render diagnostics file');
+  assert.equal(await exists(join(result.diagnosticsDir, 'render-diagnostics-page.png')), false,
+    'no-disk-write must not leave a page screenshot');
+  assert.equal(await exists(join(result.diagnosticsDir, 'render-diagnostics-host.json')), false,
+    'no-disk-write must not leave a host diagnostics summary');
 });
 
 test('native page diagnostics quantize fractional device scale and panel geometry to the accepted schema', {

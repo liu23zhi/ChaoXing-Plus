@@ -578,7 +578,7 @@ test('compiled native report preserves reconnect totals and snapshots only live 
 test('compiled native reports an interrupted in-flight injection and recovers its live document', { skip: !executable }, async () => {
   const proxy = await cdpProxy();
   try {
-    const value = await runFixture(['--attach', String(proxy.port), '--duration', '4000'], undefined, async ({ page }) => {
+    const value = await runFixture(['--attach', String(proxy.port), '--duration', '10000'], undefined, async ({ page }) => {
       const interruption = proxy.disconnectDuringNextEvaluation();
       await page.evaluate(() => {
         const frame = document.createElement('iframe');
@@ -586,8 +586,9 @@ test('compiled native reports an interrupted in-flight injection and recovers it
         document.body.append(frame);
       });
       const observed = await interruption;
+      // 并行浏览器回归下 Chromium 与新宿主进程会被放慢；给重连后的补注入留更宽裕的上限。
       await page.waitForFunction(() => document.querySelector('iframe[data-audit-interrupted]')?.contentWindow.__nativeAuditBundleRuns === 1,
-        { timeout: 3000 });
+        { timeout: 8000 });
       return observed;
     });
     const report = await readReport(value.reportPath);

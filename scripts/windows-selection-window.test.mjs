@@ -179,6 +179,86 @@ test('probeClientSelectionWindow 可构建 WinForms 窗口控件（Windows 冒�
   assert.equal(result.candidateCount, 1);
 });
 
+test('三个候选在默认及最小窗口中完整可见且可分别选择', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), 'cx-selection-layout-'));
+  const candidates = [
+    { path: 'C:\\考试客户端一\\CXExam.exe', machine: 'x86' },
+    { path: 'D:\\考试客户端二\\CXExam.exe', machine: 'x64' },
+    { path: 'E:\\考试客户端三\\CXExam.exe', machine: 'x86' }
+  ];
+  try {
+    const source = await readFile(defaultSelectionWindowScript, 'utf8');
+    const scriptPath = resolve(directory, 'layout.ps1');
+    const instrumented = source.replace('ConvertTo-Json -Compress', 'ConvertTo-Json -Compress -Depth 8')
+      .replace('$script:selection = @{ cancelled = $true; autoClosed = $true }', `
+    $snapshots = @()
+    foreach ($size in @($ui.form.Size, $ui.form.MinimumSize)) {
+      $ui.form.Size = $size
+      $ui.form.PerformLayout()
+      $hint = @($ui.form.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] })[0]
+      $rows = @()
+      for ($index = 0; $index -lt $ui.list.Items.Count; $index += 1) {
+        $rect = $ui.list.GetItemRectangle($index)
+        $point = New-Object System.Drawing.Point(($ui.list.Left + 10), ($ui.list.Top + $rect.Top + [int]($rect.Height / 2)))
+        $ui.list.SelectedIndex = $index
+        $rows += @{
+          top = $rect.Top; bottom = $rect.Bottom
+          text = [string]$ui.list.Items[$index]
+          hitList = [object]::ReferenceEquals($ui.form.GetChildAtPoint($point), $ui.list)
+          selectedIndex = $ui.list.SelectedIndex
+        }
+      }
+      $snapshots += @{
+        count = $ui.list.Items.Count; listTop = $ui.list.Top; listBottom = $ui.list.Bottom
+        listClientHeight = $ui.list.ClientSize.Height
+        hintBottom = $hint.Bottom; buttonsTop = $ui.buttons.Top; rows = $rows
+      }
+    }
+    $ui.list.SelectedIndex = [int]$payload.preferredIndex
+    $ui.ok.PerformClick()
+    $script:selection.layout = $snapshots
+`);
+    await writeFile(scriptPath, instrumented, 'ascii');
+    for (const preferredIndex of [0, 1, 2]) {
+      const result = await showClientSelectionWindow({
+        candidates, preferredIndex, scriptPath, autoCloseMs: 350, timeoutMs: 30000,
+        execFileImpl: (command, args, options) => new Promise((resolveResult, rejectResult) => {
+          const child = spawn(command, args, { windowsHide: options.windowsHide, stdio: ['pipe', 'pipe', 'pipe'] });
+          const stdout = [], stderr = [];
+          const timer = setTimeout(() => { child.kill(); rejectResult(new Error('layout probe timed out')); }, options.timeout);
+          child.stdout.on('data', (chunk) => stdout.push(chunk));
+          child.stderr.on('data', (chunk) => stderr.push(chunk));
+          child.on('error', (error) => { clearTimeout(timer); rejectResult(error); });
+          child.on('close', (code) => {
+            clearTimeout(timer);
+            try {
+              assert.equal(code, 0, Buffer.concat(stderr).toString('utf8'));
+              const raw = JSON.parse(Buffer.concat(stdout).toString('utf8'));
+              assert.equal(raw.layout.length, 2);
+              for (const layout of raw.layout) {
+                assert.equal(layout.count, 3, 'all scanned candidates must reach the list');
+                assert.ok(layout.listTop >= layout.hintBottom, `hint covers list: ${JSON.stringify(layout)}`);
+                assert.ok(layout.listBottom <= layout.buttonsTop, 'buttons must not cover the list');
+                for (const [index, row] of layout.rows.entries()) {
+                  assert.ok(row.top >= 0 && row.bottom <= layout.listClientHeight, 'candidate row must fit in the list');
+                  assert.equal(row.hitList, true, `candidate ${index + 1} is covered by another control`);
+                  assert.equal(row.selectedIndex, index);
+                  assert.ok(row.text.includes(candidates[index].path), 'candidate path must remain intact');
+                }
+              }
+              resolveResult({ stdout: JSON.stringify(raw) });
+            } catch (error) { rejectResult(error); }
+          });
+          child.stdin.end(options.input, 'utf8');
+        })
+      });
+      assert.deepEqual(result, { status: 'selected', path: candidates[preferredIndex].path, index: preferredIndex + 1, manual: false });
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('真实选择窗口对操作系统可见，全盘按钮返回请求（自动操作，不启动客户端）', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
   const directory = await mkdtemp(resolve(tmpdir(), 'cx-selection-visibility-'));
   try {

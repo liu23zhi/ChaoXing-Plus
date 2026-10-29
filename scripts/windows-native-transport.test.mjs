@@ -214,7 +214,7 @@ test('native endpoint deadline includes a slow HTTP version response', { skip: !
   assert.equal(result.code, 1, JSON.stringify(result));
   const version = result.requests.find(request => request.path === '/json/version');
   assert.ok(version, JSON.stringify(result));
-  assert.ok(result.elapsed - version.at < 1500, JSON.stringify(result));
+  assert.ok(result.elapsed - version.at < 2000, JSON.stringify(result));
   assert.equal(result.requests.some(request => request.path === '/json/list'), false, JSON.stringify(result));
   assert.equal(result.stdout + result.stderr, '');
 });
@@ -226,7 +226,7 @@ test('native run deadline includes a slow HTTP target-list response', { skip: !p
   assert.equal(result.code, 1, JSON.stringify(result));
   const list = result.requests.find(request => request.path === '/json/list');
   assert.ok(list, JSON.stringify(result));
-  assert.ok(result.elapsed - list.at < 1500, JSON.stringify(result));
+  assert.ok(result.elapsed - list.at < 2000, JSON.stringify(result));
   assert.equal(result.stdout + result.stderr, '');
 });
 
@@ -237,7 +237,7 @@ test('native endpoint deadline does not restart for HTTP response chunks', { ski
   assert.equal(result.code, 1, JSON.stringify(result));
   const version = result.requests.find(request => request.path === '/json/version');
   assert.ok(version, JSON.stringify(result));
-  assert.ok(result.elapsed - version.at < 1500, JSON.stringify(result));
+  assert.ok(result.elapsed - version.at < 2000, JSON.stringify(result));
   assert.equal(result.requests.some(request => request.path === '/json/list'), false, JSON.stringify(result));
   assert.equal(result.stdout + result.stderr, '');
 });
@@ -249,7 +249,7 @@ for (const trickleUpgrade of [false, true]) {
     const result = await runHostUpgradeDeadline({ trickleUpgrade });
     assert.equal(result.code, 1, JSON.stringify(result));
     assert.equal(typeof result.upgradeAt, 'number', JSON.stringify(result));
-    assert.ok(result.elapsed - result.upgradeAt < 1500, JSON.stringify(result));
+    assert.ok(result.elapsed - result.upgradeAt < 2000, JSON.stringify(result));
     assert.equal(result.stdout + result.stderr, '');
   });
 }

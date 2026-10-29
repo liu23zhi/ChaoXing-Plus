@@ -363,6 +363,8 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
                     if (versionReason == CX_ENDPOINT_READY) h_ui_record("info", "endpoint-ready");
                 }
                 if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
+                /* The CDP endpoint is ready and the owned client window now exists. */
+                if (!options->attachPortSet) h_capture_window_diagnostics();
                 break;
             } else h_probe_record(CX_ENDPOINT_HTTP_FAILED);
         } else {

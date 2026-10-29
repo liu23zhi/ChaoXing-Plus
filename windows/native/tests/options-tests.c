@@ -27,6 +27,17 @@ static void output(const char *s) {
     DWORD written;
     WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), s, (DWORD)text_length(s), &written, 0);
 }
+static int count_occurrences(const char *text, const char *needle) {
+    int count = 0, i, j, n, m;
+    if (!text || !needle) return 0;
+    n = text_length(text); m = text_length(needle);
+    if (!m) return 0;
+    for (i = 0; i + m <= n; ++i) {
+        for (j = 0; j < m; ++j) if (text[i + j] != needle[j]) break;
+        if (j == m) ++count;
+    }
+    return count;
+}
 static void check(BOOL condition, const char *name) {
     assertions++;
     if (!condition) failures++;
@@ -56,6 +67,13 @@ static void test_layer_priority(void) {
     check(!baseOptions.panelCollapsed, "unoverridden lower-layer setting survives");
     check(wide_equal(baseOptions.expectedBrowser, L"Inline/"), "inline JSON string overrides selected JSON string");
     check(wide_equal(baseOptions.dataDir, L"D:\\Native Test\\CLI data"), "CLI WCHAR string is copied during merge");
+    reset();
+    {
+        WCHAR *versionArgs[] = { L"--version" };
+        check(cx_options_parse_cli(&cliOptions, 1, versionArgs, errorText, 512) && cliOptions.version,
+              "version flag parses in the CLI layer");
+        check(!baseOptions.version, "version flag stays off unless requested");
+    }
 }
 
 static void test_strings_and_no_disk_write(void) {
@@ -83,6 +101,21 @@ static void test_shared_settings(void) {
     check(text_contains(settingsJson, "\"cx.new.study.answer-source\":{\"mode\":\"cache\"}"), "nested shared setting survives");
     check(text_contains(settingsJson, "\"common.apps.question-caches\":[{\"question\":\"q\"}]"), "question cache setting survives");
     check(text_contains(settingsJson, "\"common.settings.extension-enabled\":false"), "extension enabled setting survives");
+    check(count_occurrences(settingsJson, "\"common.settings.extension-enabled\"") == 1,
+          "managed extension setting is not duplicated");
+    reset();
+    check(apply("{\"settings\":{\"common.settings.windows-panel-enabled\":false,\"common.settings.windows-answer-key\":\"Ctrl+Alt+Shift+S\",\"common.settings.windows-panel-width\":520,\"common.settings.tiku-adapter.baseurl\":\"https://example.test\",\"common.settings.unknown-key\":\"keep\"}}"), "managed and unmanaged shared settings parse");
+    check(cx_options_finalize(&baseOptions, errorText, 512), "mixed shared settings finalize");
+    check(cx_options_effective_settings_json_utf8(&baseOptions, settingsJson, sizeof(settingsJson), &length), "mixed shared settings serialize");
+    check(count_occurrences(settingsJson, "\"common.settings.windows-panel-enabled\"") == 1,
+          "managed panel setting is written once");
+    check(count_occurrences(settingsJson, "\"common.settings.windows-answer-key\"") == 1,
+          "managed answer shortcut is written once");
+    check(count_occurrences(settingsJson, "\"common.settings.windows-panel-width\"") == 1,
+          "managed panel width is written once");
+    check(text_contains(settingsJson, "\"common.settings.windows-panel-enabled\":false"), "managed value comes from typed field");
+    check(text_contains(settingsJson, "\"common.settings.tiku-adapter.baseurl\":\"https://example.test\""), "unmanaged tiku setting survives filtering");
+    check(text_contains(settingsJson, "\"common.settings.unknown-key\":\"keep\""), "unknown unmanaged setting survives filtering");
     reset();
     check(!apply("{\"log\":\"true\"}"), "JSON string boolean is rejected");
 }
@@ -224,9 +257,25 @@ static void test_invalid_inputs(void) {
     check(errorText[0] != 0, "malformed JSON includes a diagnostic");
     reset(); check(!apply("[]"), "non-object JSON root is rejected");
     reset(); check(!apply("{\"notImplementedNativeFlag\":true}"), "unknown top-level JSON field is rejected");
-    reset(); check(!apply("{\"executionMode\":\"memory\"}"), "unimplemented JSON execution mode is rejected");
+    reset(); check(!apply("{\"executionMode\":\"delete-suspend\"}"), "JSON delete-suspend execution mode is rejected");
+    reset(); check(apply("{\"executionMode\":\"memory\"}")
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.executionModeMemory && baseOptions.noDiskWrite,
+        "JSON memory execution mode enables host-side zero-disk-write");
+    reset(); check(apply("{\"memoryExec\":true}")
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.executionModeMemory && baseOptions.noDiskWrite,
+        "JSON memoryExec alias enables zero-disk-write");
+    reset(); check(!apply("{\"memoryExec\":\"yes\"}"), "JSON memoryExec rejects non-boolean values");
+    reset(); check(!apply("{\"settings\":{\"common.settings.windows-execution-mode\":\"memory\"}}"),
+        "shared settings cannot switch launch execution mode");
+    reset(); check(apply("{\"settings\":{\"common.settings.windows-execution-mode\":\"normal\"}}"),
+        "shared settings keep tolerating explicit normal execution mode");
     reset(); check(!cx_options_parse_cli(&baseOptions, 1, unknown, errorText, 512), "unknown CLI flag is rejected");
-    reset(); check(!cx_options_parse_cli(&baseOptions, 2, memory, errorText, 512), "unimplemented CLI execution mode is rejected");
+    reset(); check(cx_options_parse_cli(&baseOptions, 2, memory, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.executionModeMemory && baseOptions.noDiskWrite,
+        "CLI memory execution mode enables host-side zero-disk-write");
     reset(); check(!cx_options_parse_cli(&baseOptions, 2, range, errorText, 512), "out-of-range CLI answer threads are rejected");
     reset(); check(!apply("{\"answerThreads\":5}") || !cx_options_finalize(&baseOptions, errorText, 512), "out-of-range JSON answer threads are rejected");
 }
@@ -436,11 +485,47 @@ static void test_launch_ports(void) {
         && cx_options_finalize(&baseOptions, errorText, 512), "higher JSON valid launch port overrides earlier unsupported value");
 }
 
+static void test_data_lifecycle(void) {
+    WCHAR *retain[] = { L"--no-retain-data" };
+    WCHAR *deleteConfig[] = { L"--delete-config", L"--config", L"D:\\Native Test\\lifecycle.json" };
+    WCHAR *deleteWithoutConfig[] = { L"--delete-config" };
+    WCHAR *deleteWithNoDiskWrite[] = { L"--delete-config", L"--config", L"D:\\Native Test\\lifecycle.json", L"--no-disk-write" };
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 1, retain, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.retainData,
+        "no-retain-data finalizes and disables retention");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 3, deleteConfig, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.deleteConfig && baseOptions.configPathSet,
+        "delete-config with explicit config finalizes");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 1, deleteWithoutConfig, errorText, 512)
+        && !cx_options_finalize(&baseOptions, errorText, 512) && errorText[0],
+        "delete-config requires explicit config");
+    reset();
+    check(cx_options_parse_cli(&baseOptions, 4, deleteWithNoDiskWrite, errorText, 512)
+        && !cx_options_finalize(&baseOptions, errorText, 512),
+        "delete-config conflicts with no-disk-write");
+    reset();
+    check(apply("{\"retainData\":false}") && cx_options_finalize(&baseOptions, errorText, 512) && !baseOptions.retainData,
+        "JSON retainData=false finalizes");
+    reset();
+    check(apply("{\"deleteConfig\":true}") && !cx_options_finalize(&baseOptions, errorText, 512),
+        "JSON deleteConfig requires explicit CLI config");
+    reset();
+    check(apply("{\"deleteConfig\":true}") && cx_options_parse_cli(&cliOptions, 3, deleteConfig, errorText, 512)
+        && cx_options_merge(&baseOptions, &cliOptions, errorText, 512)
+        && cx_options_finalize(&baseOptions, errorText, 512) && baseOptions.deleteConfig,
+        "JSON deleteConfig finalizes with explicit CLI config");
+}
+
 void WINAPI WinMainCRTStartup(void) {
     test_layer_priority(); test_strings_and_no_disk_write(); test_shared_settings(); test_diagnostic_switches(); test_bounded_shared_merges(); test_shortcuts();
     test_invalid_inputs(); test_nested_unsupported_options(); test_selection_conflicts(); test_scan_aliases(); test_selection_layer_priority();
     test_elevation_options();
     test_dpi_options();
+    test_data_lifecycle();
     test_launch_ports();
     output(failures ? "RESULT FAIL\r\n" : "RESULT PASS\r\n");
     (void)assertions;

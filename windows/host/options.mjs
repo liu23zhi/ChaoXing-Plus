@@ -6,9 +6,9 @@ export const UNSUPPORTED_CAPABILITIES = Object.freeze({
   implemented: false,
   reason: '第一阶段仅支持普通可审计运行；以下参数会显式报错，不会静默降级',
   executionModes: Object.freeze({
-    supported: Object.freeze(['normal']),
-    unsupportedFlags: Object.freeze(['--memory-exec', '--delete-suspend']),
-    unsupportedValues: Object.freeze(['memory', 'delete-suspend'])
+    supported: Object.freeze(['normal', 'memory']),
+    unsupportedFlags: Object.freeze(['--delete-suspend']),
+    unsupportedValues: Object.freeze(['delete-suspend'])
   }),
   startupWipe: Object.freeze({
     implemented: false,
@@ -42,7 +42,7 @@ export const UNSUPPORTED_CAPABILITIES = Object.freeze({
 
 export function describeUnsupportedCapabilities() {
   return [
-    `execution: 仅支持 ${UNSUPPORTED_CAPABILITIES.executionModes.supported.join('/')}；`
+    `execution: 仅支持 ${UNSUPPORTED_CAPABILITIES.executionModes.supported.join('/')}；memory 为宿主侧零落盘（客户端仍正常可见启动）；`
       + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues.join('/')} 与 `
       + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedFlags.join('/')} 未实现`,
     `startup-wipe: 尚未实现（策略 ${UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies.join('|')}，`
@@ -168,7 +168,8 @@ function rejectUnsupportedExecutionOption(argument) {
 }
 
 export function validateSupportedJsonOptions(value, source = 'options-json') {
-  const unsupportedKey = /^(?:executionmode|memoryexec|deletesuspend|selfdestruct.*|wipe.*)$/iu;
+  const unsupportedKey = /^(?:deletesuspend|selfdestruct.*|wipe.*)$/iu;
+  const isTopLevelExecutionMode = (prefix, key) => !prefix && !key.toLowerCase().startsWith('common.settings.');
   const visit = (item, prefix = '') => {
     if (!item || typeof item !== 'object') return;
     for (const [key, child] of Object.entries(item)) {
@@ -177,9 +178,20 @@ export function validateSupportedJsonOptions(value, source = 'options-json') {
         .replace(/^common\.settings\.windows-/iu, '')
         .replace(/[-_]/gu, '')
         .toLowerCase();
-      if (unsupportedKey.test(normalizedKey)
-        && (normalizedKey.startsWith('wipe') || child !== false)
-        && !(normalizedKey === 'executionmode' && child === 'normal')) {
+      if (normalizedKey === 'executionmode' || normalizedKey === 'memoryexec') {
+        if (!isTopLevelExecutionMode(prefix, key)) {
+          const error = new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
+          error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
+          throw error;
+        }
+        if (normalizedKey === 'memoryexec' && typeof child !== 'boolean') {
+          throw new Error(`${source} 的 ${fullKey} 必须是布尔值`);
+        }
+        if (normalizedKey === 'executionmode' && child !== 'normal' && child !== 'memory') {
+          throw new Error(`${source} 的 ${fullKey} 只支持 normal 或 memory`);
+        }
+      } else if (unsupportedKey.test(normalizedKey)
+        && (normalizedKey.startsWith('wipe') || child !== false)) {
         const error = new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
         error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
         throw error;
@@ -251,6 +263,8 @@ const JSON_OPTION_KEYS = {
   answerCountdown: 'answerCountdown',
   answerRetry: 'answerRetry',
   autoSubmit: 'autoSubmit',
+  executionMode: 'executionMode',
+  memoryExec: 'executionMode',
   wipeOwnedFilesOnStart: 'wipeOwnedFilesOnStart',
   wipeFailurePolicy: 'wipeFailurePolicy',
   wipeRetries: 'wipeRetries',
@@ -345,6 +359,15 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
       case 'answerThreads': next.answerThreads = normalizeAnswerThreads(raw); break;
       case 'answerCountdown': next.answerCountdown = readBoundedInteger(raw, 'options-json.answerCountdown', 0, 3600); break;
       case 'answerRetry': next.answerRetry = readBoundedInteger(raw, 'options-json.answerRetry', 0, 20); break;
+      case 'executionMode':
+        if (jsonKey === 'memoryExec') {
+          if (typeof raw !== 'boolean') throw new Error('options-json 的 memoryExec 必须是布尔值');
+          next.executionMode = raw ? 'memory' : 'normal';
+        } else {
+          if (!['normal', 'memory'].includes(raw)) throw new Error('options-json 的 executionMode 只支持 normal 或 memory');
+          next.executionMode = raw;
+        }
+        break;
       case 'wipeFailurePolicy':
         if (!['retry', 'background', 'ignore', 'abort'].includes(raw)) throw new Error('options-json 的 wipeFailurePolicy 无效');
         next.wipeFailurePolicy = raw;
@@ -403,6 +426,7 @@ function finalizeHostOptions(options) {
   const next = { ...options };
   if (next.elevateOnStart && next.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   if (next.port !== null && next.port !== undefined) next.port = validateLaunchPort(next.port);
+  if (next.executionMode === 'memory') next.noDiskWrite = true;
   if (next.noDiskWrite) {
     next.logFileEnabled = false;
     next.noDiagnose = true;
@@ -556,8 +580,11 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
     attachPort: 0,
     reportPath: '',
     selfCheck: false,
+    version: false,
+    printEffectiveConfig: false,
     noElevate: false,
     elevateOnStart: false,
+    hideConsole: false,
     elevated: false,
     stopClientOnExit: false,
     diagnose: false,
@@ -661,8 +688,10 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--attach': options.attachPort = readPort(readValue(argv, index, argument), argument); index += 1; break;
       case '--report': options.reportPath = readValue(argv, index, argument); index += 1; break;
       case '--self-check': options.selfCheck = true; break;
+      case '--print-effective-config': options.printEffectiveConfig = true; break;
       case '--no-elevate': options.noElevate = true; break;
       case '--elevate-on-start': options.elevateOnStart = true; break;
+      case '--hide-console': options.hideConsole = true; break;
       case '--elevated': options.elevated = true; break;
       case '--stop-client-on-exit': options.stopClientOnExit = true; break;
       case '--diagnose': options.diagnose = true; options.noDiagnose = false; break;
@@ -690,11 +719,14 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--no-auto-submit': options.autoSubmit = false; break;
       case '--execution-mode': {
         const value = readValue(argv, index, argument);
-        if (value !== 'normal') rejectUnsupportedExecutionOption(argument);
+        if (value !== 'normal' && value !== 'memory') rejectUnsupportedExecutionOption(argument);
         options.executionMode = value;
         index += 1;
         break;
       }
+      case '--memory-exec':
+        options.executionMode = 'memory';
+        break;
       case '--wipe-owned-files-on-start':
       case '--wipe-failure-policy':
       case '--wipe-retries':
@@ -706,10 +738,10 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--self-destruct-on-fullscreen-exit':
       case '--self-destruct-delay':
       case '--no-self-destruct-confirm':
-      case '--memory-exec':
       case '--delete-suspend':
         rejectUnsupportedExecutionOption(argument);
       case '--help': case '-h': options.help = true; break;
+      case '--version': case '-v': options.version = true; break;
       case '--capabilities': options.capabilities = true; break;
       default: throw new Error(`未知参数：${argument}`);
     }
@@ -720,6 +752,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
   if (options.elevateOnStart && options.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   validateDataLifecycleOptions(options);
   validateWipeOptions(options);
+  if (options.executionMode === 'memory') options.noDiskWrite = true;
   if (options.noDiskWrite) {
     options.logFileEnabled = false;
     options.noDiagnose = true;

@@ -36,8 +36,11 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(host, /static char h_settings\[CX_OPTIONS_JSON_CAP\]/);
   assert.doesNotMatch(host, /char settings\[CX_OPTIONS_JSON_CAP\]/);
   assert.match(host, /WriteFile\(out, utf8/);
-  assert.match(options, /memory and delete-suspend execution are not supported/);
-  assert.match(options, /wipe, memory and self-destruct options are not supported/);
+  assert.match(options, /cx_valid_mode\(const WCHAR \*value\)[\s\S]{0,160}L"memory"/u);
+  assert.match(options, /cx_json_execution_mode\(CX_OPTIONS \*o/u);
+  assert.match(options, /delete-suspend, wipe and self-destruct options are not supported/);
+  assert.match(host, /executionModeMemory \? "memory" : "normal"/u);
+
   assert.match(build, /\/NODEFAULTLIB/);
   assert.match(build, /\/MACHINE:X86/);
   assert.match(build, /SkipAssetCopy/);
@@ -98,7 +101,7 @@ test('compiled native explicit index never opens auto GUI with redirected input'
 
 test('native host CLI writes help and machine-readable output to redirected stdout', {
   skip: !process.env.CX_NATIVE_HOST_EXE
-}, () => {
+}, async () => {
   const executable = process.env.CX_NATIVE_HOST_EXE;
   const run = (...args) => spawnSync(executable, args, {
     encoding: 'utf8',
@@ -109,9 +112,15 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   const help = run('--help');
   assert.equal(help.status, 0, help.stderr || `help exited with ${help.status}`);
   assert.match(help.stdout, /超星学习助手 Windows 宿主/);
-  for (const flag of ['--client-index', '--select-client', '--scan-mode', '--inject-strategy', '--attach', '--duration']) {
+  assert.equal(help.stdout.includes('不采集窗口 DPI'), false, 'stale help must not deny implemented window diagnostics');
+  assert.match(help.stdout, /页面截图/u);
+  for (const flag of ['--version', '--client-index', '--select-client', '--scan-mode', '--scan-clients', '--scan-all', '--no-scan-all', '--answer-retry', '--inject-strategy', '--attach', '--duration']) {
     assert.ok(help.stdout.includes(flag), `missing native help: ${flag}`);
   }
+
+  const version = run('--version');
+  assert.equal(version.status, 0, version.stderr || `version exited with ${version.status}`);
+  assert.equal(version.stdout.trim(), '6.2.0');
 
   const capabilities = run('--capabilities');
   assert.equal(capabilities.status, 0, capabilities.stderr || `capabilities exited with ${capabilities.status}`);
@@ -120,6 +129,7 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.embeddedResources, true);
   assert.equal(nativeCapabilities.embeddedResourceCount, 4);
   assert.equal(nativeCapabilities.nativeSelection, true);
+  assert.equal(nativeCapabilities.highDpiUi, true);
   assert.equal(nativeCapabilities.contextLifecycle, true);
   assert.equal(nativeCapabilities.navigation, true);
   assert.equal(nativeCapabilities.targetReconnect, true);
@@ -129,7 +139,12 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.runReport, true);
   assert.equal(nativeCapabilities.renderDiagnostics, false);
   assert.equal(nativeCapabilities.pageRenderDiagnostics, true);
+  assert.equal(nativeCapabilities.pageScreenshots, true);
+  assert.equal(nativeCapabilities.windowDiagnostics, true);
+  assert.equal(nativeCapabilities.diagnosticsSummary, true);
   assert.equal(nativeCapabilities.selfCheck, true);
+  assert.equal(nativeCapabilities.retainData, true);
+  assert.equal(nativeCapabilities.deleteConfig, true);
 
   const config = run('--print-effective-config', '--no-disk-write');
   assert.equal(config.status, 0, config.stderr || `config exited with ${config.status}`);
@@ -139,14 +154,26 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(unsupported.status, 2, unsupported.stderr || `unsupported option exited with ${unsupported.status}`);
   assert.match(unsupported.stdout, /not supported/);
 
-  for (const args of [
-    ['--no-retain-data'], ['--delete-config'],
-    ['--options-json', '{"retainData":false}'],
-    ['--options-json', '{"deleteConfig":true}']
-  ]) {
-    const result = run('--print-effective-config', ...args);
-    assert.equal(result.status, 2, `${args.join(' ')} must fail before launching a client`);
-    assert.match(result.stdout, /not supported by native host/);
+  // 原生宿主现已支持数据生命周期；delete-config 仍要求显式 --config。
+  const retained = run('--print-effective-config', '--no-retain-data');
+  assert.equal(retained.status, 0, retained.stderr || retained.stdout);
+  const retainedJson = run('--print-effective-config', '--options-json', '{"retainData":false}');
+  assert.equal(retainedJson.status, 0, retainedJson.stderr || retainedJson.stdout);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-native-lifecycle-config-'));
+  try {
+    const configPath = path.join(directory, 'chaoxing-plus.json');
+    await fs.writeFile(configPath, '{"settings":{"common.settings.extension-enabled":true}}', 'utf8');
+    const withoutConfig = run('--delete-config');
+    assert.equal(withoutConfig.status, 2, 'delete-config without --config must fail before launching a client');
+    assert.match(withoutConfig.stdout, /explicit --config/);
+    const withConfig = run('--print-effective-config', '--config', configPath, '--delete-config');
+    assert.equal(withConfig.status, 0, withConfig.stderr || withConfig.stdout);
+    const jsonWithConfig = run('--print-effective-config', '--config', configPath, '--options-json', '{"deleteConfig":true}');
+    assert.equal(jsonWithConfig.status, 0, jsonWithConfig.stderr || jsonWithConfig.stdout);
+    const jsonWithoutConfig = run('--print-effective-config', '--options-json', '{"deleteConfig":true}');
+    assert.equal(jsonWithoutConfig.status, 2, 'JSON delete-config without --config must fail');
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -202,4 +229,12 @@ test('compiled native startup failure retains its exit code and a redacted repor
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test('native host embeds a DPI-aware asInvoker manifest', { skip: !process.env.CX_NATIVE_HOST_EXE }, async () => {
+  const bytes = await fs.readFile(process.env.CX_NATIVE_HOST_EXE);
+  const text = bytes.toString('latin1');
+  assert.ok(text.includes('ChaoxingPlus.NativeHost'), 'host manifest identity must be embedded');
+  assert.ok(text.includes('dpiAware'), 'host manifest must declare DPI awareness');
+  assert.ok(text.includes('asInvoker'), 'host manifest must keep the standard asInvoker execution level');
 });

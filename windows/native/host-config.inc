@@ -15,6 +15,9 @@ struct H_CONFIG {
     H_CONFIG_STAMP defaultStamp, selectedStamp;
     DWORD currentLength, pendingLength, dirtyLength, writeAt, pollAt;
     BOOL pendingSet, dirtySet, noDiskWrite, logEnabled, enabled, pendingEnabled;
+    /* --no-retain-data also removes a default config file this run created,
+       matching the Node host's "only this run's new config" cleanup rule. */
+    BOOL cleanCreatedOnExit, defaultExistedAtStart, selectedExistedAtStart;
 };
 
 static void h_config_stamp(const WCHAR *path, H_CONFIG_STAMP *stamp) {
@@ -74,6 +77,9 @@ static BOOL h_config_begin(const CX_OPTIONS *options, WCHAR *error, DWORD cap) {
     if (!h_copy(config->selectedPath, CX_OPTIONS_PATH_CAP, options->configPathSet ? options->configPath : config->defaultPath)) goto failed;
     h_config_stamp(config->defaultPath, &config->defaultStamp);
     h_config_stamp(config->selectedPath, &config->selectedStamp);
+    config->cleanCreatedOnExit = !options->retainData;
+    config->defaultExistedAtStart = config->defaultStamp.exists;
+    config->selectedExistedAtStart = config->selectedStamp.exists;
     config->dirty[0] = '{'; config->dirty[1] = '}'; config->dirty[2] = 0; config->dirtyLength = 2;
     /* PID plus monotonic start tick distinguishes each running native host. */
     at = 0; h_append_bytes(h_instance, sizeof(h_instance), &at, "native-", 7);
@@ -187,5 +193,17 @@ static BOOL h_config_send(H_NATIVE_PAGE *page, WCHAR *error, DWORD cap) {
 static void h_config_close(void) {
     if (!h_config) return;
     h_config_flush();
+    if (h_config->cleanCreatedOnExit) {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (!h_config->defaultExistedAtStart
+            && GetFileAttributesExW(h_config->defaultPath, GetFileExInfoStandard, &data)) {
+            DeleteFileW(h_config->defaultPath);
+        }
+        if (lstrcmpiW(h_config->selectedPath, h_config->defaultPath) != 0
+            && !h_config->selectedExistedAtStart
+            && GetFileAttributesExW(h_config->selectedPath, GetFileExInfoStandard, &data)) {
+            DeleteFileW(h_config->selectedPath);
+        }
+    }
     HeapFree(GetProcessHeap(), 0, h_config); h_config = NULL;
 }

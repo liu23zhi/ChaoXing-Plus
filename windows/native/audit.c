@@ -278,6 +278,7 @@ BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
     json_number(&out, "durationMs", report->durationMs); json_number(&out, "clientPid", report->clientPid);
     json_number(&out, "port", report->port); json_bool(&out, "attached", report->attached);
     json_bool(&out, "ownershipVerified", report->ownershipVerified); json_bool(&out, "success", report->success);
+    append(&out, ",\"executionMode\":"); json_string(&out, report->executionMode ? report->executionMode : "normal");
     append(&out, ",\"injectStrategy\":"); json_string(&out, report->injectStrategy);
     append(&out, ",\"stopReason\":"); json_string(&out, report->stopReason);
     json_endpoint_probe(&out, &report->endpointProbe);

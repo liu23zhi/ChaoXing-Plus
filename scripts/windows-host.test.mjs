@@ -759,6 +759,8 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
     assert.equal(result.code, 0, `宿主退出码 ${result.code}\n${result.stdout}\n${result.stderr}`);
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'attach');
+    assert.equal(report.host, 'node');
+    assert.equal(report.version, '6.2.0');
     assert.equal(report.endpoint.browser, 'Chrome/75.0.3770.100');
     assert.equal(report.totals.bootstraps >= 1, true);
     assert.equal(report.totals.bundles >= 1, true);
@@ -1064,24 +1066,44 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
   const configPath = path.join(directory, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({ clientPath: '', port: 0 }), 'utf8');
   const reportPath = path.join(directory, 'self-check.json');
+  const dataDir = path.join(directory, 'data');
   try {
     const result = await runCommand(process.execPath, [
       path.resolve(root, 'windows', 'host', 'main.mjs'),
       '--self-check',
       '--assets', assetsDir,
       '--config', configPath,
+      '--data-dir', dataDir,
       '--report', reportPath,
       '--quiet'
     ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
     assert.equal(result.code, 0, result.stderr);
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'self-check');
+    assert.equal(report.version, '6.2.0');
+    assert.equal(report.host, 'node');
     assert.equal(report.failures.length, 0);
     assert.equal(report.capabilities.unsupported.implemented, false);
-    assert.deepEqual(report.capabilities.unsupported.executionModes.supported, ['normal']);
+    assert.deepEqual(report.capabilities.unsupported.executionModes.supported, ['normal', 'memory']);
     assert.equal(report.checks.some((check) => check.name.includes('原生客户端选择窗口') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('WebSocket') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('调试端口') && check.ok), true);
+    assert.equal(await fs.access(dataDir).then(() => true, () => false), false,
+      '自检默认必须保持只读，不创建数据目录或隐式日志');
+    const explicitLogDir = path.join(directory, 'explicit-log-data');
+    const logResult = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--self-check',
+      '--assets', assetsDir,
+      '--config', configPath,
+      '--data-dir', explicitLogDir,
+      '--log',
+      '--quiet'
+    ], { env: { CXPLUS_NO_LOG_FILE: '0' } });
+    assert.equal(logResult.code, 0, logResult.stderr);
+    const explicitLogs = await fs.readdir(path.join(explicitLogDir, 'logs')).catch(() => []);
+    assert.equal(explicitLogs.some((name) => name.endsWith('.log')), true,
+      '显式 --log 时自检仍应写出日志');
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -1191,6 +1213,8 @@ for (const startupNoDiskWrite of [true, false]) {
       } else {
         const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
         assert.equal(report.mode, 'attach');
+    assert.equal(report.host, 'node');
+    assert.equal(report.version, '6.2.0');
       }
     } finally {
       if (resultPromise) await resultPromise;
@@ -1229,7 +1253,7 @@ test('宿主配置热更新拒绝未实现参数并保留上一有效配置', as
     }), 'utf8');
     const result = await resultPromise;
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /热更新配置.*尚未实现/u);
+    assert.match(result.stdout, /热更新配置.*executionMode.*启动策略/u);
     assert.equal(mock.captured.evaluates.some((expression) => expression.startsWith('try{window.__CX_WIN_ON_CONFIG__') && expression.includes('rejected')), false);
   } finally {
     if (resultPromise) await resultPromise;
@@ -1311,4 +1335,130 @@ test('PageSession 支持 runtime、script 与 hybrid 注入策略', async () => 
   await hybrid.injectSource(1, 'window.__hybrid=1;', 'hybrid');
   assert.equal(hybridRuntimeCalls, 1);
   assert.equal(logs.some((line) => line.includes('尝试下一路径')), true);
+});
+test('Node --capabilities 如实列出已支持的数据、诊断与配置能力', async () => {
+  const result = await runCommand(process.execPath, [
+    path.resolve(root, 'windows', 'host', 'main.mjs'),
+    '--capabilities'
+  ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
+  assert.equal(result.code, 0, result.stderr);
+  const capabilities = JSON.parse(result.stdout);
+  assert.equal(capabilities.hostVersion, '6.2.0');
+  assert.equal(capabilities.executionMode, 'normal');
+  assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory']);
+  for (const key of [
+    'scanner',
+    'parameterGenerator',
+    'configReload',
+    'configPersistence',
+    'fileLogging',
+    'runReport',
+    'pageRenderDiagnostics',
+    'pageScreenshots',
+    'windowDiagnostics',
+    'renderDiagnostics',
+    'retainData',
+    'deleteConfig'
+  ]) {
+    assert.equal(capabilities.supported[key], true, `capability must be advertised truthfully: ${key}`);
+  }
+  assert.equal(capabilities.supported.nativeClientSelection, process.platform === 'win32');
+  assert.equal(capabilities.unsupported.implemented, false);
+  assert.ok(Array.isArray(capabilities.notes) && capabilities.notes.length > 0);
+});
+test('Node --version 只输出版本号且不创建数据目录', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-version-'));
+  try {
+    const dataDir = path.join(directory, 'data');
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--version',
+      '--data-dir', dataDir
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout.trim(), '6.2.0');
+    assert.equal(await fs.access(dataDir).then(() => true, () => false), false,
+      '--version 不得创建数据目录或日志');
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+test('Node --list-clients --report 写入列表报告且 --no-disk-write 抑制', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-list-report-'));
+  try {
+    const reportPath = path.join(directory, 'list-report.json');
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--list-clients',
+      '--scan-mode', 'common',
+      '--no-scan-cache',
+      '--report', reportPath,
+      '--data-dir', path.join(directory, 'data'),
+      '--quiet'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' }, timeoutMs: 120000 });
+    assert.equal(result.code, 0, result.stderr);
+    const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
+    assert.equal(report.mode, 'list-clients');
+    assert.equal(report.host, 'node');
+    assert.equal(report.version, '6.2.0');
+    assert.equal(report.stopReason, 'list-clients');
+    assert.equal(report.success, true);
+    assert.equal(report.scanMode, 'common');
+    assert.ok(Number.isFinite(report.durationMs) && report.durationMs >= 0);
+    assert.ok(Number.isInteger(report.total) && report.total >= 0);
+    assert.equal(report.total, report.candidates.length);
+    for (const candidate of report.candidates) {
+      assert.equal(typeof candidate.path, 'string');
+      assert.equal(typeof candidate.machine, 'string');
+    }
+    assert.equal(Number.isNaN(Date.parse(report.startedAt)), false);
+    assert.equal(Number.isNaN(Date.parse(report.finishedAt)), false);
+
+    const suppressedPath = path.join(directory, 'suppressed-report.json');
+    const suppressed = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--list-clients',
+      '--scan-mode', 'common',
+      '--no-scan-cache',
+      '--report', suppressedPath,
+      '--data-dir', path.join(directory, 'data-no-write'),
+      '--no-disk-write',
+      '--quiet'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' }, timeoutMs: 120000 });
+    assert.equal(suppressed.code, 0, suppressed.stderr);
+    assert.equal(await fs.access(suppressedPath).then(() => true, () => false), false,
+      '--no-disk-write 必须抑制列表报告写入');
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+test('Node --execution-mode memory 保持正常可见启动且宿主侧零落盘', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-memory-mode-'));
+  try {
+    const reportPath = path.join(directory, 'memory-report.json');
+    const dataDir = path.join(directory, 'data');
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--execution-mode', 'memory',
+      '--list-clients',
+      '--scan-mode', 'common',
+      '--no-scan-cache',
+      '--report', reportPath,
+      '--data-dir', dataDir,
+      '--quiet'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' }, timeoutMs: 120000 });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await fs.access(reportPath).then(() => true, () => false), false,
+      'memory 模式必须抑制报告落盘');
+    assert.equal(await fs.access(dataDir).then(() => true, () => false), false,
+      'memory 模式必须不创建数据目录或日志');
+    const capabilities = JSON.parse((await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'), '--execution-mode', 'memory', '--capabilities'
+    ], { env: { CXPLUS_NO_LOG_FILE: '1' } })).stdout);
+    assert.equal(capabilities.executionMode, 'memory');
+    assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory']);
+    assert.deepEqual(capabilities.unsupported.executionModes.unsupportedValues, ['delete-suspend']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });

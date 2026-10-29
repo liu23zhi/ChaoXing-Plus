@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-windows/
+release/
 .tmp-tests/
 .tmp-tests-*/
 .tmp-native-host/
@@ -12,3 +13,5 @@ windows/data/
 .DS_Store
 /.history
 /.claude/worktrees/
+release-ci/
+/.data/

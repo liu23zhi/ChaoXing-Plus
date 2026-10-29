@@ -51,7 +51,7 @@ $originalPath = $env:Path
 try {
     $env:Path = (Join-Path $kitRoot ('bin\' + $sdk.Name + '\x64')) + ';' + $originalPath
     $objects = $sources | ForEach-Object { Join-Path $build ($_ + '.obj') }
-    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
+    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $scriptRoot 'host.manifest')),('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
     & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
     if ($BuildTests) {
@@ -59,7 +59,7 @@ try {
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
         $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi') | ForEach-Object { Join-Path $build ($_ + '.obj') }
-        $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' }
+        $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' -and $_ -notlike '/MANIFESTINPUT:*' }
         & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }
         foreach ($test in @(
@@ -100,5 +100,9 @@ if ($SkipAssetCopy) { Write-Verbose 'SkipAssetCopy is retained for compatibility
 $dumpbin = Join-Path $compiler.DirectoryName 'dumpbin.exe'
 & $dumpbin /headers /imports (Join-Path $bin 'chaoxing_plus.exe') | Set-Content -LiteralPath (Join-Path $build 'pe-imports.txt') -Encoding UTF8
 if ($LASTEXITCODE -ne 0) { throw 'PE import audit failed.' }
-Get-Item -LiteralPath (Join-Path $bin 'chaoxing_plus.exe') | Select-Object FullName,Length
-Get-FileHash -LiteralPath (Join-Path $bin 'chaoxing_plus.exe') -Algorithm SHA256
+$hostExe = Join-Path $bin 'chaoxing_plus.exe'
+Get-Item -LiteralPath $hostExe | Select-Object FullName,Length
+# Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
+# and build must not depend on PowerShell module auto-loading.
+& certutil.exe -hashfile $hostExe SHA256
+if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }

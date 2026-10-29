@@ -40,7 +40,7 @@
     <section class="card">
       <div class="section"><h2>预设</h2><div class="preset-list">
         <button data-preset="silent">绝对静默型（安全子集）</button><button data-preset="friendly">友好交互型</button><button data-preset="lazy">懒人型（普通启动）</button><button data-preset="manual">手动答题型</button><button data-preset="startupClean">启动清理型（设计）</button><button data-preset="scan">仅扫描型</button><button data-preset="path">直接路径型</button><button data-preset="all">全盘扫描型</button>
-      </div><p class="hint">第一阶段导出普通运行、扫描、面板、答题、日志和诊断参数；启动清理型只展示设计配置，启动清理、内存执行、删除挂起与自毁均不会生成可运行命令。</p></div>
+      </div><p class="hint">第一阶段导出普通运行、扫描、面板、答题、日志和诊断参数；绝对静默型会为 Node 宿主附加 --hide-console（原生 EXE 无控制台，不附加），配合发布包 start-windows-silent.cmd 可无黑框启动；启动清理型只展示设计配置，启动清理、删除挂起与自毁不会生成可运行命令；内存执行会生成零落盘（不写日志/配置/诊断/报告）的普通可见启动命令。</p></div>
       <div class="section"><h2>客户端扫描</h2><div class="grid">
         <div class="field full"><label for="clientPath">直接指定客户端路径</label><input id="clientPath" placeholder="例如 D:\\Exam\\CXExam.exe"><p class="hint">与扫描序号、首个候选互斥。</p></div>
         <div class="field"><label for="scanMode">扫描模式</label><select id="scanMode"><option value="common">仅常规路径</option><option value="fallback-all" selected>常规无结果才全盘</option><option value="all">强制全盘扫描</option></select></div>
@@ -55,16 +55,17 @@
         <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value="windows\data"><p class="hint" id="dataDirectoryHint">Node 默认 windows\data，以项目根目录为工作目录；原生 EXE 默认 .data，以 EXE 所在目录为工作目录。</p></div>
         <div class="field full"><label for="optionsJson">内联 JSON 或 @JSON 文件</label><textarea id="optionsJson" placeholder='例如 {"panelTop":24,"panelWidth":520} 或 @C:\\Tools\\options.json'></textarea><p class="hint">支持 JSON 对象或 @文件路径；独立命令行参数优先级更高。</p></div>
         <div class="field"><label for="report">运行报告</label><input id="report" placeholder="可选路径"></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">--no-retain-data 和 --delete-config 仅 Node 宿主支持；原生 EXE 当前不可执行，选择后会阻止导出，请切回 Node 取消或重置。两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
-        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、内存执行、删除挂起和自毁字段会被拒绝。</p></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">两种宿主都支持数据生命周期：--no-retain-data 只删除本次运行创建的日志/报告/诊断，--delete-config 只删除显式 --config 文件且不能与 --no-disk-write 同用。两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
+        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、删除挂起和自毁字段会被拒绝；executionMode 只接受 normal 或 memory。</p></div>
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
         <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="node" selected>Node 开发宿主（需要 Node.js 22+）</option><option value="native">原生单文件 EXE（无需 Node.js）</option></select><p class="hint">选择宿主后再套用预设。两种宿主的能力分别校验，不会自动切换或降级。</p></div>
         <div class="field full" id="nodeLauncherField"><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\host\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\host\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
-        <div class="field full" id="nativeLauncherField" hidden><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">请填写已构建的 chaoxing_plus.exe 路径；生成器无法检查文件是否存在。命令直接启动 EXE，不需要 Node.js，并以 EXE 所在目录作为工作目录；相对配置与数据路径均由此解析。原生诊断仅提供页面布局采样，不含窗口 DPI 或截图。</p></div>
-        <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory" disabled>内存执行（未发布）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
+        <div class="field full" id="nativeLauncherField" hidden><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">请填写已构建的 chaoxing_plus.exe 路径；生成器无法检查文件是否存在。命令直接启动 EXE，不需要 Node.js，并以 EXE 所在目录作为工作目录；相对配置与数据路径均由此解析。原生诊断提供页面布局采样、页面 PNG 截图与自有启动窗口 DPI/BMP；不采集正文、URL 或窗口标题。</p></div>
+        <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
         <div class="field full"><label class="check"><input id="elevateOnStart" type="checkbox">启动宿主时先申请管理员权限（--elevate-on-start）</label><p class="hint">默认不提前申请；只在启动所选 CXExam.exe 确实需要管理员权限时请求 UAC。勾选后在扫描、显示 GUI 前申请；已是管理员时直接继续。帮助、自检、仅扫描和 attach 不申请。</p></div>
+        <div class="field full"><label class="check"><input id="hideConsole" type="checkbox">静默启动：隐藏 Node 控制台窗口（--hide-console，仅 Node 宿主）</label><p class="hint">只影响 Node 宿主控制台显示；原生 EXE 是 GUI 子系统，没有控制台。隐藏窗口不等于关闭日志、报告或系统权限提示。</p></div>
       </div></div>
       <div class="section"><h2>CEF 注入兼容性</h2><div class="grid">
         <div class="field full"><label for="expectedBrowser">调试端点 Browser 校验文本</label><input id="expectedBrowser" value="Chrome/" placeholder="例如 Chrome/75"><p class="hint">只连接本次启动客户端的本机 CDP 端点；不匹配时中止，避免误连其它浏览器。</p></div>
@@ -73,12 +74,12 @@
         <div class="field"><label for="debugTimeout">调试端点超时（毫秒）</label><input id="debugTimeout" type="number" min="1000" max="120000" value="30000"></div>
         <div class="field"><label for="targetPollInterval">target 轮询间隔（毫秒）</label><input id="targetPollInterval" type="number" min="250" max="10000" value="1000"></div>
         <div class="field"><label for="bundleTimeout">bundle 执行超时（毫秒）</label><input id="bundleTimeout" type="number" min="1000" max="300000" value="120000"></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="injectBlankFrames" type="checkbox" checked>注入 about:blank/srcdoc frame</label><label class="check"><input id="captureConsole" type="checkbox" checked>捕获页面 console/异常</label></div><p class="hint">hybrid 是默认推荐策略；script 路径用于部分 CEF 页面 Runtime.evaluate 被拦截或执行上下文不稳定时的回退。</p></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="injectBlankFrames" type="checkbox" checked>注入 about:blank/srcdoc frame</label><label class="check"><input id="captureConsole" type="checkbox" checked>捕获页面 console/异常</label><label class="check"><input id="dpiAware" type="checkbox">本次启动为客户端临时启用 HIGHDPIAWARE（修复系统缩放导致的整体模糊）</label></div><p class="hint">hybrid 是默认推荐策略；script 路径用于部分 CEF 页面 Runtime.evaluate 被拦截或执行上下文不稳定时的回退。</p></div>
       </div></div>
       <div class="section"><h2>面板</h2><div class="grid">
         <div class="field full"><div class="checks"><label class="check"><input id="panel" type="checkbox" checked>显示悬浮面板</label><label class="check"><input id="panelExpanded" type="checkbox">默认展开</label></div></div>
         <div class="field"><label for="panelTop">顶部距离</label><input id="panelTop" type="number" value="16" min="0" max="10000"></div><div class="field"><label for="panelRight">右侧距离</label><input id="panelRight" type="number" value="16" min="0" max="10000"></div><div class="field"><label for="panelWidth">宽度 <small>320-800</small></label><input id="panelWidth" type="number" value="460" min="320" max="800"></div>
-        <div class="field"><label for="panelTheme">主题名 <small>预留</small></label><input id="panelTheme" placeholder="留空使用内置主题"></div>
+        <div class="field"><label for="panelTheme">主题名 <small>pink/blue/green</small></label><input id="panelTheme" list="panelThemeList" placeholder="留空使用 pink"><datalist id="panelThemeList"><option value="pink">pink（默认粉色）</option><option value="blue">blue（蓝色）</option><option value="green">green（绿色）</option></datalist><p class="hint">内置浅色主题；未知名称由页面回退 pink，建议留空或从列表选择。</p></div>
       </div></div>
       <div class="section"><h2>答题</h2><div class="grid">
         <div class="field"><label for="answerMode">答题模式</label><select id="answerMode"><option value="auto" selected>自动答题</option><option value="manual">快捷键逐题放行</option></select></div>
@@ -108,7 +109,7 @@
         <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox" disabled>退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox" disabled>静默自毁</label></div></div>
         <div class="field full"><p class="hint">当前宿主不可执行：自毁快捷键与行为不会导出为可运行命令；答题快捷键不得与自毁快捷键相同。</p></div>
       </div></div>
-      <div class="section"><h2>能力说明</h2><div class="capability">第一阶段只支持普通可审计运行；启动清理、内存执行、删除挂起和自毁均为当前宿主不可执行能力，只保留设计与参数校验，不会导出可运行参数。</div></div>
+      <div class="section"><h2>能力说明</h2><div class="capability">第一阶段支持普通可审计运行与内存执行（executionMode=memory：宿主侧零落盘，客户端仍正常可见启动）；启动清理、删除挂起和自毁仍为不可执行能力，不会导出可运行参数。</div></div>
     </section>
     <aside class="out">
       <section class="card"><h2>校验结果</h2><div id="status" class="status">配置有效，可以生成普通宿主参数。</div></section>
@@ -122,7 +123,7 @@
 <script>
 (function () {
   'use strict';
-  var ids = ['elevateOnStart','hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
+  var ids = ['elevateOnStart','hideConsole','hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','dpiAware','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
   function el(id) { return document.getElementById(id); }
   function value(id) { var node = el(id); return node.type === 'checkbox' ? node.checked : node.value.trim(); }
   function setValue(id, next) { var node = el(id); if (!node) return; if (node.type === 'checkbox') node.checked = !!next; else node.value = next == null ? '' : next; }
@@ -189,7 +190,8 @@
     setIfEmitted(config, 'ui', s.ui, emitted);
     setIfEmitted(config, 'rescan', Boolean(s.rescan), emitted);
     setIfEmitted(config, 'noScanCache', Boolean(s.noScanCache), emitted);
-    setIfEmitted(config, 'noDiskWrite', Boolean(s.noDiskWrite), emitted);
+    setIfEmitted(config, 'noDiskWrite', Boolean(s.noDiskWrite || String(s.executionMode || 'normal') === 'memory'), emitted);
+    setIfEmitted(config, 'executionMode', String(s.executionMode || 'normal'), emitted);
     setIfEmitted(config, 'quiet', Boolean(s.quiet), emitted);
     setIfEmitted(config, 'logFileEnabled', Boolean(s.log && !s.noDiskWrite), emitted);
     setIfEmitted(config, 'diagnose', Boolean(s.diagnose && !s.noDiskWrite), emitted);
@@ -199,6 +201,7 @@
     setIfEmitted(config, 'retainData', Boolean(s.retainData), emitted);
     setIfEmitted(config, 'deleteConfig', Boolean(s.deleteConfig), emitted);
     setIfEmitted(config, 'stopClientOnExit', Boolean(s.stopClient), emitted);
+    setIfEmitted(config, 'dpiAware', Boolean(s.dpiAware), emitted);
     setIfEmitted(config, 'elevateOnStart', Boolean(s.elevateOnStart), emitted);
     setIfEmitted(config, 'expectedBrowser', s.expectedBrowser, emitted);
     setIfEmitted(config, 'injectStrategy', s.injectStrategy, emitted);
@@ -233,7 +236,8 @@
     if (emitted.panelRight) config.settings['common.settings.windows-panel-right'] = Number(s.panelRight);
     if (emitted.panelWidth) config.settings['common.settings.windows-panel-width'] = Number(s.panelWidth);
     if (emitted.panelTheme && s.panelTheme) config.settings['common.settings.windows-panel-theme'] = s.panelTheme;
-    if (emitted.logFileEnabled) config.settings['common.settings.windows-log-enabled'] = Boolean(s.log && !s.noDiskWrite);
+    if (emitted.logFileEnabled) config.settings['common.settings.windows-log-enabled'] = Boolean(s.log && !s.noDiskWrite && String(s.executionMode || 'normal') !== 'memory');
+    if (emitted.noDiskWrite) config.settings['common.settings.windows-no-disk-write'] = true;
     if (emitted.answerMode) config.settings['common.settings.windows-answer-mode'] = s.answerMode;
     if (emitted.answerKey) config.settings['common.settings.windows-answer-key'] = s.answerKey;
     if (emitted.answerThreads) config.settings['common.settings.windows-answer-threads'] = Number(s.answerThreads);
@@ -277,18 +281,20 @@
   }
   var NATIVE_PATH_CAP = 1024;
   var NATIVE_SHORT_CAP = 128;
-  var NATIVE_JSON_KEYS = ('elevateOnStart clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode').split(' ');
-  function validateNativeJson(parsed, errors) {
+  var NATIVE_JSON_KEYS = ('elevateOnStart clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode memoryExec').split(' ');
+  function validateNativeJson(parsed, errors, s) {
     Object.keys(parsed).forEach(function (key) {
       var raw = parsed[key];
       if (NATIVE_JSON_KEYS.indexOf(key) < 0) errors.push('原生宿主不接受内联 JSON 字段：' + key + '。');
-      if (key === 'retainData' && raw === false || key === 'deleteConfig' && raw === true) errors.push('原生宿主当前不可执行数据清理字段：' + key + '。');
+      if (key === 'deleteConfig' && raw === true && !(s && s.configPath)) errors.push('原生宿主内联 JSON 的 deleteConfig 要求同时使用 --config 指定外部配置。');
+      if (key === 'deleteConfig' && raw === true && s && s.noDiskWrite) errors.push('原生宿主 --no-disk-write 不能与内联 JSON 的 deleteConfig 同时使用。');
       if (['panelTop', 'panelRight', 'panelWidth', 'clientIndex', 'port', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs', 'answerThreads', 'answerCountdown', 'answerRetry'].indexOf(key) >= 0 && (typeof raw !== 'number' || !Number.isInteger(raw))) errors.push('原生宿主内联 JSON 的 ' + key + ' 必须是整数。');
       if (key === 'clientIndex' && (raw < 1 || raw > 2147483647)) errors.push('原生宿主内联 JSON 的 clientIndex 必须是 1 到 2147483647 的整数。');
       if (key === 'answerKey' && (typeof raw !== 'string' || !validNativeShortcut(raw))) errors.push('原生宿主内联 JSON 的 answerKey 格式不支持。');
       if (['panel', 'scanClients'].indexOf(key) >= 0 && typeof raw !== 'boolean') errors.push('原生宿主内联 JSON 的 ' + key + ' 必须是布尔值。');
       if (key === 'assetsDir' && typeof raw !== 'string') errors.push('原生宿主内联 JSON 的 assetsDir 必须是字符串。');
       if (key === 'dpiAwareness' && raw !== '' && raw !== 'system') errors.push('原生宿主的 dpiAwareness 只接受空字符串或 system。');
+      if (key === 'panelTheme' && typeof raw === 'string' && raw.trim() && ['pink', 'blue', 'green'].indexOf(raw.trim().toLowerCase()) < 0) errors.push('原生宿主内联 JSON 的 panelTheme 只支持 pink、blue 或 green。');
       if (typeof raw === 'string' && raw.length >= (['clientPath', 'dataDir', 'diagnosticsDir', 'reportPath', 'assetsDir'].indexOf(key) >= 0 ? NATIVE_PATH_CAP : NATIVE_SHORT_CAP)) errors.push('原生宿主内联 JSON 的 ' + key + ' 超过参数容量。');
     });
     if (Object.prototype.hasOwnProperty.call(parsed, 'settings') && (!parsed.settings || typeof parsed.settings !== 'object' || Array.isArray(parsed.settings))) errors.push('原生宿主内联 JSON 的 settings 必须是对象。');
@@ -326,15 +332,15 @@
     port: 'port',
     clientPath: 'clientPath', clientIndex: 'clientIndex', clientFirst: 'clientFirst', listClients: 'listClients', selectClient: 'selectClient',
     scanMode: 'scanMode', scanAll: 'scanMode', ui: 'ui', rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir', expectedBrowser: 'expectedBrowser', injectStrategy: 'injectStrategy', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames', captureConsole: 'captureConsole', debugEndpointTimeoutMs: 'debugEndpointTimeoutMs', targetPollIntervalMs: 'targetPollIntervalMs', bundleTimeoutMs: 'bundleTimeoutMs',
-    noDiskWrite: 'noDiskWrite', retainData: 'retainData', deleteConfig: 'deleteConfig',
+    noDiskWrite: 'noDiskWrite', retainData: 'retainData', deleteConfig: 'deleteConfig', executionMode: 'executionMode', memoryExec: 'memoryExec',
     panel: 'panelEnabled', panelEnabled: 'panelEnabled', panelCollapsed: 'panelCollapsed', panelTop: 'panelTop', panelRight: 'panelRight', panelWidth: 'panelWidth', panelTheme: 'panelTheme',
     answerMode: 'answerMode', answerKey: 'answerKey', showAnswerDialog: 'showAnswerDialog', answerThreads: 'answerThreads', answerCountdown: 'answerCountdown', answerRetry: 'answerRetry', autoSubmit: 'autoSubmit',
     wipeOwnedFilesOnStart: 'wipeOwnedFilesOnStart', wipeFailurePolicy: 'wipeFailurePolicy', wipeRetries: 'wipeRetries', wipeRetryDelayMs: 'wipeRetryDelayMs', wipeRuntimeRetry: 'wipeRuntimeRetry', wipeRuntimeIntervalSec: 'wipeRuntimeIntervalSec',
     log: 'logFileEnabled', logFileEnabled: 'logFileEnabled', quiet: 'quiet', diagnose: 'diagnose', noDiagnose: 'diagnose', diagnosticsDir: 'diagnosticsDir', report: 'reportPath', reportPath: 'reportPath', stopClientOnExit: 'stopClientOnExit', dpiAware: 'dpiAware'
   };
-  var JSON_BOOLEAN_KEYS = ['elevateOnStart', 'noElevate', 'clientFirst', 'listClients', 'selectClient', 'scanAll', 'rescan', 'noScanCache', 'noDiskWrite', 'retainData', 'deleteConfig', 'panelEnabled', 'panelCollapsed', 'showAnswerDialog', 'autoSubmit', 'logFileEnabled', 'quiet', 'diagnose', 'stopClientOnExit', 'dpiAware', 'wipeOwnedFilesOnStart', 'wipeRuntimeRetry', 'injectBlankFrames', 'captureConsole'];
+  var JSON_BOOLEAN_KEYS = ['elevateOnStart', 'noElevate', 'clientFirst', 'listClients', 'selectClient', 'scanAll', 'rescan', 'noScanCache', 'noDiskWrite', 'retainData', 'deleteConfig', 'panelEnabled', 'panelCollapsed', 'showAnswerDialog', 'autoSubmit', 'logFileEnabled', 'quiet', 'diagnose', 'stopClientOnExit', 'dpiAware', 'wipeOwnedFilesOnStart', 'wipeRuntimeRetry', 'injectBlankFrames', 'captureConsole', 'memoryExec'];
   var JSON_NUMBER_KEYS = ['wipeRetries', 'wipeRetryDelayMs', 'wipeRuntimeIntervalSec', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs'];
-  var JSON_ENUM_KEYS = ['wipeFailurePolicy', 'injectStrategy'];
+  var JSON_ENUM_KEYS = ['wipeFailurePolicy', 'injectStrategy', 'executionMode'];
   var JSON_STRING_KEYS = ['clientPath', 'dataDir', 'expectedBrowser', 'panelTheme', 'diagnosticsDir', 'reportPath'];
   // 与宿主 windows/host/options.mjs 的 options-json 规则保持一致：
   // 只有未被独立命令行参数覆盖的内联 JSON 字段才会被宿主真正应用，也才需要在这里校验。
@@ -348,9 +354,11 @@
     if (!s.clientPath) keys.scanMode = true;
     if (s.configPath) keys.configPath = true;
     if (s.deleteConfig && s.configPath) keys.deleteConfig = true;
-    if (s.noDiskWrite) keys.noDiskWrite = true;
+    if (s.noDiskWrite || String(s.executionMode || 'normal') === 'memory') keys.noDiskWrite = true;
+    if (String(s.executionMode || 'normal') !== 'normal') keys.executionMode = true;
     if (!s.retainData) keys.retainData = true;
     if (s.stopClient) keys.stopClientOnExit = true;
+    if (s.dpiAware) keys.dpiAware = true;
     if (s.elevateOnStart) keys.elevateOnStart = true;
     if (!s.clientPath && s.rescan) keys.rescan = true;
     if (!s.clientPath && s.noScanCache) keys.noScanCache = true;
@@ -401,6 +409,7 @@
       }
       if (JSON_STRING_KEYS.indexOf(optionKey) >= 0) {
         if (typeof raw !== 'string') errors.push('内联 JSON 的 ' + key + ' 必须是字符串。');
+        else if (key === 'panelTheme' && raw.trim() && ['pink', 'blue', 'green'].indexOf(raw.trim().toLowerCase()) < 0) errors.push('内联 JSON 的 panelTheme 只支持 pink、blue 或 green。');
         else if (key !== 'diagnosticsDir' && key !== 'reportPath' && key !== 'dataDir' && key !== 'panelTheme' && startsWithOptionPrefix(raw)) errors.push('内联 JSON 的 ' + key + ' 不能以 -- 开头。');
         return;
       }
@@ -411,7 +420,7 @@
         return;
       }
       if (JSON_ENUM_KEYS.indexOf(optionKey) >= 0) {
-        var enumValues = optionKey === 'injectStrategy' ? ['hybrid', 'runtime', 'script'] : ['retry', 'background', 'ignore', 'abort'];
+        var enumValues = optionKey === 'injectStrategy' ? ['hybrid', 'runtime', 'script'] : optionKey === 'executionMode' ? ['normal', 'memory'] : ['retry', 'background', 'ignore', 'abort'];
         if (enumValues.indexOf(raw) < 0) errors.push('内联 JSON 的 ' + key + ' 只支持 ' + enumValues.slice(0, -1).join('、') + ' 或 ' + enumValues[enumValues.length - 1] + '。');
         return;
       }
@@ -438,7 +447,6 @@
     if (['node', 'native'].indexOf(s.hostType) < 0) errors.push('请选择 Node 或原生 EXE 宿主。');
     if (!workingDirectory(s)) errors.push(s.hostType === 'native' ? '请指定原生宿主 EXE 的 Windows 驱动器绝对路径或完整 UNC 路径。' : '请指定项目中 windows\\host\\main.mjs 的 Windows 驱动器绝对路径或完整 UNC 路径。');
     if (s.hostType === 'native') {
-      if (!s.retainData || s.deleteConfig) errors.push('原生宿主当前不可执行 --no-retain-data / --delete-config；请切回 Node 取消清理选项或重置。');
       if (['panelTop', 'panelRight', 'panelWidth'].some(function (key) { return !/^\d+$/u.test(String(s[key])); })) errors.push('原生宿主的面板位置与宽度必须是整数。');
       if (s.clientIndex && Number(s.clientIndex) > 2147483647) errors.push('原生宿主的扫描序号不能超过 2147483647。');
       if (!validNativeShortcut(s.answerKey)) errors.push('原生宿主快捷键需使用 Ctrl/Alt/Shift/Win 与一个基础按键，不能重复修饰键。');
@@ -456,6 +464,7 @@
     if (s.listClients && (s.clientPath || s.clientIndex || s.selection === 'first')) errors.push('--list-clients 不能同时指定启动客户端选择参数。');
     if (s.clientIndex !== '' && !validBoundedInteger(s.clientIndex, 1, Number.MAX_SAFE_INTEGER)) errors.push('扫描结果序号必须是大于等于 1 的整数。');
     if (!validBoundedNumber(s.panelWidth, 320, 800)) errors.push('面板宽度必须在 320 到 800 之间。');
+    if (String(s.panelTheme || '').trim() && ['pink', 'blue', 'green'].indexOf(String(s.panelTheme).trim().toLowerCase()) < 0) errors.push('面板主题只支持 pink、blue 或 green；留空使用 pink。');
     if (!validBoundedNumber(s.panelTop, 0, 10000)) errors.push('面板顶部距离必须在 0 到 10000 之间。');
     if (!validBoundedNumber(s.panelRight, 0, 10000)) errors.push('面板右侧距离必须在 0 到 10000 之间。');
     if (!/^\d+$/u.test(String(s.answerThreads)) || Number(s.answerThreads) < 1 || Number(s.answerThreads) > 4) errors.push('每次放行题数必须是 1 到 4 之间的整数。');
@@ -468,7 +477,9 @@
     if (!validBoundedInteger(s.debugTimeout, 1000, 120000)) errors.push('调试端点超时必须是 1000 到 120000 之间的整数。');
     if (!validBoundedInteger(s.targetPollInterval, 250, 10000)) errors.push('target 轮询间隔必须是 250 到 10000 之间的整数。');
     if (!validBoundedInteger(s.bundleTimeout, 1000, 300000)) errors.push('bundle 执行超时必须是 1000 到 300000 之间的整数。');
-    if (String(s.executionMode || 'normal') !== 'normal') errors.push('当前宿主只支持 --execution-mode normal；内存执行和删除挂起不可导出。');
+    var executionMode = String(s.executionMode || 'normal');
+    if (executionMode !== 'normal' && executionMode !== 'memory') errors.push('执行模式只支持 normal 或 memory；删除挂起尚未支持。');
+    if (executionMode === 'memory' && (s.log || s.diagnose || s.report)) errors.push('内存执行会强制宿主侧零落盘，不能同时请求日志、诊断或运行报告。');
     if (s.wipeRetries !== '' && (!/^\d+$/u.test(String(s.wipeRetries)) || Number(s.wipeRetries) < 1 || Number(s.wipeRetries) > 20)) errors.push('启动清理重试次数必须是 1 到 20 之间的整数。');
     if (s.wipeDelay !== '' && (!/^\d+$/u.test(String(s.wipeDelay)) || Number(s.wipeDelay) < 50 || Number(s.wipeDelay) > 5000)) errors.push('启动清理重试间隔必须是 50 到 5000 之间的整数。');
     if (s.wipeInterval !== '' && (!/^\d+$/u.test(String(s.wipeInterval)) || Number(s.wipeInterval) < 1 || Number(s.wipeInterval) > 86400)) errors.push('运行期重试间隔必须是 1 到 86400 之间的整数。');
@@ -491,6 +502,8 @@
     if (unsupportedRequests.length) errors.push('以下能力当前宿主不可执行，不会导出可运行命令：' + unsupportedRequests.join('、') + '。');
     if (s.noDiskWrite && (s.log || s.diagnose || s.report)) errors.push('--no-disk-write 与日志、诊断或报告冲突。');
     if (s.noDiskWrite && s.deleteConfig) errors.push('--no-disk-write 不能与 --delete-config 同时使用（禁止磁盘写入时不能删除外部配置）。');
+    if (s.hostType === 'native' && s.hideConsole) errors.push('原生宿主没有控制台窗口，不支持 --hide-console。');
+    if (s.hostType === 'native' && s.dpiAware && s.noDiskWrite) errors.push('原生宿主 --dpi-aware 不能与 --no-disk-write 同时使用。');
     if (s.optionsJson) {
       var input = s.optionsJson.trim();
       if (input.charAt(0) === '@') {
@@ -505,7 +518,11 @@
             if (s.noDiskWrite && hasDiskWriteOption(parsed)) errors.push('--no-disk-write 与内联 JSON 的磁盘输出配置冲突。');
             if (s.clientPath && ['scanMode', 'scanAll', 'rescan', 'noScanCache'].some(function (key) { return Object.prototype.hasOwnProperty.call(parsed, key); })) errors.push('--client 不能与内联 JSON 的扫描参数同时指定。');
             validateInlineJsonOptions(s, parsed, errors);
-            if (s.hostType === 'native') validateNativeJson(parsed, errors);
+            if (parsed.settings && typeof parsed.settings === 'object' && !Array.isArray(parsed.settings)) {
+              var sharedPanelTheme = parsed.settings['common.settings.windows-panel-theme'];
+              if (sharedPanelTheme !== undefined && (typeof sharedPanelTheme !== 'string' || (sharedPanelTheme.trim() && ['pink', 'blue', 'green'].indexOf(sharedPanelTheme.trim().toLowerCase()) < 0))) errors.push('内联 JSON 的 common.settings.windows-panel-theme 只支持 pink、blue 或 green。');
+            }
+            if (s.hostType === 'native') validateNativeJson(parsed, errors, s);
             if (s.hostType === 'native' && (s.noDiskWrite || parsed.noDiskWrite || parsed.settings && parsed.settings['common.settings.windows-no-disk-write']) && (parsed.dpiAware === true || parsed.dpiAware == null && parsed.dpiAwareness === 'system')) errors.push('原生宿主的 DPI 兼容层不能与 --no-disk-write 同时使用。');
           }
         } catch (error) {
@@ -524,14 +541,15 @@
     if (s.clientPath) both('--client', s.clientPath); else if (s.clientIndex) both('--client-index', s.clientIndex); else if (!s.listClients && s.selection === 'first') both('--client-first', true); else if (!s.listClients && s.selection === 'interactive') both('--select-client', true);
     if (s.listClients) both('--list-clients', true); if (!s.clientPath) { both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true); if (s.noScanCache) both('--no-scan-cache', true); }
     both('--ui', s.ui);
-    both('--execution-mode', 'normal');
+    both('--execution-mode', s.executionMode || 'normal');
+    var memoryMode = String(s.executionMode || 'normal') === 'memory';
     if (s.elevateOnStart) both('--elevate-on-start', true);
     if (s.expectedBrowser !== 'Chrome/') both('--expected-browser', s.expectedBrowser); if (s.injectStrategy !== 'hybrid') both('--inject-strategy', s.injectStrategy); if (s.injectRetries !== '2') both('--inject-retries', s.injectRetries); if (!s.injectBlankFrames) both('--no-inject-blank-frames', true); if (!s.captureConsole) both('--no-capture-console', true); if (s.debugTimeout !== '30000') both('--debug-timeout', s.debugTimeout); if (s.targetPollInterval !== '1000') both('--target-poll-interval', s.targetPollInterval); if (s.bundleTimeout !== '120000') both('--bundle-timeout', s.bundleTimeout);
-    if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== defaultDataDir(s)) both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.noDiskWrite) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
+    if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== defaultDataDir(s)) both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite && !memoryMode) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.dpiAware) both('--dpi-aware', true); if (s.hideConsole && !native) both('--hide-console', true); if (s.noDiskWrite || memoryMode) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
     if (s.optionsJson) both('--options-json', s.optionsJson);
     both('--answer-mode', s.answerMode); both('--answer-key', s.answerKey); both('--answer-threads', s.answerThreads); both('--answer-countdown', s.answerCountdown); if (s.answerRetry !== '') both('--answer-retry', s.answerRetry); both(s.showAnswerDialog ? '--show-answer-dialog' : '--hide-answer-dialog', true); if (s.noAutoSubmit) both('--no-auto-submit', true);
     if (s.panel) both('--panel', true); else both('--no-panel', true); if (s.panelExpanded) both('--panel-expanded', true); else both('--panel-collapsed', true); if (Number(s.panelTop) !== 16) both('--panel-top', s.panelTop); if (Number(s.panelRight) !== 16) both('--panel-right', s.panelRight); if (Number(s.panelWidth) !== 460) both('--panel-width', s.panelWidth); if (s.panelTheme) both('--panel-theme', s.panelTheme);
-    if (s.log && !s.noDiskWrite) both('--log', true); else both('--no-log', true); if (s.quiet) both('--quiet', true); if (s.diagnose && !s.noDiskWrite) both('--diagnose', true); else both('--no-diagnose', true); if (s.diagnosticsDir !== defaultDiagnosticsDir(s) && !s.noDiskWrite) both('--diagnostics-dir', s.diagnosticsDir);
+    if (s.log && !s.noDiskWrite && !memoryMode) both('--log', true); else both('--no-log', true); if (s.quiet) both('--quiet', true); if (s.diagnose && !s.noDiskWrite && !memoryMode) both('--diagnose', true); else both('--no-diagnose', true); if (s.diagnosticsDir !== defaultDiagnosticsDir(s) && !s.noDiskWrite && !memoryMode) both('--diagnostics-dir', s.diagnosticsDir);
     if (s.wipeOnStart) both('--wipe-owned-files-on-start', true); if (s.wipePolicy !== 'retry') both('--wipe-failure-policy', s.wipePolicy); if (s.wipeRetries !== '5') both('--wipe-retries', s.wipeRetries); if (s.wipeDelay !== '200') both('--wipe-retry-delay', s.wipeDelay); if (!s.wipeRuntimeRetry) both('--no-wipe-runtime-retry', true); if (s.wipeInterval !== '30') both('--wipe-runtime-interval', s.wipeInterval);
     var optionsText = String(s.optionsJson || '').trim();
     var inlineJson = optionsText && optionsText.charAt(0) !== '@';
@@ -545,8 +563,9 @@
     return { powershell: ps.join('\n'), cmd: cmdSafe ? 'cd /d ' + quoteCmd(projectRoot) + ' && ' + cmd.join(' ') : '', cmdWarning: cmdSafe ? '' : 'cmd 输出不可安全表示当前参数（含内联 JSON、命令解释符、路径末尾反斜杠、UNC 项目目录、百分号、感叹号、引号或换行）；请使用 PowerShell 或配置文件。', args: args };
   }
   function hasRestrictedOption(value) {
-    var restricted = /^(?:selfdestruct.*|memoryexec|deletesuspend)$/i;
-    function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase(); if (/^wipe/i.test(normalized)) return true; if (restricted.test(normalized) && item[key] !== false) return true; if (normalized === 'executionmode' && item[key] !== 'normal') return true; return visit(item[key]); }); }
+    var restricted = /^(?:selfdestruct.*|deletesuspend)$/i;
+    function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase(); if (/^wipe/i.test(normalized)) return true; if (restricted.test(normalized) && item[key] !== false) return true; if (normalized === 'executionmode' && item[key] !== 'normal' && item[key] !== 'memory') return true;
+      if (normalized === 'memoryexec' && typeof item[key] !== 'boolean') return true; return visit(item[key]); }); }
     return visit(value);
   }
   function requestedWipeOptions(s) {
@@ -561,7 +580,7 @@
   }
   function capabilityBlocked(s) {
     s = s || state();
-    return requestedWipeOptions(s).length > 0 || String(s.executionMode || 'normal') !== 'normal' || Boolean(s.selfDestructKey || s.selfDestructOnFullscreenExit || s.noSelfDestructConfirm) || hasRestrictedOption(parsedInlineConfig(s)) || s.hostType === 'native' && (!s.retainData || s.deleteConfig);
+    return requestedWipeOptions(s).length > 0 || Boolean(s.selfDestructKey || s.selfDestructOnFullscreenExit || s.noSelfDestructConfirm) || hasRestrictedOption(parsedInlineConfig(s));
   }
   function hasDiskWriteOption(value) {
     function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { if ((key === 'log' || key === 'logFileEnabled' || key === 'diagnose' || key === 'report' || key === 'reportPath') && item[key]) return true; if (key === 'common.settings.windows-log-enabled' && item[key] === true) return true; return visit(item[key]); }); }
@@ -576,10 +595,10 @@
     status.innerHTML = result.errors.length ? '<strong>无法生成：</strong><ul>' + result.errors.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : result.warnings.length ? '<strong>可以生成，但请确认：</strong><ul>' + result.warnings.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : '配置有效，可以生成普通宿主参数。';
     var jsonConfig = configFor(s);
     el('powershell').value = result.errors.length ? '' : command.powershell; el('cmd').value = result.errors.length ? '' : command.cmd; el('json').value = result.errors.length || !jsonConfig ? '' : JSON.stringify(jsonConfig, null, 2);
-    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：普通可审计运行', '注入：' + s.injectStrategy + ' / 重试 ' + s.injectRetries + ' / Browser ' + s.expectedBrowser, '注入超时：端点 ' + s.debugTimeout + 'ms / target ' + s.targetPollInterval + 'ms / bundle ' + s.bundleTimeout + 'ms', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理：' + (requestedWipeOptions(s).length ? '设计配置（当前宿主不可执行） / ' + s.wipePolicy + ' / 启动重试 ' + s.wipeRetries : '当前宿主不可执行'), '自毁：当前宿主不可执行'].join('\n');
-    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '启动清理、内存执行、删除挂起和自毁当前不可执行；启动清理型仅展示设计，不会导出命令或 JSON，也不会自动降级为普通启动。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
+    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：' + (String(s.executionMode || 'normal') === 'memory' ? '内存执行（宿主侧零落盘，客户端正常可见）' : '普通可审计运行'), '注入：' + s.injectStrategy + ' / 重试 ' + s.injectRetries + ' / Browser ' + s.expectedBrowser, '注入超时：端点 ' + s.debugTimeout + 'ms / target ' + s.targetPollInterval + 'ms / bundle ' + s.bundleTimeout + 'ms', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理：' + (requestedWipeOptions(s).length ? '设计配置（当前宿主不可执行） / ' + s.wipePolicy + ' / 启动重试 ' + s.wipeRetries : '当前宿主不可执行'), '自毁：当前宿主不可执行'].join('\n');
+    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '启动清理、删除挂起和自毁当前不可执行；启动清理型仅展示设计，不会导出命令或 JSON。内存执行会生成零落盘普通可见启动命令。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
     el('summary').textContent = '宿主：' + (s.hostType === 'native' ? '原生单文件 EXE' : 'Node 开发宿主') + '\n工作目录：' + (workingDirectory(s) || '请填写有效路径') + '\n' + el('summary').textContent;
-    if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；数据清理参数不可执行，诊断仅提供页面布局采样。目标 Windows 和真实 CEF75 环境仍需验收。</li>');
+    if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；数据生命周期按 --config/--no-disk-write 规则执行，诊断仅提供页面布局采样。目标 Windows 和真实 CEF75 环境仍需验收。</li>');
   }
   function escapeHtml(text) { return String(text).replace(/[&<>"']/g, function (char) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]; }); }
   var defaults = { elevateOnStart: false, scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: 'windows\\data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, expectedBrowser: 'Chrome/', injectStrategy: 'hybrid', injectRetries: '2', debugTimeout: '30000', targetPollInterval: '1000', bundleTimeout: '120000', injectBlankFrames: true, captureConsole: true, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: 'windows\\data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
@@ -594,8 +613,6 @@
     }
     el('nodeLauncherField').hidden = next === 'native';
     el('nativeLauncherField').hidden = next !== 'native';
-    el('retainData').disabled = next === 'native';
-    el('deleteConfig').disabled = next === 'native';
   }
   function applyDefaults() {
     Object.keys(defaults).forEach(function (id) { if (id !== 'launcherPath') setValue(id, defaults[id]); });
@@ -604,7 +621,7 @@
     setValue('diagnosticsDir', defaultDiagnosticsDir(current));
   }
   var presets = {
-    silent: { scanMode: 'fallback-all', selection: 'first', ui: 'cli', panel: false, noDiskWrite: true, log: false, diagnose: false, quiet: true, executionMode: 'normal', answerMode: 'manual', answerKey: 'Ctrl+Alt+Shift+S', answerThreads: '1', showAnswerDialog: false },
+    silent: { scanMode: 'fallback-all', selection: 'first', ui: 'cli', panel: false, noDiskWrite: true, log: false, diagnose: false, quiet: true, hideConsole: true, executionMode: 'normal', answerMode: 'manual', answerKey: 'Ctrl+Alt+Shift+S', answerThreads: '1', showAnswerDialog: false },
     friendly: { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', panel: true, panelExpanded: true, log: true, diagnose: true, answerMode: 'auto', answerThreads: '4', answerCountdown: '5', showAnswerDialog: true },
     lazy: { scanMode: 'fallback-all', selection: 'first', ui: 'auto', panel: true, panelExpanded: true, log: true, diagnose: false, executionMode: 'normal', answerMode: 'auto', answerThreads: '4', answerCountdown: '5', showAnswerDialog: true },
     manual: { scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', panel: true, panelExpanded: false, answerMode: 'manual', answerKey: 'Ctrl+Shift+A', answerThreads: '2', showAnswerDialog: false, noAutoSubmit: true },
@@ -614,7 +631,7 @@
     all: { scanMode: 'all', selection: 'first', ui: 'cli', panel: false, log: false }
   };
   window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: capabilityBlocked };
-  Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; applyDefaults(); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); render(); }); });
+  Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; applyDefaults(); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); if (name === 'silent') setValue('hideConsole', state().hostType !== 'native'); render(); }); });
   ids.forEach(function (id) { el(id).addEventListener('input', function () { selectedPreset = ''; render(); }); el(id).addEventListener('change', function () { selectedPreset = ''; render(); }); });
   document.querySelectorAll('[data-copy]').forEach(function (button) { button.addEventListener('click', function () { var target = el(button.getAttribute('data-copy')); if (!target.value) return; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(target.value); else { target.select(); document.execCommand('copy'); } button.textContent = '已复制'; setTimeout(function () { button.textContent = button.getAttribute('data-copy') === 'json' ? '复制 JSON' : button.getAttribute('data-copy') === 'cmd' ? '复制 cmd' : '复制 PowerShell'; }, 900); }); });
   document.querySelector('[data-download="json"]').addEventListener('click', function () { var data = el('json').value; if (!data) return; var url = URL.createObjectURL(new Blob([data], { type: 'application/json;charset=utf-8' })); var link = document.createElement('a'); link.href = url; link.download = 'chaoxing-plus.options.json'; link.click(); setTimeout(function () { URL.revokeObjectURL(url); }, 500); });

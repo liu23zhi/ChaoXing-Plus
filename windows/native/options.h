@@ -134,8 +134,10 @@ typedef struct CX_OPTIONS {
     BOOL stopClientOnExit;
     BOOL dpiAware;
     BOOL executionModeNormal;
+    BOOL executionModeMemory;
     BOOL unsupportedRequested;
     BOOL help;
+    BOOL version;
     BOOL capabilities;
     BOOL printEffectiveConfig;
     BOOL selfCheck;

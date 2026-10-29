@@ -38,6 +38,7 @@
   ];
   var ENABLED_KEY = 'common.settings.extension-enabled';
   var PANEL_ENABLED_KEY = 'common.settings.windows-panel-enabled';
+  var PANEL_THEME_KEY = 'common.settings.windows-panel-theme';
   var NO_DISK_WRITE_KEY = 'common.settings.windows-no-disk-write';
   var noDiskWriteEnabled = false;
   var SHARED_STORE_PREFIXES = [
@@ -481,7 +482,6 @@
     try {
       root = doc.createElement('div');
       root.id = PANEL_SHELL_ID;
-      root.setAttribute('data-chaoxing-plus-theme', 'pink');
       root.setAttribute('data-cx-win-panel-shell', '1');
       root.style.position = 'fixed';
       root.style.top = getPanelNumber('common.settings.windows-panel-top', 16, 0, 10000) + 'px';
@@ -491,10 +491,7 @@
       root.style.padding = '14px';
       root.style.boxSizing = 'content-box';
       root.style.borderRadius = '24px';
-      root.style.background = 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)';
-      root.style.border = '1px solid rgba(219, 39, 119, 0.34)';
-      root.style.boxShadow = '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)';
-      root.style.color = '#831843';
+      applyPanelShellTheme(root);
       root.style.fontFamily = '"Microsoft YaHei", "PingFang SC", -apple-system, sans-serif';
       root.appendChild(createShellHeader());
       var parent = doc.body || doc.documentElement;
@@ -658,6 +655,46 @@
     return Math.max(minimum, Math.min(maximum, value));
   }
 
+  // 与 src/projects/common.ts 的 pink/blue/green 色板保持一致；bootstrap 先于业务包
+  // 挂载折叠壳，必须用当前主题着色，避免展开前出现粉色闪壳。未知名称回退 pink。
+  var PANEL_THEME_STYLES = {
+    pink: {
+      gradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
+      border: '1px solid rgba(219, 39, 119, 0.34)',
+      shadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)',
+      text: '#831843'
+    },
+    blue: {
+      gradient: 'linear-gradient(145deg, #f0f6ff 0%, #fbfdff 48%, #eaf2ff 100%)',
+      border: '1px solid rgba(37, 99, 235, 0.34)',
+      shadow: '0 10px 28px rgba(30, 64, 175, 0.16), 0 2px 8px rgba(30, 64, 175, 0.10)',
+      text: '#1e3a8a'
+    },
+    green: {
+      gradient: 'linear-gradient(145deg, #ecfdf5 0%, #f9fffc 48%, #d1fae5 100%)',
+      border: '1px solid rgba(5, 150, 105, 0.34)',
+      shadow: '0 10px 28px rgba(6, 78, 59, 0.16), 0 2px 8px rgba(6, 78, 59, 0.10)',
+      text: '#064e3b'
+    }
+  };
+
+  function getPanelThemeName() {
+    var raw = typeof config[PANEL_THEME_KEY] === 'string' ? config[PANEL_THEME_KEY].trim().toLowerCase() : '';
+    return hasOwn(PANEL_THEME_STYLES, raw) ? raw : 'pink';
+  }
+
+  function applyPanelShellTheme(root) {
+    if (!root) {
+      return;
+    }
+    var style = PANEL_THEME_STYLES[getPanelThemeName()];
+    root.setAttribute('data-chaoxing-plus-theme', getPanelThemeName());
+    root.style.background = style.gradient;
+    root.style.border = style.border;
+    root.style.boxShadow = style.shadow;
+    root.style.color = style.text;
+  }
+
   function onMessageFromHost(payload) {
     if (!payload) {
       return;
@@ -684,6 +721,12 @@
       // Hydrate the current write policy before runtimeStore handles removals.
       applySharedValues(values, true);
       removeSharedValues(removedKeys);
+      // 已挂载的折叠壳同步刷新主题；业务包尚未加载时也能立即跟随 --panel-theme。
+      try {
+        applyPanelShellTheme(findPanelById(PANEL_SHELL_ID));
+      } catch (error) {
+        // ignore shell theme refresh failures
+      }
       if (wasEnabled !== isEnabled() || wasPanelEnabled !== isPanelEnabled()) {
         // 与扩展行为一致：总开关变化后顶层刷新，让业务脚本按新状态重新注入。
         try {

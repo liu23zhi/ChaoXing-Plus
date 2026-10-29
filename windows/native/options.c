@@ -60,7 +60,7 @@ static BOOL cx_json_wstr(const char *s, const JT *t, int value,
     return value >= 0 && jwstr(s, t, value, out, cap);
 }
 static BOOL cx_valid_mode(const WCHAR *value) {
-    return cx_streq(value, L"normal");
+    return cx_streq(value, L"normal") || cx_streq(value, L"memory");
 }
 static BOOL cx_valid_scan_mode(const WCHAR *value) {
     return cx_streq(value, L"common") || cx_streq(value, L"fallback-all") ||
@@ -160,7 +160,7 @@ void cx_options_init(CX_OPTIONS *o) {
     o->panelTop = 16; o->panelRight = 16; o->panelWidth = 460;
     o->answerModeAuto = TRUE; o->showAnswerDialog = TRUE;
     o->answerThreads = 4; o->answerCountdown = 5; o->answerRetry = 3;
-    o->autoSubmit = TRUE; o->executionModeNormal = TRUE;
+    o->autoSubmit = TRUE; o->executionModeNormal = TRUE; o->executionModeMemory = FALSE;
     o->extensionEnabled = TRUE;
 }
 
@@ -209,6 +209,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (!a) continue;
         if (cx_streq(a, L"--help")) { o->help = TRUE; continue; }
         if (cx_streq(a, L"--capabilities")) { o->capabilities = TRUE; continue; }
+    if (cx_streq(a, L"--version") || cx_streq(a, L"-v")) { o->version = TRUE; continue; }
         if (cx_streq(a, L"--print-effective-config")) { o->printEffectiveConfig = TRUE; continue; }
         if (cx_streq(a, L"--self-check")) { o->selfCheck = TRUE; continue; }
         if (cx_streq(a, L"--config")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->configPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->configPathSet = TRUE; continue; }
@@ -279,16 +280,16 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--no-auto-submit")) { o->autoSubmit = FALSE; o->autoSubmitSet = TRUE; continue; }
         if (cx_streq(a, L"--stop-client-on-exit")) { o->stopClientOnExit = TRUE; o->stopClientOnExitSet = TRUE; continue; }
         if (cx_streq(a, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
-        if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_valid_mode(raw)) { cx_error(error, errorCap, L"memory and delete-suspend execution are not supported by native host"); return FALSE; } o->executionModeNormal = TRUE; o->executionModeSet = TRUE; continue; }
-        if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--delete-suspend") ||
+        if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
+        if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
+        if (cx_streq(a, L"--delete-suspend") ||
             cx_streq(a, L"--wipe-owned-files-on-start") || cx_streq(a, L"--wipe-failure-policy") ||
             cx_streq(a, L"--wipe-retries") || cx_streq(a, L"--wipe-retry-delay") ||
             cx_streq(a, L"--wipe-runtime-retry") || cx_streq(a, L"--no-wipe-runtime-retry") ||
             cx_streq(a, L"--wipe-runtime-interval") || cx_streq(a, L"--self-destruct-key") ||
             cx_streq(a, L"--self-destruct-on-fullscreen-exit") || cx_streq(a, L"--self-destruct-delay") ||
-            cx_streq(a, L"--no-self-destruct-confirm") || cx_streq(a, L"--execution-mode-memory") ||
-            cx_streq(a, L"--execution-mode-delete-suspend")) {
-            cx_error(error, errorCap, L"wipe, memory and self-destruct options are not supported by native host");
+            cx_streq(a, L"--no-self-destruct-confirm") || cx_streq(a, L"--execution-mode-delete-suspend")) {
+            cx_error(error, errorCap, L"delete-suspend, wipe and self-destruct options are not supported by native host");
             o->unsupportedRequested = TRUE; return FALSE;
         }
         if (cx_streq(a, L"--no-elevate")) { o->noElevate = TRUE; continue; }
@@ -344,12 +345,18 @@ static BOOL cx_json_mode(const char *s, const JT *t, int object,
     *autoMode = cx_streq(mode, L"auto");
     *set = TRUE; return TRUE;
 }
-static BOOL cx_json_execution_mode(const char *s, const JT *t, int object,
+static BOOL cx_json_execution_mode(CX_OPTIONS *o, const char *s, const JT *t, int object,
                                    WCHAR *error, DWORD errorCap) {
-    int v; WCHAR mode[CX_OPTIONS_SHORT_CAP];
-    if (!cx_skey(s, t, object, "executionMode", &v)) return TRUE;
-    if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP) || !cx_valid_mode(mode)) {
-        cx_error(error, errorCap, L"memory and delete-suspend execution are not supported by native host"); return FALSE;
+    int v, boolValue; WCHAR mode[CX_OPTIONS_SHORT_CAP];
+    if (cx_skey(s, t, object, "executionMode", &v)) {
+        if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP) || !cx_valid_mode(mode)) {
+            cx_error(error, errorCap, L"JSON executionMode must be normal or memory"); return FALSE;
+        }
+        o->executionModeNormal = cx_streq(mode, L"normal"); o->executionModeMemory = cx_streq(mode, L"memory"); o->executionModeSet = TRUE;
+    }
+    if (cx_skey(s, t, object, "memoryExec", &v)) {
+        if (!cx_json_bool(s, t, v, &boolValue)) { cx_error(error, errorCap, L"JSON memoryExec must be a boolean"); return FALSE; }
+        o->executionModeNormal = !boolValue; o->executionModeMemory = boolValue; o->executionModeSet = TRUE;
     }
     return TRUE;
 }
@@ -389,12 +396,76 @@ static BOOL cx_merge_shared_settings(CX_OPTIONS *o, const char *patch, DWORD pat
     HeapFree(GetProcessHeap(), 0, base); HeapFree(GetProcessHeap(), 0, merged);
     return ok;
 }
+/* Host-managed settings are parsed into typed CX_OPTIONS fields and are always
+   re-emitted by cx_options_effective_settings_json_utf8(). Keeping their raw
+   copies in the shared-settings snapshot would serialize duplicate JSON keys
+   (and let stale lower-layer values linger), so only unmanaged page settings
+   are retained verbatim. */
+static BOOL cx_managed_shared_setting(const WCHAR *name) {
+    static const WCHAR *const managed[] = {
+        L"common.settings.extension-enabled",
+        L"common.settings.windows-panel-enabled",
+        L"common.settings.windows-panel-collapsed",
+        L"common.settings.windows-panel-top",
+        L"common.settings.windows-panel-right",
+        L"common.settings.windows-panel-width",
+        L"common.settings.windows-panel-theme",
+        L"common.settings.windows-answer-mode",
+        L"common.settings.windows-answer-key",
+        L"common.settings.windows-answer-threads",
+        L"common.settings.windows-show-answer-dialog",
+        L"common.settings.windows-answer-countdown",
+        L"common.settings.windows-answer-retry",
+        L"common.settings.windows-auto-submit",
+        L"common.settings.windows-log-enabled",
+        L"common.settings.windows-no-disk-write"
+    };
+    DWORD i;
+    for (i = 0; i < sizeof(managed) / sizeof(managed[0]); ++i) {
+        if (cx_streq(name, managed[i])) return TRUE;
+    }
+    return FALSE;
+}
 static BOOL cx_append_shared_settings(CX_OPTIONS *o, const char *s,
                                       const JT *t, int object,
                                       WCHAR *error, DWORD errorCap) {
+    char *filtered;
+    WCHAR name[512];
+    DWORD capacity, length = 0;
+    BOOL first = TRUE, ok;
+    int i, value, rawLength;
     if (!o || object < 0 || t[object].type != '{') return TRUE;
-    return cx_merge_shared_settings(o, s + t[object].start,
-        (DWORD)(t[object].end - t[object].start), error, errorCap);
+    rawLength = t[object].end - t[object].start;
+    if (rawLength < 0) return TRUE;
+    capacity = (DWORD)rawLength * 2U + 4U;
+    filtered = (char *)HeapAlloc(GetProcessHeap(), 0, capacity);
+    if (!filtered) { cx_error(error, errorCap, L"out of memory while filtering shared settings"); return FALSE; }
+    filtered[length++] = '{';
+    for (i = object + 1; i < t[object].next; i = t[value].next) {
+        value = i + 1;
+        /* jwstr failure cannot match a managed key, so copy the raw pair. */
+        if (jwstr(s, t, i, name, 512) && cx_managed_shared_setting(name)) continue;
+        if (!first) filtered[length++] = ',';
+        first = FALSE;
+        filtered[length++] = '"';
+        CopyMemory(filtered + length, s + t[i].start, (SIZE_T)(t[i].end - t[i].start));
+        length += (DWORD)(t[i].end - t[i].start);
+        filtered[length++] = '"';
+        filtered[length++] = ':';
+        if (t[value].type == 's') {
+            filtered[length++] = '"';
+            CopyMemory(filtered + length, s + t[value].start, (SIZE_T)(t[value].end - t[value].start));
+            length += (DWORD)(t[value].end - t[value].start);
+            filtered[length++] = '"';
+        } else {
+            CopyMemory(filtered + length, s + t[value].start, (SIZE_T)(t[value].end - t[value].start));
+            length += (DWORD)(t[value].end - t[value].start);
+        }
+    }
+    filtered[length++] = '}';
+    ok = cx_merge_shared_settings(o, filtered, length, error, errorCap);
+    HeapFree(GetProcessHeap(), 0, filtered);
+    return ok;
 }
 static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
     static const char *known[] = {
@@ -408,7 +479,7 @@ static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
         "answerMode", "answerKey", "showAnswerDialog", "answerThreads",
         "answerCountdown", "answerRetry", "autoSubmit", "clientIndex", "clientFirst",
         "scanClients", "listClients", "selectClient", "scanMode", "scanAll", "rescan",
-        "noScanCache", "ui", "settings", "executionMode", "elevateOnStart"
+        "noScanCache", "ui", "settings", "executionMode", "memoryExec", "elevateOnStart"
     };
     char name[CX_OPTIONS_SHORT_CAP * 4]; int i;
     if (key < 0 || t[key].type != 's' || !jstr(s, t, key, name, sizeof(name))) return FALSE;
@@ -441,13 +512,14 @@ static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
     for (object = 0; object < count; ++object) {
         if (t[object].type != '{') continue;
         for (key = object + 1; key < t[object].next; key = t[value].next) {
-            BOOL wipe, restricted, disabled;
+            BOOL wipe, restricted, disabled, prefixed;
             WCHAR mode[7];
             value = key + 1;
             if (!jwstr(s, t, key, name, length + 1)) {
                 cx_error(error, errorCap, L"JSON option key cannot be decoded"); goto done;
             }
-            read = cx_token_eq(name, 24, L"common.settings.windows-") ? 24 : 0;
+            prefixed = cx_token_eq(name, 24, L"common.settings.windows-");
+            read = prefixed ? 24 : 0;
             written = 0;
             while (name[read]) {
                 WCHAR ch = name[read++];
@@ -460,9 +532,18 @@ static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
                 || cx_key_prefix(name, L"SELFDESTRUCT") || cx_streq(name, L"NOSELFDESTRUCTCONFIRM");
             if (!restricted) continue;
             disabled = t[value].type == 'p' && jeq(s, t, value, "false");
-            if (!wipe && (disabled || (cx_streq(name, L"EXECUTIONMODE")
-                && jwstr(s, t, value, mode, 7) && cx_streq(mode, L"normal")))) continue;
-            cx_error(error, errorCap, L"wipe, memory and self-destruct options are not supported by native host");
+            if (!wipe) {
+                if (cx_streq(name, L"EXECUTIONMODE")) {
+                    if (jwstr(s, t, value, mode, 7)
+                        && ((!prefixed && (cx_streq(mode, L"normal") || cx_streq(mode, L"memory")))
+                            || (prefixed && cx_streq(mode, L"normal")))) continue;
+                } else if (cx_streq(name, L"MEMORYEXEC")) {
+                    if (disabled || (!prefixed && (disabled || t[value].type == 'p'))) continue;
+                } else if (disabled) {
+                    continue;
+                }
+            }
+            cx_error(error, errorCap, L"delete-suspend, wipe and self-destruct options are not supported by native host");
             goto done;
         }
     }
@@ -477,7 +558,7 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
     int v, settings;
     if (object < 0 || tokens[object].type != '{') { cx_error(error, errorCap, L"JSON root must be an object"); return FALSE; }
     if (!cx_reject_unknown_top(json, tokens, object, error, errorCap) ||
-        !cx_json_execution_mode(json, tokens, object, error, errorCap)
+        !cx_json_execution_mode(o, json, tokens, object, error, errorCap)
         || !cx_json_dpi_mode(o, json, tokens, object, error, errorCap)) return FALSE;
     if (!cx_json_wstr_field(json, tokens, object, "clientPath", o->clientPath, CX_OPTIONS_PATH_CAP, &o->clientPathSet, error, errorCap) ||
         !cx_json_wstr_field(json, tokens, object, "dataDir", o->dataDir, CX_OPTIONS_PATH_CAP, &o->dataDirSet, error, errorCap) ||
@@ -709,9 +790,9 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_BOOL_IF(answerRetrySet, answerRetry); CX_BOOL_IF(injectRetriesSet, injectRetries); CX_BOOL_IF(debugTimeoutSet, debugTimeoutMs);
     CX_BOOL_IF(targetPollIntervalSet, targetPollIntervalMs); CX_BOOL_IF(bundleTimeoutSet, bundleTimeoutMs);
     CX_BOOL_IF(portSet, port); CX_BOOL_IF(attachPortSet, attachPort); CX_BOOL_IF(durationSet, durationMs);
-    if (layer->executionModeSet) { destination->executionModeNormal = layer->executionModeNormal; destination->executionModeSet = TRUE; }
+    if (layer->executionModeSet) { destination->executionModeNormal = layer->executionModeNormal; destination->executionModeMemory = layer->executionModeMemory; destination->executionModeSet = TRUE; }
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
-    destination->help = layer->help; destination->capabilities = layer->capabilities;
+    destination->help = layer->help; destination->capabilities = layer->capabilities; destination->version = layer->version;
     destination->printEffectiveConfig = layer->printEffectiveConfig; destination->selfCheck = layer->selfCheck;
     if (layer->commandLineLayer) {
         destination->noElevate = layer->noElevate; destination->elevated = layer->elevated;
@@ -741,11 +822,15 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (o->clientPathSet && !o->clientPath[0]) o->clientPathSet = FALSE;
     /* Defer UI suppression until the final layer, preserving the path if a later auto overrides it. */
     if (o->clientPathSet && !cx_streq(o->ui, L"auto") && o->uiSource > o->clientPathSource) { o->clientPathSet = FALSE; o->clientPathSuppressedByUi = TRUE; }
-    if (!o->retainData || o->deleteConfig) {
-        cx_error(error, errorCap, L"data cleanup is not supported by native host; use the Node host for these options");
+    if (o->deleteConfig && !o->configPathSet) {
+        cx_error(error, errorCap, L"--delete-config requires an explicit --config file");
         return FALSE;
     }
-    if (!cx_valid_mode(o->executionModeNormal ? L"normal" : L"unsupported") || !cx_valid_scan_mode(o->scanMode) || !cx_valid_ui(o->ui) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid execution, scan, UI or injection mode"); return FALSE; }
+    if (o->deleteConfig && o->noDiskWrite) {
+        cx_error(error, errorCap, L"--no-disk-write cannot be combined with --delete-config");
+        return FALSE;
+    }
+    if (!cx_valid_mode(o->executionModeNormal ? L"normal" : (o->executionModeMemory ? L"memory" : L"unsupported")) || !cx_valid_scan_mode(o->scanMode) || !cx_valid_ui(o->ui) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid execution, scan, UI or injection mode"); return FALSE; }
     if (o->clientIndexSet && o->clientIndex < 1) { cx_error(error, errorCap, L"client-index must be a positive integer"); return FALSE; }
     if (o->clientPathSet && (o->scanClients || o->clientIndexSet || o->clientFirst || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client path conflicts with scanning or client selection flags"); return FALSE; }
     if (o->clientIndexSet && (o->clientFirst || o->selectClient || o->listClients)) { cx_error(error, errorCap, L"client index conflicts with other selection flags"); return FALSE; }
@@ -755,6 +840,7 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (o->injectRetries < 0 || o->injectRetries > 5 || o->debugTimeoutMs < 1000 || o->debugTimeoutMs > 120000 || o->targetPollIntervalMs < 250 || o->targetPollIntervalMs > 10000 || o->bundleTimeoutMs < 1000 || o->bundleTimeoutMs > 300000 || o->port < 0 || o->port > 65535) { cx_error(error, errorCap, L"host settings are outside their allowed range"); return FALSE; }
     if (o->port != 0 && (o->port < 1024 || o->port > 65534)) { cx_error(error, errorCap, L"CEF75 launch port must be 0 (automatic) or 1024 to 65534"); return FALSE; }
     if (o->answerKey[0] && !cx_shortcut(o->answerKey)) { cx_error(error, errorCap, L"answer-key must contain one base key"); return FALSE; }
+    if (o->executionModeMemory) o->noDiskWrite = TRUE;
     if (o->noDiskWrite) { o->logFileEnabled = FALSE; o->diagnose = FALSE; o->noDiagnose = TRUE; o->reportPath[0] = 0; o->noScanCache = TRUE; }
     return TRUE;
 }

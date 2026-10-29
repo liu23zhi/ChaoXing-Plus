@@ -321,6 +321,17 @@ export async function getDefaultDriveRoots({
   return existing.sort(comparePaths);
 }
 
+function scanAbortError() {
+  const error = new Error('全盘扫描已取消');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function throwIfScanAborted(signal) {
+  if (signal && signal.aborted) throw scanAbortError();
+}
+
 export async function discoverClientExecutables({
   roots,
   rootProvider = getDefaultDiscoveryRoots,
@@ -330,7 +341,10 @@ export async function discoverClientExecutables({
   scanMode = 'common',
   stopOnMachine,
   preserveOrder = false,
-  skipDirectoryNames = DEFAULT_SKIP_DIRECTORY_NAMES
+  skipDirectoryNames = DEFAULT_SKIP_DIRECTORY_NAMES,
+  signal = null,
+  onProgress = null,
+  progressIntervalMs = 200
 } = {}) {
   const resolvedRoots = roots === undefined ? await rootProvider({ fsProvider }) : roots;
   const requestedDepth = maxDepth === undefined
@@ -346,8 +360,26 @@ export async function discoverClientExecutables({
   const visited = new Set();
   const clients = new Map();
   let stopped = false;
+  let directoriesVisited = 0;
+  let lastProgressAt = 0;
+  const startedAt = Date.now();
+  const progressInterval = Number.isFinite(progressIntervalMs) && progressIntervalMs >= 0
+    ? progressIntervalMs
+    : 200;
+  const reportProgress = (force = false) => {
+    if (typeof onProgress !== 'function') return;
+    const now = Date.now();
+    if (!force && progressInterval > 0 && now - lastProgressAt < progressInterval) return;
+    lastProgressAt = now;
+    try {
+      onProgress({ directoriesVisited, candidatesFound: clients.size, elapsedMs: now - startedAt });
+    } catch {
+      // Progress observers must never abort or corrupt the scan.
+    }
+  };
 
   async function visit(directory, depth) {
+    throwIfScanAborted(signal);
     const normalizedDirectory = normalizeWindowsPath(directory);
     const directoryKey = pathKey(normalizedDirectory);
     if (!directoryKey || visited.has(directoryKey)) return;
@@ -359,6 +391,9 @@ export async function discoverClientExecutables({
     } catch {
       return;
     }
+    throwIfScanAborted(signal);
+    directoriesVisited += 1;
+    reportProgress();
 
     const orderedEntries = entries.slice().sort((left, right) => {
       const a = String(left?.name || '').toLowerCase();
@@ -370,6 +405,7 @@ export async function discoverClientExecutables({
 
     for (const entry of files) {
       if (stopped) return;
+      throwIfScanAborted(signal);
       if (!entry || typeof entry.name !== 'string' || !entry.name) continue;
       const entryPath = windowsPath.join(normalizedDirectory, entry.name);
       if (isSymbolicLink(entry)) continue;
@@ -382,6 +418,7 @@ export async function discoverClientExecutables({
         const machine = await peMachineReader(normalizedPath);
         if (machine !== 0x014c && machine !== 0x8664) continue;
         clients.set(key, { path: normalizedPath, name: entry.name, machine });
+        reportProgress();
         if (preferredMachine !== null && machine === preferredMachine) {
           stopped = true;
           return;
@@ -393,6 +430,7 @@ export async function discoverClientExecutables({
 
     for (const entry of directories) {
       if (stopped) return;
+      throwIfScanAborted(signal);
       if (!entry || typeof entry.name !== 'string' || !entry.name) continue;
       if (depth < depthLimit && !isSymbolicLink(entry) && !skippedNames.has(entry.name.toLowerCase())) {
         await visit(windowsPath.join(normalizedDirectory, entry.name), depth + 1);
@@ -402,10 +440,12 @@ export async function discoverClientExecutables({
 
   for (const root of resolvedRoots || []) {
     if (stopped) break;
+    throwIfScanAborted(signal);
     const normalizedRoot = normalizeWindowsPath(root);
     if (normalizedRoot) await visit(normalizedRoot, 0);
   }
 
+  reportProgress(true);
   const result = [...clients.values()];
   return preserveOrder
     ? result
@@ -427,8 +467,14 @@ export async function discoverClientCandidates({
   cacheFs = fs,
   cacheTtlMs = DEFAULT_CLIENT_SCAN_CACHE_TTL_MS,
   onCacheEvent = () => {},
-  forceRescan = false
+  forceRescan = false,
+  signal = null,
+  onProgress = null,
+  progressIntervalMs = 200
 } = {}) {
+  throwIfScanAborted(signal);
+  const progressOptions = onProgress ? { onProgress, progressIntervalMs } : {};
+  const scanOptions = signal ? { signal, ...progressOptions } : progressOptions;
   const cacheEnabled = Boolean(cachePath) && !noScanCache && !noDiskWrite;
   // Resolve the current scan range before reusing a cache from another environment.
   const commonRoots = scanMode === 'all' ? [] : await commonRootProvider({ fsProvider, desktopRootProvider });
@@ -459,7 +505,8 @@ export async function discoverClientCandidates({
       preserveOrder: true,
       stopOnMachine,
       fsProvider,
-      peMachineReader
+      peMachineReader,
+      ...scanOptions
     });
     result = { candidates, source: 'full', selected: candidates.find((item) => item.machine === 0x014c) || candidates[0] || null };
   } else {
@@ -467,13 +514,15 @@ export async function discoverClientCandidates({
       roots: commonRoots,
       scanMode: 'common',
       fsProvider,
-      peMachineReader
+      peMachineReader,
+      ...scanOptions
     });
     const driveCandidates = await discoverClientExecutables({
       roots: driveRoots,
       scanMode: 'common',
       fsProvider,
-      peMachineReader
+      peMachineReader,
+      ...scanOptions
     });
     const commonPaths = new Set();
     const candidates = [...commonCandidates, ...driveCandidates]
@@ -496,7 +545,8 @@ export async function discoverClientCandidates({
         preserveOrder: true,
         stopOnMachine,
         fsProvider,
-        peMachineReader
+        peMachineReader,
+        ...scanOptions
       });
       const selected = fullCandidates.find((item) => item.machine === 0x014c) || fullCandidates[0] || null;
       result = { candidates: fullCandidates, source: 'full', selected };

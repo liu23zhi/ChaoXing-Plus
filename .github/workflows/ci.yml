@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows 6.2.0 类型检查、构建与全量测试
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CXPLUS_NO_LOG_FILE: '1'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建扩展包
+        run: npm run build
+
+      - name: 构建 Windows 注入资源（release 关闭调试日志）
+        run: npm run build:windows -- --release
+
+      - name: 构建原生宿主与编译测试
+        run: npm run build:native
+
+      - name: 导出原生编译测试路径
+        shell: pwsh
+        run: |
+          $bin = (Resolve-Path '.\windows\native\.tmp-native-host\bin').Path
+          $executables = [ordered]@{
+            CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
+            CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'
+            CX_NATIVE_ASSETS_EXE = 'assets-tests.exe'
+            CX_NATIVE_OPTIONS_EXE = 'options-tests.exe'
+            CX_NATIVE_SESSION_EXE = 'session-tests.exe'
+            CX_NATIVE_SELECTION_EXE = 'selection-tests.exe'
+            CX_NATIVE_TRANSPORT_EXE = 'transport-tests.exe'
+            CX_NATIVE_AUDIT_EXE = 'audit-tests.exe'
+            CX_NATIVE_CONFIG_EXE = 'config-store-tests.exe'
+            CX_NATIVE_CACHE_EXE = 'discovery-cache-driver.exe'
+            CX_NATIVE_CACHE_HOST_EXE = 'discovery-cache-host-tests.exe'
+            CX_NATIVE_CLI_SELECTION_EXE = 'cli-selection-tests.exe'
+            CX_NATIVE_ELEVATION_EXE = 'elevation-tests.exe'
+            CX_NATIVE_ELEVATION_HOST_EXE = 'elevation-host-tests.exe'
+            CX_NATIVE_DPI_EXE = 'dpi-tests.exe'
+            CX_NATIVE_DPI_PROCESS_EXE = 'dpi-process-tests.exe'
+            CX_NATIVE_DPI_CHILD_EXE = 'dpi-child.exe'
+            CX_NATIVE_PROCESS_CHECK_EXE = 'process-check-tests.exe'
+            CX_NATIVE_PROCESS_FIXTURE_EXE = 'process-fixture.exe'
+            CX_NATIVE_DIAGNOSTICS_EXE = 'diagnostics-tests.exe'
+          }
+          foreach ($entry in $executables.GetEnumerator()) {
+            $path = Join-Path $bin $entry.Value
+            if (-not (Test-Path -LiteralPath $path)) { throw "缺少原生编译测试产物: $path" }
+            "$($entry.Key)=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: 单元测试（含原生编译入口）
+        shell: pwsh
+        run: |
+          $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          Write-Host "单元测试文件数: $($testFiles.Count)"
+          # 受限并发：默认按 CPU 并发会同时启动多个 Chromium/原生宿主用例，在 CI 小规格 runner 上出现过截止类偶发。
+          node --test --test-concurrency=4 --test-timeout=300000 @testFiles
+
+      - name: 浏览器回归（含原生构建浏览器入口）
+        shell: pwsh
+        run: |
+          $browserFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          Write-Host "浏览器测试文件数: $($browserFiles.Count)"
+          node --test --test-concurrency=4 --test-timeout=600000 @browserFiles
+
+      - name: 发布包冒烟
+        shell: pwsh
+        run: npm run release:windows -- --out release-ci
+
+      - name: 发布包解压入口自检
+        shell: pwsh
+        run: |
+          $package = Join-Path (Resolve-Path 'release-ci').Path 'chaoxing-plus-6.2.0-windows'
+          node (Join-Path $package 'verify-release.mjs')
+          if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'windows\host\main.mjs', 'chaoxing_plus.exe', 'start-windows-silent.cmd', 'windows\host\silent-launch.vbs', 'windows\config.example.json')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
+          }
+          node (Join-Path $package 'windows\host\main.mjs') --self-check --no-disk-write --quiet
+          if ($LASTEXITCODE -ne 0) { throw "发布包 Node 自检失败: $LASTEXITCODE" }
+          $native = Start-Process -FilePath (Join-Path $package 'chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
+          if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
+
+      - name: 上传发布包
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release-ci/*.zip
+          if-no-files-found: error

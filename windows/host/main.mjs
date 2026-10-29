@@ -8,8 +8,10 @@ import {
   DEFAULT_PORT_CANDIDATES,
   chooseBindablePort,
   canBindPort,
+  createListenerOwnershipVerifier,
   describeMachine,
   getListenerOwnerPid,
+  hideConsoleWindow,
   isElevated,
   isSupportedClientMachine,
   killProcessTree,
@@ -57,6 +59,7 @@ function usage() {
     '  --scan-clients       扫描桌面、Program Files 等常见根目录（根目录及一级子目录）',
     '  --scan-mode <mode>   common、fallback-all 或 all；默认常规无结果才全盘递归',
     '  --scan-all           启用常规无结果后的全盘回退（等价 fallback-all）',
+    '  --no-scan-all        禁用全盘回退并强制常规扫描模式（common）',
     '  --client-first       选择扫描结果中的首个推荐客户端（x86 优先）',
     '  --ui <mode>          auto、gui 或 cli；gui/--select-client 使用 Windows 原生选择窗口',
     '  --list-clients       扫描并列出候选客户端后退出',
@@ -78,9 +81,11 @@ function usage() {
     '  --attach <port>      测试/调试：连接已存在的调试端点，不启动、不校验归属',
     '  --report <path>      退出时把运行报告写入指定 JSON 文件',
     '  --self-check         只做环境/资源检查，不启动客户端',
+    '  --print-effective-config 输出合并后的共享设置 JSON 后退出（不扫描、不启动、不写文件）',
     '  --elevate-on-start   启动时先申请管理员权限，再扫描和显示选择窗口',
     '  --no-elevate         不自动申请 UAC；客户端实际需要管理员权限时才报错',
     '  --elevated           内部标记：表示当前进程由 UAC 自动重启而来',
+    '  --hide-console       静默启动：启动时及 UAC 提权重启时隐藏 Node 控制台窗口（供静默脚本使用）',
     '  --stop-client-on-exit 退出时结束本次启动的客户端进程树',
     '  --diagnose           强制开启渲染诊断（默认启动模式开启、attach 模式关闭）',
     '  --no-diagnose        关闭渲染诊断',
@@ -92,7 +97,7 @@ function usage() {
     '  --panel-top <px>     面板距窗口顶部距离（0-10000）',
     '  --panel-right <px>   面板距窗口右侧距离（0-10000）',
     '  --panel-width <px>   面板宽度（320-800）',
-    '  --panel-theme <name> 主题名称（当前保留内置主题）',
+    '  --panel-theme <name> 面板主题：pink（默认）/ blue / green；未知值回退 pink',
     '  --answer-mode <mode> auto 自动答题，manual 按键逐题触发',
     '  --answer-key <keys>  手动模式组合键，例如 Ctrl+Shift+A（默认 F8）',
     '  --show-answer-dialog/--hide-answer-dialog  是否显示自动答题确认弹窗',
@@ -106,7 +111,9 @@ function usage() {
     '  --diagnose/--no-diagnose 开启或关闭页面与窗口渲染诊断',
     '  --diagnostics-dir <path> 诊断输出目录',
     '  --wipe-*             启动清理仅保留参数设计，当前尚未实现并会报错',
-    '  --execution-mode normal 仅支持普通运行；内存/删除挂起和自毁参数会报错',
+    '  --execution-mode normal|memory 选择执行模式；memory 为宿主侧零落盘（客户端仍正常可见启动）',
+    '  --memory-exec        --execution-mode memory 的简写',
+    '  --version            输出宿主版本号 6.2.0',
     '  --capabilities       输出机器可读的能力标记与未实现能力说明',
     '  --quiet              减少控制台输出，不保证屏蔽参数错误或系统提示'
   ].join('\n');
@@ -204,9 +211,10 @@ async function readOptionalJson(filePath, label, { allowMissing = true } = {}) {
   }
 }
 
-async function resolveClientSelection(options, config, logger) {
+async function resolveClientSelection(options, config, logger, hooks = {}) {
   return resolveClientSelectionFlow(options, config, {
     logger,
+    onListCandidates: hooks.onListCandidates,
     assertMachine: assertSupportedClientMachine,
     scanCachePath: options.scanCachePath || '',
     onCacheEvent: (event) => {
@@ -303,6 +311,8 @@ async function runSelfCheck(options, logger) {
 
   const report = {
     mode: 'self-check',
+    version: '6.2.0',
+    host: 'node',
     generatedAt: nowIso(),
     repositoryRoot,
     assetsDir,
@@ -394,22 +404,50 @@ async function main() {
     console.log(usage());
     return;
   }
+  if (options.version) {
+    console.log('6.2.0');
+    return;
+  }
   if (options.capabilities) {
     console.log(JSON.stringify({
       hostVersion: '6.2.0',
       executionMode: options.executionMode,
-      supported: { executionModes: ['normal'], scanner: true, parameterGenerator: true, nativeClientSelection: process.platform === 'win32' },
+      supported: {
+        executionModes: ['normal', 'memory'],
+        scanner: true,
+        parameterGenerator: true,
+        nativeClientSelection: process.platform === 'win32',
+        configReload: true,
+        configPersistence: true,
+        fileLogging: true,
+        runReport: true,
+        pageRenderDiagnostics: true,
+        pageScreenshots: true,
+        windowDiagnostics: true,
+        renderDiagnostics: true,
+        retainData: true,
+        deleteConfig: true
+      },
       unsupported: UNSUPPORTED_CAPABILITIES,
       notes: describeUnsupportedCapabilities()
     }, null, 2));
     return;
   }
 
+  // --hide-console：静默脚本已通过 wscript 隐藏初始控制台；这里兜底隐藏本进程
+  // （包括 UAC 提升后的实例）附着的控制台窗口，避免出现持续可见的 Node 黑框。
+  // --print-effective-config 需要把 JSON 输出到控制台，因此不隐藏。
+  if (options.hideConsole && !options.printEffectiveConfig) {
+    await hideConsoleWindow();
+  }
+
+  const isConsoleQuiet = () => options.quiet || options.printEffectiveConfig;
+
   let dataDirectory = options.dataDirExplicit
     ? path.resolve(options.dataDir)
     : path.join(repositoryRoot, 'windows', 'data');
   options.scanCachePath = path.join(dataDirectory, 'scan-cache.json');
-  let logger = createLogger({ quiet: options.quiet });
+  let logger = createLogger({ quiet: isConsoleQuiet() });
   let loggerQuiet = options.quiet;
   let configStoreForCleanup = null;
   let cleanupAfterStartupFailure = null;
@@ -456,7 +494,10 @@ async function main() {
 
   try {
     if (options.selfCheck) {
-      if (!options.noDiskWrite && options.logFileEnabled !== false && process.env.CXPLUS_NO_LOG_FILE !== '1') {
+      // Self-check is read-only by default (mirroring the native host): it must
+      // not create logs/diagnostics/config implicitly. Explicit --log/--report
+      // are errors the user asked for; only then do we write files.
+      if (!options.noDiskWrite && options.logFileEnabled === true && process.env.CXPLUS_NO_LOG_FILE !== '1') {
         const selfCheckLogPath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
         await registerNewFile(selfCheckLogPath);
         await logger.attachFile(selfCheckLogPath);
@@ -494,17 +535,22 @@ async function main() {
     );
     options = resolveLayeredOptions();
     options.optionsJsonObject = inlineConfig;
-    if (loggerQuiet !== options.quiet) {
+    if (loggerQuiet !== isConsoleQuiet()) {
       await logger.close();
-      logger = createLogger({ quiet: options.quiet });
-      loggerQuiet = options.quiet;
+      logger = createLogger({ quiet: isConsoleQuiet() });
+      loggerQuiet = isConsoleQuiet();
     }
     if (options.elevateOnStart && !options.attachPort && !options.listClients) {
       if (process.platform !== 'win32') throw new Error('--elevate-on-start 需要 Windows');
       if (!(await isElevated())) {
         if (options.elevated) throw new Error('管理员重启未获得提升后的权限，停止重复申请 UAC');
         logger.info('[launch] --elevate-on-start：正在通过系统 UAC 请求管理员宿主，确认后继续扫描和选择');
-        await relaunchElevated({ scriptPath: hostScriptPath, args: options.rawArgs, cwd: process.cwd() });
+        await relaunchElevated({
+          scriptPath: hostScriptPath,
+          args: options.rawArgs,
+          cwd: process.cwd(),
+          windowStyle: options.hideConsole ? 'Hidden' : 'Normal'
+        });
         await logger.close();
         return;
       }
@@ -517,16 +563,16 @@ async function main() {
       dataDirectory,
       'scan-cache.json'
     );
-    if (loggerQuiet !== options.quiet) {
+    if (loggerQuiet !== isConsoleQuiet()) {
       await logger.close();
-      logger = createLogger({ quiet: options.quiet });
-      loggerQuiet = options.quiet;
+      logger = createLogger({ quiet: isConsoleQuiet() });
+      loggerQuiet = isConsoleQuiet();
     }
 
     let selectedConfigCreated = false;
-    if (!options.noDiskWrite && options.attachPort) {
+    if (!options.noDiskWrite && !options.printEffectiveConfig && options.attachPort) {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
-    } else if (!options.noDiskWrite) {
+    } else if (!options.noDiskWrite && !options.printEffectiveConfig) {
       selectedConfigCreated = await ensureConfigFile(repositoryRoot, configPath, (message) => logger.info(message));
       if (selectedConfigCreated) runArtifacts.files.add(configPath);
     }
@@ -545,13 +591,13 @@ async function main() {
         dataDirectory,
         'scan-cache.json'
       );
-      if (loggerQuiet !== options.quiet) {
+      if (loggerQuiet !== isConsoleQuiet()) {
         await logger.close();
-        logger = createLogger({ quiet: options.quiet });
-        loggerQuiet = options.quiet;
+        logger = createLogger({ quiet: isConsoleQuiet() });
+        loggerQuiet = isConsoleQuiet();
       }
     }
-    if (!options.noDiskWrite) await registerNewFile(configPath);
+    if (!options.noDiskWrite && !options.printEffectiveConfig) await registerNewFile(configPath);
     const configStore = createConfigStore(configPath, {
       logger: (message) => logger.info(message),
       persistEnabled: !options.noDiskWrite,
@@ -575,6 +621,14 @@ async function main() {
       : (options.logFileEnabled === undefined ? configuredLogging : options.logFileEnabled);
     config.settings['common.settings.windows-no-disk-write'] = options.noDiskWrite;
     config.settings['common.settings.windows-log-enabled'] = loggingEnabled;
+    if (options.printEffectiveConfig) {
+      // 与原生 --print-effective-config 对齐：只输出合并后的共享设置 JSON，
+      // 不扫描、不启动客户端、不申请 UAC、不写日志/配置/报告。
+      process.stdout.write(`${JSON.stringify(config.settings)}\n`);
+      await configStore.close();
+      await logger.close();
+      return;
+    }
     if (loggingEnabled && process.env.CXPLUS_NO_LOG_FILE !== '1') {
       const logFilePath = path.join(dataDirectory, 'logs', `host-${Date.now()}.log`);
       await registerNewFile(logFilePath);
@@ -595,8 +649,34 @@ async function main() {
 
     if (!options.attachPort) {
       if (!options.noDiskWrite && !options.noScanCache) await registerNewFile(options.scanCachePath);
-      const selectedClientPath = await resolveClientSelection(options, config, logger);
-      if (options.listClients || selectedClientPath === null) {
+      let listedCandidates = null;
+      const listStartedAt = nowIso();
+      const selectedClientPath = await resolveClientSelection(options, config, logger, {
+        onListCandidates: (candidates) => { listedCandidates = candidates; }
+      });
+      if (options.listClients) {
+        if (!options.noDiskWrite && options.reportPath) {
+          const listFinishedAt = nowIso();
+          await writeReport(options.reportPath, {
+            mode: 'list-clients',
+            version: '6.2.0',
+            host: 'node',
+            stopReason: 'list-clients',
+            startedAt: listStartedAt,
+            finishedAt: listFinishedAt,
+            durationMs: Math.max(0, Date.parse(listFinishedAt) - Date.parse(listStartedAt)),
+            scanMode: options.scanMode,
+            success: true,
+            total: Array.isArray(listedCandidates) ? listedCandidates.length : 0,
+            candidates: listedCandidates || []
+          }, logger);
+        }
+        await configStore.close();
+        await logger.close();
+        await finalizeDataLifecycle();
+        return;
+      }
+      if (selectedClientPath === null) {
         await configStore.close();
         await logger.close();
         await finalizeDataLifecycle();
@@ -629,6 +709,9 @@ async function main() {
     const sessionHistory = [];
     const report = {
       mode: options.attachPort ? 'attach' : 'launch',
+      version: '6.2.0',
+      host: 'node',
+      executionMode: options.executionMode,
       startedAt: nowIso(),
       finishedAt: '',
       configPath,
@@ -757,17 +840,25 @@ async function main() {
     };
     cleanupAfterStartupFailure = () => stop('启动失败，清理本次启动的客户端与注入资源', true);
 
+    // 监听归属校验同时接受本次启动 PID 及其后代链（客户端可能把调试监听交给
+    // 子进程）；每个监听 PID 最多一次 PowerShell 父链查询，直接 PID 不查询。
+    const listenerOwnershipVerifier = createListenerOwnershipVerifier();
     const verifyEndpointOwnership = async () => {
       if (stopping) return false;
       if (options.attachPort) return true;
       let owner = null;
       try { owner = await getListenerOwnerPid(port); } catch { /* Unknown ownership is rejected below. */ }
       if (stopping) return false;
-      if (!clientChild || !Number.isInteger(clientChild.pid) || clientChild.pid <= 0 || owner !== clientChild.pid) {
+      const clientPid = clientChild && Number.isInteger(clientChild.pid) && clientChild.pid > 0 ? clientChild.pid : 0;
+      const ownership = clientPid
+        ? await listenerOwnershipVerifier.verify(owner, clientPid)
+        : { verified: false, reason: 'unknown-client', depth: -1 };
+      if (stopping) return false;
+      if (!ownership.verified) {
         report.ownershipVerified = false;
         for (const session of sessions.values()) session.close();
         sessions.clear();
-        throw Object.assign(new Error(`调试端口 ${port} 的监听进程（${owner === null ? '未知' : owner}）不是本次启动的客户端（${clientChild ? clientChild.pid : '未知'}）`), { code: 'CX_ENDPOINT_OWNERSHIP' });
+        throw Object.assign(new Error(`调试端口 ${port} 的监听进程（${owner === null ? '未知' : owner}）不是本次启动的客户端或其子进程（${clientPid || '未知'}，原因：${ownership.reason}）`), { code: 'CX_ENDPOINT_OWNERSHIP' });
       }
       report.ownershipVerified = true;
       return true;
@@ -834,7 +925,13 @@ async function main() {
         logger.warn('[launch] 客户端普通启动返回 Win32 740，正在通过系统 UAC 重新启动宿主');
         const passthrough = options.rawArgs.filter((argument) => argument !== '--elevated');
         await configStore.close();
-        await relaunchElevated({ scriptPath: hostScriptPath, args: passthrough, cwd: process.cwd(), selectedClientPath: config.clientPath });
+        await relaunchElevated({
+          scriptPath: hostScriptPath,
+          args: passthrough,
+          cwd: process.cwd(),
+          selectedClientPath: config.clientPath,
+          windowStyle: options.hideConsole ? 'Hidden' : 'Normal'
+        });
         logger.info('[launch] 已请求管理员实例启动，保留本次选择，当前窗口退出');
         await logger.close();
         await finalizeDataLifecycle();
@@ -860,7 +957,7 @@ async function main() {
       }
       if (!(await verifyEndpointOwnership())) return;
       diagnostics.record('endpoint-ready');
-      logger.info(`[launch] 监听归属校验通过：pid=${clientChild.pid}，127.0.0.1:${port}`);
+      logger.info(`[launch] 监听归属校验通过：pid=${clientChild.pid}（或其后代进程），127.0.0.1:${port}`);
     } else {
       logger.warn(`[attach] 测试/调试模式：只连接 127.0.0.1:${port}，不启动客户端、不校验监听归属`);
       diagnostics.record('endpoint-waiting');
@@ -988,6 +1085,12 @@ async function main() {
     configWatcherOff = configStore.watch({
       resolveConfig: (raw) => {
         validateSupportedJsonOptions(raw, '热更新配置');
+        const requestedExecutionMode = raw.memoryExec === true ? 'memory'
+          : raw.memoryExec === false ? 'normal'
+          : raw.executionMode;
+        if (requestedExecutionMode !== undefined && requestedExecutionMode !== options.executionMode) {
+          throw new Error(`热更新配置不能改变 executionMode 启动策略（当前 ${options.executionMode}，需要重启宿主）`);
+        }
         const nextDefault = options.configPath ? defaultHostConfig : raw;
         const nextSelected = options.configPath ? raw : {};
         const nextOptions = applyHostOptionLayers(cliOptions, nextDefault, appConfig, nextSelected, inlineConfig);

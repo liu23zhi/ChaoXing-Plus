@@ -51,9 +51,23 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 npm run build:windows
 # 首次运行会创建 windows/data/config.json，把 clientPath 指向 CXExam.exe
 .\start-windows.cmd
+# 无控制台窗口启动（发布包内为 start-windows-silent.cmd，只隐藏 Node 控制台）
+.\start-windows-silent.cmd
 ```
 
-启动模式会自动采集渲染诊断到 `windows/data/diagnostics/<时间戳>/`（DPI/窗口 DPI 感知/面板样式/页面与窗口截图），用于排查“悬浮窗模糊”；若系统缩放为 125%/150% 且客户端 DPI-unaware，可用 `.\start-windows.cmd --dpi-aware` 重试。Windows 端只服务考试/答题场景：悬浮面板仅在考试相关页面出现、**默认折叠为标题条**（点击标题条展开/折叠），并只保留考试答题相关功能（答题结果、题库配置、考试设置）；Chrome 扩展保持完整面板与默认展开。详细设计、配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
+启动模式会自动采集渲染诊断到 `windows/data/diagnostics/<时间戳>/`（DPI/窗口 DPI 感知/面板样式/页面与窗口截图），用于排查“悬浮窗模糊”；若系统缩放为 125%/150% 且客户端 DPI-unaware，可用 `.\start-windows.cmd
+# 无控制台窗口启动（发布包内为 start-windows-silent.cmd，只隐藏 Node 控制台）
+.\start-windows-silent.cmd --dpi-aware` 重试。Windows 端只服务考试/答题场景：悬浮面板仅在考试相关页面出现、**默认折叠为标题条**（点击标题条展开/折叠），并只保留考试答题相关功能（答题结果、题库配置、考试设置）；Chrome 扩展保持完整面板与默认展开。详细设计、配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
+
+Windows 发布包（原生单文件 + Node 宿主双入口）：
+
+```powershell
+npm run build:windows   # dist-windows 注入资源
+npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
+npm run release:windows # release/chaoxing-plus-6.2.0-windows.zip
+```
+
+包内同时提供 `chaoxing_plus.exe`（资源内嵌，可独立运行）与 `start-windows.cmd` / `start-windows-silent.cmd` + `windows/host` + `dist-windows`（Node 宿主，静默入口通过 `wscript.exe` 隐藏控制台），并附 `release-info.json`（含 `entrypoints.nodeSilent`）/ `SHA256SUMS.txt` / `verify-release.mjs`（解压后运行 `node verify-release.mjs` 校验完整性）；第一阶段内部原型与外部 npm 依赖不会进入发布包。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ---
 
@@ -78,7 +92,8 @@ chaoxing_plus/
 │   └── data/                    # 本地配置/日志（gitignore）
 ├── build.mjs                    # 扩展注入脚本构建
 ├── build.windows.mjs            # Windows 端构建（target chrome75 + 语法闸门）
-├── start-windows.cmd            # Windows 端入口
+├── start-windows.cmd            # Windows 端入口（可见控制台）
+├── start-windows-silent.cmd     # Windows 端静默入口（隐藏 Node 控制台）
 ├── docs/windows.md              # Windows 端使用与设计说明
 ├── package.json
 └── tsconfig.json

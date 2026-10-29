@@ -137,26 +137,118 @@ function shouldRefreshPanelForSharedValues(values: Record<string, unknown>) {
   return shouldRefreshPanel;
 }
 
-const panelPinkTheme = {
-  primary: '#db2777',
-  primaryDeep: '#be185d',
-  primarySoft: 'rgba(244, 114, 182, 0.14)',
-  primaryGradient: 'linear-gradient(135deg, #db2777 0%, #f472b6 55%, #fb7185 100%)',
-  // Windows / CEF75 与软件渲染环境下，半透明底色 + backdrop-filter + 大半径阴影会让悬浮窗周围
-  // 出现模糊光晕；这里统一改成不透明底色 + 紧凑阴影，保证面板边缘与页面内容清晰。
-  shellGradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
-  heroGradient: 'radial-gradient(circle at 18% 0%, rgba(251, 207, 232, 0.82) 0%, transparent 32%), linear-gradient(135deg, #fff1f8 0%, #fff7fc 54%, #ffe4eb 100%)',
-  sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #fff1f8 100%)',
-  surface: '#fffafd',
-  surfaceStrong: '#ffffff',
-  border: 'rgba(244, 114, 182, 0.24)',
-  borderStrong: 'rgba(219, 39, 119, 0.34)',
-  text: '#831843',
-  muted: '#9d174d',
-  shadow: '0 8px 20px rgba(190, 24, 93, 0.10)',
-  heroShadow: '0 8px 22px rgba(190, 24, 93, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
-  shellShadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)'
+const WINDOWS_PANEL_THEME_KEY = 'common.settings.windows-panel-theme';
+type PanelThemeName = 'pink' | 'blue' | 'green';
+
+interface PanelPalette {
+  primary: string;
+  primaryDeep: string;
+  primarySoft: string;
+  primaryGradient: string;
+  shellGradient: string;
+  heroGradient: string;
+  sectionGradient: string;
+  surface: string;
+  surfaceStrong: string;
+  border: string;
+  borderStrong: string;
+  text: string;
+  muted: string;
+  shadow: string;
+  heroShadow: string;
+  shellShadow: string;
+  /** RGB 三元组（无 rgba 包裹），供面板内可复用的低透明度阴影使用。 */
+  shadowRgb: string;
+}
+
+// Windows 面板内置浅色主题。--panel-theme 只接受下列名称，未知/空值回退 pink，
+// 避免宿主收到任意长字符串后静默改变视觉。扩展端不设置该键，始终使用 pink。
+const panelThemes: Record<PanelThemeName, PanelPalette> = {
+  pink: {
+    primary: '#db2777',
+    primaryDeep: '#be185d',
+    primarySoft: 'rgba(244, 114, 182, 0.14)',
+    primaryGradient: 'linear-gradient(135deg, #db2777 0%, #f472b6 55%, #fb7185 100%)',
+    // Windows / CEF75 与软件渲染环境下，半透明底色 + backdrop-filter + 大半径阴影会让悬浮窗周围
+    // 出现模糊光晕；这里统一改成不透明底色 + 紧凑阴影，保证面板边缘与页面内容清晰。
+    shellGradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
+    heroGradient: 'radial-gradient(circle at 18% 0%, rgba(251, 207, 232, 0.82) 0%, transparent 32%), linear-gradient(135deg, #fff1f8 0%, #fff7fc 54%, #ffe4eb 100%)',
+    sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #fff1f8 100%)',
+    surface: '#fffafd',
+    surfaceStrong: '#ffffff',
+    border: 'rgba(244, 114, 182, 0.24)',
+    borderStrong: 'rgba(219, 39, 119, 0.34)',
+    text: '#831843',
+    muted: '#9d174d',
+    shadow: '0 8px 20px rgba(190, 24, 93, 0.10)',
+    heroShadow: '0 8px 22px rgba(190, 24, 93, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
+    shellShadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)',
+    shadowRgb: '190, 24, 93'
+  },
+  blue: {
+    primary: '#2563eb',
+    primaryDeep: '#1d4ed8',
+    primarySoft: 'rgba(96, 165, 250, 0.14)',
+    primaryGradient: 'linear-gradient(135deg, #2563eb 0%, #60a5fa 55%, #38bdf8 100%)',
+    shellGradient: 'linear-gradient(145deg, #f0f6ff 0%, #fbfdff 48%, #eaf2ff 100%)',
+    heroGradient: 'radial-gradient(circle at 18% 0%, rgba(191, 219, 254, 0.82) 0%, transparent 32%), linear-gradient(135deg, #f2f7ff 0%, #f9fcff 54%, #e6efff 100%)',
+    sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #eff6ff 100%)',
+    surface: '#f8fbff',
+    surfaceStrong: '#ffffff',
+    border: 'rgba(96, 165, 250, 0.26)',
+    borderStrong: 'rgba(37, 99, 235, 0.34)',
+    text: '#1e3a8a',
+    muted: '#1d4ed8',
+    shadow: '0 8px 20px rgba(30, 64, 175, 0.10)',
+    heroShadow: '0 8px 22px rgba(30, 64, 175, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
+    shellShadow: '0 10px 28px rgba(30, 64, 175, 0.16), 0 2px 8px rgba(30, 64, 175, 0.10)',
+    shadowRgb: '30, 64, 175'
+  },
+  green: {
+    primary: '#059669',
+    primaryDeep: '#047857',
+    primarySoft: 'rgba(52, 211, 153, 0.14)',
+    primaryGradient: 'linear-gradient(135deg, #059669 0%, #34d399 55%, #6ee7b7 100%)',
+    shellGradient: 'linear-gradient(145deg, #ecfdf5 0%, #f9fffc 48%, #d1fae5 100%)',
+    heroGradient: 'radial-gradient(circle at 18% 0%, rgba(167, 243, 208, 0.82) 0%, transparent 32%), linear-gradient(135deg, #effcf6 0%, #f8fffb 54%, #dcfce7 100%)',
+    sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #ecfdf5 100%)',
+    surface: '#f7fffb',
+    surfaceStrong: '#ffffff',
+    border: 'rgba(52, 211, 153, 0.26)',
+    borderStrong: 'rgba(5, 150, 105, 0.34)',
+    text: '#064e3b',
+    muted: '#047857',
+    shadow: '0 8px 20px rgba(6, 78, 59, 0.10)',
+    heroShadow: '0 8px 22px rgba(6, 78, 59, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
+    shellShadow: '0 10px 28px rgba(6, 78, 59, 0.16), 0 2px 8px rgba(6, 78, 59, 0.10)',
+    shadowRgb: '6, 78, 59'
+  }
 };
+
+function resolvePanelThemeName(): PanelThemeName {
+  try {
+    const raw = runtimeStore.get<unknown>(WINDOWS_PANEL_THEME_KEY, 'pink');
+    const name = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    return Object.prototype.hasOwnProperty.call(panelThemes, name) ? name as PanelThemeName : 'pink';
+  } catch {
+    return 'pink';
+  }
+}
+
+function panelShadowColor(alpha: number): string {
+  return `rgba(${panelPinkTheme.shadowRgb}, ${alpha})`;
+}
+
+// 保留既有调用点：所有 `panelPinkTheme.<prop>` 读取都解析为当前主题色板，
+// 主题在配置热更新后由共享设置 observer 触发重渲染并重新取色。
+const panelPinkTheme: PanelPalette = new Proxy({} as PanelPalette, {
+  get(_target, property: string | symbol): unknown {
+    if (typeof property !== 'string') {
+      return undefined;
+    }
+    return panelThemes[resolvePanelThemeName()][property as keyof PanelPalette];
+  }
+});
 
 const defaultWorkOptions: CommonWorkOptions = {
   period: 3,
@@ -486,8 +578,8 @@ function bindPanelDrag(panel: ScriptPanel, kind: 'workResults' | 'apps') {
   handle.style.position = 'sticky';
   handle.style.top = '-14px';
   handle.style.zIndex = '3';
-  handle.style.background = '#fff5fa';
-  handle.style.boxShadow = '0 6px 16px rgba(190, 24, 93, 0.08)';
+  handle.style.background = panelPinkTheme.surface;
+  handle.style.boxShadow = `0 6px 16px ${panelShadowColor(0.08)}`;
 
   const rootWithHeaderState = root as HTMLElement & {
     __cxHeaderHandle?: HTMLElement;
@@ -940,7 +1032,7 @@ function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'pr
     button.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
     button.style.background = panelPinkTheme.primaryGradient;
     button.style.color = '#fff';
-    button.style.boxShadow = '0 10px 24px rgba(219, 39, 119, 0.24)';
+    button.style.boxShadow = `0 10px 24px ${panelShadowColor(0.24)}`;
     return;
   }
 
@@ -955,7 +1047,7 @@ function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'pr
   button.style.border = `1px solid ${panelPinkTheme.border}`;
   button.style.background = panelPinkTheme.surfaceStrong;
   button.style.color = panelPinkTheme.text;
-  button.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.08)';
+  button.style.boxShadow = `0 6px 18px ${panelShadowColor(0.08)}`;
 }
 
 function createMetricChip(label: string, value: string) {
@@ -967,7 +1059,7 @@ function createMetricChip(label: string, value: string) {
   chip.style.borderRadius = '14px';
   chip.style.background = panelPinkTheme.surfaceStrong;
   chip.style.border = `1px solid ${panelPinkTheme.border}`;
-  chip.style.boxShadow = '0 8px 22px rgba(190, 24, 93, 0.08)';
+  chip.style.boxShadow = `0 8px 22px ${panelShadowColor(0.08)}`;
 
   const title = createElement('div', { text: label });
   title.style.fontSize = '11px';
@@ -1324,7 +1416,7 @@ function createConfigField(
     toggle.style.background = checked
       ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.96) 0%, rgba(255, 241, 248, 0.98) 100%)'
       : 'linear-gradient(135deg, rgba(255, 250, 253, 0.96) 0%, rgba(255,255,255,0.98) 100%)';
-    toggle.style.boxShadow = checked ? '0 10px 24px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
+    toggle.style.boxShadow = checked ? `0 10px 24px ${panelShadowColor(0.12)}` : `0 6px 18px ${panelShadowColor(0.05)}`;
 
     const stateText = createElement('div', { text: checked ? '已开启' : '已关闭' });
     stateText.style.fontSize = '13px';
@@ -1373,7 +1465,7 @@ function createConfigField(
     inputWrap.style.borderRadius = '12px';
     inputWrap.style.border = `1px solid ${panelPinkTheme.border}`;
     inputWrap.style.background = panelPinkTheme.surfaceStrong;
-    inputWrap.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
+    inputWrap.style.boxShadow = `0 6px 18px ${panelShadowColor(0.05)}`;
 
     const input = document.createElement('input');
     input.type = isVolumeField ? 'number' : inputType === 'range' ? 'range' : 'text';
@@ -1468,7 +1560,7 @@ function createConfigField(
           : panelPinkTheme.surfaceStrong;
         button.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
         button.style.fontWeight = selected ? '700' : '600';
-        button.style.boxShadow = selected ? '0 10px 22px rgba(219, 39, 119, 0.12)' : '0 6px 18px rgba(190, 24, 93, 0.05)';
+        button.style.boxShadow = selected ? `0 10px 22px ${panelShadowColor(0.12)}` : `0 6px 18px ${panelShadowColor(0.05)}`;
       };
 
       [0, 25, 50, 75, 100].forEach((percent) => {
@@ -1756,7 +1848,7 @@ function createStudySettingsPanel() {
       field.style.borderRadius = '14px';
       field.style.background = panelPinkTheme.surfaceStrong;
       field.style.border = `1px solid ${panelPinkTheme.border}`;
-      field.style.boxShadow = '0 8px 20px rgba(190, 24, 93, 0.05)';
+      field.style.boxShadow = `0 8px 20px ${panelShadowColor(0.05)}`;
       if (key === 'playbackRate' || key === 'volume' || key === 'mode') {
         field.style.gridColumn = '1 / -1';
       }
@@ -1942,7 +2034,7 @@ function createWorkResultsPanel() {
   const badge = createElement('div', { text: state.workResults.results.length === 0 ? '空闲中' : '运行中' });
   badge.style.padding = '7px 12px';
   badge.style.borderRadius = '999px';
-  badge.style.background = state.workResults.results.length === 0 ? 'rgba(244, 114, 182, 0.10)' : panelPinkTheme.primarySoft;
+  badge.style.background = panelPinkTheme.primarySoft;
   badge.style.color = state.workResults.results.length === 0 ? panelPinkTheme.muted : panelPinkTheme.primaryDeep;
   badge.style.fontSize = '12px';
   badge.style.fontWeight = '700';
@@ -2190,7 +2282,7 @@ function createWorkResultsPanel() {
         button.style.border = `1px solid ${panelPinkTheme.border}`;
         button.style.cursor = 'pointer';
         button.style.fontWeight = '700';
-        button.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.06)';
+        button.style.boxShadow = `0 6px 18px ${panelShadowColor(0.06)}`;
 
         if (tone === 'selected') {
           button.style.background = panelPinkTheme.primaryGradient;
@@ -2226,7 +2318,7 @@ function createWorkResultsPanel() {
         item.style.padding = '12px';
         item.style.borderRadius = '14px';
         item.style.cursor = 'pointer';
-        item.style.boxShadow = '0 8px 22px rgba(190, 24, 93, 0.06)';
+        item.style.boxShadow = `0 8px 22px ${panelShadowColor(0.06)}`;
         item.style.borderLeft = index === state.workResults.currentResultIndex ? `4px solid ${panelPinkTheme.primary}` : '4px solid transparent';
 
         if (tone === 'selected') {
@@ -2335,7 +2427,7 @@ function createWorkResultsPanel() {
       item.style.borderRadius = '12px';
       item.style.padding = '10px 12px';
       item.style.background = panelPinkTheme.surfaceStrong;
-      item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
+      item.style.boxShadow = `0 6px 18px ${panelShadowColor(0.05)}`;
 
       const title = createElement('div', { text: cache.title || '未识别题目' });
       title.style.fontSize = '13px';
@@ -2440,7 +2532,7 @@ function createAppsPanel() {
     item.style.borderRadius = '8px';
     item.style.padding = '10px';
     item.style.background = panelPinkTheme.surfaceStrong;
-    item.style.boxShadow = '0 6px 18px rgba(190, 24, 93, 0.05)';
+    item.style.boxShadow = `0 6px 18px ${panelShadowColor(0.05)}`;
 
     const title = createElement('div', { text: cache.title || '未识别题目' });
     title.style.fontSize = '13px';
@@ -2501,7 +2593,7 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
   panel.root.style.overflow = 'auto';
   panel.root.style.overscrollBehavior = 'contain';
   panel.root.style.scrollbarGutter = 'stable';
-  panel.root.dataset.chaoxingPlusTheme = 'pink';
+  panel.root.dataset.chaoxingPlusTheme = resolvePanelThemeName();
   panel.root.style.background = panelPinkTheme.shellGradient;
   // 不使用 backdrop-filter：它会把面板背后的页面内容整体模糊，在 CEF75 上体验尤差。
   panel.root.style.backdropFilter = 'none';

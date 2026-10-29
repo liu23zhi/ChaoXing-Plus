@@ -72,6 +72,7 @@ static BOOL h_capture_console;
 static BOOL h_quiet;
 static BOOL h_needs_elevation;
 static BOOL h_default_gui;
+static void h_capture_window_diagnostics(void);
 typedef struct H_CONFIG H_CONFIG;
 static H_CONFIG *h_config;
 static char h_instance[64] = "native";
@@ -92,6 +93,11 @@ static WCHAR h_exe_path[HOST_PATH_CAP];
 static char h_settings[CX_OPTIONS_JSON_CAP];
 static WCHAR h_selected_path[HOST_PATH_CAP];
 static WCHAR h_scan_cache_path[CX_OPTIONS_PATH_CAP + 64];
+/* Artifacts created by this run, captured so --no-retain-data can remove only
+   the files this process wrote; pre-existing user data stays untouched. */
+static WCHAR h_created_log_path[HOST_PATH_CAP];
+static WCHAR h_created_report_path[HOST_PATH_CAP];
+static WCHAR h_created_diagnostics_path[HOST_PATH_CAP];
 static JT h_event_tokens[HOST_REPLY_TOKENS];
 static JT h_page_message_tokens[HOST_REPLY_TOKENS];
 static char h_page_message[CX_OPTIONS_JSON_CAP + 512];
@@ -107,6 +113,62 @@ static BOOL h_copy(WCHAR *out, DWORD cap, const WCHAR *in) {
     out[i] = 0; return in[i] == 0;
 }
 static void h_error(WCHAR *error, DWORD cap, const WCHAR *text) { if (error && cap) lstrcpynW(error, text, (int)cap); }
+
+static void h_delete_created_file(const WCHAR *path) {
+    if (path && path[0]) DeleteFileW(path);
+}
+/* Diagnostics runs publish several files (page JSON/PNG, window JSON/BMP/PNG,
+   host summary) inside one unique run directory created by this process. Only
+   that directory is removed; pre-existing user data elsewhere is untouched. */
+static void h_delete_created_tree(const WCHAR *filePath) {
+    /* Large path buffers must not live on the deep host stack (no stack probes). */
+    static WCHAR directory[HOST_PATH_CAP], pattern[HOST_PATH_CAP], full[HOST_PATH_CAP];
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+    DWORD length, index, base;
+    if (!filePath || !filePath[0] || !h_copy(directory, HOST_PATH_CAP, filePath)) return;
+    length = (DWORD)h_wlen(directory);
+    for (index = length; index > 0; --index) {
+        if (directory[index - 1] == L'\\' || directory[index - 1] == L'/') break;
+    }
+    if (index <= 1) return;
+    directory[index - 1] = 0;
+    if (!h_copy(pattern, HOST_PATH_CAP, directory)) return;
+    base = (DWORD)h_wlen(pattern);
+    if (base + 3 >= HOST_PATH_CAP) return;
+    pattern[base] = L'\\'; pattern[base + 1] = L'*'; pattern[base + 2] = 0;
+    find = FindFirstFileW(pattern, &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (data.cFileName[0] == L'.' && (!data.cFileName[1]
+                || (data.cFileName[1] == L'.' && !data.cFileName[2]))) continue;
+            if (!h_copy(full, HOST_PATH_CAP, directory)) continue;
+            lstrcatW(full, L"\\");
+            lstrcatW(full, data.cFileName);
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(full);
+            else DeleteFileW(full);
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    RemoveDirectoryW(directory);
+}
+/* --no-retain-data removes only artifacts created by this run. --delete-config
+   removes an explicitly selected --config file; an elevation handoff skips that
+   so the elevated child (which re-runs the same flags) owns the final deletion. */
+static void h_cleanup_run_data(CX_OPTIONS *options, BOOL elevationHandoff) {
+    if (!options) return;
+    if (!options->retainData) {
+        h_delete_created_file(h_created_log_path);
+        h_delete_created_file(h_created_report_path);
+        if (h_created_diagnostics_path[0]) h_delete_created_tree(h_created_diagnostics_path);
+    }
+    if (options->deleteConfig && options->configPathSet && !elevationHandoff) {
+        DeleteFileW(options->configPath);
+    }
+    h_created_log_path[0] = 0;
+    h_created_report_path[0] = 0;
+    h_created_diagnostics_path[0] = 0;
+}
 static void h_print(const WCHAR *text) {
     HANDLE out;
     DWORD written;
@@ -437,6 +499,56 @@ static BOOL h_preflight_assets(const CX_OPTIONS *options, DWORD bootstrapLength,
     }
     return h_set_page_config(NULL, NULL, options, style, styleLength, TRUE, error, errorCap);
 }
+/* Returns the raw base64 payload of the first "data":"..." JSON string in a
+   bounded CDP reply. Base64 never needs JSON unescaping; reject escapes and
+   line breaks rather than guessing. */
+static BOOL h_reply_base64(const char *json, DWORD length, const char **out, DWORD *outLength) {
+    static const char marker[] = "\"data\":\"";
+    const DWORD markerLength = sizeof(marker) - 1;
+    DWORD i = 0;
+    if (out) *out = NULL;
+    if (outLength) *outLength = 0;
+    if (!json || !out || !outLength || length <= markerLength) return FALSE;
+    while (i + markerLength < length) {
+        DWORD j = 0;
+        while (j < markerLength && json[i + j] == marker[j]) ++j;
+        if (j == markerLength) break;
+        ++i;
+    }
+    if (i + markerLength >= length) return FALSE;
+    i += markerLength;
+    {
+        DWORD start = i;
+        for (; i < length; ++i) {
+            char c = json[i];
+            if (c == '"') break;
+            if (c == '\\' || c == '\r' || c == '\n') return FALSE;
+        }
+        if (i >= length || i == start) return FALSE;
+        *out = json + start;
+        *outLength = i - start;
+        return TRUE;
+    }
+}
+
+static void h_capture_page_screenshot(H_NATIVE_PAGE *page, WCHAR *error, DWORD errorCap) {
+    char *reply = NULL;
+    DWORD replyLength = 0;
+    const char *base64 = NULL;
+    DWORD base64Length = 0;
+    if (!h_diagnostics || !cx_diagnostics_enabled(h_diagnostics)) return;
+    if (!h_send_command(page, "Page.captureScreenshot", "{\"format\":\"png\"}",
+                        &reply, &replyLength, error, errorCap)
+        || !h_reply_base64(reply, replyLength, &base64, &base64Length)
+        || !cx_diagnostics_write_page_png(h_diagnostics, base64, base64Length, error, errorCap)) {
+        h_audit_event("warn", "diagnostics", "Page screenshot failed; continuing without it");
+        if (reply) net_free(reply);
+        return;
+    }
+    h_audit_event("info", "diagnostics", "Captured page screenshot diagnostics");
+    net_free(reply);
+}
+
 static void h_collect_page_diagnostics(H_NATIVE_PAGE *page) {
     static const char expression[] =
         "(function(){var v=window.visualViewport,d=window.devicePixelRatio;"
@@ -476,6 +588,7 @@ static void h_collect_page_diagnostics(H_NATIVE_PAGE *page) {
         || !jstr(reply, h_diagnostic_tokens, value, h_diagnostic_json, sizeof(h_diagnostic_json))) goto done;
     success = cx_diagnostics_write_page_json(h_diagnostics, h_diagnostic_json,
         (DWORD)h_len(h_diagnostic_json), diagnosticError, HOST_ERROR_CAP);
+    if (success) h_capture_page_screenshot(page, diagnosticError, HOST_ERROR_CAP);
 done:
     if (!success) h_audit_event("warn", "diagnostics", "Page diagnostics sample failed; continuing without page diagnostics");
     if (reply) net_free(reply);
@@ -524,23 +637,46 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
         CX_SELECTION_STATUS status;
         CX_DISCOVERY_RESULT fullResult;
         const CX_DISCOVERY_RESULT *shown = result;
+        const WCHAR *notice = NULL;
         GetNativeSystemInfo(&info);
         cx_discovery_init(&fullResult);
         for (;;) {
-            status = cx_select_client(shown, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, h_selected_path, HOST_PATH_CAP, error, errorCap);
+            status = cx_select_client(shown, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, notice,
+                h_selected_path, HOST_PATH_CAP, error, errorCap);
             if (status != CX_SELECTION_SCAN_ALL) break;
             {
                 CX_DISCOVERY_OPTIONS scan;
+                CX_SCAN_PROGRESS *progress = NULL;
+                WCHAR progressError[256];
+                BOOL cancelledByUser = FALSE;
                 ZeroMemory(&scan, sizeof(scan));
                 scan.mode = CX_DISCOVERY_SCAN_ALL; scan.enumerateAll = TRUE;
                 scan.hostIs32Bit = info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL;
                 scan.rescan = TRUE; scan.noScanCache = TRUE; scan.noDiskWrite = options->noDiskWrite;
                 cx_discovery_free(&fullResult);
                 h_audit_event("info", "scan", "Full disk scan requested from client selection");
+                progressError[0] = 0;
+                if (cx_scan_progress_begin(&progress, progressError, 256)) {
+                    h_audit_event("info", "scan", "Full disk scan progress window shown; the scan is cancellable");
+                } else {
+                    progress = NULL;
+                    h_audit_event("warn", "scan", "Scan progress window unavailable; scanning without it");
+                }
+                cx_scan_progress_bind(&scan, progress);
                 if (!cx_discovery_scan(&scan, &fullResult, error, errorCap)) {
+                    if (progress) cx_scan_progress_end(progress, progressError, 256);
                     cx_discovery_free(&fullResult); return FALSE;
                 }
+                if (progress) cancelledByUser = cx_scan_progress_end(progress, progressError, 256);
+                if (cancelledByUser || fullResult.cancelled) {
+                    h_audit_event("info", "scan", "Full disk scan cancelled from the progress window");
+                    cx_discovery_free(&fullResult);
+                    notice = L"已取消全盘扫描，保留原候选；可重试或手动浏览。";
+                    if (error && errorCap) error[0] = 0;
+                    continue;
+                }
                 shown = &fullResult;
+                notice = NULL;
             }
         }
         cx_discovery_free(&fullResult);
@@ -584,6 +720,30 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
     if (!result->count) { h_error(error, errorCap, L"no valid CXExam.exe was found"); return FALSE; }
     return h_copy(h_selected_path, HOST_PATH_CAP, result->items[index].path);
 }
+
+/* Window diagnostics are captured once for this host's own client launch.
+   Wait briefly for the CXExam main window, then record DPI/rect and a
+   best-effort BMP snapshot next to the page diagnostics JSON. */
+static void h_capture_window_diagnostics(void) {
+    WCHAR captureError[HOST_ERROR_CAP];
+    int attempt;
+    if (!h_diagnostics || !cx_diagnostics_enabled(h_diagnostics) || !h_client_pid) return;
+    for (attempt = 0; attempt < 25; ++attempt) {
+        if (cx_diagnostics_client_window_ready(h_client_pid)) break;
+        Sleep(200);
+    }
+    if (!cx_diagnostics_client_window_ready(h_client_pid)) {
+        h_audit_event("warn", "diagnostics", "Client window not ready; window diagnostics omitted");
+        return;
+    }
+    captureError[0] = 0;
+    if (!cx_diagnostics_capture_window(h_diagnostics, h_client_pid, captureError, HOST_ERROR_CAP)) {
+        h_audit_event("warn", "diagnostics", "Window diagnostics capture failed; continuing");
+    } else {
+        h_audit_event("info", "diagnostics", "Captured bounded client window diagnostics");
+    }
+}
+
 static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     CX_DISCOVERY_OPTIONS discover; CX_DISCOVERY_RESULT result; HANDLE client = NULL; USHORT port = 0;
     char *bootstrap = NULL, *bundle = NULL, *style = NULL, *trampoline = NULL;
@@ -598,8 +758,12 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_needs_elevation = FALSE;
     h_diagnostics = NULL; h_diagnostics_sampled = FALSE;
     h_zero(h_diagnostic_json, sizeof(h_diagnostic_json));
+    h_created_log_path[0] = 0;
+    h_created_report_path[0] = 0;
+    h_created_diagnostics_path[0] = 0;
     h_capture_console = options->captureConsole; h_quiet = options->quiet;
     h_report.attached = options->attachPortSet;
+    h_report.executionMode = options->executionModeMemory ? "memory" : "normal";
     h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
     h_report.stopReason = "discovery-failed";
     if (!options->listClients || options->reportPath[0]) {
@@ -612,6 +776,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         }
         h_audit = cx_audit_create(auditOptions, auditError, 256);
         if (!h_audit) { h_error(error, errorCap, L"cannot allocate native audit state"); goto done; }
+        h_copy(h_created_log_path, HOST_PATH_CAP, cx_audit_log_path(h_audit));
         if (auditError[0]) h_audit_event("warn", "audit", "Some file output is unavailable; continuing");
         h_audit_event("info", "start", "Native host started");
     }
@@ -714,10 +879,22 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_diagnostics = cx_diagnostics_create(options, auditError, 256);
     if (!h_diagnostics) h_audit_event("warn", "diagnostics", "Page diagnostics unavailable; continuing without page diagnostics");
     else if (auditError[0]) h_audit_event("warn", "diagnostics", "Page diagnostics path unavailable; continuing without page diagnostics");
+    /* Window DPI/snapshot sampling runs once the CDP endpoint is ready (owned launch only). */
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
     ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
+    /* Publish the host-level diagnostics index after the run; failures are nonfatal. */
+    if (h_diagnostics && cx_diagnostics_enabled(h_diagnostics)) {
+        WCHAR summaryError[256];
+        summaryError[0] = 0;
+        if (!cx_diagnostics_write_host_summary(h_diagnostics, options->attachPortSet, summaryError, 256))
+            h_audit_event("warn", "diagnostics", "Host diagnostics summary failed; continuing");
+    }
 done:
-    if (h_diagnostics) { cx_diagnostics_close(h_diagnostics); h_diagnostics = NULL; }
+    if (h_diagnostics) {
+        h_copy(h_created_diagnostics_path, HOST_PATH_CAP, cx_diagnostics_output_path(h_diagnostics));
+        cx_diagnostics_close(h_diagnostics);
+        h_diagnostics = NULL;
+    }
     h_config_close();
     h_report.success = ok && h_exit_code == 0 && !h_needs_elevation;
     if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }
@@ -735,8 +912,13 @@ done:
             h_audit_event("error", "report", "Run report could not be written; execution result retained");
             if (options->listClients && !options->quiet) h_print(L"[report] Run report could not be written.\r\n");
         }
+        if (!h_needs_elevation && options->reportPathSet) {
+            h_copy(h_created_report_path, HOST_PATH_CAP, options->reportPath);
+        }
         cx_audit_close(h_audit); h_audit = NULL;
     }
+    /* File handles are closed above; only now remove this run's own artifacts. */
+    h_cleanup_run_data(options, h_needs_elevation);
     return ok;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
@@ -769,14 +951,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         h_print_utf8("超星学习助手 Windows 宿主 6.2.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
-            "扫描: --scan-mode common|fallback-all|all --list-clients --ui auto|gui|cli\n"
+            "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
-            "  --rescan（绕过缓存并更新） --no-scan-cache（禁读写缓存）；缓存有效期 5 分钟，仅扫描列表始终实时。\n"
+            "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
+            "  --scan-all|--no-scan-all（常规无结果时是否全盘回退） --rescan（绕过缓存并更新）\n"
+            "  --no-scan-cache（禁读写缓存）；缓存有效期 5 分钟，仅扫描列表始终实时。\n"
             "配置: --config <path> --options-json <JSON|@file> --print-effective-config\n"
             "面板: --panel|--no-panel --panel-expanded|--panel-collapsed\n"
             "  --panel-top <0-10000> --panel-right <0-10000> --panel-width <320-800>\n"
-            "答题: --answer-mode auto|manual --answer-key <shortcut> --answer-threads <1-4>\n"
+            "  --panel-theme <pink|blue|green>（面板主题，未知值回退 pink）\n"
+            "答题: --answer-mode auto|manual --answer-key <shortcut> --answer-threads <1-4> --answer-retry <0-20>\n"
             "  --show-answer-dialog|--hide-answer-dialog --answer-countdown <sec> --no-auto-submit\n"
             "注入: --inject-strategy runtime|script|hybrid --inject-retries <0-5>\n"
             "  --inject-blank-frames|--no-inject-blank-frames\n"
@@ -788,22 +973,31 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --elevate-on-start（扫描及窗口前请求管理员权限；与 --no-elevate 互斥）\n"
             "  --dpi-aware（启动时临时使用 HIGHDPIAWARE，随后恢复原值；与 no-disk-write/attach 互斥）\n"
             "  --data-dir <dir> --log|--no-log --report <path> --quiet\n"
-            "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局采样）\n"
+            "  --diagnose|--no-diagnose --diagnostics-dir <dir>（页面布局 + 自有启动窗口 DPI/截图采样）\n"
             "  --no-disk-write（同时禁止日志和报告） --duration <ms, 0=不限时>\n"
             "  --capture-console|--no-capture-console（只记录页面错误事件，不保存页面文本）\n"
+            "  --retain-data|--no-retain-data（退出时是否删除本次运行创建的日志/报告/诊断；默认保留）\n"
+            "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
-            "状态: --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
+            "状态: --version --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
-            "  页面布局诊断仅采集一次性页面视口与面板几何/样式，不采集窗口 DPI、正文、URL 或截图。\n"
-            "内存执行、删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
+            "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
+            "执行模式: --execution-mode normal|memory；memory 表示宿主侧零落盘（客户端仍正常可见启动）。\n"
+            "删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
         return 0;
     }
+    if (h_base_options.version) { h_print_utf8("6.2.0\n"); return 0; }
     if (h_base_options.capabilities) {
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
-        h_print_utf8("{\"host\":\"native\",\"executionMode\":\"normal\",\"embeddedResources\":true,\"embeddedResourceCount\":4,"
-            "\"nativeSelection\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
-            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
-            "\"memory\":false,\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
+        h_print_utf8("{\"host\":\"native\",\"executionMode\":\"");
+        h_print_utf8(h_base_options.executionModeMemory ? "memory" : "normal");
+        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":true,\"embeddedResourceCount\":4,"
+            "\"nativeSelection\":true,\"highDpiUi\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
+            "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"pageScreenshots\":true,\"windowDiagnostics\":true,\"diagnosticsSummary\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
+            "\"retainData\":true,\"deleteConfig\":true,"
+            "\"memory\":");
+        h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
         return 0;
     }
     if (h_base_options.selfCheck) return h_self_check(&h_base_options);

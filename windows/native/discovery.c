@@ -26,6 +26,12 @@ typedef struct D_CONTEXT {
     BOOL stopOnX86;
     BOOL stopped;
     BOOL complete;
+    BOOL cancelled;
+    DWORD directoriesVisited;
+    DWORD lastProgressTick;
+    void *progressContext;
+    void (*onProgress)(void *progressContext, DWORD directoriesVisited, DWORD candidatesFound);
+    BOOL (*cancelRequested)(void *progressContext);
     WCHAR *error;
     DWORD errorCap;
 } D_CONTEXT;
@@ -113,6 +119,42 @@ static void d_error(D_CONTEXT *context, const WCHAR *text) {
     if (!context || !context->error || !context->errorCap) return;
     d_copy(context->error, context->errorCap, text ? text : L"");
 }
+static BOOL d_progress_cancelled(D_CONTEXT *context) {
+    if (!context || context->cancelled) return TRUE;
+    if (context->cancelRequested && context->cancelRequested(context->progressContext)) {
+        context->cancelled = TRUE;
+        context->stopped = TRUE;
+        d_error(context, L"scan cancelled by user");
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void d_report_progress(D_CONTEXT *context, BOOL force) {
+    DWORD now, candidates;
+    if (!context || !context->onProgress) return;
+    now = GetTickCount();
+    if (!force && now - context->lastProgressTick < 200) return;
+    context->lastProgressTick = now;
+    candidates = context->result ? context->result->count : 0;
+    context->onProgress(context->progressContext, context->directoriesVisited, candidates);
+}
+
+static void d_init_progress(D_CONTEXT *context, const CX_DISCOVERY_OPTIONS *options) {
+    if (!context) return;
+    context->cancelled = FALSE;
+    context->directoriesVisited = 0;
+    context->lastProgressTick = 0;
+    /* Explicit-client resolution has no options; never leave function pointers
+       uninitialized because traversal polls them on every directory. */
+    context->progressContext = NULL;
+    context->onProgress = NULL;
+    context->cancelRequested = NULL;
+    if (!options) return;
+    context->progressContext = options->progressContext;
+    context->onProgress = options->onProgress;
+    context->cancelRequested = options->cancelRequested;
+}
 
 static void d_result_reset(CX_DISCOVERY_RESULT *result) {
     if (!result) return;
@@ -123,6 +165,7 @@ static void d_result_reset(CX_DISCOVERY_RESULT *result) {
     result->stoppedOnX86 = FALSE;
     result->truncated = FALSE;
     result->cacheHit = FALSE;
+    result->cancelled = FALSE;
 }
 
 void cx_discovery_init(CX_DISCOVERY_RESULT *result) {
@@ -294,6 +337,7 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
     DWORD count = 0, i;
     DWORD attributes;
     if (context->stopped) return;
+    if (d_progress_cancelled(context)) return;
     if (!d_safe_root(directory)) return;
     attributes = GetFileAttributesW(directory);
     if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -303,9 +347,16 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
     }
     if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return;
     entries = d_entries_read(context, directory, &count);
+    context->directoriesVisited += 1;
+    d_report_progress(context, FALSE);
+    if (d_progress_cancelled(context)) {
+        d_entries_free(entries, count);
+        return;
+    }
     if (!entries) return;
     for (i = 0; i < count && !context->stopped; ++i) {
         WCHAR *path;
+        if (d_progress_cancelled(context)) break;
         if (entries[i].attributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (!d_is_candidate_name(entries[i].name) || (entries[i].attributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
         path = d_join(directory, entries[i].name);
@@ -315,6 +366,7 @@ static void d_visit(D_CONTEXT *context, const WCHAR *directory, LONG depth) {
     if (depth != 0) {
         for (i = 0; i < count && !context->stopped; ++i) {
             WCHAR *path;
+            if (d_progress_cancelled(context)) break;
             if (!(entries[i].attributes & FILE_ATTRIBUTE_DIRECTORY) || d_skip_directory(entries[i].name, entries[i].attributes)) continue;
             path = d_join(directory, entries[i].name);
             if (path) { d_visit(context, path, depth < 0 ? -1 : depth - 1); HeapFree(GetProcessHeap(), 0, path); }
@@ -435,6 +487,7 @@ BOOL cx_discovery_resolve_client(const WCHAR *clientPath, BOOL hostIs32Bit, CX_D
     if (error && errorCap) error[0] = 0;
     if (!clientPath || !*clientPath || !result) { if (error && errorCap) d_copy(error, errorCap, L"client path is empty"); return FALSE; }
     context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.complete = TRUE; context.error = error; context.errorCap = errorCap;
+    d_init_progress(&context, NULL);
     attributes = GetFileAttributesW(clientPath);
     if (attributes == INVALID_FILE_ATTRIBUTES) { d_error(&context, L"client path is not accessible"); return FALSE; }
     if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) { d_error(&context, L"client path is a reparse point"); return FALSE; }
@@ -473,10 +526,11 @@ BOOL cx_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESULT 
         d_root_list_free(&defaultCommon); d_root_list_free(&defaultFixed); return TRUE;
     }
     context.result = result; context.hostIs32Bit = hostIs32Bit; context.stopOnX86 = FALSE; context.stopped = FALSE; context.complete = TRUE; context.error = error; context.errorCap = errorCap;
+    d_init_progress(&context, options);
     if (scanMode != CX_DISCOVERY_SCAN_ALL) {
         result->commonScanned = TRUE;
-        for (i = 0; i < roots->commonRootCount; ++i) d_visit(&context, roots->commonRoots[i], 1);
-        for (i = 0; i < roots->fixedRootCount; ++i) {
+        for (i = 0; i < roots->commonRootCount && !context.stopped; ++i) d_visit(&context, roots->commonRoots[i], 1);
+        for (i = 0; i < roots->fixedRootCount && !context.stopped; ++i) {
             BOOL duplicate = FALSE; DWORD j;
             for (j = 0; j < roots->commonRootCount; ++j) if (d_equal_ci(roots->fixedRoots[i], roots->commonRoots[j])) { duplicate = TRUE; break; }
             if (!duplicate) d_visit(&context, roots->fixedRoots[i], 1);
@@ -508,7 +562,9 @@ BOOL cx_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESULT 
             && !(options && options->enumerateAll);
         context.stopped = FALSE;
         for (i = 0; i < roots->fixedRootCount && !context.stopped; ++i) d_visit(&context, roots->fixedRoots[i], -1);
-        if (scanMode == CX_DISCOVERY_SCAN_ALL && roots->fixedRootCount == 0) for (i = 0; i < roots->commonRootCount; ++i) d_visit(&context, roots->commonRoots[i], -1);
+        if (scanMode == CX_DISCOVERY_SCAN_ALL && roots->fixedRootCount == 0) for (i = 0; i < roots->commonRootCount && !context.stopped; ++i) d_visit(&context, roots->commonRoots[i], -1);
+        d_report_progress(&context, TRUE);
+        if (context.cancelled) { result->cancelled = TRUE; d_error(&context, L"scan cancelled by user"); }
         d_choose(result, context.stopOnX86);
     }
     if (!result->count && error && errorCap) d_copy(error, errorCap, L"no valid CXExam.exe found");

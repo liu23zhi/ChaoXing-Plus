@@ -13,7 +13,7 @@ function makeOptions(overrides = {}) {
 }
 
 function makeDeps({ candidates = [], selectedPath = '', showResult, stdinIsTTY = false, stdoutIsTTY = false, platform = 'win32', answer = '', output = '' } = {}) {
-  const calls = { show: [], discover: [], warnings: [], lines: [] };
+  const calls = { show: [], discover: [], warnings: [], lines: [], progress: [] };
   return {
     calls,
     logger: { info() {}, warn(message) { calls.warnings.push(message); } },
@@ -21,6 +21,11 @@ function makeDeps({ candidates = [], selectedPath = '', showResult, stdinIsTTY =
     async showWindow(options) {
       calls.show.push(options);
       return showResult || { status: 'selected', path: selectedPath || options.candidates[options.preferredIndex]?.path, manual: false };
+    },
+    // 默认不打开真实 WinForms 窗口；进度窗口专项测试按需覆盖该依赖。
+    async showProgressWindow(options) {
+      calls.progress.push(options);
+      return { status: 'unavailable', reason: 'test-disabled' };
     },
     async readMachine() { return 0x014c; },
     assertMachine() {},
@@ -241,4 +246,76 @@ test('rescan 强制绕过扫描缓存', async () => {
   await resolveClientSelection(makeOptions({ rescan: true, clientFirst: true }), {}, deps);
   assert.equal(received.noScanCache, false);
   assert.equal(received.forceRescan, true);
+});
+
+test('全盘扫描显示进度窗口、传递进度并在完成后关闭窗口', async () => {
+  const deps = makeDeps({ candidates: [] });
+  const progress = { updates: [], closed: 0 };
+  deps.showProgressWindow = async (options) => {
+    deps.calls.progress.push(options);
+    let resolveCancelled;
+    const cancelled = new Promise((resolve) => { resolveCancelled = resolve; });
+    return {
+      status: 'ok',
+      cancelled,
+      async update(update) { progress.updates.push(update); return true; },
+      async close() { progress.closed += 1; resolveCancelled(false); }
+    };
+  };
+  let windowCalls = 0;
+  deps.showWindow = async (options) => {
+    deps.calls.show.push(options);
+    return ++windowCalls === 1 ? { status: 'scan-all' } : { status: 'selected', path: candidates[1].path };
+  };
+  deps.discover = async (options) => {
+    deps.calls.discover.push(options);
+    if (options.scanMode === 'all') {
+      options.onProgress?.({ directoriesVisited: 4, candidatesFound: 1, elapsedMs: 20 });
+      options.onProgress?.({ directoriesVisited: 9, candidatesFound: 2, elapsedMs: 40 });
+      return { candidates, source: 'full' };
+    }
+    return { candidates: [] };
+  };
+  const selected = await resolveClientSelection(makeOptions({ ui: 'gui', scanMode: 'common' }), {}, deps);
+  assert.equal(selected, candidates[1].path);
+  assert.equal(deps.calls.progress.length, 1);
+  assert.deepEqual(progress.updates.map((update) => update.directoriesVisited), [4, 9]);
+  assert.equal(progress.closed, 1);
+  assert.equal(deps.calls.show.length, 2);
+});
+
+test('扫描进度窗口取消会中止全盘扫描并保留原候选', async () => {
+  const deps = makeDeps({ candidates: [] });
+  let resolveCancelled;
+  const cancelled = new Promise((resolve) => { resolveCancelled = resolve; });
+  let closed = 0;
+  deps.showProgressWindow = async () => ({
+    status: 'ok',
+    cancelled,
+    async update() { return true; },
+    async close() { closed += 1; resolveCancelled(true); }
+  });
+  let windowCalls = 0;
+  deps.showWindow = async (options) => {
+    deps.calls.show.push(options);
+    return ++windowCalls === 1 ? { status: 'scan-all' } : { status: 'cancelled' };
+  };
+  deps.discover = async (options) => {
+    deps.calls.discover.push(options);
+    if (options.scanMode !== 'all') return { candidates: [] };
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
+      if (options.signal.aborted) { abort(); return; }
+      options.signal.addEventListener('abort', abort, { once: true });
+      setTimeout(() => resolveCancelled(true), 20).unref?.();
+    });
+  };
+  await assert.rejects(
+    resolveClientSelection(makeOptions({ ui: 'gui', scanMode: 'common' }), {}, deps),
+    /已取消客户端选择/u
+  );
+  assert.equal(deps.calls.discover.length, 2);
+  assert.equal(deps.calls.discover[1].signal instanceof AbortSignal, true);
+  assert.match(deps.calls.warnings.join('\n'), /已取消全盘扫描/u);
+  assert.equal(closed, 1);
 });

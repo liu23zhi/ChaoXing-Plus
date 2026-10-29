@@ -84,7 +84,6 @@ function New-SelectionForm {
   $hint.Dock = 'Top'
   $hint.Height = 64
   $hint.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 0)
-  $form.Controls.Add($hint)
 
   $list = New-Object System.Windows.Forms.ListBox
   $list.Dock = 'Fill'
@@ -104,7 +103,9 @@ function New-SelectionForm {
     if ($preferred -lt 0 -or $preferred -ge $list.Items.Count) { $preferred = 0 }
     $list.SelectedIndex = $preferred
   }
+  # Docking runs in reverse Z-order: reserve the hint and buttons before Fill.
   $form.Controls.Add($list)
+  $form.Controls.Add($hint)
 
   $buttons = New-Object System.Windows.Forms.FlowLayoutPanel
   $buttons.Dock = 'Bottom'

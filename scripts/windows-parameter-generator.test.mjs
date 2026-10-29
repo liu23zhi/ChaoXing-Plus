@@ -120,12 +120,12 @@ test('生成器可切换原生单文件入口并直接导出 EXE 命令，预设
   assert.match(output.command.cmd, /&& "C:\\学习助手 O'Brien\\chaoxing_plus\.exe"/u);
   assert.equal(output.json.retainData, undefined);
   assert.equal(output.json.deleteConfig, undefined);
-  assert.equal(await page.$eval('#retainData', (node) => node.disabled), true);
-  assert.equal(await page.$eval('#deleteConfig', (node) => node.disabled), true);
+  assert.equal(await page.$eval('#retainData', (node) => node.disabled), false);
+  assert.equal(await page.$eval('#deleteConfig', (node) => node.disabled), false);
   await page.close();
 });
 
-test('原生模式拒绝数据清理、无效 EXE 路径、小数面板与未知 JSON 字段', async () => {
+test('原生模式导出数据生命周期参数，并拒绝无效 EXE 路径、小数面板与未知 JSON 字段', async () => {
   const page = await openGenerator();
   await page.select('#hostType', 'native');
   for (const nativePath of ['chaoxing_plus.exe', 'C:chaoxing_plus.exe', '\\Tools\\chaoxing_plus.exe', 'C:\\Tools\\main.mjs']) {
@@ -133,18 +133,28 @@ test('原生模式拒绝数据清理、无效 EXE 路径、小数面板与未知
     assert.equal(await page.$eval('#powershell', (node) => node.value), '', nativePath);
   }
   await page.$eval('#nativePath', (node) => { node.value = 'C:\\Tools\\chaoxing_plus.exe'; node.dispatchEvent(new Event('input', { bubbles: true })); });
-  for (const optionsJson of ['{"retainData":false}', '{"deleteConfig":true}', '{"unknown":true}', '{"panelTop":1.5}', '{"answerKey":"Ctrl+Ctrl+A"}', '{"settings":{"common.settings.windows-panel-enabled":"true"}}', '{"settings":{"common.settings.extension-enabled":"true"}}', '{"dpiAware":true,"settings":{"common.settings.windows-no-disk-write":true}}']) {
+  for (const optionsJson of ['{"unknown":true}', '{"panelTop":1.5}', '{"answerKey":"Ctrl+Ctrl+A"}', '{"settings":{"common.settings.windows-panel-enabled":"true"}}', '{"settings":{"common.settings.extension-enabled":"true"}}', '{"dpiAware":true,"settings":{"common.settings.windows-no-disk-write":true}}']) {
     await page.$eval('#optionsJson', (node, text) => { node.value = text; node.dispatchEvent(new Event('input', { bubbles: true })); }, optionsJson);
     assert.equal(await page.$eval('#powershell', (node) => node.value), '', optionsJson);
     assert.equal(await page.$eval('#json', (node) => node.value), '', optionsJson);
   }
+
+  // 原生宿主现已支持数据生命周期：retainData=false 可直接导出；deleteConfig 需要 --config。
+  await page.$eval('#optionsJson', (node) => { node.value = '{"retainData":false}'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--no-retain-data|retainData/u);
+  await page.$eval('#optionsJson', (node) => { node.value = '{"deleteConfig":true}'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  await page.$eval('#configPath', (node) => { node.value = 'C:\\Tools\\chaoxing-plus.json'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  await page.$eval('#optionsJson', (node) => { node.value = '{"deleteConfig":true}'; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--delete-config|deleteConfig/u);
+
   await page.$eval('#optionsJson', (node) => { node.value = ''; node.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.$eval('#panelTop', (node) => { node.value = '1.5'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
   await page.close();
 });
 
-test('切换宿主不会静默丢弃已有清理请求或自定义数据目录', async () => {
+test('切换宿主保留已有清理请求与自定义数据目录', async () => {
   const page = await openGenerator();
   await page.evaluate(() => {
     document.getElementById('retainData').checked = false;
@@ -153,8 +163,9 @@ test('切换宿主不会静默丢弃已有清理请求或自定义数据目录',
   await page.select('#hostType', 'native');
   await page.$eval('#nativePath', (node) => { node.value = 'C:\\Tools\\chaoxing_plus.exe'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   assert.equal(await page.$eval('#dataDir', (node) => node.value), 'D:\\自定义缓存');
-  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
-  assert.match(await page.$eval('#status', (node) => node.textContent), /原生宿主当前不可执行/u);
+  // 原生宿主现在也支持 --no-retain-data，因此切换后仍能导出而不是静默丢弃请求。
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--no-retain-data/u);
+  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /当前不可执行/u);
   await page.click('#reset');
   assert.equal(await page.$eval('#hostType', (node) => node.value), 'native');
   assert.equal(await page.$eval('#dataDir', (node) => node.value), '.data');
@@ -174,6 +185,7 @@ test('原生预设命令和 JSON 均通过已编译入口只读解析', { skip: 
         return { ...generator.commandFor(generator.state()), json: document.getElementById('json').value };
       });
       assert.ok(output.json, preset);
+      if (preset === 'silent') assert.equal(output.args.includes('--hide-console'), false, '原生宿主不应生成 --hide-console');
       for (const args of [output.args, ['--options-json', output.json]]) {
         const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, [...args, '--help'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
         assert.ifError(result.error);
@@ -441,6 +453,8 @@ test('所有可执行预设的 JSON 与生成命令具有相同的宿主启动�
       assert.equal(output.json.logFileEnabled, false);
       assert.equal(output.json.quiet, true);
       assert.equal(output.json.clientFirst, true);
+      assert.equal(output.args.includes('--hide-console'), true, 'silent 预设应为 Node 宿主隐藏控制台');
+      assert.equal('hideConsole' in output.json, false, '宿主 JSON schema 不接受 hideConsole，只能通过 CLI 传递');
     }
   }
   await page.close();
@@ -764,14 +778,25 @@ test('生成器覆盖数据保留、自毁快捷键冲突和启动清理范围�
   assert.match(await page.$eval('#status', (node) => node.textContent), /当前宿主不可执行/u);
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
 
-  // 第一阶段只允许普通执行模式，选择未实现模式时阻止生成。
+  // 内存执行需要零落盘：默认开启日志时阻止生成。
   await page.click('#reset');
   await dispatch('executionMode', "node.value = 'memory';");
-  assert.match(await page.$eval('#status', (node) => node.textContent), /--execution-mode normal/u);
+  assert.match(await page.$eval('#status', (node) => node.textContent), /零落盘/u);
   assert.equal(await page.$eval('#powershell', (node) => node.value), '');
 
-  // 内存执行、删除挂起和自毁仍标记为当前宿主不可执行。
-  assert.match(await page.$eval('.capability', (node) => node.textContent), /当前宿主不可执行/u);
+  // 关闭日志/诊断并清空报告后，内存执行生成普通可见启动的零落盘命令与 JSON。
+  await dispatch('log', 'node.checked = false;');
+  await dispatch('executionMode', "node.value = 'memory';");
+  assert.doesNotMatch(await page.$eval('#status', (node) => node.textContent), /无法生成/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--execution-mode "memory"/u);
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--no-disk-write/u);
+  const memoryConfig = JSON.parse(await page.$eval('#json', (node) => node.value));
+  assert.equal(memoryConfig.executionMode, 'memory');
+  assert.equal(memoryConfig.noDiskWrite, true);
+
+  // 删除挂起与自毁仍标记为当前宿主不可执行。
+  await page.click('#reset');
+  assert.match(await page.$eval('.capability', (node) => node.textContent), /删除挂起|自毁/u);
   await page.close();
 });
 
@@ -864,6 +889,15 @@ test('生成器归一化快捷键别名，修改设计预设后仍不降级输�
   assert.doesNotThrow(() => parseHostArgs(info.args));
   assert.match(info.summary, /运行数据/u);
   assert.match(info.summary, /启动清理/u);
+
+  await setField('panelTheme', "node.value = 'blue';");
+  assert.match(await page.$eval('#powershell', (node) => node.value), /--panel-theme "blue"/u);
+  assert.equal(JSON.parse(await page.$eval('#json', (node) => node.value)).settings['common.settings.windows-panel-theme'], 'blue');
+  await setField('panelTheme', "node.value = 'purple';");
+  assert.match(await page.$eval('#status', (node) => node.textContent), /面板主题只支持/u);
+  assert.equal(await page.$eval('#powershell', (node) => node.value), '');
+  const builtInThemes = await page.$$eval('#panelThemeList option', (nodes) => nodes.map((node) => node.value));
+  assert.deepEqual(builtInThemes, ['pink', 'blue', 'green']);
   await page.close();
 });
 
@@ -957,4 +991,50 @@ test('关闭 Windows 面板时页面渲染诊断不采样面板 DOM', async () =
   assert.equal(sample.panelCount, 0);
   assert.equal(sample.topPanel, null);
   await page.close();
+});
+
+test('两种宿主可导出 --dpi-aware 与 Node 静默控制台，原生宿主拒绝无控制台参数', async () => {
+  const page = await openGenerator();
+  try {
+    const defaults = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      return { dpiAware: generator.state().dpiAware, hideConsole: generator.state().hideConsole };
+    });
+    assert.equal(defaults.dpiAware, false);
+    assert.equal(defaults.hideConsole, false);
+    const outputs = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      function run(hostType, change) {
+        const state = {
+          ...generator.state(), hostType,
+          launcherPath: 'C:\\Tools\\windows\\host\\main.mjs',
+          nativePath: 'C:\\Tools\\chaoxing_plus.exe',
+          ...change
+        };
+        return { errors: generator.validate(state).errors, args: generator.commandFor(state).args, config: generator.configFor(state) };
+      }
+      return {
+        node: run('node', { dpiAware: true, hideConsole: true }),
+        native: run('native', { dpiAware: true }),
+        nativeHide: run('native', { hideConsole: true }),
+        nativeNoDisk: run('native', { dpiAware: true, noDiskWrite: true })
+      };
+    });
+    assert.deepEqual(outputs.node.errors, []);
+    assert.ok(outputs.node.args.includes('--dpi-aware'));
+    assert.ok(outputs.node.args.includes('--hide-console'));
+    assert.equal(outputs.node.config.dpiAware, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(outputs.node.config, 'hideConsole'), false,
+      'hide-console must stay CLI-only because the host JSON schema does not accept it');
+    assert.deepEqual(outputs.native.errors, []);
+    assert.ok(outputs.native.args.includes('--dpi-aware'));
+    assert.equal(outputs.native.config.dpiAware, true);
+    assert.match(outputs.nativeHide.errors.join(' '), /hide-console/u);
+    assert.match(outputs.nativeNoDisk.errors.join(' '), /dpi-aware.*no-disk-write/u);
+    assert.equal(parseHostArgs(outputs.node.args).dpiAware, true);
+    assert.equal(parseHostArgs(outputs.node.args).hideConsole, true);
+    const hints = await page.evaluate(() => document.body.textContent);
+    assert.equal(hints.includes('原生诊断仅提供页面布局采样'), false, 'stale native diagnostics hint must be gone');
+    assert.match(hints, /页面 PNG 截图/u);
+  } finally { await page.close(); }
 });

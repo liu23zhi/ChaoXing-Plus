@@ -166,7 +166,8 @@ nativeTest('native self-check keeps quiet output empty and still rejects unsuppo
     const quiet = invoke('--quiet', '--no-disk-write');
     assert.equal(quiet.status, 0, quiet.error?.message);
     assert.equal(quiet.stdout + quiet.stderr, '');
-    const unsupported = invoke('--memory-exec');
+    // 内存执行已支持；删除挂起仍必须显式拒绝。
+    const unsupported = invoke('--delete-suspend');
     assert.equal(unsupported.status, 2);
     assert.match(unsupported.stdout, /not supported/);
   });

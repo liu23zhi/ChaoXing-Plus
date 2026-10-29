@@ -45,7 +45,8 @@ test('floating panel avoids backdrop blur and device-pixel blurry artifacts', as
 test('common panel style helpers expose a cohesive pink theme palette', async () => {
   const source = await readFile(commonPath, 'utf8');
 
-  assert.equal(source.includes('const panelPinkTheme = {'), true);
+  assert.equal(source.includes('const panelThemes: Record<PanelThemeName, PanelPalette> = {'), true);
+  assert.equal(source.includes('  pink: {'), true);
   assert.equal(source.includes("primary: '#db2777'"), true);
   assert.equal(source.includes("primarySoft: 'rgba(244, 114, 182, 0.14)'"), true);
   assert.equal(source.includes("surface: '#fffafd'"), true);
@@ -54,6 +55,24 @@ test('common panel style helpers expose a cohesive pink theme palette', async ()
   assert.equal(source.includes("shadow: '0 8px 20px rgba(190, 24, 93, 0.10)'"), true);
   assert.equal(source.includes("shellGradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)'"), true);
   assert.equal(source.includes("shellShadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)'"), true);
+});
+
+test('panel themes are palette-driven with a fixed fallback', async () => {
+  const source = await readFile(commonPath, 'utf8');
+  assert.equal(source.includes("const WINDOWS_PANEL_THEME_KEY = 'common.settings.windows-panel-theme';"), true);
+  assert.equal(source.includes('const panelThemes: Record<PanelThemeName, PanelPalette> = {'), true);
+  for (const palette of ['  pink: {', '  blue: {', '  green: {']) {
+    assert.equal(source.includes(palette), true, palette);
+  }
+  assert.equal(source.includes('function resolvePanelThemeName(): PanelThemeName'), true);
+  assert.equal(source.includes("raw = runtimeStore.get<unknown>(WINDOWS_PANEL_THEME_KEY, 'pink')"), true);
+  assert.equal(source.includes('panel.root.dataset.chaoxingPlusTheme = resolvePanelThemeName();'), true);
+  assert.equal(source.includes('panelThemes[resolvePanelThemeName()][property as keyof PanelPalette]'), true);
+  // 色板之外的硬编码粉色阴影已全部改为 shadowRgb 派生的 panelShadowColor，避免换主题后残留粉色阴影。
+  const afterPalette = source.slice(source.indexOf('const panelPinkTheme'));
+  for (const stale of ['rgba(190, 24, 93', 'rgba(219, 39, 119', "background = '#fff5fa'"]) {
+    assert.equal(afterPalette.includes(stale), false, stale);
+  }
 });
 
 test('work results panel hero, cards, toggles, and selected items use the pink theme', async () => {

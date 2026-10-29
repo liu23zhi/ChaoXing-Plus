@@ -92,12 +92,20 @@ async function clickButton(page, label) {
 }
 
 async function addFrame(page) {
+  const frameUrl = `${url}frame`;
   await page.evaluate(url => {
     const frame = document.createElement('iframe');
     frame.src = `${url}frame`;
     document.body.append(frame);
   }, url);
-  await page.waitForFunction(() => document.querySelector('iframe')?.contentDocument?.readyState === 'complete');
+  // Wait for the iframe to finish navigating to the fixture URL. A fresh iframe
+  // starts on about:blank with readyState=complete, so checking only readyState
+  // can return a frame whose navigation is still in flight.
+  await page.waitForFunction((expected) => {
+    const frame = document.querySelector('iframe');
+    return Boolean(frame && frame.contentWindow && frame.contentWindow.location.href === expected
+      && frame.contentDocument && frame.contentDocument.readyState === 'complete');
+  }, {}, frameUrl);
   return page.frames().find(frame => frame.parentFrame());
 }
 

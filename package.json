@@ -8,6 +8,8 @@
     "dev": "node build.mjs --watch",
     "build": "node build.mjs",
     "build:windows": "node build.windows.mjs",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native/build.ps1 -BuildTests",
+    "release:windows": "node scripts/package-windows.mjs",
     "windows": "node windows/host/main.mjs",
     "windows:self-check": "node windows/host/main.mjs --self-check",
     "typecheck": "tsc --noEmit"

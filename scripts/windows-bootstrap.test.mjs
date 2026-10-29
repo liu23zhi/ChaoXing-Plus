@@ -430,6 +430,37 @@ test('bootstrap 在考试相关页面提前挂载折叠面板壳', async () => {
   assert.equal(source.includes('__CX_WIN_SHELL_EXPAND_REQUESTED__'), true);
 });
 
+test('bootstrap 折叠壳按 --panel-theme 着色，未知主题回退 pink 并支持热更新', async () => {
+  for (const [theme, expected] of [['blue', 'blue'], ['green', 'green'], ['light-purple', 'pink'], ['', 'pink']]) {
+    const harness = createHarness({
+      config: {
+        'common.settings.extension-enabled': true,
+        'common.settings.windows-panel-theme': theme
+      }
+    });
+    await harness.run();
+    const shell = harness.document.getElementById('panel-common-work-results');
+    assert.notEqual(shell, null, theme);
+    assert.equal(shell.getAttribute('data-chaoxing-plus-theme'), expected, theme);
+  }
+  const harness = createHarness({ config: { 'common.settings.extension-enabled': true } });
+  await harness.run();
+  const shell = harness.document.getElementById('panel-common-work-results');
+  harness.window.__CX_WIN_ON_CONFIG__({
+    kind: 'config',
+    values: { 'common.settings.windows-panel-theme': 'green' }
+  });
+  assert.equal(shell.getAttribute('data-chaoxing-plus-theme'), 'green');
+  assert.equal(harness.window.__CX_WIN_CONFIG_JSON__ !== undefined, true);
+
+  const source = await readFile(bootstrapPath, 'utf8');
+  assert.equal(source.includes('function applyPanelShellTheme('), true);
+  assert.equal(source.includes("PANEL_THEME_STYLES = {"), true);
+  for (const gradient of ['#fff0f7', '#f0f6ff', '#ecfdf5']) {
+    assert.equal(source.includes(gradient), true, gradient);
+  }
+});
+
 test('bootstrap 在宿主关闭 Windows 面板时不挂载面板壳', async () => {
   const harness = createHarness({
     config: {

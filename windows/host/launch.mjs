@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { validateLaunchPort } from './options.mjs';
-export { getListenerOwnerPid } from './listener-owner.mjs';
+export { createListenerOwnershipVerifier, getListenerOwnerPid, getProcessParentChain, parseProcessParentChain } from './listener-owner.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -56,7 +56,42 @@ export async function isElevated() {
   }
 }
 
-export function buildElevatedRelaunchCommand({ scriptPath, args, cwd, selectedClientPath, nodeExecutable = process.execPath }) {
+// 静默启动脚本通过 --hide-console 传入 Hidden：UAC 提升后的 Node 控制台不再显示。
+// 默认仍是 Normal，保留普通交互启动可见的注入日志窗口。
+const ELEVATED_WINDOW_STYLES = new Set(['Normal', 'Hidden', 'Minimized']);
+
+// 无论当前进程是首次启动还是 UAC 提升后的实例，都把自己附着的控制台窗口隐藏。
+// 作为 --hide-console 的兜底：即使 ShellExecuteEx 的 -WindowStyle 在 RunAs 场景
+// 未被系统采纳，Node 也主动调用 Win32 ShowWindow(SW_HIDE) 消除持续可见的窗口。
+export async function hideConsoleWindow() {
+  if (process.platform !== 'win32') return false;
+  const command = [
+    'Add-Type -Name HiddenConsole -Namespace Win32 -MemberDefinition '
+      + '\'[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);'
+      + ' [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();\';',
+    '$handle = [Win32.HiddenConsole]::GetConsoleWindow();',
+    'if ($handle -eq [IntPtr]::Zero) { [Console]::Out.Write("no-console") }',
+    'else { [Console]::Out.Write(([Win32.HiddenConsole]::ShowWindow($handle, 0)).ToString().ToLowerInvariant()) }'
+  ].join(' ');
+  try {
+    const output = await runPowerShell(command, { timeoutMs: 8000 });
+    return output === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function buildElevatedRelaunchCommand({
+  scriptPath,
+  args,
+  cwd,
+  selectedClientPath,
+  windowStyle = 'Normal',
+  nodeExecutable = process.execPath
+}) {
+  if (!ELEVATED_WINDOW_STYLES.has(windowStyle)) {
+    throw new Error(`不支持的提权重启窗口样式：${windowStyle}`);
+  }
   if (selectedClientPath) {
     const selectionValues = new Set(['--client', '--client-index', '--scan-mode']);
     const selectionFlags = new Set(['--client-first', '--scan-clients', '--select-client', '--list-clients', '--rescan', '--no-scan-cache', '--scan-all', '--no-scan-all', '--elevated']);
@@ -75,7 +110,7 @@ export function buildElevatedRelaunchCommand({ scriptPath, args, cwd, selectedCl
     `Start-Process -FilePath ${psQuote(nodeExecutable)}`,
     `-ArgumentList ${psQuote(argumentList)}`,
     `-WorkingDirectory ${psQuote(cwd)}`,
-    '-Verb RunAs -WindowStyle Normal'
+    `-Verb RunAs -WindowStyle ${windowStyle}`
   ].join(' ');
 }
 

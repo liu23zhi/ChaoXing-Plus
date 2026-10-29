@@ -42,6 +42,7 @@ typedef struct CX_AUDIT_REPORT {
     BOOL ownershipVerified;
     BOOL success;
     const char *injectStrategy;
+    const char *executionMode;
     const char *stopReason;
     CX_ENDPOINT_PROBE endpointProbe;
 } CX_AUDIT_REPORT;

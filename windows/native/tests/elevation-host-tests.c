@@ -38,7 +38,7 @@ static DWORD processChecks, existingCount;
 static BOOL inspectionAllowed = TRUE;
 static const char *defaultJson;
 static BOOL selectionCancelled, scannedFullCandidates, emptyCandidates;
-static BOOL requestScanAll, failFullScan, explicitFullScanPolicies;
+static BOOL requestScanAll, failFullScan, cancelFullScan, explicitFullScanPolicies;
 static CX_DISCOVERY_SCAN_MODE firstScanMode, lastScanMode;
 static DWORD expectedRestartArgc = 5;
 static BOOL earlyRestartExpected, tokenElevated, tokenAvailable = TRUE;
@@ -96,6 +96,7 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
             && options->rescan && options->noScanCache && !options->clientPath
             && options->noDiskWrite == testOptions.noDiskWrite;
         if (failFullScan) { h_error(error, cap, L"fixture full scan failed"); return FALSE; }
+        if (cancelFullScan) { result->cancelled = TRUE; return TRUE; }
     }
     scannedFullCandidates = !options->clientPath && options->enumerateAll;
     if (emptyCandidates) return TRUE;
@@ -107,9 +108,11 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
     lstrcpyW(result->items[0].path, path); result->items[0].machine = CX_DISCOVERY_MACHINE_X86;
     return TRUE;
 }
+static const WCHAR *lastSelectionNotice;
 CX_SELECTION_STATUS test_selection(const CX_DISCOVERY_RESULT *result, BOOL hostIs32Bit,
-                                   WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
+                                   const WCHAR *notice, WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
     (void)result; (void)hostIs32Bit; (void)error; (void)cap; ++selections;
+    lastSelectionNotice = notice;
     if (requestScanAll && selections == 1) return CX_SELECTION_SCAN_ALL;
     if (selectionCancelled) return CX_SELECTION_CANCELLED;
     return h_copy(out, outCap, L"D:\\用户选定 客户端\\CXExam.exe") ? CX_SELECTION_SELECTED : CX_SELECTION_ERROR;
@@ -150,10 +153,48 @@ static void reset(void) {
     dpiActive = FALSE; dpiBeginAllowed = dpiRestoreAllowed = TRUE;
     processChecks = existingCount = 0; inspectionAllowed = TRUE;
     defaultJson = NULL; selectionCancelled = scannedFullCandidates = emptyCandidates = FALSE; expectedRestartArgc = 5;
-    requestScanAll = failFullScan = explicitFullScanPolicies = FALSE;
+    requestScanAll = failFullScan = cancelFullScan = explicitFullScanPolicies = FALSE; lastSelectionNotice = NULL;
     firstScanMode = lastScanMode = CX_DISCOVERY_SCAN_FALLBACK_ALL;
     h_default_gui = FALSE;
     earlyRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
+}
+static void test_diagnostics_cleanup(void) {
+    static WCHAR temp[HOST_PATH_CAP], root[HOST_PATH_CAP], run[HOST_PATH_CAP], file[HOST_PATH_CAP], keep[HOST_PATH_CAP];
+    static const WCHAR *const names[] = {
+        L"render-diagnostics.json", L"render-diagnostics-page.png", L"window-diagnostics.json",
+        L"window-capture.bmp", L"window-capture.png", L"render-diagnostics-host.json"
+    };
+    DWORD length, i;
+    HANDLE handle;
+    BOOL ok = TRUE;
+    length = GetTempPathW(HOST_PATH_CAP, temp);
+    check(length > 0 && length < HOST_PATH_CAP, "temporary directory is available for diagnostics cleanup");
+    if (!length || length >= HOST_PATH_CAP || !GetTempFileNameW(temp, L"cxc", 0, root)) return;
+    check(TRUE, "temporary diagnostics root is created");
+    DeleteFileW(root);
+    CreateDirectoryW(root, NULL);
+    lstrcpynW(run, root, HOST_PATH_CAP); lstrcatW(run, L"\\run");
+    CreateDirectoryW(run, NULL);
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        lstrcpynW(file, run, HOST_PATH_CAP); lstrcatW(file, L"\\"); lstrcatW(file, names[i]);
+        handle = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        else ok = FALSE;
+    }
+    check(ok, "diagnostics run directory fixtures are created");
+    lstrcpynW(keep, root, HOST_PATH_CAP); lstrcatW(keep, L"\\keep.txt");
+    handle = CreateFileW(keep, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); else ok = FALSE;
+    lstrcpynW(h_created_diagnostics_path, run, HOST_PATH_CAP);
+    lstrcatW(h_created_diagnostics_path, L"\\render-diagnostics.json");
+    h_delete_created_tree(h_created_diagnostics_path);
+    h_created_diagnostics_path[0] = 0;
+    check(GetFileAttributesW(run) == INVALID_FILE_ATTRIBUTES,
+          "recursive diagnostics cleanup removes the whole run directory");
+    check(GetFileAttributesW(keep) != INVALID_FILE_ATTRIBUTES,
+          "recursive diagnostics cleanup preserves files outside the run directory");
+    DeleteFileW(keep);
+    RemoveDirectoryW(root);
 }
 void __stdcall ElevationHostTestMain(void) {
     BOOL result;
@@ -272,8 +313,12 @@ void __stdcall ElevationHostTestMain(void) {
         "verified elevated client selection bypasses a no-argument GUI policy without reopening it");
     reset(); requestScanAll = TRUE; testOptions.noDiskWrite = TRUE; launchFailure = ERROR_ACCESS_DENIED;
     check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && scans == 2 && selections == 2
-        && launches == 1 && explicitFullScanPolicies && lastScanMode == CX_DISCOVERY_SCAN_ALL,
+        && launches == 1 && explicitFullScanPolicies && lastScanMode == CX_DISCOVERY_SCAN_ALL && lastSelectionNotice == NULL,
         "GUI full scan requests an uncached recursive scan and reopens refreshed selection before launch");
+    reset(); requestScanAll = cancelFullScan = TRUE; testOptions.noDiskWrite = TRUE; launchFailure = ERROR_ACCESS_DENIED;
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && scans == 2 && selections == 2 && launches == 1
+        && lastSelectionNotice && !lstrcmpW(lastSelectionNotice, L"已取消全盘扫描，保留原候选；可重试或手动浏览。"),
+        "a cancelled recursive scan keeps the selection and reopens it with a cancellation notice");
     reset(); requestScanAll = selectionCancelled = TRUE; testOptions.noDiskWrite = TRUE;
     check(h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && h_exit_code == 3 && scans == 2
         && selections == 2 && !launches && explicitFullScanPolicies,

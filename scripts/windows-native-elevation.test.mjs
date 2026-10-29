@@ -45,7 +45,7 @@ test('native internal resume cannot be used for read-only actions or without its
   skip: !executable
 }, () => {
   for (const args of [
-    ['--self-check'], ['--help'], ['--capabilities'], ['--print-effective-config'],
+    ['--self-check'], ['--version'], ['--help'], ['--capabilities'], ['--print-effective-config'],
     ['--list-clients'], ['--attach', '38100'], [],
     ['--elevated', '--self-check'], ['--elevated', '--help'],
     ['--elevated', '--capabilities'], ['--elevated', '--print-effective-config'],

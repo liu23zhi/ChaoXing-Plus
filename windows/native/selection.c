@@ -10,6 +10,7 @@
 
 static const WCHAR selectionClass[] = L"CXPlusNativeClientSelection";
 static const WCHAR selectionTitle[] = L"超星学习助手 - 选择考试客户端";
+static const WCHAR selectionHeadingDefault[] = L"请选择考试客户端；全盘扫描后将重新打开并刷新列表，也可手动浏览。";
 
 typedef struct SELECTION_WINDOW {
     const CX_DISCOVERY_RESULT *candidates;
@@ -19,6 +20,7 @@ typedef struct SELECTION_WINDOW {
     WCHAR *error;
     DWORD errorCap;
     HWND window, heading, columns, list, browse, scanAll, choose, cancel;
+    const WCHAR *notice;
     HFONT font;
     BOOL finished;
     CX_SELECTION_STATUS result;
@@ -45,6 +47,44 @@ static WCHAR *selection_number(WCHAR *out, DWORD value) {
     do { digits[count++] = (WCHAR)(L'0' + value % 10); value /= 10; } while (value);
     while (count) *out++ = digits[--count];
     return out;
+}
+
+/* Native selection/progress windows are DPI aware (host.manifest). Fixed
+   pixel metrics are scaled from 96 DPI so text and controls stay crisp and
+   correctly sized on high-DPI displays. CXPLUS_NATIVE_UI_DPI is a test-only
+   override so layout scaling can be exercised on any machine. */
+static DWORD selection_system_dpi;
+
+static DWORD selection_ui_dpi(void) {
+    WCHAR text[16];
+    DWORD length, value = 0, i;
+    length = GetEnvironmentVariableW(L"CXPLUS_NATIVE_UI_DPI", text, 16);
+    if (length && length < 16) {
+        for (i = 0; i < length; ++i) {
+            if (text[i] < L'0' || text[i] > L'9') { value = 0; break; }
+            value = value * 10 + (DWORD)(text[i] - L'0');
+            if (value > 480) { value = 0; break; }
+        }
+        if (value >= 96) return value;
+    }
+    if (selection_system_dpi) return selection_system_dpi;
+    {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        typedef UINT (WINAPI *DPI_FOR_SYSTEM)(void);
+        DPI_FOR_SYSTEM getForSystem = user32 ? (DPI_FOR_SYSTEM)GetProcAddress(user32, "GetDpiForSystem") : NULL;
+        HDC screen;
+        if (getForSystem) selection_system_dpi = getForSystem();
+        if (!selection_system_dpi) {
+            screen = GetDC(NULL);
+            if (screen) { selection_system_dpi = (DWORD)GetDeviceCaps(screen, LOGPIXELSX); ReleaseDC(NULL, screen); }
+        }
+        if (!selection_system_dpi) selection_system_dpi = 96;
+    }
+    return selection_system_dpi;
+}
+
+static int selection_scale(int value) {
+    return (int)MulDiv(value, (int)selection_ui_dpi(), 96);
 }
 
 static BOOL selection_fill(SELECTION_WINDOW *state) {
@@ -84,13 +124,17 @@ static void selection_layout(SELECTION_WINDOW *state) {
     RECT rect;
     int width, height;
     GetClientRect(state->window, &rect); width = rect.right; height = rect.bottom;
-    MoveWindow(state->heading, 18, 16, width - 36, 26, TRUE);
-    MoveWindow(state->columns, 20, 52, width - 40, 22, TRUE);
-    MoveWindow(state->list, 18, 78, width - 36, height - 146, TRUE);
-    MoveWindow(state->browse, 18, height - 52, 138, 32, TRUE);
-    MoveWindow(state->scanAll, 168, height - 52, 138, 32, TRUE);
-    MoveWindow(state->choose, width - 238, height - 52, 102, 32, TRUE);
-    MoveWindow(state->cancel, width - 120, height - 52, 102, 32, TRUE);
+    int margin = selection_scale(18), gap = selection_scale(20), top = selection_scale(16);
+    int headingHeight = selection_scale(26), columnsTop = selection_scale(52), columnsHeight = selection_scale(22);
+    int listTop = selection_scale(78), bottomOffset = selection_scale(146), buttonTop = height - selection_scale(52);
+    int buttonHeight = selection_scale(32), buttonWidth = selection_scale(138), chooseWidth = selection_scale(102);
+    MoveWindow(state->heading, margin, top, width - selection_scale(36), headingHeight, TRUE);
+    MoveWindow(state->columns, gap, columnsTop, width - selection_scale(40), columnsHeight, TRUE);
+    MoveWindow(state->list, margin, listTop, width - selection_scale(36), height - bottomOffset, TRUE);
+    MoveWindow(state->browse, margin, buttonTop, buttonWidth, buttonHeight, TRUE);
+    MoveWindow(state->scanAll, selection_scale(168), buttonTop, buttonWidth, buttonHeight, TRUE);
+    MoveWindow(state->choose, width - selection_scale(238), buttonTop, chooseWidth, buttonHeight, TRUE);
+    MoveWindow(state->cancel, width - selection_scale(120), buttonTop, chooseWidth, buttonHeight, TRUE);
 }
 
 static HWND selection_control(SELECTION_WINDOW *state, DWORD style, const WCHAR *kind,
@@ -154,7 +198,8 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
     }
     if (!state) return DefWindowProcW(window, message, wParam, lParam);
     if (message == WM_CREATE) {
-        state->heading = selection_control(state, 0, L"STATIC", L"请选择考试客户端；全盘扫描后将重新打开并刷新列表，也可手动浏览。", 0);
+        state->heading = selection_control(state, 0, L"STATIC",
+            state->notice && state->notice[0] ? state->notice : selectionHeadingDefault, 0);
         state->columns = selection_control(state, 0, L"STATIC", L"序号 / 架构 / 文件版本 / 完整路径", 0);
         state->list = selection_control(state, WS_TABSTOP | WS_BORDER | WS_VSCROLL | WS_HSCROLL
             | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_USETABSTOPS, L"LISTBOX", L"", SELECTION_LIST);
@@ -169,7 +214,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
     if (message == WM_SIZE) { selection_layout(state); return 0; }
     if (message == WM_GETMINMAXINFO) {
         MINMAXINFO *info = (MINMAXINFO *)lParam;
-        info->ptMinTrackSize.x = 640; info->ptMinTrackSize.y = 360; return 0;
+        info->ptMinTrackSize.x = selection_scale(640); info->ptMinTrackSize.y = selection_scale(360); return 0;
     }
     if (message == WM_COMMAND) {
         int command = LOWORD(wParam);
@@ -194,7 +239,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
 static BOOL selection_create(SELECTION_WINDOW *state) {
     WNDCLASSEXW windowClass;
     RECT work;
-    int width = 960, height = 510;
+    int width = selection_scale(960), height = selection_scale(510);
     ZeroMemory(&windowClass, sizeof(windowClass));
     windowClass.cbSize = sizeof(windowClass); windowClass.lpfnWndProc = selection_proc;
     windowClass.hInstance = GetModuleHandleW(NULL); windowClass.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -207,7 +252,7 @@ static BOOL selection_create(SELECTION_WINDOW *state) {
     }
     if (width > work.right - work.left) width = work.right - work.left;
     if (height > work.bottom - work.top) height = work.bottom - work.top;
-    state->font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    state->font = CreateFontW(-selection_scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
     state->window = CreateWindowExW(WS_EX_CONTROLPARENT, selectionClass, selectionTitle,
         WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
@@ -230,7 +275,8 @@ static DWORD selection_auto_close(void) {
 }
 
 CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
-                                     BOOL hostIs32Bit, WCHAR *out, DWORD outCap,
+                                     BOOL hostIs32Bit, const WCHAR *notice,
+                                     WCHAR *out, DWORD outCap,
                                      WCHAR *error, DWORD errorCap) {
     SELECTION_WINDOW state;
     MSG message;
@@ -245,7 +291,8 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
         || candidates->count > CX_DISCOVERY_MAX_CANDIDATES))) {
         selection_error(&state, L"客户端选择参数无效。"); return CX_SELECTION_ERROR;
     }
-    state.candidates = candidates; state.hostIs32Bit = hostIs32Bit; state.out = out; state.outCap = outCap;
+    state.candidates = candidates; state.hostIs32Bit = hostIs32Bit; state.notice = notice;
+    state.out = out; state.outCap = outCap;
     GetNativeSystemInfo(&system);
     if (system.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) state.hostIs32Bit = TRUE;
     if (!selection_create(&state)) { if (state.font) DeleteObject(state.font); return CX_SELECTION_ERROR; }
@@ -270,11 +317,13 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
     return state.result;
 }
 
-BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, CX_SELECTION_PROBE *probe,
+BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
+                         const WCHAR *notice, CX_SELECTION_PROBE *probe,
                          WCHAR *error, DWORD errorCap) {
     SELECTION_WINDOW state;
-    WCHAR title[128];
+    WCHAR title[128], heading[512];
     ZeroMemory(&state, sizeof(state)); state.candidates = candidates;
+    state.hostIs32Bit = hostIs32Bit; state.notice = notice;
     state.error = error; state.errorCap = errorCap;
     if (error && errorCap) error[0] = 0;
     if (!probe || (candidates && ((candidates->count && !candidates->items)
@@ -289,7 +338,256 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, CX_SELECTION_PROB
     probe->scanAllAvailable = IsWindow(state.scanAll) && IsWindowEnabled(state.scanAll);
     probe->unicodeWindow = IsWindowUnicode(state.window);
     GetWindowTextW(state.window, title, 128); probe->titleMatches = lstrcmpW(title, selectionTitle) == 0;
+    probe->layoutScale = selection_ui_dpi();
+    GetWindowTextW(state.heading, heading, 512);
+    probe->noticeShown = notice && notice[0]
+        ? lstrcmpW(heading, notice) == 0
+        : lstrcmpW(heading, selectionHeadingDefault) == 0;
     DestroyWindow(state.window);
     if (state.font) DeleteObject(state.font);
     return TRUE;
+}
+
+/* ---- Full disk scan progress window (own thread) ---- */
+
+#define SCAN_PROGRESS_UPDATE (WM_APP + 1)
+#define SCAN_PROGRESS_CANCEL_ID 1201
+#define SCAN_PROGRESS_DETAIL_ID 1202
+#define SCAN_PROGRESS_AUTO_TIMER 1203
+
+struct CX_SCAN_PROGRESS {
+    HANDLE thread;
+    DWORD threadId;
+    HANDLE ready;
+    HWND window;
+    HWND detailControl;
+    HFONT font;
+    volatile LONG directories;
+    volatile LONG candidates;
+    volatile LONG cancelRequested;
+    volatile LONG finished;
+    volatile LONG visible;
+    BOOL hidden;
+    DWORD autoCancelMs;
+};
+
+static BOOL scan_progress_registered;
+
+static DWORD scan_progress_env_number(const WCHAR *name, DWORD fallback) {
+    WCHAR text[32];
+    DWORD value = 0, index = 0, length;
+    length = GetEnvironmentVariableW(name, text, 32);
+    if (!length || length >= 32) return fallback;
+    while (index < length && text[index] >= L'0' && text[index] <= L'9') {
+        value = value * 10 + (DWORD)(text[index] - L'0');
+        if (value > 600000) return fallback;
+        ++index;
+    }
+    if (!index || index != length) return fallback;
+    return value;
+}
+
+static void scan_progress_detail(WCHAR *out, DWORD cap, DWORD directories, DWORD candidates) {
+    WCHAR *at = out;
+    if (!out || cap < 64) { if (out && cap) out[0] = 0; return; }
+    at = selection_append(at, L"已检查 ");
+    at = selection_number(at, directories);
+    at = selection_append(at, L" 个目录，发现 ");
+    at = selection_number(at, candidates);
+    at = selection_append(at, L" 个候选。");
+    *at = 0;
+}
+
+static LRESULT CALLBACK scan_progress_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    CX_SCAN_PROGRESS *state = (CX_SCAN_PROGRESS *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (message == WM_NCCREATE) {
+        CREATESTRUCTW *create = (CREATESTRUCTW *)lParam;
+        state = (CX_SCAN_PROGRESS *)create->lpCreateParams;
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)state);
+    }
+    if (!state) return DefWindowProcW(window, message, wParam, lParam);
+    if (message == WM_CREATE) {
+        HINSTANCE instance = GetModuleHandleW(NULL);
+        HFONT font;
+        HWND heading, detail, cancel;
+        WCHAR detailText[160];
+        font = CreateFontW(-selection_scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+        if (!font) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        state->font = font;
+        heading = CreateWindowExW(0, L"STATIC", L"正在全盘扫描固定磁盘根目录…",
+                                  WS_CHILD | WS_VISIBLE, selection_scale(18), selection_scale(16),
+                                  selection_scale(420), selection_scale(26), window, NULL, instance, NULL);
+        scan_progress_detail(detailText, 160, 0, 0);
+        detail = CreateWindowExW(0, L"STATIC", detailText, WS_CHILD | WS_VISIBLE,
+                                 selection_scale(18), selection_scale(52), selection_scale(420), selection_scale(40),
+                                 window, (HMENU)(INT_PTR)SCAN_PROGRESS_DETAIL_ID, instance, NULL);
+        cancel = CreateWindowExW(0, L"BUTTON", L"取消扫描",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                 selection_scale(326), selection_scale(108), selection_scale(116), selection_scale(34),
+                                 window, (HMENU)(INT_PTR)SCAN_PROGRESS_CANCEL_ID, instance, NULL);
+        if (heading) SendMessageW(heading, WM_SETFONT, (WPARAM)font, TRUE);
+        if (detail) SendMessageW(detail, WM_SETFONT, (WPARAM)font, TRUE);
+        if (cancel) SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
+        state->detailControl = detail;
+        state->window = window;
+        if (state->autoCancelMs) SetTimer(window, SCAN_PROGRESS_AUTO_TIMER, state->autoCancelMs, NULL);
+        return 0;
+    }
+    if (message == SCAN_PROGRESS_UPDATE) {
+        WCHAR text[160];
+        DWORD directories = (DWORD)InterlockedCompareExchange(&state->directories, 0, 0);
+        DWORD candidates = (DWORD)InterlockedCompareExchange(&state->candidates, 0, 0);
+        scan_progress_detail(text, 160, directories, candidates);
+        if (state->detailControl) SetWindowTextW(state->detailControl, text);
+        return 0;
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == SCAN_PROGRESS_CANCEL_ID) {
+        InterlockedExchange(&state->cancelRequested, 1);
+        DestroyWindow(window);
+        return 0;
+    }
+    if (message == WM_TIMER && wParam == SCAN_PROGRESS_AUTO_TIMER) {
+        InterlockedExchange(&state->cancelRequested, 1);
+        DestroyWindow(window);
+        return 0;
+    }
+    if (message == WM_CLOSE) {
+        if (InterlockedCompareExchange(&state->finished, 0, 0) == 0)
+            InterlockedExchange(&state->cancelRequested, 1);
+        DestroyWindow(window);
+        return 0;
+    }
+    if (message == WM_DESTROY) {
+        KillTimer(window, SCAN_PROGRESS_AUTO_TIMER);
+        if (state->font) DeleteObject(state->font);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+static DWORD WINAPI scan_progress_thread(void *parameter) {
+    CX_SCAN_PROGRESS *state = (CX_SCAN_PROGRESS *)parameter;
+    HINSTANCE instance = GetModuleHandleW(NULL);
+    WNDCLASSEXW cls;
+    MSG message;
+    int width = selection_scale(460), height = selection_scale(170), x, y;
+    if (!scan_progress_registered) {
+        ZeroMemory(&cls, sizeof(cls));
+        cls.cbSize = sizeof(cls);
+        cls.lpfnWndProc = scan_progress_proc;
+        cls.hInstance = instance;
+        cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        cls.lpszClassName = CX_SCAN_PROGRESS_CLASS;
+        if (!RegisterClassExW(&cls)) { SetEvent(state->ready); return 1; }
+        scan_progress_registered = TRUE;
+    }
+    x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+    y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    state->window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, CX_SCAN_PROGRESS_CLASS,
+                                    L"超星学习助手 - 全盘扫描",
+                                    WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height,
+                                    NULL, NULL, instance, state);
+    if (!state->window) { SetEvent(state->ready); return 1; }
+    if (!state->hidden) {
+        /* The first ShowWindow in a process may be overridden by
+           STARTUPINFO.wShowWindow (for example windowsHide:true under spawn);
+           a second call with SW_SHOW makes the progress window truly visible. */
+        ShowWindow(state->window, SW_SHOWNORMAL);
+        if (!IsWindowVisible(state->window)) ShowWindow(state->window, SW_SHOW);
+        UpdateWindow(state->window);
+        SetForegroundWindow(state->window);
+    }
+    InterlockedExchange(&state->visible, IsWindowVisible(state->window) ? 1 : 0);
+    SetEvent(state->ready);
+    while (GetMessageW(&message, NULL, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    return 0;
+}
+
+BOOL cx_scan_progress_begin(CX_SCAN_PROGRESS **progress, WCHAR *error, DWORD errorCap) {
+    CX_SCAN_PROGRESS *state;
+    DWORD wait;
+    if (error && errorCap) error[0] = 0;
+    if (!progress) return FALSE;
+    *progress = NULL;
+    state = (CX_SCAN_PROGRESS *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
+    if (!state) {
+        if (error && errorCap) lstrcpynW(error, L"内存不足，无法创建全盘扫描进度窗口。", (int)errorCap);
+        return FALSE;
+    }
+    state->ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!state->ready) {
+        HeapFree(GetProcessHeap(), 0, state);
+        if (error && errorCap) lstrcpynW(error, L"无法创建进度窗口同步事件。", (int)errorCap);
+        return FALSE;
+    }
+    state->hidden = scan_progress_env_number(L"CXPLUS_NATIVE_SCAN_PROGRESS_HIDDEN", 0) != 0;
+    state->autoCancelMs = scan_progress_env_number(L"CXPLUS_NATIVE_SCAN_PROGRESS_AUTOCANCEL_MS", 0);
+    if (state->autoCancelMs < 10) state->autoCancelMs = 0;
+    state->thread = CreateThread(NULL, 0, scan_progress_thread, state, 0, &state->threadId);
+    if (!state->thread) {
+        CloseHandle(state->ready);
+        HeapFree(GetProcessHeap(), 0, state);
+        if (error && errorCap) lstrcpynW(error, L"无法创建全盘扫描进度窗口线程。", (int)errorCap);
+        return FALSE;
+    }
+    wait = WaitForSingleObject(state->ready, 5000);
+    if (wait != WAIT_OBJECT_0 || !state->window) {
+        WaitForSingleObject(state->thread, 2000);
+        CloseHandle(state->thread);
+        CloseHandle(state->ready);
+        HeapFree(GetProcessHeap(), 0, state);
+        if (error && errorCap) lstrcpynW(error, L"全盘扫描进度窗口创建失败。", (int)errorCap);
+        return FALSE;
+    }
+    *progress = state;
+    return TRUE;
+}
+
+static void scan_progress_update(void *context, DWORD directories, DWORD candidatesFound) {
+    CX_SCAN_PROGRESS *state = (CX_SCAN_PROGRESS *)context;
+    if (!state || InterlockedCompareExchange(&state->finished, 0, 0) != 0) return;
+    InterlockedExchange(&state->directories, (LONG)directories);
+    InterlockedExchange(&state->candidates, (LONG)candidatesFound);
+    if (state->window) PostMessageW(state->window, SCAN_PROGRESS_UPDATE, 0, 0);
+}
+
+static BOOL scan_progress_cancel(void *context) {
+    CX_SCAN_PROGRESS *state = (CX_SCAN_PROGRESS *)context;
+    if (!state) return FALSE;
+    return InterlockedCompareExchange(&state->cancelRequested, 0, 0) != 0;
+}
+
+void cx_scan_progress_bind(CX_DISCOVERY_OPTIONS *scan, CX_SCAN_PROGRESS *progress) {
+    if (!scan) return;
+    if (!progress) {
+        scan->progressContext = NULL;
+        scan->onProgress = NULL;
+        scan->cancelRequested = NULL;
+        return;
+    }
+    scan->progressContext = progress;
+    scan->onProgress = scan_progress_update;
+    scan->cancelRequested = scan_progress_cancel;
+}
+
+BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *state, WCHAR *error, DWORD errorCap) {
+    BOOL cancelled;
+    if (error && errorCap) error[0] = 0;
+    if (!state) return FALSE;
+    InterlockedExchange(&state->finished, 1);
+    if (state->window) PostMessageW(state->window, WM_CLOSE, 0, 0);
+    if (state->thread) WaitForSingleObject(state->thread, 5000);
+    cancelled = InterlockedCompareExchange(&state->cancelRequested, 0, 0) != 0;
+    if (state->thread) CloseHandle(state->thread);
+    if (state->ready) CloseHandle(state->ready);
+    HeapFree(GetProcessHeap(), 0, state);
+    return cancelled;
 }
