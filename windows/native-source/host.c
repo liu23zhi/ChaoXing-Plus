@@ -873,9 +873,14 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     if (!options->quiet) h_print(L"cdp-pipe: launching client with --remote-debugging-pipe\n");
     if (!h_pipe_open(&state, h_selected_path)) {
         if (h_pipe_open_error == ERROR_ELEVATION_REQUIRED) {
-            h_error(error, errorCap, L"cdp-pipe: client requires administrator rights; 请以管理员身份运行宿主后再用 cdp-pipe（宿主当前无法为该模式自动提权）");
+            h_needs_elevation = TRUE;
+            h_error(error, errorCap, L"cdp-pipe: client requires administrator rights; requesting UAC");
         } else {
-            h_error(error, errorCap, L"cdp-pipe: launch failed");
+            {
+                WCHAR diag[128];
+                wsprintfW(diag, L"cdp-pipe: launch failed (Win32 %lu)", (unsigned long)h_pipe_open_error);
+                h_error(error, errorCap, diag);
+            }
         }
         return FALSE;
     }
@@ -2305,6 +2310,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
