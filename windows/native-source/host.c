@@ -1023,6 +1023,46 @@ static BOOL h_file_contains(const WCHAR *path, const char *needle) {
     return found;
 }
 
+/* 大小写不敏感的文件内容查找（用于探测 PE 导入表里的 DLL 名）。 */
+static BOOL h_file_contains_ci(const WCHAR *path, const char *needle) {
+    static char buffer[1 << 20];
+    static char lowerNeedle[256];
+    HANDLE file;
+    DWORD got = 0, keep = 0;
+    int needleLength = 0, i;
+    BOOL found = FALSE;
+    if (!path || !needle) return FALSE;
+    while (needle[needleLength] && needleLength < 255) {
+        char ch = needle[needleLength];
+        lowerNeedle[needleLength] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
+        ++needleLength;
+    }
+    lowerNeedle[needleLength] = 0;
+    if (!needleLength) return FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    for (;;) {
+        DWORD chunk = 0;
+        if (!ReadFile(file, buffer + keep, (DWORD)sizeof(buffer) - keep, &chunk, NULL) || chunk == 0) break;
+        got = keep + chunk;
+        for (i = 0; i + needleLength <= (int)got; ++i) {
+            int k = 0;
+            while (k < needleLength) {
+                char ch = buffer[i + k];
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                if (ch != lowerNeedle[k]) break;
+                ++k;
+            }
+            if (k == needleLength) { found = TRUE; break; }
+        }
+        if (found) break;
+        keep = (DWORD)(needleLength - 1);
+        if (got > keep) CopyMemory(buffer, buffer + got - keep, keep);
+    }
+    CloseHandle(file);
+    return found;
+}
 static BOOL h_probe_client(const WCHAR *clientPath) {
     WCHAR dir[CX_CLEANUP_PATH_CAP], cef[CX_CLEANUP_PATH_CAP], winmm[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     WCHAR version[64];
@@ -1058,6 +1098,11 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     }
     proxyPresent = GetFileAttributesW(winmm) != INVALID_FILE_ATTRIBUTES;
     markerPresent = GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
+    {
+        BOOL clientUsesWinmm = h_file_contains_ci(clientPath, "winmm.dll");
+        h_print(L"probe: client-winmm="); h_print(clientUsesWinmm ? L"yes" : L"no"); h_print(L"\n");
+        if (!clientUsesWinmm) markerPresent = FALSE;
+    }
     h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
     h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent"); h_print(L"\n");
     h_print(L"probe: suggested=");
@@ -2236,6 +2281,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
