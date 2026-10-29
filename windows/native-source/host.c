@@ -112,6 +112,15 @@ static JT h_diagnostic_tokens[HOST_REPLY_TOKENS];
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static void h_zero(void *p, SIZE_T n) { volatile BYTE *b = (volatile BYTE *)p; while (n--) *b++ = 0; }
+static BOOL h_parent_dir(const WCHAR *path, WCHAR *out, DWORD cap) {
+    DWORD i = 0, cut = 0;
+    if (!path || !out || cap < 4) return FALSE;
+    while (path[i]) { if (path[i] == L'\\\\' || path[i] == L'/') cut = i; ++i; }
+    if (!cut || cut + 1 > cap) return FALSE;
+    for (i = 0; i < cut; ++i) out[i] = path[i];
+    out[cut] = 0;
+    return TRUE;
+}
 static BOOL h_same(const WCHAR *a, const WCHAR *b) {
     int i = 0;
     if (!a || !b) return FALSE;
@@ -1124,6 +1133,30 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
        不能静默退回端口模式，否则用户会误以为换了注入链路。 */
     if (options->injectModeSet &&
         !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port")) {
+        if (h_same(options->injectMode, L"dll-proxy")) {
+            /* dll-proxy 需要代理 DLL 在客户端目录；先把"缺什么、放哪里"说清楚。 */
+            WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
+            BOOL dirOk = options->injectProxyDirSet
+                ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
+                : h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP);
+            BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
+                           h_cat(proxyDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                           GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
+            if (!options->quiet) {
+                if (present) {
+                    h_print(L"dll-proxy: proxy found at ");
+                    h_print(proxyDll);
+                    h_print(L"; in-process hook driving is not implemented yet, use --inject-mode cdp-port");
+                } else {
+                    h_print(L"dll-proxy requires the proxy DLL at ");
+                    if (dirOk) { h_print(proxyDir); h_print(L"\\winmm.dll"); }
+                    h_print(L"; copy the winmm proxy there (administrator may be required)");
+                }
+            }
+            h_report.stopReason = present ? "inject-proxy-not-driven" : "inject-proxy-missing";
+            h_exit_code = 4;
+            goto done;
+        }
         if (!options->quiet) {
             h_print(L"inject mode is not implemented in this build: ");
             h_print(options->injectMode);

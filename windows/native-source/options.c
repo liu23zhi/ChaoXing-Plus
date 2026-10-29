@@ -284,7 +284,13 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
         if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
         if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
-        if (cx_streq(a, L"--inject-mode")) {
+        if (cx_streq(a, L"--inject-proxy-dir")) {
+        if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) ||
+            !cx_copy_arg(o, o->injectProxyDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE;
+        o->injectProxyDirSet = TRUE;
+        continue;
+    }
+    if (cx_streq(a, L"--inject-mode")) {
         if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) ||
             !cx_copy_arg(o, o->injectMode, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE;
         if (!cx_streq(o->injectMode, L"auto") && !cx_streq(o->injectMode, L"cdp-port") &&
@@ -814,6 +820,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
     /* 静默场景只来自命令行：合并层必须显式搬运，否则 finalize 看到的永远是 FALSE。 */
     if (layer->silentScenario) destination->silentScenario = TRUE;
+    if (layer->injectProxyDirSet) { cx_wcopy(destination->injectProxyDir, CX_OPTIONS_PATH_CAP, layer->injectProxyDir); destination->injectProxyDirSet = TRUE; }
     if (layer->injectModeSet) { cx_wcopy(destination->injectMode, CX_OPTIONS_SHORT_CAP, layer->injectMode); destination->injectModeSet = TRUE; }
     if (layer->consoleWindow) destination->consoleWindow = TRUE;
     if (layer->stagedBoot) destination->stagedBoot = TRUE;
@@ -975,6 +982,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
 
 
 
