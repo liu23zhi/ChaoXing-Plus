@@ -805,8 +805,10 @@ static BOOL h_pipe_stage2(const WCHAR *clientPath, const WCHAR *expression) {
     h_pipe_close(&state);
     return TRUE;
 }
+static char *h_bundle_source(const char *bundle, DWORD length, DWORD *outLength);
+
 /* cdp-pipe 主流程（第一阶段）：管道启动客户端、attach 目标、注入 bootstrap 源码。 */
-static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, WCHAR *error, DWORD errorCap) {
+static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, const char *bundle, DWORD bundleLength, WCHAR *error, DWORD errorCap) {
     H_PIPE_CDP state;
     char *reply = NULL;
     char targetId[80];
@@ -873,6 +875,35 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     net_free(reply); reply = NULL;
     h_report.bootstraps += 1;
     if (!options->quiet) h_print(L"cdp-pipe: bootstrap injected\n");
+    if (bundle && bundleLength) {
+        char *wrapped = NULL;
+        DWORD wrappedLength = 0;
+        HeapFree(GetProcessHeap(), 0, params);
+        params = NULL;
+        wrapped = h_bundle_source(bundle, bundleLength, &wrappedLength);
+        if (!wrapped) { h_error(error, errorCap, L"cdp-pipe: bundle wrap failed"); goto done; }
+        paramsCap = wrappedLength * 6 + 256;
+        params = (char *)HeapAlloc(GetProcessHeap(), 0, paramsCap);
+        if (!params) { net_free(wrapped); h_error(error, errorCap, L"cdp-pipe: out of memory"); goto done; }
+        at = 0;
+        {
+            static const char head[] = "{\"expression\":";
+            DWORD k;
+            for (k = 0; head[k]; ++k) params[at++] = head[k];
+        }
+        if (!h_json_quote(params, paramsCap, &at, wrapped, wrappedLength)) { net_free(wrapped); h_error(error, errorCap, L"cdp-pipe: bundle too large"); goto done; }
+        net_free(wrapped);
+        {
+            static const char tail[] = ",\"returnByValue\":true}";
+            DWORD k;
+            for (k = 0; tail[k]; ++k) params[at++] = tail[k];
+            params[at] = 0;
+        }
+        if (h_pipe_call(&state, "Runtime.evaluate", params, &reply, 15000) != 1) { h_error(error, errorCap, L"cdp-pipe: bundle evaluate failed"); goto done; }
+        net_free(reply); reply = NULL;
+        h_report.bundles += 1;
+        if (!options->quiet) h_print(L"cdp-pipe: bundle injected\n");
+    }
     ok = TRUE;
 done:
     if (params) HeapFree(GetProcessHeap(), 0, params);
@@ -1616,10 +1647,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         || !cx_asset_load(L"trampoline.js", options->assetsDirSet ? options->assetsDir : NULL, &trampoline, &trampolineLength, error, errorCap)) goto done;
     if (!h_preflight_assets(options, bootstrapLength, bundleLength, style, styleLength, error, errorCap)) goto done;
     if (options->injectModeSet && h_same(options->injectMode, L"cdp-pipe")) {
-        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, error, errorCap)) goto done;
+        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, bundle, bundleLength, error, errorCap)) goto done;
         h_report.stopReason = "pipe-bootstrap-complete";
         h_report.injectMode = "cdp-pipe";
-        return TRUE;
+        ok = TRUE;
+        goto done;
     }
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
     if (options->silentScenario) {
@@ -1996,6 +2028,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
 
 
 
