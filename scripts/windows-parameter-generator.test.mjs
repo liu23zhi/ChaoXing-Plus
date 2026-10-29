@@ -1102,3 +1102,22 @@ test('两种宿主可导出 --dpi-aware 与 Node 静默控制台，原生宿主�
     assert.match(hints, /页面 PNG 截图/u);
   } finally { await page.close(); }
 });
+test('注入方式只在原生宿主导出，auto 不输出该参数', async () => {
+  const page = await openGenerator();
+  try {
+    await page.select('#hostType', 'native');
+    await page.$eval('#nativePath', (node, p) => { node.value = p; node.dispatchEvent(new Event('input', { bubbles: true })); }, resolve('build-windows/bin/chaoxing_plus.exe'));
+    const autoCli = await page.$eval('#powershell', (node) => node.value);
+    assert.equal(autoCli.length > 0, true, '原生宿主应生成命令');
+    assert.equal(autoCli.includes('--inject-mode'), false, 'auto 为默认值，不应输出');
+    await page.select('#injectMode', 'cdp-port');
+    const portCli = await page.$eval('#powershell', (node) => node.value);
+    assert.equal(portCli.includes('--inject-mode'), true, '应导出 --inject-mode');
+    assert.equal(portCli.includes('cdp-port'), true, '应导出值 cdp-port');
+    await page.select('#hostType', 'node');
+    const nodeCli = await page.$eval('#powershell', (node) => node.value);
+    assert.equal(nodeCli.includes('--inject-mode'), false, 'Node 宿主不输出该参数');
+  } finally { await page.close(); }
+});
+
+
