@@ -712,22 +712,23 @@ static BOOL proxy_patch_pushret(void *targetAddr, void *hookAddr, void **trampol
     return TRUE;
 }
 
-static void proxy_hook_cef_initialize(void) {
+static BOOL proxy_hook_cef_initialize(void) {
     HMODULE cef = GetModuleHandleW(L"libcef.dll");
     void *target;
     void *trampoline = NULL;
-    if (!cef || g_cefInitTrampoline) return;
+    if (!cef || g_cefInitTrampoline) return g_cefInitTrampoline != NULL;
     target = (void *)GetProcAddress(cef, "cef_initialize");
-    if (!target) { proxy_append("winmm proxy: cef_initialize not exported"); return; }
+    if (!target) { proxy_append("winmm proxy: cef_initialize not exported"); return FALSE; }
     g_realCefInitAddr = target;
     if (!proxy_patch_pushret(target, (void *)proxy_cef_init_wrapper, &trampoline)) {
         proxy_append("winmm proxy: cef_initialize patch skipped");
-        return;
+        return FALSE;
     }
     g_cefInitTrampoline = trampoline;
     /* wrapper 通过 g_realCefInitAddr 调用真实函数；我们改用 trampoline */
     g_realCefInitAddr = trampoline;
     proxy_append("winmm proxy: cef_initialize patched (pushret)");
+    return TRUE;
 }
 static void proxy_init_table(void) {
     WCHAR dir[MAX_PATH];
@@ -785,7 +786,6 @@ static DWORD WINAPI proxy_warmup(LPVOID unused) {
     (void)unused;
     proxy_prepare_command_line();
     proxy_hook_getprocaddress();
-    proxy_hook_cef_initialize();
     {
         DWORD p = 0;
         const WCHAR *src = NULL;
@@ -808,6 +808,23 @@ static DWORD WINAPI proxy_warmup(LPVOID unused) {
         g_forcedPort = (int)p;
     }
     if (!g_commandLineReady && !g_forcedPort) { proxy_append("winmm proxy: no injection port"); return 0; }
+    /* CX_PROXY_SETTINGS_ONLY=1：只允许 settings 注入，失败也不做命令行/IAT 改写（避免重复注入崩溃）。 */
+    {
+        WCHAR onlyFlag[8];
+        if (GetEnvironmentVariableW(L"CX_PROXY_SETTINGS_ONLY", onlyFlag, 8) > 0 && onlyFlag[0] == L'1') {
+            if (proxy_hook_cef_initialize()) {
+                proxy_append("winmm proxy: settings-only mode (forced)");
+            } else {
+                proxy_append("winmm proxy: settings-only forced but hook failed");
+            }
+            return 0;
+        }
+    }
+    /* 优先走 settings 注入：成功则完全不碰命令行与 IAT，稳定性最高。 */
+    if (proxy_hook_cef_initialize()) {
+        proxy_append("winmm proxy: settings-only mode");
+        return 0;
+    }
     proxy_rewrite_peb_command_line();
     /* libcef 等模块可能在本线程启动后才加载：持续重试 ~3 秒，确保 CEF 初始化前补上 IAT。 */
     proxy_hook_command_line();
@@ -894,6 +911,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
+
 
 
 

@@ -2152,15 +2152,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_exit_code = 4;
         goto done;
     }
-    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy") && !h_pe_section_named(h_selected_path, ".themida")) {
-        if (!options->quiet) {
-            h_print(L"非加壳客户端无需 dll-proxy：它支持命令行开关，请改用默认的 cdp-port\n");
-            h_print(L"（实测 4.1.4 客户端装代理后会在 libcef.dll 内 0xC0000005 崩溃）\n");
-        }
-        h_report.stopReason = "inject-proxy-not-needed";
-        h_exit_code = 4;
-        goto done;
-    }
+
     if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
         WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
         BOOL dirOk = options->injectProxyDirSet
@@ -2278,8 +2270,10 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             WCHAR proxyPort[16];
             wsprintfW(proxyPort, L"%u", (unsigned)port);
             SetEnvironmentVariableW(L"CX_INJECT_PORT", proxyPort);
+            SetEnvironmentVariableW(L"CX_PROXY_SETTINGS_ONLY", L"1");
             launched = proc_launch_env(h_selected_path, port, FALSE, &h_client_pid, &client, error, errorCap);
             SetEnvironmentVariableW(L"CX_INJECT_PORT", NULL);
+            SetEnvironmentVariableW(L"CX_PROXY_SETTINGS_ONLY", NULL);
         } else {
             launched = proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap);
         }
@@ -2565,6 +2559,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
