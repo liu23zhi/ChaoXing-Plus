@@ -808,7 +808,7 @@ static BOOL h_pipe_stage2(const WCHAR *clientPath, const WCHAR *expression) {
 static char *h_bundle_source(const char *bundle, DWORD length, DWORD *outLength);
 
 /* cdp-pipe 主流程（第一阶段）：管道启动客户端、attach 目标、注入 bootstrap 源码。 */
-static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, const char *bundle, DWORD bundleLength, WCHAR *error, DWORD errorCap) {
+static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, const char *bundle, DWORD bundleLength, const char *style, DWORD styleLength, WCHAR *error, DWORD errorCap) {
     H_PIPE_CDP state;
     char *reply = NULL;
     char targetId[80];
@@ -854,6 +854,32 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     }
     net_free(reply); reply = NULL;
     if (!state.sessionId[0]) { h_error(error, errorCap, L"cdp-pipe: attach returned no sessionId"); goto done; }
+    /* 先下发页面配置（与 WebSocket 通道同一份表达式），再注入 bootstrap。 */
+    if (state.sessionId[0]) {
+        char *configExpression = NULL;
+        DWORD configLength = 0;
+        if (h_build_page_config(options, style, styleLength, &configExpression, &configLength, error, errorCap)) {
+            DWORD cap2 = configLength * 6 + 256;
+            char *configParams = (char *)HeapAlloc(GetProcessHeap(), 0, cap2);
+            if (configParams) {
+                DWORD at2 = 0, k2 = 0;
+                static const char head[] = "{\"expression\":";
+                static const char tail[] = ",\"returnByValue\":true}";
+                for (k2 = 0; head[k2]; ++k2) configParams[at2++] = head[k2];
+                if (h_json_quote(configParams, cap2, &at2, configExpression, configLength)) {
+                    for (k2 = 0; tail[k2]; ++k2) configParams[at2++] = tail[k2];
+                    configParams[at2] = 0;
+                    if (h_pipe_call(&state, "Runtime.evaluate", configParams, &reply, 10000) == 1) {
+                        net_free(reply);
+                        reply = NULL;
+                        h_ui_record("info", "pipe-config");
+                    }
+                }
+                HeapFree(GetProcessHeap(), 0, configParams);
+            }
+            HeapFree(GetProcessHeap(), 0, configExpression);
+        }
+    }
     HeapFree(GetProcessHeap(), 0, params);
     paramsCap = bootstrapLength * 6 + 256;
     params = (char *)HeapAlloc(GetProcessHeap(), 0, paramsCap);
@@ -1265,19 +1291,22 @@ static BOOL h_inject_asset(NET_WS *ws, DWORD *nextId, const WCHAR *strategy, DWO
     h_copy(error, errorCap, lastError);
     return FALSE;
 }
-static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *options,
-                              const char *style, DWORD styleLength, BOOL preflight, WCHAR *error, DWORD errorCap) {
+/* 构建页面配置表达式（配置 JSON + instance + 样式 + 可选标记），供 WebSocket 与管道通道共用。 */
+static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DWORD styleLength,
+                                char **outExpression, DWORD *outLength, WCHAR *error, DWORD errorCap) {
     const char prefix[] = "window.__CX_WIN_CONFIG_JSON__=";
     const char middle[] = ";window.__CX_WIN_INSTANCE__=";
     const char stylePrefix[] = ";window.__CX_WIN_STYLE_TEXT__=";
     char *config = NULL, *expression = NULL;
     DWORD configLength = 0, capacity, at = 0;
     BOOL ok = FALSE;
+    if (outExpression) *outExpression = NULL;
+    if (outLength) *outLength = 0;
     config = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
     if (!config || !cx_options_effective_settings_json_utf8(options, config, CX_OPTIONS_JSON_CAP, &configLength)) {
         h_error(error, errorCap, L"cannot serialize native settings"); goto done;
     }
-    if (!preflight && h_config_json(&configLength)) CopyMemory(config, h_config_json(&configLength), configLength + 1);
+    if (h_config_json(&configLength)) CopyMemory(config, h_config_json(&configLength), configLength + 1);
     if (!style || styleLength > (HOST_SOURCE_CAP - configLength - 256) / 6) {
         h_error(error, errorCap, L"native style exceeds its size limit"); goto done;
     }
@@ -1309,13 +1338,28 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
             if (at + 1 >= capacity) { h_error(error, errorCap, L"panel flag exceeds size limit"); goto done; }
             expression[at++] = panelAll[panelAt++];
         }
-    }    if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
-    ok = preflight || h_send_eval(ws, (*nextId)++, expression, at, error, errorCap);
+    }
+    if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
+    if (outExpression) { *outExpression = expression; expression = NULL; }
+    if (outLength) *outLength = at;
+    ok = TRUE;
 done:
     if (config) HeapFree(GetProcessHeap(), 0, config);
     if (expression) HeapFree(GetProcessHeap(), 0, expression);
     return ok;
 }
+
+static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *options,
+                              const char *style, DWORD styleLength, BOOL preflight, WCHAR *error, DWORD errorCap) {
+    char *expression = NULL;
+    DWORD length = 0;
+    BOOL ok;
+    if (!h_build_page_config(options, style, styleLength, &expression, &length, error, errorCap)) return FALSE;
+    ok = preflight || h_send_eval(ws, (*nextId)++, expression, length, error, errorCap);
+    HeapFree(GetProcessHeap(), 0, expression);
+    return ok;
+}
+
 static BOOL h_preflight_assets(const CX_OPTIONS *options, DWORD bootstrapLength, DWORD bundleLength,
                                const char *style, DWORD styleLength, WCHAR *error, DWORD errorCap) {
     if (bootstrapLength > HOST_EVAL_SOURCE_CAP || bundleLength > HOST_EVAL_SOURCE_CAP) {
@@ -1652,7 +1696,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         || !cx_asset_load(L"trampoline.js", options->assetsDirSet ? options->assetsDir : NULL, &trampoline, &trampolineLength, error, errorCap)) goto done;
     if (!h_preflight_assets(options, bootstrapLength, bundleLength, style, styleLength, error, errorCap)) goto done;
     if (options->injectModeSet && h_same(options->injectMode, L"cdp-pipe")) {
-        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, bundle, bundleLength, error, errorCap)) goto done;
+        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, error, errorCap)) goto done;
         h_report.stopReason = "pipe-bootstrap-complete";
         h_report.injectMode = "cdp-pipe";
         ok = TRUE;
@@ -2033,6 +2077,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
