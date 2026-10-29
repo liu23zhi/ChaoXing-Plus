@@ -560,8 +560,25 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxySourceSet) {
         if (!h_copy(source, CX_CLEANUP_PATH_CAP, options->proxySource)) { h_print(L"install-proxy: invalid --proxy-source"); return FALSE; }
     } else {
+        static const WCHAR *const candidates[] = {
+            L"\\winmm-proxy.dll",
+            L"\\winmm.dll",
+            L"\\hook\\winmm.dll",
+            L"\\..\\hook\\winmm.dll",
+            L"\\build-windows\\hook\\winmm.dll"
+        };
+        DWORD i = 0;
+        BOOL found = FALSE;
         if (!h_parent_dir(h_exe_path, hostDir, CX_CLEANUP_PATH_CAP)) { h_print(L"install-proxy: cannot locate host directory"); return FALSE; }
-        if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
+        for (i = 0; i < (DWORD)(sizeof(candidates) / sizeof(candidates[0])); ++i) {
+            if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, candidates[i])) continue;
+            if (GetFileAttributesW(source) != INVALID_FILE_ATTRIBUTES) { found = TRUE; break; }
+        }
+        if (!found) {
+            if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, L"\\winmm-proxy.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
+            h_print(L"install-proxy: proxy DLL not found next to the host; build it with windows\\hook-source\\build-proxy.ps1 or pass --proxy-source");
+            return FALSE;
+        }
     }
     if (GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES) {
         h_print(L"install-proxy: proxy DLL not found at ");
@@ -2207,6 +2224,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

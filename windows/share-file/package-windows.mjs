@@ -276,6 +276,13 @@ async function main() {
       await fs.copyFile(source, path.join(packageRoot, name));
     }
   }
+  // 可选：把 winmm 代理随包发布，便于 --install-proxy 直接找到源文件。
+  {
+    const proxySource = path.join(repoRoot, 'build-windows', 'hook', 'winmm.dll');
+    if (includeNative && await pathExists(proxySource)) {
+      await fs.copyFile(proxySource, path.join(packageRoot, 'winmm-proxy.dll'));
+    }
+  }
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
   if (!options.skipDocs) {
     for (const doc of ['README.md', path.join('docs', 'windows.md')]) {
@@ -363,6 +370,7 @@ async function main() {
 }
 
 main().catch((error) => fail(error && error.message ? error.message : String(error), 1));
+
 
 
 
