@@ -444,6 +444,18 @@ static void emit_page_setup(void) {
     ExitProcess(ok ? 0 : 1);
 }
 
+/* 管道 CDP 传输在注入测试里不需要真实行为，提供最小替身以便链接 host.c。 */
+BOOL net_pipe_send_frame(HANDLE writeHandle, const char *payload, DWORD length) {
+    (void)writeHandle; (void)payload; (void)length;
+    return FALSE;
+}
+
+int net_pipe_recv_frame(HANDLE readHandle, char **payload, DWORD *length, DWORD timeoutMs) {
+    (void)readHandle; (void)timeoutMs;
+    if (payload) *payload = NULL;
+    if (length) *length = 0;
+    return -1;
+}
 void __stdcall InjectionTestMain(void) {
     DWORD id = 2;
     int argc;
@@ -486,3 +498,5 @@ void __stdcall InjectionTestMain(void) {
     h_print_utf8(failedChecks ? "NATIVE INJECTION TESTS FAIL\n" : "NATIVE INJECTION TESTS PASS\n");
     ExitProcess(failedChecks ? 1 : 0);
 }
+
+
