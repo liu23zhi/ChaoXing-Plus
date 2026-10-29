@@ -534,8 +534,10 @@ static int __cdecl proxy_cef_init_wrapper(const void *args, void *settings, void
     if (settings && g_forcedPort) {
         DWORD size = *(DWORD *)settings;
         int offset = -1;
-        if (size >= 228) offset = 184;
-        else if (size == 216) offset = 172;
+        /* IG5 反编译 libcef!FUN_100030bc 证实：remote_debugging_port 固定位于 +0xB8(184)，
+           其后的字段（background_color / accept_language_list / application_client_id…）
+           只影响 sizeof。因此只要结构体覆盖到 +188 就用 184，不能再按 sizeof 回退偏移。 */
+        if (size >= 188) offset = 184;
         if (offset > 0 && (DWORD)offset + 4 <= size) {
             /* IG5 实测 cef_settings_t 布局：size=0xE4(228)、command_line_args_disabled=0x2C(44)、
                remote_debugging_port=0xB8(184)。这里同时解除命令行开关禁用。 */
@@ -865,6 +867,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
 
 
 
