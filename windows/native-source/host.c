@@ -1017,6 +1017,35 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     h_print(L"\n");
     return TRUE;
 }
+/* 扫描常见目录并对每个候选客户端做离线探测（不启动、不写盘）。 */
+static BOOL h_probe_all(void) {
+    CX_DISCOVERY_OPTIONS options;
+    CX_DISCOVERY_RESULT result;
+    WCHAR error[HOST_ERROR_CAP];
+    DWORD i;
+    BOOL ok = TRUE;
+    ZeroMemory(&options, sizeof(options));
+    options.mode = CX_DISCOVERY_SCAN_COMMON;
+    options.hostIs32Bit = FALSE;
+    cx_discovery_init(&result);
+    error[0] = 0;
+    if (!cx_discovery_scan(&options, &result, error, HOST_ERROR_CAP)) {
+        h_print(L"probe-all: scan failed: "); h_print(error); h_print(L"\n");
+        cx_discovery_free(&result);
+        return FALSE;
+    }
+    {
+        WCHAR line[96];
+        wsprintfW(line, L"probe-all: candidates=%lu", (unsigned long)result.count);
+        h_print(line); h_print(L"\n");
+    }
+    for (i = 0; i < result.count; ++i) {
+        h_print(L"---\n");
+        if (!h_probe_client(result.items[i].path)) ok = FALSE;
+    }
+    cx_discovery_free(&result);
+    return ok;
+}
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOW si;
@@ -2050,6 +2079,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
     "调试: --install-proxy [--proxy-source <winmm.dll>]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
+    "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
             "状态: --version --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
@@ -2074,6 +2104,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.probeClientPathSet) { return h_probe_client(h_base_options.probeClientPath) ? 0 : 1; }
+    if (h_base_options.probeAll) { return h_probe_all() ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath, h_base_options.pipeExpr) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
@@ -2152,6 +2183,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

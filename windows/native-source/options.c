@@ -296,6 +296,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
     }
     if (cx_streq(a, L"--panel-all-pages")) { o->panelAllPages = TRUE; continue; }
     if (cx_streq(a, L"--pipe-test")) { o->pipeTest = TRUE; continue; }
+    if (cx_streq(a, L"--probe-all")) { o->probeAll = TRUE; continue; }
     if (cx_streq(a, L"--probe-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->probeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->probeClientPathSet = TRUE; continue; }
     if (cx_streq(a, L"--install-proxy")) { o->installProxy = TRUE; continue; }
     if (cx_streq(a, L"--uninstall-proxy")) { o->uninstallProxy = TRUE; continue; }
@@ -850,6 +851,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->pipeTest) destination->pipeTest = TRUE;
     if (layer->installProxy) destination->installProxy = TRUE;
     if (layer->probeClientPathSet) { cx_wcopy(destination->probeClientPath, CX_OPTIONS_PATH_CAP, layer->probeClientPath); destination->probeClientPathSet = TRUE; }
+    if (layer->probeAll) destination->probeAll = TRUE;
     if (layer->uninstallProxy) destination->uninstallProxy = TRUE;
     if (layer->proxySourceSet) { cx_wcopy(destination->proxySource, CX_OPTIONS_PATH_CAP, layer->proxySource); destination->proxySourceSet = TRUE; }
     if (layer->pipeClientPathSet) { cx_wcopy(destination->pipeClientPath, CX_OPTIONS_PATH_CAP, layer->pipeClientPath); destination->pipeClientPathSet = TRUE; }
@@ -1015,6 +1017,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
 
 
 
