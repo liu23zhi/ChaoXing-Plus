@@ -81,3 +81,8 @@ $testExe = Join-Path $out 'tests/proxy-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'link test failed' }
 Get-Item $testExe | Select-Object FullName, Length
 
+
+
+
+
+

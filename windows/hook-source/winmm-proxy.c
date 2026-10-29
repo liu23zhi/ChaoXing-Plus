@@ -1,5 +1,8 @@
 /* winmm.dll 代理：所有导出由生成的 naked 跳转桩转发到系统 winmm。
-   本文件只负责加载真实 winmm、填充跳转表、写装载日志。 */
+   设计要点（2026-10-29 真实客户端 0xc0000142 故障后修正）：
+   - DllMain 只做 DisableThreadLibraryCalls、记录实例、启动工作线程；
+     绝不能在加载器锁内 LoadLibrary / 枚举 Toolhelp（会让宿主 DLL 初始化失败）。
+   - 跳转表由 lazy 桩按需填充：先看表项，为空则调用 proxy_ensure() 再跳。 */
 #include <windows.h>
 #include <tlhelp32.h>
 
@@ -15,7 +18,22 @@ extern const char *g_winmm_names[];
 extern int g_winmm_count;
 
 static HMODULE g_realWinmm;
+static HINSTANCE g_proxyInstance;
+static LONG g_initState; /* 0=未初始化 1=进行中 2=完成 */
+static char g_fixedPort[16];
+static WCHAR g_patchedCommandLine[4096];
+static BOOL g_commandLineReady;
+static LPWSTR (WINAPI *g_realGetCommandLineW)(void);
 
+static void proxy_append(const char *text);
+static void proxy_read_fixed_port(void);
+static void proxy_prepare_command_line(void);
+static void proxy_hook_command_line(void);
+static void proxy_init_table(void);
+void __cdecl proxy_ensure(void);
+static DWORD WINAPI proxy_warmup(LPVOID unused);
+
+/* ---- 日志：%TEMP%\cxhook-<pid>.log ---- */
 static void proxy_append(const char *text) {
     WCHAR temp[MAX_PATH];
     WCHAR path[MAX_PATH];
@@ -52,43 +70,9 @@ static void proxy_append(const char *text) {
     CloseHandle(file);
 }
 
-static int proxy_load_real(void) {
-    WCHAR dir[MAX_PATH];
-    WCHAR path[MAX_PATH];
-    DWORD got, at = 0, i;
-    int filled = 0;
-    if (g_realWinmm) return g_winmm_count;
-    got = GetSystemDirectoryW(dir, MAX_PATH);
-    if (!got || got + 16 >= MAX_PATH) return 0;
-    while (dir[at]) { path[at] = dir[at]; ++at; }
-    path[at++] = L'\\'; path[at++] = L'w'; path[at++] = L'i'; path[at++] = L'n'; path[at++] = L'm'; path[at++] = L'm';
-    path[at++] = L'.'; path[at++] = L'd'; path[at++] = L'l'; path[at++] = L'l'; path[at] = 0;
-    g_realWinmm = LoadLibraryW(path);
-    if (!g_realWinmm) return 0;
-    for (i = 0; i < (DWORD)g_winmm_count; ++i) {
-        FARPROC proc = GetProcAddress(g_realWinmm, g_winmm_names[i]);
-        g_winmm_table[i] = proc ? proc : (FARPROC)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetLastError");
-        if (proc) ++filled;
-    }
-    return filled;
-}
-
-
-/* ---- 命令行注入：让未带调试开关启动的客户端也能被宿主连接 ----
-   思路：DllMain 里把各模块 IAT 中 GetCommandLineW 的地址换成我们的包装函数，
-   在原始命令行后追加 --remote-debugging-port=<端口>（端口来自环境变量 CX_INJECT_PORT）。
-   Chromium 在 base::CommandLine::Init 里读到的就是追加后的命令行。 */
-typedef LPWSTR (WINAPI *GETCOMMANDLINEW)(void);
-
-
-/* 固定端口：没有 CX_INJECT_PORT 时（客户端被考试系统等第三方拉起）读取
-   DLL 同目录 cxhook-port.txt，让客户端仍然打开调试端点，供宿主 --attach 连接。 */
-static HINSTANCE g_proxyInstance;
-static char g_fixedPort[16];
-
+/* ---- 固定端口：cxhook-port.txt（第三方拉起场景） ---- */
 static void proxy_read_fixed_port(void) {
     WCHAR path[MAX_PATH];
-    WCHAR dir[MAX_PATH];
     DWORD got, at = 0, i;
     HANDLE file;
     char text[16];
@@ -99,17 +83,15 @@ static void proxy_read_fixed_port(void) {
     if (!got || got + 20 >= MAX_PATH) return;
     for (i = 0; i < got; ++i) {
         if (path[i] == L'\\' || path[i] == L'/') at = i;
-        dir[i] = path[i];
     }
     if (!at) return;
-    dir[at] = 0;
     {
         static const WCHAR tail[] = L"\\cxhook-port.txt";
         DWORD k = 0;
-        while (tail[k] && at + k + 1 < MAX_PATH) { dir[at + k] = tail[k]; ++k; }
-        dir[at + k] = 0;
+        while (tail[k] && at + k + 1 < MAX_PATH) { path[at + k] = tail[k]; ++k; }
+        path[at + k] = 0;
     }
-    file = CreateFileW(dir, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return;
     if (ReadFile(file, text, sizeof(text) - 1, &read, NULL) && read > 0) {
         DWORD k = 0, n = 0;
@@ -120,13 +102,10 @@ static void proxy_read_fixed_port(void) {
     }
     CloseHandle(file);
 }
-static WCHAR g_patchedCommandLine[4096];
-static BOOL g_commandLineReady = FALSE;
-static GETCOMMANDLINEW g_realGetCommandLineW = NULL;
 
 static LPWSTR WINAPI proxy_GetCommandLineW(void) {
     if (g_commandLineReady) return g_patchedCommandLine;
-    if (!g_realGetCommandLineW) g_realGetCommandLineW = (GETCOMMANDLINEW)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCommandLineW");
+    if (!g_realGetCommandLineW) g_realGetCommandLineW = (LPWSTR (WINAPI *)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCommandLineW");
     return g_realGetCommandLineW ? g_realGetCommandLineW() : NULL;
 }
 
@@ -145,7 +124,7 @@ static void proxy_prepare_command_line(void) {
     WCHAR *original;
     DWORD got, at = 0;
     if (g_commandLineReady) return;
-    if (!g_realGetCommandLineW) g_realGetCommandLineW = (GETCOMMANDLINEW)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCommandLineW");
+    if (!g_realGetCommandLineW) g_realGetCommandLineW = (LPWSTR (WINAPI *)(void))GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCommandLineW");
     if (!g_realGetCommandLineW) return;
     got = GetEnvironmentVariableW(L"CX_INJECT_PORT", port, 16);
     if (!got) {
@@ -179,8 +158,8 @@ static void proxy_patch_module_iat(HMODULE module) {
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
     nt = (IMAGE_NT_HEADERS *)((BYTE *)module + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return;
-    descriptor = (IMAGE_IMPORT_DESCRIPTOR *)((BYTE *)module + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     if (!nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress) return;
+    descriptor = (IMAGE_IMPORT_DESCRIPTOR *)((BYTE *)module + nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     while (descriptor && descriptor->Name) {
         IMAGE_THUNK_DATA *lookup = (IMAGE_THUNK_DATA *)((BYTE *)module + descriptor->OriginalFirstThunk);
         IMAGE_THUNK_DATA *address = (IMAGE_THUNK_DATA *)((BYTE *)module + descriptor->FirstThunk);
@@ -188,7 +167,7 @@ static void proxy_patch_module_iat(HMODULE module) {
         while (lookup && lookup->u1.AddressOfData) {
             if (!IMAGE_SNAP_BY_ORDINAL(lookup->u1.Ordinal)) {
                 IMAGE_IMPORT_BY_NAME *name = (IMAGE_IMPORT_BY_NAME *)((BYTE *)module + lookup->u1.AddressOfData);
-                if (name && name->Name[0] == 'G' && lstrcmpA((const char *)name->Name, "GetCommandLineW") == 0) {
+                if (name && lstrcmpA((const char *)name->Name, "GetCommandLineW") == 0) {
                     DWORD protect = 0;
                     if (VirtualProtect(&address->u1.Function, sizeof(void *), PAGE_READWRITE, &protect)) {
                         address->u1.Function = (ULONG_PTR)proxy_GetCommandLineW;
@@ -206,30 +185,69 @@ static void proxy_patch_module_iat(HMODULE module) {
 static void proxy_hook_command_line(void) {
     HANDLE snapshot;
     MODULEENTRY32W entry;
-    proxy_prepare_command_line();
+    if (!g_commandLineReady) proxy_prepare_command_line();
     if (!g_commandLineReady) return;
     snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (snapshot == INVALID_HANDLE_VALUE) return;
     entry.dwSize = sizeof(entry);
     if (Module32FirstW(snapshot, &entry)) {
         do {
-            DWORD protect = 0;
-            if (!VirtualProtect(&g_realGetCommandLineW, sizeof(void *), PAGE_READWRITE, &protect)) { }
             proxy_patch_module_iat(entry.hModule);
         } while (Module32NextW(snapshot, &entry));
     }
     CloseHandle(snapshot);
 }
+
+static void proxy_init_table(void) {
+    WCHAR dir[MAX_PATH];
+    WCHAR path[MAX_PATH];
+    DWORD got, at = 0, i;
+    got = GetSystemDirectoryW(dir, MAX_PATH);
+    if (!got || got + 16 >= MAX_PATH) return;
+    while (dir[at]) { path[at] = dir[at]; ++at; }
+    path[at++] = L'\\'; path[at++] = L'w'; path[at++] = L'i'; path[at++] = L'n'; path[at++] = L'm'; path[at++] = L'm';
+    path[at++] = L'.'; path[at++] = L'd'; path[at++] = L'l'; path[at++] = L'l'; path[at] = 0;
+    g_realWinmm = LoadLibraryW(path);
+    if (!g_realWinmm) { proxy_append("winmm proxy: real winmm not found"); return; }
+    for (i = 0; i < (DWORD)g_winmm_count; ++i) {
+        FARPROC proc = GetProcAddress(g_realWinmm, g_winmm_names[i]);
+        g_winmm_table[i] = proc ? proc : (FARPROC)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetLastError");
+    }
+    proxy_append("winmm proxy loaded");
+}
+
+void __cdecl proxy_ensure(void) {
+    if (InterlockedCompareExchange(&g_initState, 1, 0) == 0) {
+        proxy_init_table();
+        InterlockedExchange(&g_initState, 2);
+        return;
+    }
+    while (InterlockedCompareExchange(&g_initState, 0, 0) != 2) Sleep(0);
+}
+
+static DWORD WINAPI proxy_warmup(LPVOID unused) {
+    int attempt;
+    (void)unused;
+    proxy_prepare_command_line();
+    if (!g_commandLineReady) proxy_append("winmm proxy: no injection port");
+    for (attempt = 0; attempt < 20; ++attempt) {
+        proxy_hook_command_line();
+        if (g_commandLineReady) break;
+        Sleep(10);
+    }
+    proxy_append(g_commandLineReady ? "winmm proxy: hook done" : "winmm proxy: hook skipped");
+    return 0;
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
-        int filled;
         DisableThreadLibraryCalls(instance);
         g_proxyInstance = instance;
-        filled = proxy_load_real();
-        proxy_hook_command_line();
-        if (filled <= 0) proxy_append("winmm proxy: real winmm not found");
-        else proxy_append("winmm proxy loaded");
+        /* 只做 LoadLibrary + GetProcAddress 填表；Toolhelp/日志交给工作线程，
+           避免在加载器锁内枚举模块导致宿主 0xc0000142。 */
+        proxy_init_table();
+        CreateThread(NULL, 0, proxy_warmup, NULL, 0, NULL);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (g_realWinmm) { FreeLibrary(g_realWinmm); g_realWinmm = NULL; }
     }
