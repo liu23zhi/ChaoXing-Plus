@@ -757,7 +757,7 @@ static void h_pipe_stage(const WCHAR *name) {
     h_print(L"\n");
 }
 
-static BOOL h_pipe_stage2(const WCHAR *clientPath) {
+static BOOL h_pipe_stage2(const WCHAR *clientPath, const WCHAR *expression) {
     H_PIPE_CDP state;
     char *reply = NULL;
     if (!clientPath || !*clientPath) { h_print(L"pipe-call: missing path"); return FALSE; }
@@ -791,7 +791,15 @@ static BOOL h_pipe_stage2(const WCHAR *clientPath) {
     }
     net_free(reply); reply = NULL;
     h_pipe_stage(L"evaluate");
-    if (h_pipe_call(&state, "Runtime.evaluate", "{\"expression\":\"1+1\",\"returnByValue\":true}", &reply, 8000) != 1) { h_print(L"pipe-call: evaluate failed"); h_pipe_close(&state); return FALSE; }
+    {
+        char evalParams[2048];
+        char expressionA[1024];
+        int copied = 0;
+        if (expression && *expression) copied = WideCharToMultiByte(CP_UTF8, 0, expression, -1, expressionA, 1000, NULL, NULL);
+        if (copied <= 1) lstrcpyA(expressionA, "1+1");
+        wsprintfA(evalParams, "{\"expression\":\"%s\",\"returnByValue\":true}", expressionA);
+        if (h_pipe_call(&state, "Runtime.evaluate", evalParams, &reply, 8000) != 1) { h_print(L"pipe-call: evaluate failed"); h_pipe_close(&state); return FALSE; }
+    }
     net_free(reply);
     h_pipe_stage(L"done");
     h_pipe_close(&state);
@@ -1830,7 +1838,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
-    if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath) ? 0 : 1; }
+    if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath, h_base_options.pipeExpr) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
         int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
         if (pipeCode == 740) {
@@ -1907,6 +1915,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

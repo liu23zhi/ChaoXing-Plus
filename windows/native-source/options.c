@@ -299,6 +299,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
     if (cx_streq(a, L"--install-proxy")) { o->installProxy = TRUE; continue; }
     if (cx_streq(a, L"--uninstall-proxy")) { o->uninstallProxy = TRUE; continue; }
     if (cx_streq(a, L"--proxy-source")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxySource, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->proxySourceSet = TRUE; continue; }
+    if (cx_streq(a, L"--pipe-expr")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeExpr, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; continue; }
     if (cx_streq(a, L"--pipe-call")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeCallPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeCallPathSet = TRUE; continue; }
     if (cx_streq(a, L"--pipe-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeClientPathSet = TRUE; continue; }
     if (cx_streq(a, L"--inject-mode")) {
@@ -851,6 +852,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->proxySourceSet) { cx_wcopy(destination->proxySource, CX_OPTIONS_PATH_CAP, layer->proxySource); destination->proxySourceSet = TRUE; }
     if (layer->pipeClientPathSet) { cx_wcopy(destination->pipeClientPath, CX_OPTIONS_PATH_CAP, layer->pipeClientPath); destination->pipeClientPathSet = TRUE; }
     if (layer->pipeCallPathSet) { cx_wcopy(destination->pipeCallPath, CX_OPTIONS_PATH_CAP, layer->pipeCallPath); destination->pipeCallPathSet = TRUE; }
+    if (layer->pipeExpr[0]) cx_wcopy(destination->pipeExpr, CX_OPTIONS_PATH_CAP, layer->pipeExpr);
     if (layer->consoleWindow) destination->consoleWindow = TRUE;
     if (layer->stagedBoot) destination->stagedBoot = TRUE;
     if (layer->stageRequest) destination->stageRequest = TRUE;
@@ -1011,6 +1013,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
 
 
 
