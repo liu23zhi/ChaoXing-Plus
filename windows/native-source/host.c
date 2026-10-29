@@ -283,6 +283,7 @@ static void h_sample_page(H_NATIVE_PAGE *page) {
 /* ---------- 原生静默场景：程序痕迹清理 + 自毁接线 ---------- */
 static CX_SILENT h_silent;
 static BOOL h_silent_active = FALSE;
+static BOOL h_dll_proxy_mode = FALSE;
 static BOOL h_silent_simulate = FALSE;
 static BOOL h_silent_done = FALSE;
 static CX_CLEANUP_PLAN *h_silent_plan = NULL;
@@ -1277,38 +1278,38 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
     }
-    /* 注入方式分派：目前只有 auto/cdp-port 具备完整实现；其余模式必须显式失败，
-       不能静默退回端口模式，否则用户会误以为换了注入链路。 */
-    if (options->injectModeSet &&
-        !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port")) {
-        if (h_same(options->injectMode, L"dll-proxy")) {
-            /* dll-proxy 需要代理 DLL 在客户端目录；先把"缺什么、放哪里"说清楚。 */
-            WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
-            BOOL dirOk = options->injectProxyDirSet
-                ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
-                : h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP);
-            BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
-                           h_cat(proxyDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
-                           GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
+    /* 注入方式分派：auto / cdp-port / dll-proxy 已接入主流程；
+   cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
+    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
+        WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
+        BOOL dirOk = options->injectProxyDirSet
+            ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
+            : h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP);
+        BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
+                       h_cat(proxyDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                       GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
+        if (!present) {
             if (!options->quiet) {
-                if (present) {
-                    h_print(L"dll-proxy: proxy found at ");
-                    h_print(proxyDll);
-                    h_print(L"; in-process hook driving is not implemented yet, use --inject-mode cdp-port");
-                } else {
-                    h_print(L"dll-proxy requires the proxy DLL at ");
-                    if (dirOk) { h_print(proxyDir); h_print(L"\\winmm.dll"); }
-                    h_print(L"; copy the winmm proxy there (administrator may be required)");
-                }
+                h_print(L"dll-proxy requires the proxy DLL at ");
+                if (dirOk) { h_print(proxyDir); h_print(L"\\winmm.dll"); }
+                h_print(L"; copy the winmm proxy there (administrator may be required)");
             }
-            h_report.stopReason = present ? "inject-proxy-not-driven" : "inject-proxy-missing";
+            h_report.stopReason = "inject-proxy-missing";
             h_exit_code = 4;
             goto done;
         }
+        h_dll_proxy_mode = TRUE;
+        if (!options->quiet) {
+            h_print(L"dll-proxy: proxy found at ");
+            h_print(proxyDll);
+            h_print(L"; launching without --remote-debugging-port and letting the proxy append it\n");
+        }
+    } else if (options->injectModeSet &&
+               !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port")) {
         if (!options->quiet) {
             h_print(L"inject mode is not implemented in this build: ");
             h_print(options->injectMode);
-            h_print(L" (available: auto, cdp-port)");
+            h_print(L" (available: auto, cdp-port, dll-proxy)");
         }
         h_report.stopReason = "inject-mode-unavailable";
         h_exit_code = 4;
@@ -1335,7 +1336,15 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_audit_event("info", "dpi", "Applying temporary system DPI compatibility for owned client launch");
         }
         h_report.stopReason = "launch-failed";
-        launched = proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap);
+        if (h_dll_proxy_mode) {
+            WCHAR proxyPort[16];
+            wsprintfW(proxyPort, L"%u", (unsigned)port);
+            SetEnvironmentVariableW(L"CX_INJECT_PORT", proxyPort);
+            launched = proc_launch_env(h_selected_path, port, FALSE, &h_client_pid, &client, error, errorCap);
+            SetEnvironmentVariableW(L"CX_INJECT_PORT", NULL);
+        } else {
+            launched = proc_launch(h_selected_path, port, &h_client_pid, &client, error, errorCap);
+        }
         launchError = GetLastError();
         if (launched) { h_report.clientPid = h_client_pid; h_report.port = port; }
         if (dpi) {
@@ -1602,6 +1611,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
