@@ -77,6 +77,7 @@ try {
             @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'cdp-echo'; Entry = 'CdpEchoMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'env-probe'; Entry = 'EnvProbeMain'; Objects = @('memory'); Resources = @() },
+  @{ Name = 'cdp-server'; Entry = 'CdpServerMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'audit-tests'; Entry = 'AuditTestMain'; Objects = @('memory','audit'); Resources = @() },
             @{ Name = 'config-store-tests'; Entry = 'ConfigStoreTestMain'; Objects = @('memory','json','config-store'); Resources = @() },
             @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() },
@@ -113,6 +114,7 @@ Get-Item -LiteralPath $hostExe | Select-Object FullName,Length
 # and build must not depend on PowerShell module auto-loading.
 & certutil.exe -hashfile $hostExe SHA256
 if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }
+
 
 
 
