@@ -2153,7 +2153,28 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_exit_code = 4;
         goto done;
     }
-    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida") && !options->quiet) {
+    /* 加壳客户端忽略命令行开关：auto 模式下自动切到 dll-proxy（需代理已安装）。 */
+    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida")) {
+        {
+            WCHAR probeWinmm[CX_CLEANUP_PATH_CAP];
+            BOOL proxyReady = FALSE;
+            if (h_copy(probeWinmm, CX_CLEANUP_PATH_CAP, h_selected_path)) {
+                WCHAR dirOnly[CX_CLEANUP_PATH_CAP];
+                DWORD cut = 0, k;
+                for (k = 0; probeWinmm[k]; ++k) if (probeWinmm[k] == L'\\') cut = k;
+                for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = probeWinmm[k];
+                dirOnly[k] = 0;
+                if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) proxyReady = TRUE;
+            }
+            if (proxyReady) {
+            h_dll_proxy_mode = TRUE;
+            h_report.injectMode = "dll-proxy";
+                if (!options->quiet) h_print(L"auto: 检测到加壳客户端，已自动启用 dll-proxy\n");
+            } else if (!options->quiet) {
+                h_print(L"auto: 检测到加壳客户端，但它忽略命令行开关；请先 --install-proxy 安装代理\n");
+            }
+        }
+    }    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida") && !options->quiet) {
         h_print(L"提示：该客户端带 Themida 壳并禁用命令行开关；请用 --install-proxy 安装代理后再启动（代理会在 cef_initialize 里强制调试端口）\n");
     }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
@@ -2464,6 +2485,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
