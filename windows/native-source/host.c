@@ -609,6 +609,79 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     else { h_print(L"uninstall-proxy: winmm.dll was already absent"); }
     return TRUE;
 }
+/* 诊断第一步：spawn + 单次 Browser.getVersion，带阶段打印，用于定位管道链路阻塞点。 */
+static BOOL h_pipe_stage1(const WCHAR *clientPath) {
+    SECURITY_ATTRIBUTES inherit;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    WCHAR command[1024];
+    DWORD at = 0, k = 0;
+    HANDLE childIn = NULL, childOut = NULL, parentWrite = NULL, parentRead = NULL;
+    char *reply = NULL;
+    DWORD replyLength = 0;
+    static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
+    int status;
+    if (!clientPath || !*clientPath) { h_print(L"stage1: missing path"); return FALSE; }
+    h_print(L"stage1: building command");
+    command[at++] = L'"';
+    for (k = 0; clientPath[k] && at < 900; ++k) command[at++] = clientPath[k];
+    command[at++] = L'"';
+    {
+        static const WCHAR tail[] = L" --remote-debugging-pipe";
+        for (k = 0; tail[k] && at < 1000; ++k) command[at++] = tail[k];
+    }
+    command[at] = 0;
+    inherit.nLength = sizeof(inherit);
+    inherit.lpSecurityDescriptor = NULL;
+    inherit.bInheritHandle = TRUE;
+    h_print(L"stage1: creating pipes");
+    if (!CreatePipe(&childIn, &parentWrite, &inherit, 65536)) { h_print(L"stage1: stdin pipe failed"); return FALSE; }
+    if (!CreatePipe(&parentRead, &childOut, &inherit, 65536)) { h_print(L"stage1: stdout pipe failed"); return FALSE; }
+    SetHandleInformation(parentWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(parentRead, HANDLE_FLAG_INHERIT, 0);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = childIn;
+    si.hStdOutput = childOut;
+    si.hStdError = childOut;
+    ZeroMemory(&pi, sizeof(pi));
+    h_print(L"stage1: CreateProcess");
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        WCHAR message[96];
+        wsprintfW(message, L"stage1: CreateProcess failed (%lu)", (unsigned long)GetLastError());
+        h_print(message);
+        return FALSE;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(childIn);
+    CloseHandle(childOut);
+    h_print(L"stage1: spawned");
+    Sleep(800);
+    h_print(L"stage1: sending");
+    if (!net_pipe_send_frame(parentWrite, request, (DWORD)sizeof(request) - 1)) {
+        h_print(L"stage1: send failed");
+        TerminateProcess(pi.hProcess, 0);
+        return FALSE;
+    }
+    h_print(L"stage1: waiting reply");
+    status = net_pipe_recv_frame(parentRead, &reply, &replyLength, 8000);
+    if (status == 1 && reply) {
+        WCHAR wide[400];
+        int wideLength = MultiByteToWideChar(CP_UTF8, 0, reply, (int)replyLength, wide, 380);
+        if (wideLength > 0) { wide[wideLength] = 0; h_print(L"stage1: "); h_print(wide); }
+        net_free(reply);
+    } else {
+        WCHAR message[64];
+        wsprintfW(message, L"stage1: recv status %d", status);
+        h_print(message);
+    }
+    CloseHandle(parentWrite);
+    CloseHandle(parentRead);
+    TerminateProcess(pi.hProcess, 0);
+    CloseHandle(pi.hProcess);
+    return status == 1;
+}
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOW si;
@@ -1642,6 +1715,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
+    if (h_base_options.pipeCallPathSet) { return h_pipe_stage1(h_base_options.pipeCallPath) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
         int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
         if (pipeCode == 740) {
@@ -1718,6 +1792,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
