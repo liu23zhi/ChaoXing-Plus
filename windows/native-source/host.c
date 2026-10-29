@@ -129,6 +129,24 @@ static BOOL h_parent_dir(const WCHAR *path, WCHAR *out, DWORD cap) {
     out[cut] = 0;
     return TRUE;
 }
+static int h_find_offset(const char *haystack, const char *needle) {
+    int i, k;
+    if (!haystack || !needle) return -1;
+    for (i = 0; haystack[i]; ++i) {
+        for (k = 0; needle[k] && haystack[i + k] == needle[k]; ++k) { }
+        if (!needle[k]) return i;
+    }
+    return -1;
+}
+static BOOL h_wcontains_a(const char *haystack, const char *needle) {
+    int i, k;
+    if (!haystack || !needle) return FALSE;
+    for (i = 0; haystack[i]; ++i) {
+        for (k = 0; needle[k] && haystack[i + k] == needle[k]; ++k) { }
+        if (!needle[k]) return TRUE;
+    }
+    return FALSE;
+}
 static BOOL h_wcontains(const WCHAR *haystack, const WCHAR *needle) {
     int i, k;
     if (!haystack || !needle) return FALSE;
@@ -610,19 +628,26 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     return TRUE;
 }
 /* 诊断第一步：spawn + 单次 Browser.getVersion，带阶段打印，用于定位管道链路阻塞点。 */
-static BOOL h_pipe_stage1(const WCHAR *clientPath) {
+/* 管道 CDP 客户端：spawn / 单次调用 / 完整诊断序列。 */
+typedef struct {
+    HANDLE toChild;
+    HANDLE fromChild;
+    HANDLE process;
+    DWORD pid;
+    DWORD nextId;
+    char sessionId[80];
+} H_PIPE_CDP;
+
+static BOOL h_pipe_open(H_PIPE_CDP *state, const WCHAR *clientPath) {
     SECURITY_ATTRIBUTES inherit;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     WCHAR command[1024];
     DWORD at = 0, k = 0;
-    HANDLE childIn = NULL, childOut = NULL, parentWrite = NULL, parentRead = NULL;
-    char *reply = NULL;
-    DWORD replyLength = 0;
-    static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
-    int status;
-    if (!clientPath || !*clientPath) { h_print(L"stage1: missing path"); return FALSE; }
-    h_print(L"stage1: building command");
+    HANDLE childIn = NULL, childOut = NULL;
+    if (!state || !clientPath || !*clientPath) return FALSE;
+    ZeroMemory(state, sizeof(*state));
+    state->nextId = 1;
     command[at++] = L'"';
     for (k = 0; clientPath[k] && at < 900; ++k) command[at++] = clientPath[k];
     command[at++] = L'"';
@@ -634,11 +659,13 @@ static BOOL h_pipe_stage1(const WCHAR *clientPath) {
     inherit.nLength = sizeof(inherit);
     inherit.lpSecurityDescriptor = NULL;
     inherit.bInheritHandle = TRUE;
-    h_print(L"stage1: creating pipes");
-    if (!CreatePipe(&childIn, &parentWrite, &inherit, 65536)) { h_print(L"stage1: stdin pipe failed"); return FALSE; }
-    if (!CreatePipe(&parentRead, &childOut, &inherit, 65536)) { h_print(L"stage1: stdout pipe failed"); return FALSE; }
-    SetHandleInformation(parentWrite, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(parentRead, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(&childIn, &state->toChild, &inherit, 65536)) return FALSE;
+    if (!CreatePipe(&state->fromChild, &childOut, &inherit, 65536)) {
+        CloseHandle(childIn); CloseHandle(state->toChild); state->toChild = NULL;
+        return FALSE;
+    }
+    SetHandleInformation(state->toChild, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(state->fromChild, HANDLE_FLAG_INHERIT, 0);
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -646,41 +673,129 @@ static BOOL h_pipe_stage1(const WCHAR *clientPath) {
     si.hStdOutput = childOut;
     si.hStdError = childOut;
     ZeroMemory(&pi, sizeof(pi));
-    h_print(L"stage1: CreateProcess");
     if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
-        WCHAR message[96];
-        wsprintfW(message, L"stage1: CreateProcess failed (%lu)", (unsigned long)GetLastError());
-        h_print(message);
+        CloseHandle(childIn); CloseHandle(childOut);
+        CloseHandle(state->toChild); CloseHandle(state->fromChild);
+        state->toChild = NULL; state->fromChild = NULL;
         return FALSE;
     }
     CloseHandle(pi.hThread);
     CloseHandle(childIn);
     CloseHandle(childOut);
-    h_print(L"stage1: spawned");
+    state->process = pi.hProcess;
+    state->pid = pi.dwProcessId;
+    return TRUE;
+}
+
+static void h_pipe_close(H_PIPE_CDP *state) {
+    if (!state) return;
+    if (state->toChild) { CloseHandle(state->toChild); state->toChild = NULL; }
+    if (state->fromChild) { CloseHandle(state->fromChild); state->fromChild = NULL; }
+    if (state->process) { TerminateProcess(state->process, 0); CloseHandle(state->process); state->process = NULL; }
+}
+
+/* 1 = 拿到对应 id 的响应；0 = 超时；-1 = 错误 */
+static int h_pipe_call(H_PIPE_CDP *state, const char *method, const char *params, char **reply, DWORD timeoutMs) {
+    char command[4096];
+    char expect[32];
+    char digits[16];
+    DWORD at = 0, k;
+    DWORD deadline;
+    const char *cursor;
+    int id;
+    if (reply) *reply = NULL;
+    if (!state || !state->toChild || !state->fromChild || !method) return -1;
+    id = (int)state->nextId++;
+    wsprintfA(digits, "%d", id);
+    command[at++] = '{';
+    command[at++] = '"'; command[at++] = 'i'; command[at++] = 'd'; command[at++] = '"'; command[at++] = ':';
+    for (k = 0; digits[k]; ++k) command[at++] = digits[k];
+    {
+        static const char mid[] = ",\"method\":\"";
+        for (k = 0; mid[k]; ++k) command[at++] = mid[k];
+    }
+    for (cursor = method; *cursor && at < 3900; ++cursor) command[at++] = *cursor;
+    command[at++] = '"';
+    if (state->sessionId[0]) {
+        static const char sessionPrefix[] = ",\"sessionId\":\"";
+        for (k = 0; sessionPrefix[k]; ++k) command[at++] = sessionPrefix[k];
+        for (cursor = state->sessionId; *cursor && at < 3950; ++cursor) command[at++] = *cursor;
+        command[at++] = '"';
+    }
+    if (params && *params) {
+        static const char paramsPrefix[] = ",\"params\":";
+        for (k = 0; paramsPrefix[k]; ++k) command[at++] = paramsPrefix[k];
+        for (cursor = params; *cursor && at < 4000; ++cursor) command[at++] = *cursor;
+    }
+    command[at++] = '}';
+    command[at] = 0;
+    lstrcpyA(expect, "\"id\":");
+    lstrcatA(expect, digits);
+    if (!net_pipe_send_frame(state->toChild, command, at)) return -1;
+    deadline = GetTickCount() + timeoutMs;
+    for (;;) {
+        char *frame = NULL;
+        DWORD frameLength = 0;
+        DWORD left;
+        int status;
+        left = (deadline > GetTickCount()) ? (DWORD)(deadline - GetTickCount()) : 1;
+        status = net_pipe_recv_frame(state->fromChild, &frame, &frameLength, left);
+        if (status == 0) return 0;
+        if (status < 0) return -1;
+        if (frame && h_wcontains_a(frame, expect)) {
+            if (reply) *reply = frame; else net_free(frame);
+            return 1;
+        }
+        if (frame) net_free(frame);
+        if (GetTickCount() >= deadline) return 0;
+    }
+}
+
+static void h_pipe_stage(const WCHAR *name) {
+    h_print(L"stage: ");
+    h_print(name);
+    h_print(L"\n");
+}
+
+static BOOL h_pipe_stage2(const WCHAR *clientPath) {
+    H_PIPE_CDP state;
+    char *reply = NULL;
+    if (!clientPath || !*clientPath) { h_print(L"pipe-call: missing path"); return FALSE; }
+    h_pipe_stage(L"open");
+    if (!h_pipe_open(&state, clientPath)) { h_print(L"pipe-call: open failed"); return FALSE; }
     Sleep(800);
-    h_print(L"stage1: sending");
-    if (!net_pipe_send_frame(parentWrite, request, (DWORD)sizeof(request) - 1)) {
-        h_print(L"stage1: send failed");
-        TerminateProcess(pi.hProcess, 0);
-        return FALSE;
+    h_pipe_stage(L"getVersion");
+    if (h_pipe_call(&state, "Browser.getVersion", NULL, &reply, 8000) != 1) { h_print(L"pipe-call: getVersion failed"); h_pipe_close(&state); return FALSE; }
+    net_free(reply); reply = NULL;
+    h_pipe_stage(L"getTargets");
+    if (h_pipe_call(&state, "Target.getTargets", NULL, &reply, 8000) != 1) { h_print(L"pipe-call: getTargets failed"); h_pipe_close(&state); return FALSE; }
+    net_free(reply); reply = NULL;
+    h_pipe_stage(L"attach");
+    if (h_pipe_call(&state, "Target.attachToTarget", "{\"targetId\":\"CXFIXTURE\",\"flatten\":true}", &reply, 8000) != 1) { h_print(L"pipe-call: attach failed"); h_pipe_close(&state); return FALSE; }
+    {
+        static const char marker[] = "\"sessionId\":\"";
+        int offset = reply ? h_find_offset(reply, marker) : -1;
+        char *found = (offset >= 0) ? reply + offset + (int)sizeof(marker) - 1 : NULL;
+        if (found) {
+            int n = 0;
+            while (found[n] && found[n] != '"' && n < (int)sizeof(state.sessionId) - 1) { state.sessionId[n] = found[n]; ++n; }
+            state.sessionId[n] = 0;
+            h_print(L"stage: session=");
+            {
+                WCHAR wide[80];
+                int wideLength = MultiByteToWideChar(CP_UTF8, 0, state.sessionId, -1, wide, 79);
+                if (wideLength > 0) { wide[wideLength] = 0; h_print(wide); }
+            }
+            h_print(L"\n");
+        }
     }
-    h_print(L"stage1: waiting reply");
-    status = net_pipe_recv_frame(parentRead, &reply, &replyLength, 8000);
-    if (status == 1 && reply) {
-        WCHAR wide[400];
-        int wideLength = MultiByteToWideChar(CP_UTF8, 0, reply, (int)replyLength, wide, 380);
-        if (wideLength > 0) { wide[wideLength] = 0; h_print(L"stage1: "); h_print(wide); }
-        net_free(reply);
-    } else {
-        WCHAR message[64];
-        wsprintfW(message, L"stage1: recv status %d", status);
-        h_print(message);
-    }
-    CloseHandle(parentWrite);
-    CloseHandle(parentRead);
-    TerminateProcess(pi.hProcess, 0);
-    CloseHandle(pi.hProcess);
-    return status == 1;
+    net_free(reply); reply = NULL;
+    h_pipe_stage(L"evaluate");
+    if (h_pipe_call(&state, "Runtime.evaluate", "{\"expression\":\"1+1\",\"returnByValue\":true}", &reply, 8000) != 1) { h_print(L"pipe-call: evaluate failed"); h_pipe_close(&state); return FALSE; }
+    net_free(reply);
+    h_pipe_stage(L"done");
+    h_pipe_close(&state);
+    return TRUE;
 }
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
@@ -1715,7 +1830,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
-    if (h_base_options.pipeCallPathSet) { return h_pipe_stage1(h_base_options.pipeCallPath) ? 0 : 1; }
+    if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
         int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
         if (pipeCode == 740) {
@@ -1792,6 +1907,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
