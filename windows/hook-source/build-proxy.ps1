@@ -30,7 +30,7 @@ foreach ($m in [regex]::Matches($exportText, '(?m)^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A
   $names += $m.Groups[1].Value
 }
 $names = @($names | Sort-Object -Unique)
-if ($names.Count -lt 8) { throw ('unexpected winmm export count: ' + $names.Count) }
+if ($names.Count -lt 2) { throw ('unexpected ' + $Target + ' export count: ' + $names.Count) }
 
 # Generated stub source: one naked jump per export through a table filled in DllMain.
 $stubLines = New-Object System.Collections.Generic.List[string]

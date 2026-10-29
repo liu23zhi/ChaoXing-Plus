@@ -214,4 +214,25 @@ test('端口拿不到端点时自动改用 settings-only 代理重试（端口�
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('小载体 msimg32 / sensapi 可安装并卸载', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  for (const carrier of ['msimg32', 'sensapi']) {
+    const src = resolve(`build-windows/hook/${carrier}.dll`);
+    if (!existsSync(src)) continue;
+    const dir = await mkdtemp(join(tmpdir(), `cx-proxy-${carrier}-`));
+    try {
+      const client = join(dir, 'CXExam.exe');
+      await copyFile(fixtureExe, client);
+      const install = run(['--install-proxy', '--proxy-target', carrier, '--proxy-source', src, '--client', client]);
+      assert.equal(install.status, 0, install.output);
+      assert.equal(existsSync(join(dir, `${carrier}.dll`)), true, `${carrier} 未安装`);
+      const marker = await readFile(join(dir, 'cxhook-proxy.marker'), 'utf8');
+      assert.match(marker, new RegExp(`carrier=${carrier}`, 'u'));
+      const uninstall = run(['--uninstall-proxy', '--client', client]);
+      assert.equal(uninstall.status, 0, uninstall.output);
+      assert.equal(existsSync(join(dir, `${carrier}.dll`)), false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
 

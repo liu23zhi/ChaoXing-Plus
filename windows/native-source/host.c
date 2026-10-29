@@ -327,6 +327,9 @@ static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static BOOL h_proxy_target_auto;
+static const WCHAR *const h_proxy_carriers[] = { L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi" };
+static const int h_proxy_carrier_count = 5;
+
 static WCHAR h_proxy_target[16] = L"winmm";
 static const WCHAR *h_proxy_dll_suffix(void) {
     static WCHAR suffix[32];
@@ -663,11 +666,13 @@ static BOOL h_proxy_file_present(const WCHAR *clientPath) {
 }
 /* auto 载体选择：按客户端导入表挑一个能用的代理 DLL（winmm → version → uxtheme）。 */
 static void h_resolve_proxy_target(const WCHAR *clientPath) {
-    static const WCHAR *const order[3] = { L"winmm", L"version", L"uxtheme" };
-    static const WCHAR *const dlls[3] = { L"winmm.dll", L"version.dll", L"uxtheme.dll" };
     int i;
-    for (i = 0; i < 3; ++i) {
-        if (h_pe_imports_dll(clientPath, dlls[i])) { h_copy(h_proxy_target, 16, order[i]); return; }
+    for (i = 0; i < h_proxy_carrier_count; ++i) {
+        WCHAR dll[32];
+        int k = 0;
+        while (h_proxy_carriers[i][k] && k < 24) { dll[k] = h_proxy_carriers[i][k]; ++k; }
+        dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+        if (h_pe_imports_dll(clientPath, dll)) { h_copy(h_proxy_target, 16, h_proxy_carriers[i]); return; }
     }
     h_copy(h_proxy_target, 16, L"winmm");
 }
@@ -759,11 +764,10 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     /* 载体冲突：目标位置已有第三方同名 DLL 时，auto 模式换下一个载体，显式模式直接报错。 */
     if (!h_proxy_destination_free(targetDir)) {
         BOOL autoTarget = h_proxy_target_auto;
-        static const WCHAR *const order[3] = { L"winmm", L"version", L"uxtheme" };
         int i, picked = -1;
         if (autoTarget) {
-            for (i = 0; i < 3; ++i) {
-                h_copy(h_proxy_target, 16, order[i]);
+            for (i = 0; i < h_proxy_carrier_count; ++i) {
+                h_copy(h_proxy_target, 16, h_proxy_carriers[i]);
                 if (h_proxy_destination_free(targetDir)) { picked = i; break; }
             }
         }
@@ -1499,10 +1503,18 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     h_print(L"probe: packed="); h_print(h_pe_section_named(clientPath, ".themida") ? L"themida" : L"none"); h_print(L"\n");
     h_print(L"probe: proxies=");
     {
-        int printed = 0;
-        if (h_pe_imports_dll(h_probe_path_global(), L"winmm.dll")) { h_print(L"winmm"); printed = 1; }
-        if (h_pe_imports_dll(h_probe_path_global(), L"version.dll")) { if (printed) h_print(L","); h_print(L"version"); printed = 1; }
-        if (h_pe_imports_dll(h_probe_path_global(), L"uxtheme.dll")) { if (printed) h_print(L","); h_print(L"uxtheme"); printed = 1; }
+        int printed = 0, ci;
+        for (ci = 0; ci < h_proxy_carrier_count; ++ci) {
+            WCHAR dll[32];
+            int k = 0;
+            while (h_proxy_carriers[ci][k] && k < 24) { dll[k] = h_proxy_carriers[ci][k]; ++k; }
+            dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+            if (h_pe_imports_dll(h_probe_path_global(), dll)) {
+                if (printed) h_print(L",");
+                h_print(h_proxy_carriers[ci]);
+                printed = 1;
+            }
+        }
         if (!printed) h_print(L"none");
     }
     h_print(L"\n");
@@ -2660,7 +2672,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
-    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version|uxtheme|auto]（把代理装到 --client 目录，配合 auto 使用）\n"
+    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version|uxtheme|msimg32|sensapi|auto]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
@@ -2770,6 +2782,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
