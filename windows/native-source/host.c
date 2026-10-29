@@ -328,7 +328,13 @@ static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static WCHAR h_proxy_target[16] = L"winmm";
 static const WCHAR *h_proxy_dll_suffix(void) {
-    return h_same(h_proxy_target, L"version") ? L"\\version.dll" : L"\\winmm.dll";
+    static WCHAR suffix[32];
+    int at = 0, i = 0;
+    suffix[at++] = L'\\';
+    while (h_proxy_target[i] && at < 24) suffix[at++] = h_proxy_target[i++];
+    suffix[at++] = L'.'; suffix[at++] = L'd'; suffix[at++] = L'l'; suffix[at++] = L'l';
+    suffix[at] = 0;
+    return suffix;
 }
 static const WCHAR *h_proxy_marker_suffix(void) { return L"\\cxhook-proxy.marker"; }
 
@@ -574,6 +580,73 @@ done:
     if (elevationRequired) return 740;
     return ok ? 1 : 0;
 }
+
+/* 判断 PE 的导入表里是否引用了指定 DLL（不区分大小写，含链式导入忽略）。 */
+static BOOL h_pe_imports_dll(const WCHAR *path, const WCHAR *dllName) {
+    HANDLE file;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS nt;
+    DWORD read = 0;
+    BOOL found = FALSE;
+    char target[64];
+    int targetLength = 0;
+    if (!path || !dllName) return FALSE;
+    {
+        int i;
+        for (i = 0; dllName[i] && i < 63; ++i) target[targetLength++] = (char)dllName[i];
+        target[targetLength] = 0;
+    }
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (ReadFile(file, &dos, sizeof(dos), &read, NULL) && read == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+        ReadFile(file, &nt, sizeof(nt), &read, NULL) && read == sizeof(nt) && nt.Signature == IMAGE_NT_SIGNATURE) {
+        DWORD importRva = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        if (importRva) {
+            IMAGE_SECTION_HEADER section;
+            DWORD sectionCount = nt.FileHeader.NumberOfSections;
+            DWORD index;
+            SetFilePointer(file, dos.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + nt.FileHeader.SizeOfOptionalHeader, NULL, FILE_BEGIN);
+            for (index = 0; index < sectionCount; ++index) {
+                DWORD span, offset;
+                if (!ReadFile(file, &section, sizeof(section), &read, NULL) || read != sizeof(section)) break;
+                span = section.Misc.VirtualSize ? section.Misc.VirtualSize : section.SizeOfRawData;
+                if (importRva < section.VirtualAddress || importRva >= section.VirtualAddress + span) continue;
+                offset = section.PointerToRawData + (importRva - section.VirtualAddress);
+                {
+                    IMAGE_IMPORT_DESCRIPTOR descriptor;
+                    if (SetFilePointer(file, offset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
+                    while (ReadFile(file, &descriptor, sizeof(descriptor), &read, NULL) && read == sizeof(descriptor) && descriptor.Name) {
+                        char moduleName[64];
+                        DWORD pos = section.PointerToRawData + (descriptor.Name - section.VirtualAddress);
+                        DWORD got = 0;
+                        if (moduleName[0] == 0) { }
+                        if (SetFilePointer(file, pos, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+                            ReadFile(file, moduleName, 63, &got, NULL) && got) {
+                            moduleName[got < 63 ? got : 63] = 0;
+                            {
+                                int k = 0, same = 1;
+                                while (moduleName[k] || target[k]) {
+                                    char a = moduleName[k], b = target[k];
+                                    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                                    if (a != b) { same = 0; break; }
+                                    ++k;
+                                }
+                                if (same) { found = TRUE; break; }
+                            }
+                        }
+                        if (SetFilePointer(file, offset + (DWORD)((descriptor.Name ? 1 : 0) * 0), NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {}
+                        offset += sizeof(descriptor);
+                        if (SetFilePointer(file, offset, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    CloseHandle(file);
+    return found;
+}
 /* 把 winmm 代理安装到客户端目录（默认取宿主同目录的 winmm.dll）。 */
 static BOOL h_proxy_file_present(const WCHAR *clientPath) {
     WCHAR path[CX_CLEANUP_PATH_CAP];
@@ -585,8 +658,19 @@ static BOOL h_proxy_file_present(const WCHAR *clientPath) {
     if (!h_cat(path, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
+/* auto 载体选择：按客户端导入表挑一个能用的代理 DLL（winmm → version → uxtheme）。 */
+static void h_resolve_proxy_target(const WCHAR *clientPath) {
+    static const WCHAR *const order[3] = { L"winmm", L"version", L"uxtheme" };
+    static const WCHAR *const dlls[3] = { L"winmm.dll", L"version.dll", L"uxtheme.dll" };
+    int i;
+    for (i = 0; i < 3; ++i) {
+        if (h_pe_imports_dll(clientPath, dlls[i])) { h_copy(h_proxy_target, 16, order[i]); return; }
+    }
+    h_copy(h_proxy_target, 16, L"winmm");
+}
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
+    if (h_same(h_proxy_target, L"auto")) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
     WCHAR hostDir[CX_CLEANUP_PATH_CAP];
     BOOL ok;
@@ -684,6 +768,7 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
 /* 卸载代理：只有当目录里有安装标记时才删除，避免误删第三方的 winmm.dll。 */
 static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
+    if (h_same(h_proxy_target, L"auto")) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     WCHAR targetDir[CX_CLEANUP_PATH_CAP], dll[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     BOOL removed = FALSE;
     if (options->clientPath[0]) {
@@ -1264,7 +1349,10 @@ static BOOL h_file_contains_ci(const WCHAR *path, const char *needle) {
     CloseHandle(file);
     return found;
 }
+static const WCHAR *h_probe_target_path;
+static const WCHAR *h_probe_path_global(void) { return h_probe_target_path ? h_probe_target_path : L""; }
 static BOOL h_probe_client(const WCHAR *clientPath) {
+    h_probe_target_path = clientPath;
     WCHAR dir[CX_CLEANUP_PATH_CAP], cef[CX_CLEANUP_PATH_CAP], winmm[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     WCHAR version[64];
     WORD machine = 0, major = 0, minor = 0;
@@ -1316,6 +1404,15 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         h_print(L"\n");
     }
     h_print(L"probe: packed="); h_print(h_pe_section_named(clientPath, ".themida") ? L"themida" : L"none"); h_print(L"\n");
+    h_print(L"probe: proxies=");
+    {
+        int printed = 0;
+        if (h_pe_imports_dll(h_probe_path_global(), L"winmm.dll")) { h_print(L"winmm"); printed = 1; }
+        if (h_pe_imports_dll(h_probe_path_global(), L"version.dll")) { if (printed) h_print(L","); h_print(L"version"); printed = 1; }
+        if (h_pe_imports_dll(h_probe_path_global(), L"uxtheme.dll")) { if (printed) h_print(L","); h_print(L"uxtheme"); printed = 1; }
+        if (!printed) h_print(L"none");
+    }
+    h_print(L"\n");
     h_print(L"probe: suggested=");
     if (markerPresent && proxyUsable) h_print(L"dll-proxy");
     else if (h_pe_section_named(clientPath, ".themida")) h_print(markerPresent ? L"dll-proxy" : L"dll-proxy-required");
@@ -2459,7 +2556,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
-    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version]（把代理装到 --client 目录，配合 auto 使用）\n"
+    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version|uxtheme|auto]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
@@ -2569,6 +2666,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
+
+
 
 
 

@@ -144,4 +144,28 @@ test('--proxy-target version 安装/卸载到 version.dll 且不动 winmm.dll', 
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('--proxy-target uxtheme 与 auto 解析', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const proxyUx = resolve('build-windows/hook/uxtheme.dll');
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-ux-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    if (existsSync(proxyUx)) {
+      const install = run(['--install-proxy', '--proxy-target', 'uxtheme', '--proxy-source', proxyUx, '--client', client]);
+      assert.equal(install.status, 0, install.output);
+      assert.equal(existsSync(join(dir, 'uxtheme.dll')), true);
+      assert.equal(existsSync(join(dir, 'winmm.dll')), false);
+      run(['--uninstall-proxy', '--proxy-target', 'uxtheme', '--client', client]);
+      assert.equal(existsSync(join(dir, 'uxtheme.dll')), false);
+    }
+    // auto：夹具不导入任何候选 DLL，应回落到 winmm
+    const auto = run(['--install-proxy', '--proxy-target', 'auto', '--proxy-source', proxyDll, '--client', client]);
+    assert.equal(auto.status, 0, auto.output);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), true, `auto 应回落到 winmm: ${auto.output}`);
+    run(['--uninstall-proxy', '--client', client]);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
