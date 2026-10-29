@@ -255,7 +255,7 @@ void cx_cleanup_release_self(const WCHAR *parked) {
     MoveFileExW(parked, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
     command[0] = 0;
     if (!s_copy(command, CX_CLEANUP_PATH_CAP * 2 + 384,
-                L"cmd.exe /c for /l %i in (1,1,120) do @(del /f /q \"")) return;
+                L"cmd.exe /c for /l %i in (1,1,60) do @(del /f /q \"")) return;
     if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, parked)) return;
     if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"\" >nul 2>nul & ")) return;
     if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"if not exist \"")) return;
@@ -276,11 +276,12 @@ void cx_cleanup_release_self(const WCHAR *parked) {
     si.cb = sizeof(si);
     ZeroMemory(&pi, sizeof(pi));
     if (CreateProcessW(NULL, command, NULL, NULL, FALSE,
-                       CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi)) {
+                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     }
 }
+
 
 
 

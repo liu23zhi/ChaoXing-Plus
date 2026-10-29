@@ -294,6 +294,22 @@ static BOOL h_cat(WCHAR *dst, DWORD cap, const WCHAR *src) {
 }
 
 /* 把自身复制到 %TEMP%\cx-<pid>\s.exe，用原参数拉起副本（追加 --staged-boot）。 */
+/* 镜像已经位于 %TEMP%\cx-* 时说明本进程就是副本：绝不再复制，避免无限递归。 */
+static BOOL h_stage_under_temp(void) {
+    WCHAR temp[CX_CLEANUP_PATH_CAP];
+    DWORD got, i = 0;
+    if (!h_exe_path[0]) return FALSE;
+    got = GetTempPathW(CX_CLEANUP_PATH_CAP, temp);
+    if (!got || got >= CX_CLEANUP_PATH_CAP) return FALSE;
+    while (temp[i] && h_exe_path[i]) {
+        WCHAR a = temp[i], b = h_exe_path[i];
+        if (a >= L'A' && a <= L'Z') a = (WCHAR)(a - L'A' + L'a');
+        if (b >= L'A' && b <= L'Z') b = (WCHAR)(b - L'A' + L'a');
+        if (a != b) return FALSE;
+        ++i;
+    }
+    return temp[i] == 0;
+}
 static BOOL h_silent_stage(void) {
     WCHAR temp[CX_CLEANUP_PATH_CAP], dir[CX_CLEANUP_PATH_CAP], staged[CX_CLEANUP_PATH_CAP];
     WCHAR command[CX_CLEANUP_PATH_CAP * 3], number[16];
@@ -1267,6 +1283,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
