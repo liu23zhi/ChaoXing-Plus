@@ -230,8 +230,14 @@ export function spawnClient({ exePath, port, logger = () => {}, platform = proce
 }
 
 export function spawnWindowsClient({ exePath, args, spawnImpl = spawn, timeoutMs = 20000 }) {
-  const helper = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-    fileURLToPath(new URL('./launch-client.ps1', import.meta.url))], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const embeddedLaunchScript = globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__
+    && globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__['launch-client.ps1'];
+  const launchScriptArgs = embeddedLaunchScript
+    ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+      Buffer.from(String(embeddedLaunchScript), 'utf16le').toString('base64')]
+    : ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      fileURLToPath(new URL('./launch-client.ps1', import.meta.url))];
+  const helper = spawnImpl('powershell.exe', launchScriptArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const child = new EventEmitter();
   child.pid = undefined;
   child.exitCode = null;

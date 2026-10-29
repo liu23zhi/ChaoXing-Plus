@@ -460,6 +460,7 @@ export async function discoverClientCandidates({
   fsProvider = fs,
   peMachineReader = readPeMachine,
   stopOnMachine = 0x014c,
+  earlyStopOnPreferred = false,
   onFullScan = () => {},
   cachePath = '',
   noScanCache = false,
@@ -510,11 +511,13 @@ export async function discoverClientCandidates({
     });
     result = { candidates, source: 'full', selected: candidates.find((item) => item.machine === 0x014c) || candidates[0] || null };
   } else {
+    const earlyStop = earlyStopOnPreferred && Number.isInteger(stopOnMachine) ? { stopOnMachine } : {};
     const commonCandidates = await discoverClientExecutables({
       roots: commonRoots,
       scanMode: 'common',
       fsProvider,
       peMachineReader,
+      ...earlyStop,
       ...scanOptions
     });
     const driveCandidates = await discoverClientExecutables({
@@ -522,6 +525,7 @@ export async function discoverClientCandidates({
       scanMode: 'common',
       fsProvider,
       peMachineReader,
+      ...earlyStop,
       ...scanOptions
     });
     const commonPaths = new Set();

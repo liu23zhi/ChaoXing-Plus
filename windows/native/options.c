@@ -161,6 +161,7 @@ void cx_options_init(CX_OPTIONS *o) {
     o->answerModeAuto = TRUE; o->showAnswerDialog = TRUE;
     o->answerThreads = 4; o->answerCountdown = 5; o->answerRetry = 3;
     o->autoSubmit = TRUE; o->executionModeNormal = TRUE; o->executionModeMemory = FALSE;
+    o->silentScenario = FALSE; o->silentDeleteSimulate = FALSE; o->silentClientPathSet = FALSE;
     o->extensionEnabled = TRUE;
 }
 
@@ -282,6 +283,9 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
         if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
         if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
+        if (cx_streq(a, L"--silent-scenario")) { o->silentScenario = TRUE; continue; }
+        if (cx_streq(a, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
+        if (cx_streq(a, L"--silent-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; o->silentClientPathSet = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(a, L"--delete-suspend") ||
             cx_streq(a, L"--wipe-owned-files-on-start") || cx_streq(a, L"--wipe-failure-policy") ||
             cx_streq(a, L"--wipe-retries") || cx_streq(a, L"--wipe-retry-delay") ||
@@ -289,7 +293,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
             cx_streq(a, L"--wipe-runtime-interval") || cx_streq(a, L"--self-destruct-key") ||
             cx_streq(a, L"--self-destruct-on-fullscreen-exit") || cx_streq(a, L"--self-destruct-delay") ||
             cx_streq(a, L"--no-self-destruct-confirm") || cx_streq(a, L"--execution-mode-delete-suspend")) {
-            cx_error(error, errorCap, L"delete-suspend, wipe and self-destruct options are not supported by native host");
+            cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported by the native host; use --silent-scenario (the Node host is deprecated and frozen)");
             o->unsupportedRequested = TRUE; return FALSE;
         }
         if (cx_streq(a, L"--no-elevate")) { o->noElevate = TRUE; continue; }
@@ -543,7 +547,7 @@ static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
                     continue;
                 }
             }
-            cx_error(error, errorCap, L"delete-suspend, wipe and self-destruct options are not supported by native host");
+            cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported by the native host; use --silent-scenario (the Node host is deprecated and frozen)");
             goto done;
         }
     }
@@ -792,6 +796,10 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_BOOL_IF(portSet, port); CX_BOOL_IF(attachPortSet, attachPort); CX_BOOL_IF(durationSet, durationMs);
     if (layer->executionModeSet) { destination->executionModeNormal = layer->executionModeNormal; destination->executionModeMemory = layer->executionModeMemory; destination->executionModeSet = TRUE; }
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
+    /* 静默场景只来自命令行：合并层必须显式搬运，否则 finalize 看到的永远是 FALSE。 */
+    if (layer->silentScenario) destination->silentScenario = TRUE;
+    if (layer->silentDeleteSimulate) destination->silentDeleteSimulate = TRUE;
+    if (layer->silentClientPathSet) destination->silentClientPathSet = TRUE;
     destination->help = layer->help; destination->capabilities = layer->capabilities; destination->version = layer->version;
     destination->printEffectiveConfig = layer->printEffectiveConfig; destination->selfCheck = layer->selfCheck;
     if (layer->commandLineLayer) {
@@ -805,6 +813,41 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
 #undef CX_COPY_IF
 #undef CX_BOOL_IF
 
+/* 静默场景固定调参：与 Node 静默入口同语义，但不依赖 Node。
+   显式 --scan-mode 仍然优先（调试入口用它跳过全盘回退）。 */
+static void cx_apply_silent_scenario(CX_OPTIONS *o) {
+    if (!o->silentScenario) return;
+    if (o->silentClientPathSet) {
+        /* 测试/诊断入口：显式客户端路径优先，不再扫描/选择。 */
+        o->clientIndexSet = FALSE;
+        o->listClients = FALSE;
+        o->selectClient = FALSE;
+        o->scanClients = FALSE;
+        o->clientFirst = FALSE;
+    } else {
+        o->clientPathSet = FALSE;
+        o->clientIndexSet = FALSE;
+        o->listClients = FALSE;
+        o->selectClient = FALSE;
+        o->scanClients = TRUE;
+    }
+    if (!o->scanModeSet) { cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"fallback-all"); o->scanModeSet = TRUE; }
+    if (!o->silentClientPathSet) o->clientFirst = TRUE;
+    o->executionModeNormal = FALSE;
+    o->executionModeMemory = TRUE;
+    o->noDiskWrite = TRUE;
+    o->logFileEnabled = FALSE;
+    o->quiet = o->silentDeleteSimulate ? FALSE : TRUE;
+    o->panelEnabled = FALSE;
+    o->diagnose = FALSE;
+    o->noDiagnose = TRUE;
+    o->reportPath[0] = 0;
+    o->noScanCache = TRUE;
+    o->answerModeAuto = FALSE;
+    o->showAnswerDialog = FALSE;
+    cx_wcopy(o->answerKey, CX_OPTIONS_SHORT_CAP, L"Ctrl+Alt+Shift+S");
+    o->answerThreads = 1;
+}
 BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (!o) { cx_error(error, errorCap, L"options are missing"); return FALSE; }
     if (o->elevateOnStart && o->noElevate) {
@@ -826,6 +869,8 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
         cx_error(error, errorCap, L"--delete-config requires an explicit --config file");
         return FALSE;
     }
+    if (o->silentScenario) cx_apply_silent_scenario(o);
+    if (o->silentScenario && o->attachPortSet) { cx_error(error, errorCap, L"silent scenario cannot be combined with --attach"); return FALSE; }
     if (o->deleteConfig && o->noDiskWrite) {
         cx_error(error, errorCap, L"--no-disk-write cannot be combined with --delete-config");
         return FALSE;
@@ -910,4 +955,10 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
+
+
+
+
+
 

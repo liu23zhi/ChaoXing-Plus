@@ -1,17 +1,34 @@
 const ANSWER_MODES = new Set(['manual', 'auto']);
 const INJECT_STRATEGIES = new Set(['hybrid', 'runtime', 'script']);
 
-// 第一阶段只提供普通运行；以下能力保留参数设计，运行入口一律拒绝。
+const EXECUTION_MODES = ['normal', 'memory', 'delete-suspend'];
+const DELETE_SUSPEND_MODE = 'delete-suspend';
+const WIPE_FAILURE_POLICIES = ['retry', 'background', 'ignore', 'abort'];
+const SELF_DESTRUCT_DELAY_MAX_MS = 60000;
+
+// Node 宿主已支持的高级能力；原生宿主仅实现普通/内存运行，以下字段用于原生
+// 与发布文档的诚实能力说明，不代表原生执行这些行为。
+export const NODE_ADVANCED_CAPABILITIES = Object.freeze({
+  executionModes: Object.freeze([...EXECUTION_MODES]),
+  deleteSuspend: true,
+  startupWipe: true,
+  selfDestruct: true,
+  silentScenario: true,
+  memoryProgramDeletion: true
+});
+
 export const UNSUPPORTED_CAPABILITIES = Object.freeze({
   implemented: false,
-  reason: '第一阶段仅支持普通可审计运行；以下参数会显式报错，不会静默降级',
+  reason: '原生宿主仅支持 normal/memory；delete-suspend、启动清理、自毁与静默自删除仅由 Node 宿主实现',
+  nodeOnly: Object.freeze(['delete-suspend', 'startup-wipe', 'self-destruct', 'silent-scenario']),
   executionModes: Object.freeze({
-    supported: Object.freeze(['normal', 'memory']),
+    supported: Object.freeze(['normal', 'memory', 'delete-suspend']),
     unsupportedFlags: Object.freeze(['--delete-suspend']),
     unsupportedValues: Object.freeze(['delete-suspend'])
   }),
   startupWipe: Object.freeze({
-    implemented: false,
+    implemented: true,
+    nodeOnly: true,
     flags: Object.freeze([
       '--wipe-owned-files-on-start',
       '--wipe-failure-policy',
@@ -21,13 +38,15 @@ export const UNSUPPORTED_CAPABILITIES = Object.freeze({
       '--no-wipe-runtime-retry',
       '--wipe-runtime-interval'
     ]),
-    failurePolicies: Object.freeze(['retry', 'background', 'ignore', 'abort']),
+    failurePolicies: Object.freeze([...WIPE_FAILURE_POLICIES]),
     retries: Object.freeze({ min: 1, max: 20, default: 5 }),
     retryDelayMs: Object.freeze({ min: 50, max: 5000, default: 200 }),
     runtimeIntervalSec: Object.freeze({ default: 30 }),
     runtimeRetryDefault: true
   }),
   selfDestruct: Object.freeze({
+    implemented: true,
+    nodeOnly: true,
     flags: Object.freeze([
       '--self-destruct-key',
       '--self-destruct-on-fullscreen-exit',
@@ -35,20 +54,16 @@ export const UNSUPPORTED_CAPABILITIES = Object.freeze({
       '--no-self-destruct-confirm'
     ]),
     repeatableKey: true,
-    delayMs: Object.freeze({ default: 0 }),
+    delayMs: Object.freeze({ min: 0, max: SELF_DESTRUCT_DELAY_MAX_MS, default: 0 }),
     confirmDefault: true
   })
 });
 
 export function describeUnsupportedCapabilities() {
   return [
-    `execution: 仅支持 ${UNSUPPORTED_CAPABILITIES.executionModes.supported.join('/')}；memory 为宿主侧零落盘（客户端仍正常可见启动）；`
-      + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues.join('/')} 与 `
-      + `${UNSUPPORTED_CAPABILITIES.executionModes.unsupportedFlags.join('/')} 未实现`,
-    `startup-wipe: 尚未实现（策略 ${UNSUPPORTED_CAPABILITIES.startupWipe.failurePolicies.join('|')}，`
-      + `重试 ${UNSUPPORTED_CAPABILITIES.startupWipe.retries.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retries.max}，`
-      + `间隔 ${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min}-${UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.max}ms）`,
-    `self-destruct: 未实现（可重复快捷键、延迟 ${UNSUPPORTED_CAPABILITIES.selfDestruct.delayMs.default}ms、默认需确认）`
+    `Node 宿主支持执行模式：${NODE_ADVANCED_CAPABILITIES.executionModes.join('/')}；delete-suspend 在启动完成后删除程序文件和数据，并在全屏退出/宿主退出时再次清理。`,
+    `Node 宿主支持启动清理与自毁；原生宿主仅支持 normal/memory，其他高级参数会明确提示使用 Node 入口。`,
+    `自毁热键/全屏监听依赖页面注入；CXExam 未启动或页面尚未注入时不会误触发。`
   ];
 }
 
@@ -161,6 +176,24 @@ function readAnswerKey(value) {
   return parts.join('+');
 }
 
+function appendSelfDestructKey(list, key, name = '--self-destruct-key') {
+  const normalized = key.toLowerCase();
+  const keys = Array.isArray(list) ? list.slice() : [];
+  if (keys.some((item) => item.toLowerCase() === normalized)) return keys;
+  if (keys.length >= 8) throw new Error('--self-destruct-key 最多配置 8 个快捷键');
+  keys.push(key);
+  return keys;
+}
+
+function normalizeSelfDestructKeys(raw, name = 'selfDestructKeys') {
+  if (raw === undefined) return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  if (!values.every((item) => typeof item === 'string')) throw new Error(`options-json 的 ${name} 必须是字符串或字符串数组`);
+  let keys = [];
+  for (const value of values) keys = appendSelfDestructKey(keys, readAnswerKey(value), name);
+  return keys;
+}
+
 function rejectUnsupportedExecutionOption(argument) {
   const error = new Error(`参数 ${argument} 当前 Windows 宿主尚未实现；请使用已支持的普通运行参数`);
   error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
@@ -168,8 +201,8 @@ function rejectUnsupportedExecutionOption(argument) {
 }
 
 export function validateSupportedJsonOptions(value, source = 'options-json') {
-  const unsupportedKey = /^(?:deletesuspend|selfdestruct.*|wipe.*)$/iu;
-  const isTopLevelExecutionMode = (prefix, key) => !prefix && !key.toLowerCase().startsWith('common.settings.');
+  const destructiveTopLevel = /^(?:deletesuspend|selfdestruct.*|wipe.*)$/iu;
+  const isTopLevel = (prefix) => !prefix;
   const visit = (item, prefix = '') => {
     if (!item || typeof item !== 'object') return;
     for (const [key, child] of Object.entries(item)) {
@@ -178,23 +211,24 @@ export function validateSupportedJsonOptions(value, source = 'options-json') {
         .replace(/^common\.settings\.windows-/iu, '')
         .replace(/[-_]/gu, '')
         .toLowerCase();
-      if (normalizedKey === 'executionmode' || normalizedKey === 'memoryexec') {
-        if (!isTopLevelExecutionMode(prefix, key)) {
-          const error = new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
-          error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
-          throw error;
+      const topLevel = isTopLevel(prefix);
+      if (normalizedKey === 'executionmode' || normalizedKey === 'memoryexec' || normalizedKey === 'deletesuspend') {
+        if (!topLevel) {
+          throw new Error(`${source} 的 ${fullKey} 只能作为顶层字段，不能由页面共享设置修改`);
         }
         if (normalizedKey === 'memoryexec' && typeof child !== 'boolean') {
           throw new Error(`${source} 的 ${fullKey} 必须是布尔值`);
         }
-        if (normalizedKey === 'executionmode' && child !== 'normal' && child !== 'memory') {
-          throw new Error(`${source} 的 ${fullKey} 只支持 normal 或 memory`);
+        if (normalizedKey === 'deletesuspend' && typeof child !== 'boolean') {
+          throw new Error(`${source} 的 ${fullKey} 必须是布尔值`);
         }
-      } else if (unsupportedKey.test(normalizedKey)
-        && (normalizedKey.startsWith('wipe') || child !== false)) {
-        const error = new Error(`${source} 包含当前宿主尚未实现的参数：${fullKey}`);
-        error.code = 'ERR_UNSUPPORTED_HOST_OPTION';
-        throw error;
+        if (normalizedKey === 'executionmode' && !EXECUTION_MODES.includes(child)) {
+          throw new Error(`${source} 的 ${fullKey} 只支持 normal、memory 或 delete-suspend`);
+        }
+      } else if (destructiveTopLevel.test(normalizedKey)) {
+        if (!topLevel) {
+          throw new Error(`${source} 的 ${fullKey} 只能作为顶层字段，不能由页面共享设置修改`);
+        }
       }
       visit(child, fullKey);
     }
@@ -265,6 +299,16 @@ const JSON_OPTION_KEYS = {
   autoSubmit: 'autoSubmit',
   executionMode: 'executionMode',
   memoryExec: 'executionMode',
+  deleteSuspend: 'deleteSuspend',
+  selfDestructKeys: 'selfDestructKeys',
+  selfDestructKey: 'selfDestructKeys',
+  selfDestructOnFullscreenExit: 'selfDestructOnFullscreenExit',
+  selfDestructDelayMs: 'selfDestructDelayMs',
+  selfDestructConfirm: 'selfDestructConfirm',
+  noSelfDestructConfirm: 'noSelfDestructConfirm',
+  silentScenario: 'silentScenario',
+  silentDeleteSimulate: 'silentDeleteSimulate',
+  earlyLaunchOnPreferred: 'earlyLaunchOnPreferred',
   wipeOwnedFilesOnStart: 'wipeOwnedFilesOnStart',
   wipeFailurePolicy: 'wipeFailurePolicy',
   wipeRetries: 'wipeRetries',
@@ -305,6 +349,12 @@ const CLI_OPTION_KEYS = {
   '--wipe-retries': 'wipeRetries', '--wipe-retry-delay': 'wipeRetryDelayMs',
   '--wipe-runtime-retry': 'wipeRuntimeRetry', '--no-wipe-runtime-retry': 'wipeRuntimeRetry',
   '--wipe-runtime-interval': 'wipeRuntimeIntervalSec',
+  '--delete-suspend': 'executionMode',
+  '--self-destruct-key': 'selfDestructKeys', '--self-destruct-on-fullscreen-exit': 'selfDestructOnFullscreenExit',
+  '--self-destruct-delay': 'selfDestructDelayMs', '--self-destruct-confirm': 'selfDestructConfirm',
+  '--no-self-destruct-confirm': 'selfDestructConfirm',
+  '--silent-scenario': 'silentScenario', '--silent-delete-simulate': 'silentDeleteSimulate',
+  '--early-launch-preferred': 'earlyLaunchOnPreferred',
   '--log': 'logFileEnabled', '--no-log': 'logFileEnabled', '--quiet': 'quiet', '--diagnose': 'diagnose',
   '--no-diagnose': 'diagnose', '--diagnostics-dir': 'diagnosticsDir', '--report': 'reportPath',
   '--stop-client-on-exit': 'stopClientOnExit', '--dpi-aware': 'dpiAware',
@@ -359,12 +409,71 @@ export function applyOptionsJsonToOptions(options, value, { deferValidation = fa
       case 'answerThreads': next.answerThreads = normalizeAnswerThreads(raw); break;
       case 'answerCountdown': next.answerCountdown = readBoundedInteger(raw, 'options-json.answerCountdown', 0, 3600); break;
       case 'answerRetry': next.answerRetry = readBoundedInteger(raw, 'options-json.answerRetry', 0, 20); break;
+      case 'deleteSuspend':
+        next.deleteSuspend = readBoolean(raw, jsonKey);
+        if (next.deleteSuspend) next.executionMode = DELETE_SUSPEND_MODE;
+        break;
+      case 'selfDestructKeys':
+        next.selfDestructKeys = normalizeSelfDestructKeys(raw, jsonKey);
+        next.selfDestructTuningSet = true;
+        break;
+      case 'selfDestructOnFullscreenExit':
+        next.selfDestructOnFullscreenExit = readBoolean(raw, jsonKey);
+        next.selfDestructTuningSet = true;
+        break;
+      case 'selfDestructDelayMs':
+        next.selfDestructDelayMs = readBoundedInteger(raw, 'options-json.selfDestructDelayMs', 0, SELF_DESTRUCT_DELAY_MAX_MS);
+        next.selfDestructTuningSet = true;
+        break;
+      case 'selfDestructConfirm':
+        next.selfDestructConfirm = readBoolean(raw, jsonKey);
+        next.selfDestructTuningSet = true;
+        break;
+      case 'noSelfDestructConfirm':
+        next.selfDestructConfirm = !readBoolean(raw, jsonKey);
+        next.selfDestructTuningSet = true;
+        break;
+      case 'silentScenario':
+        next.silentScenario = readBoolean(raw, jsonKey);
+        break;
+      case 'silentDeleteSimulate':
+        next.silentDeleteSimulate = readBoolean(raw, jsonKey);
+        if (next.silentDeleteSimulate) next.silentScenario = true;
+        break;
+      case 'earlyLaunchOnPreferred':
+        next.earlyLaunchOnPreferred = readBoolean(raw, jsonKey);
+        break;
+      case 'wipeOwnedFilesOnStart':
+        next.wipeOwnedFilesOnStart = readBoolean(raw, jsonKey);
+        next.wipeTuningSet = true;
+        break;
+      case 'wipeFailurePolicy':
+        if (!WIPE_FAILURE_POLICIES.includes(raw)) throw new Error('options-json 的 wipeFailurePolicy 无效');
+        next.wipeFailurePolicy = raw;
+        next.wipeTuningSet = true;
+        break;
+      case 'wipeRetries':
+        next.wipeRetries = readBoundedInteger(raw, 'options-json.wipeRetries', 1, 20);
+        next.wipeTuningSet = true;
+        break;
+      case 'wipeRetryDelayMs':
+        next.wipeRetryDelayMs = readBoundedInteger(raw, 'options-json.wipeRetryDelayMs', 50, 5000);
+        next.wipeTuningSet = true;
+        break;
+      case 'wipeRuntimeRetry':
+        next.wipeRuntimeRetry = readBoolean(raw, jsonKey);
+        next.wipeTuningSet = true;
+        break;
+      case 'wipeRuntimeIntervalSec':
+        next.wipeRuntimeIntervalSec = readBoundedInteger(raw, 'options-json.wipeRuntimeIntervalSec', 1, 86400);
+        next.wipeTuningSet = true;
+        break;
       case 'executionMode':
         if (jsonKey === 'memoryExec') {
           if (typeof raw !== 'boolean') throw new Error('options-json 的 memoryExec 必须是布尔值');
           next.executionMode = raw ? 'memory' : 'normal';
         } else {
-          if (!['normal', 'memory'].includes(raw)) throw new Error('options-json 的 executionMode 只支持 normal 或 memory');
+          if (!EXECUTION_MODES.includes(raw)) throw new Error('options-json 的 executionMode 只支持 normal、memory 或 delete-suspend');
           next.executionMode = raw;
         }
         break;
@@ -426,7 +535,8 @@ function finalizeHostOptions(options) {
   const next = { ...options };
   if (next.elevateOnStart && next.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   if (next.port !== null && next.port !== undefined) next.port = validateLaunchPort(next.port);
-  if (next.executionMode === 'memory') next.noDiskWrite = true;
+  if (next.deleteSuspend === true && next.executionMode !== DELETE_SUSPEND_MODE) next.executionMode = DELETE_SUSPEND_MODE;
+  if (next.executionMode === 'memory' || next.executionMode === DELETE_SUSPEND_MODE) next.noDiskWrite = true;
   if (next.noDiskWrite) {
     next.logFileEnabled = false;
     next.noDiagnose = true;
@@ -434,9 +544,11 @@ function finalizeHostOptions(options) {
     next.reportPath = '';
     next.noScanCache = true;
   }
+  if (next.silentScenario) applySilentScenario(next);
   validateClientSelectionOptions(next);
   validateDataLifecycleOptions(next);
   validateWipeOptions(next);
+  validateAdvancedOptions(next);
   return next;
 }
 
@@ -525,6 +637,69 @@ function validateWipeOptions(options) {
   }
 }
 
+function validateAdvancedOptions(options) {
+  if (options.wipeTuningSet && !options.wipeOwnedFilesOnStart) {
+    throw new Error('--wipe-* 调优参数必须与 --wipe-owned-files-on-start 一起使用');
+  }
+  const selfDestructConfigured = Array.isArray(options.selfDestructKeys) && options.selfDestructKeys.length > 0;
+  if (options.selfDestructTuningSet && !selfDestructConfigured && !options.selfDestructOnFullscreenExit && !options.silentScenario) {
+    throw new Error('--self-destruct-* 调优参数必须至少启用 --self-destruct-key 或 --self-destruct-on-fullscreen-exit');
+  }
+  if (selfDestructConfigured && options.answerKey) {
+    const answer = String(options.answerKey).toLowerCase();
+    if (options.selfDestructKeys.some((key) => String(key).toLowerCase() === answer)) {
+      throw new Error('--self-destruct-key 不能与 --answer-key 相同');
+    }
+  }
+  if (options.silentDeleteSimulate && !options.silentScenario) {
+    throw new Error('--silent-delete-simulate 必须与 --silent-scenario 一起使用');
+  }
+  if (options.silentScenario && process.platform !== 'win32') {
+    throw new Error('--silent-scenario 仅支持 Windows');
+  }
+  if (options.selfDestructDelayMs !== undefined && options.selfDestructDelayMs !== 0 && !selfDestructConfigured && !options.silentScenario) {
+    throw new Error('--self-destruct-delay 必须与自毁触发条件一起使用');
+  }
+  if (options.executionMode === DELETE_SUSPEND_MODE || options.silentScenario) {
+    if (options.attachPort > 0) throw new Error('delete-suspend/静默场景不支持 --attach');
+    if (options.listClients) throw new Error('delete-suspend/静默场景不支持 --list-clients');
+  }
+  if (options.executionMode !== 'normal' && options.executionMode !== 'memory' && options.executionMode !== DELETE_SUSPEND_MODE) {
+    throw new Error('执行模式只支持 normal、memory 或 delete-suspend');
+  }
+}
+
+function applySilentScenario(options) {
+  // 静默场景固定走扫描选择，忽略配置中保存的 clientPath/选择参数，避免 --client 与 client-first 冲突。
+  options.clientPath = '';
+  options.clientIndex = null;
+  options.listClients = false;
+  options.selectClient = false;
+  options.scanClients = true;
+  options.noDiskWrite = true;
+  options.noLog = true;
+  options.logFileEnabled = false;
+  options.quiet = !options.silentDeleteSimulate;
+  options.panelEnabled = false;
+  options.diagnose = false;
+  options.noDiagnose = true;
+  options.reportPath = '';
+  options.noScanCache = true;
+  options.clientFirst = true;
+  options.answerMode = 'manual';
+  options.answerKey = 'Ctrl+Alt+Shift+S';
+  options.answerThreads = 1;
+  options.showAnswerDialog = false;
+  options.earlyLaunchOnPreferred = true;
+  options.selfDestructKeys = ['Ctrl+Alt+Shift+E', 'F8'];
+  options.selfDestructOnFullscreenExit = true;
+  options.selfDestructDelayMs = 0;
+  options.selfDestructConfirm = false;
+  if (!options.rawArgs.includes('--scan-mode') && !options.rawArgs.includes('--scan-all') && !options.rawArgs.includes('--no-scan-all')) {
+    options.scanMode = 'fallback-all';
+  }
+}
+
 function validateClientSelectionOptions(options) {
   if (options.clientPath && options.scanClients) {
     throw new Error('--client 不能与扫描参数（--scan-clients、--scan-mode 或 --rescan）同时使用');
@@ -586,6 +761,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
     elevateOnStart: false,
     hideConsole: false,
     elevated: false,
+    wipeCompleted: false,
     stopClientOnExit: false,
     diagnose: false,
     noDiagnose: false,
@@ -612,6 +788,16 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
     wipeRetryDelayMs: 200,
     wipeRuntimeRetry: true,
     wipeRuntimeIntervalSec: 30,
+    wipeTuningSet: false,
+    selfDestructKeys: [],
+    selfDestructOnFullscreenExit: false,
+    selfDestructDelayMs: 0,
+    selfDestructConfirm: true,
+    selfDestructTuningSet: false,
+    silentScenario: false,
+    silentDeleteSimulate: false,
+    earlyLaunchOnPreferred: false,
+    deleteSuspend: false,
     executionMode: 'normal',
     help: false,
     capabilities: false
@@ -693,6 +879,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--elevate-on-start': options.elevateOnStart = true; break;
       case '--hide-console': options.hideConsole = true; break;
       case '--elevated': options.elevated = true; break;
+      case '--wipe-completed': options.wipeCompleted = true; break;
       case '--stop-client-on-exit': options.stopClientOnExit = true; break;
       case '--diagnose': options.diagnose = true; options.noDiagnose = false; break;
       case '--no-diagnose': options.diagnose = false; options.noDiagnose = true; break;
@@ -719,7 +906,7 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--no-auto-submit': options.autoSubmit = false; break;
       case '--execution-mode': {
         const value = readValue(argv, index, argument);
-        if (value !== 'normal' && value !== 'memory') rejectUnsupportedExecutionOption(argument);
+        if (!EXECUTION_MODES.includes(value)) throw new Error('参数 --execution-mode 只支持 normal、memory 或 delete-suspend');
         options.executionMode = value;
         index += 1;
         break;
@@ -727,19 +914,78 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
       case '--memory-exec':
         options.executionMode = 'memory';
         break;
-      case '--wipe-owned-files-on-start':
-      case '--wipe-failure-policy':
-      case '--wipe-retries':
-      case '--wipe-retry-delay':
-      case '--wipe-runtime-retry':
-      case '--no-wipe-runtime-retry':
-      case '--wipe-runtime-interval':
-      case '--self-destruct-key':
-      case '--self-destruct-on-fullscreen-exit':
-      case '--self-destruct-delay':
-      case '--no-self-destruct-confirm':
       case '--delete-suspend':
-        rejectUnsupportedExecutionOption(argument);
+        options.executionMode = DELETE_SUSPEND_MODE;
+        break;
+      case '--wipe-owned-files-on-start':
+        options.wipeOwnedFilesOnStart = true;
+        options.wipeTuningSet = true;
+        break;
+      case '--wipe-failure-policy': {
+        const value = readValue(argv, index, argument);
+        if (!WIPE_FAILURE_POLICIES.includes(value)) throw new Error('参数 --wipe-failure-policy 只支持 retry、background、ignore 或 abort');
+        options.wipeFailurePolicy = value;
+        options.wipeTuningSet = true;
+        index += 1;
+        break;
+      }
+      case '--wipe-retries':
+        options.wipeRetries = readBoundedInteger(readValue(argv, index, argument), argument, 1, 20);
+        options.wipeTuningSet = true;
+        index += 1;
+        break;
+      case '--wipe-retry-delay':
+        options.wipeRetryDelayMs = readBoundedInteger(readValue(argv, index, argument), argument, 50, 5000);
+        options.wipeTuningSet = true;
+        index += 1;
+        break;
+      case '--wipe-runtime-retry':
+        options.wipeRuntimeRetry = true;
+        options.wipeTuningSet = true;
+        break;
+      case '--no-wipe-runtime-retry':
+        options.wipeRuntimeRetry = false;
+        options.wipeTuningSet = true;
+        break;
+      case '--wipe-runtime-interval':
+        options.wipeRuntimeIntervalSec = readBoundedInteger(readValue(argv, index, argument), argument, 1, 86400);
+        options.wipeTuningSet = true;
+        index += 1;
+        break;
+      case '--self-destruct-key': {
+        const key = readAnswerKey(readValue(argv, index, argument));
+        options.selfDestructKeys = appendSelfDestructKey(options.selfDestructKeys, key, argument);
+        options.selfDestructTuningSet = true;
+        index += 1;
+        break;
+      }
+      case '--self-destruct-on-fullscreen-exit':
+        options.selfDestructOnFullscreenExit = true;
+        options.selfDestructTuningSet = true;
+        break;
+      case '--self-destruct-delay':
+        options.selfDestructDelayMs = readBoundedInteger(readValue(argv, index, argument), argument, 0, SELF_DESTRUCT_DELAY_MAX_MS);
+        options.selfDestructTuningSet = true;
+        index += 1;
+        break;
+      case '--self-destruct-confirm':
+        options.selfDestructConfirm = true;
+        options.selfDestructTuningSet = true;
+        break;
+      case '--no-self-destruct-confirm':
+        options.selfDestructConfirm = false;
+        options.selfDestructTuningSet = true;
+        break;
+      case '--silent-scenario':
+        options.silentScenario = true;
+        break;
+      case '--silent-delete-simulate':
+        options.silentDeleteSimulate = true;
+        options.silentScenario = true;
+        break;
+      case '--early-launch-preferred':
+        options.earlyLaunchOnPreferred = true;
+        break;
       case '--help': case '-h': options.help = true; break;
       case '--version': case '-v': options.version = true; break;
       case '--capabilities': options.capabilities = true; break;
@@ -747,12 +993,15 @@ export function parseHostArgs(argv, { startup = false, platform = process.platfo
     }
   }
   options.cliOptionKeys = new Set(argv.map((argument) => CLI_OPTION_KEYS[argument]).filter(Boolean));
+  if (options.wipeCompleted) options.wipeTuningSet = false;
   if (options.port !== null) options.port = validateLaunchPort(options.port);
+  if (options.silentScenario) applySilentScenario(options);
   validateClientSelectionOptions(options);
   if (options.elevateOnStart && options.noElevate) throw new Error('--elevate-on-start 与 --no-elevate 不能同时使用');
   validateDataLifecycleOptions(options);
   validateWipeOptions(options);
-  if (options.executionMode === 'memory') options.noDiskWrite = true;
+  validateAdvancedOptions(options);
+  if (options.executionMode === 'memory' || options.executionMode === DELETE_SUSPEND_MODE) options.noDiskWrite = true;
   if (options.noDiskWrite) {
     options.logFileEnabled = false;
     options.noDiagnose = true;

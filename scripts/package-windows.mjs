@@ -19,9 +19,10 @@ const DIST_REQUIRED = [
   path.join('vendor', 'sweetalert2.min.css'),
   'package-manifest.json'
 ];
-// Node 宿主运行时需要的非模块文件；第一阶段未发布的内部清理/自毁原型不得进入发布包。
+// Node 宿主运行时需要的非模块文件；构建期模块不得进入发布包。
 const HOST_RUNTIME_SCRIPTS = ['launch-client.ps1', 'scan-progress-window.ps1', 'selection-window.ps1', 'system-probe.ps1', 'silent-launch.vbs'];
-const HOST_FORBIDDEN_MODULES = new Set(['self-destruct.mjs', 'wipe.mjs', 'owned-files.mjs']);
+// wipe.mjs / owned-files.mjs 已升级为启动清理运行时依赖；自毁状态机仍由后续模块按需引入。
+const HOST_FORBIDDEN_MODULES = new Set(['chrome75-syntax.mjs', 'trampoline.js']);
 const EXTERNAL_IMPORT_PATTERN = /\b(?:from|import)\s+'((?!node:|\.\/)[^']+)'/gu;
 const RELATIVE_MODULE_PATTERN = /\b(?:from|import)\s+'\.\/([A-Za-z0-9_-]+\.mjs)'/gu;
 
@@ -104,7 +105,13 @@ function parseArgs(argv) {
     silentLauncher: path.join(repoRoot, 'start-windows-silent.cmd'),
     configExample: path.join(repoRoot, 'windows', 'config.example.json'),
     verifier: path.join(repoRoot, 'scripts', 'verify-release.mjs'),
-    exe: path.join(repoRoot, 'windows', 'native', '.tmp-native-host', 'bin', 'chaoxing_plus.exe'),
+    exe: path.join(repoRoot, 'build-windows', 'bin', 'chaoxing_plus.exe'),
+    // 自带 Node 运行时：发布包内的入口优先用 runtime\node.exe，避免依赖目标机器的
+    // C:\Program Files\nodejs\node.exe（考试机通常没有 Node.js）。
+    runtimeExe: process.platform === 'win32' ? process.execPath : '',
+    // Node 宿主已弃用：发布包默认只含原生 EXE，Node 闭包/启动器/运行时需 --with-node。
+    withNode: false,
+    skipRuntime: process.platform !== 'win32',
     skipNative: false,
     skipZip: false,
     skipDocs: false,
@@ -129,9 +136,13 @@ function parseArgs(argv) {
       case '--config-example': options.configExample = path.resolve(value()); break;
       case '--verifier': options.verifier = path.resolve(value()); break;
       case '--exe': options.exe = path.resolve(value()); break;
+      case '--runtime-exe': options.runtimeExe = path.resolve(value()); options.skipRuntime = false; break;
+      case '--no-runtime': options.skipRuntime = true; break;
+      case '--with-node': options.withNode = true; break;
+      case '--no-node': options.withNode = false; break;
       case '--name': options.name = value(); break;
       case '--version': options.version = value(); break;
-      case '--skip-native': options.skipNative = true; break;
+      case '--skip-native': options.skipNative = true; options.withNode = true; break;
       case '--skip-zip': options.skipZip = true; break;
       case '--skip-docs': options.skipDocs = true; break;
       case '--help': case '-h':
@@ -146,6 +157,10 @@ function parseArgs(argv) {
           '  --config-example <file>   windows/config.example.json（首跑配置模板）',
           '  --verifier <file>          scripts/verify-release.mjs（包内完整性校验器）',
           '  --exe <file>       原生 EXE（默认原生构建产物；不存在时仅打 Node 包）',
+          '  --runtime-exe <file> 内嵌到 runtime\\node.exe 的 Node 运行时（默认当前 node.exe）',
+          '  --no-runtime       不内嵌 Node 运行时（入口退回 PATH 上的 node.exe）',
+          '  --with-node        额外携带 Node 宿主闭包/启动器/自带运行时（Node 已弃用，仅备用）',
+          '  --no-node          只打原生 EXE（默认）',
           '  --skip-native      不包含原生 EXE',
           '  --skip-zip         只生成暂存目录，不创建 zip',
           '  --skip-docs        不包含 README.md / docs/windows.md',
@@ -193,9 +208,11 @@ async function main() {
   if (packageManifest && packageManifest.features && packageManifest.features.injectionLog === true) {
     fail('dist-windows 包含本地调试注入日志（features.injectionLog=true），发布包拒绝打包；请先运行 npm run build:windows -- --release 并重新构建原生宿主');
   }
-  if (!(await pathExists(options.launcher))) fail(`缺少启动脚本：${options.launcher}`);
-  if (!(await pathExists(options.debugLauncher))) fail(`缺少调试启动脚本：${options.debugLauncher}`);
-  if (!(await pathExists(options.silentLauncher))) fail(`缺少静默启动脚本：${options.silentLauncher}`);
+  if (options.withNode) {
+    if (!(await pathExists(options.launcher))) fail(`缺少启动脚本：${options.launcher}`);
+    if (!(await pathExists(options.debugLauncher))) fail(`缺少调试启动脚本：${options.debugLauncher}`);
+    if (!(await pathExists(options.silentLauncher))) fail(`缺少静默启动脚本：${options.silentLauncher}`);
+  }
   if (!(await pathExists(options.configExample))) fail(`缺少配置模板：${options.configExample}`);
   if (!(await pathExists(options.verifier))) fail(`缺少发布包校验器：${options.verifier}`);
   if (!(await pathExists(options.hostDir))) fail(`缺少 Node 宿主目录：${options.hostDir}`);
@@ -208,20 +225,57 @@ async function main() {
   await fs.rm(packageRoot, { recursive: true, force: true });
   await fs.mkdir(packageRoot, { recursive: true });
 
-  // dist-windows 是 Node 宿主注入资源；原生 EXE 使用内嵌副本。
-  await fs.cp(options.distDir, path.join(packageRoot, 'dist-windows'), { recursive: true });
+  // Node 宿主已弃用：默认只打原生 EXE；--with-node（或 --skip-native）才携带下面的内容。
+  if (options.withNode) {
+    // dist-windows 只是 Node 宿主的注入资源；原生 EXE 使用构建期内嵌副本。
+    await fs.cp(options.distDir, path.join(packageRoot, 'dist-windows'), { recursive: true });
 
-  // Node 宿主目录：只带 main.mjs 运行闭包和受控运行脚本，测试/内部原型不进入发布包。
-  const hostRuntime = await collectHostRuntime(options.hostDir);
-  const hostTarget = path.join(packageRoot, 'windows', 'host');
-  await fs.mkdir(hostTarget, { recursive: true });
-  for (const relative of [...hostRuntime.keys()].sort()) {
-    await fs.copyFile(path.join(options.hostDir, relative), path.join(hostTarget, relative));
+    // Node 宿主目录：只带 main.mjs 运行闭包和受控运行脚本，测试/内部原型不进入发布包。
+    const hostRuntime = await collectHostRuntime(options.hostDir);
+    const hostTarget = path.join(packageRoot, 'windows', 'host');
+    await fs.mkdir(hostTarget, { recursive: true });
+    for (const relative of [...hostRuntime.keys()].sort()) {
+      await fs.copyFile(path.join(options.hostDir, relative), path.join(hostTarget, relative));
+    }
+    await fs.copyFile(options.launcher, path.join(packageRoot, 'start-windows-node.cmd'));
+    await fs.copyFile(options.debugLauncher, path.join(packageRoot, 'start-windows-node-debug.cmd'));
+    await fs.copyFile(options.silentLauncher, path.join(packageRoot, 'start-windows-node-silent.cmd'));
+    for (const [sourceName, targetName] of [
+      [path.join('windows','host','silent-memory-bootstrap.mjs'), 'windows/host/silent-memory-bootstrap.mjs'],
+      [path.join('windows','host','silent-memory-launch.vbs'), 'windows/host/silent-memory-launch.vbs']
+    ]) {
+      const source = path.join(repoRoot, sourceName);
+      if (await pathExists(source)) {
+        const target = path.join(packageRoot, targetName);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.copyFile(source, target);
+      }
+    }
+    for (const [sourceName, targetName] of [
+      ['start-windows-node-silent-debug.cmd', 'start-windows-node-silent-debug.cmd'],
+      ['start-windows-node-silent-no-full-scan-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd']
+    ]) {
+      const source = path.join(repoRoot, sourceName);
+      if (await pathExists(source)) await fs.copyFile(source, path.join(packageRoot, targetName));
+    }
   }
-  await fs.copyFile(options.launcher, path.join(packageRoot, 'start-windows.cmd'));
-  await fs.copyFile(options.debugLauncher, path.join(packageRoot, 'start-windows-debug.cmd'));
-  await fs.copyFile(options.silentLauncher, path.join(packageRoot, 'start-windows-silent.cmd'));
+  // 原生-only 包没有 windows/host，这里显式创建目录再放配置模板。
+  await fs.mkdir(path.join(packageRoot, 'windows'), { recursive: true });
   await fs.copyFile(options.configExample, path.join(packageRoot, 'windows', 'config.example.json'));
+  if (includeNative) {
+    // 原生入口：指向包内 chaoxing_plus.exe，不依赖 Node/PowerShell。
+    for (const name of [
+      'start-windows.cmd',
+      'start-windows-debug.cmd',
+      'start-windows-silent.cmd',
+      'start-windows-silent-debug.cmd',
+      'start-windows-silent-no-full-scan-debug.cmd'
+    ]) {
+      const source = path.join(repoRoot, name);
+      if (!(await pathExists(source))) fail(`缺少原生启动脚本：${name}`);
+      await fs.copyFile(source, path.join(packageRoot, name));
+    }
+  }
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
   if (!options.skipDocs) {
     for (const doc of ['README.md', path.join('docs', 'windows.md')]) {
@@ -236,6 +290,18 @@ async function main() {
     await fs.copyFile(options.exe, path.join(packageRoot, 'chaoxing_plus.exe'));
   }
 
+  // 自带运行时：包内入口优先使用它，目标机器不需要安装 Node.js。
+  let runtimeRelative = '';
+  if (options.withNode && !options.skipRuntime && options.runtimeExe) {
+    if (await pathExists(options.runtimeExe)) {
+      runtimeRelative = 'runtime/node.exe';
+      await fs.mkdir(path.join(packageRoot, 'runtime'), { recursive: true });
+      await fs.copyFile(options.runtimeExe, path.join(packageRoot, runtimeRelative));
+    } else {
+      console.warn(`[release] 未找到可内嵌的 Node 运行时（${options.runtimeExe}）；包内入口会退回 PATH 上的 node.exe`);
+    }
+  }
+
   const files = await walkFiles(packageRoot);
   const info = {
     name,
@@ -243,12 +309,15 @@ async function main() {
     host: 'windows',
     createdAt: new Date().toISOString(),
     nativeHost: includeNative,
-    nodeHost: true,
-    node: process.version,
-    entrypoints: includeNative
-      ? { native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' }
-      : { node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' },
-    assetsDir: 'dist-windows',
+    nodeHost: options.withNode,
+    node: options.withNode ? process.version : '',
+    entrypoints: options.withNode
+      ? (includeNative
+        ? { native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd', nodeSilentDebug: 'start-windows-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-silent-no-full-scan-debug.cmd' }
+        : { node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' })
+      : { native: 'chaoxing_plus.exe' },
+    assetsDir: options.withNode ? 'dist-windows' : '',
+    runtime: runtimeRelative,
     payloadFiles: files.length,
     verifier: 'verify-release.mjs'
   };
@@ -289,8 +358,14 @@ async function main() {
     nativeHost: includeNative,
     files: hashTargets.length,
     verifier: 'verify-release.mjs',
-    sizeBytes: (await fs.stat(path.join(packageRoot, includeNative ? 'chaoxing_plus.exe' : 'start-windows.cmd'))).size
+    sizeBytes: (await fs.stat(path.join(packageRoot, includeNative ? 'chaoxing_plus.exe' : 'start-windows-node.cmd'))).size
   }, null, 2));
 }
 
 main().catch((error) => fail(error && error.message ? error.message : String(error), 1));
+
+
+
+
+
+

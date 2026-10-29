@@ -51,7 +51,7 @@ class FakeElement {
   }
 }
 
-function createHarness({ config = {}, instance = 'test-instance', styleText = '/*swal*/', readyState = 'complete', withDocumentElement = true, href = 'https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examlist?secret=1' } = {}) {
+function createHarness({ config = {}, instance = 'test-instance', styleText = '/*swal*/', readyState = 'complete', withDocumentElement = true, silent = null, isTopFrame = true, screen = null, viewport = null, href = 'https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/examlist?secret=1' } = {}) {
   const messages = [];
   const storage = new Map();
   const storageCalls = [];
@@ -124,9 +124,33 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
     __CX_WIN_INSTANCE__: instance,
     __CX_WIN_STYLE_TEXT__: styleText
   };
+  const windowListeners = new Map();
+  windowObject.addEventListener = (type, callback) => {
+    if (typeof callback !== 'function') return;
+    if (!windowListeners.has(type)) windowListeners.set(type, []);
+    windowListeners.get(type).push(callback);
+  };
+  windowObject.removeEventListener = (type, callback) => {
+    const list = windowListeners.get(type);
+    if (!list) return;
+    const index = list.indexOf(callback);
+    if (index >= 0) list.splice(index, 1);
+  };
+  windowObject.dispatchEvent = (event) => {
+    const list = windowListeners.get(event && event.type ? event.type : '') || [];
+    for (const callback of [...list]) callback(event);
+    return true;
+  };
+  if (silent) windowObject.__CX_WIN_SILENT__ = silent;
+  if (screen) windowObject.screen = screen;
+  if (viewport) {
+    windowObject.innerWidth = viewport.width;
+    windowObject.innerHeight = viewport.height;
+  }
   windowObject.window = windowObject;
   windowObject.self = windowObject;
-  windowObject.top = windowObject;
+  // 子 frame 用独立对象模拟 top，self !== top 才能让静默控制拒绝安装。
+  windowObject.top = isTopFrame ? windowObject : {};
   windowObject.Element = FakeElement;
   windowObject.MutationObserver = class FakeMutationObserver {
     constructor(callback) { this.callback = callback; }
@@ -146,7 +170,10 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
     document: documentObject,
     console: consoleObject,
     CustomEvent: windowObject.CustomEvent,
-    Element: FakeElement
+    Element: FakeElement,
+    // 静默全屏轮询只需要一个不产生真实定时器的桩。
+    setInterval: () => 0,
+    clearInterval: () => {}
   };
   const context = vm.createContext(sandbox);
 
@@ -166,6 +193,14 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
     for (const callback of [...list]) callback({ type: 'DOMContentLoaded' });
   }
 
+  function fireWindowEvent(event) {
+    return windowObject.dispatchEvent(event);
+  }
+
+  function fireDocumentEvent(event) {
+    return documentObject.dispatchEvent(event);
+  }
+
   return {
     window: windowObject,
     document: documentObject,
@@ -175,7 +210,9 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
     dispatched,
     parseMessages,
     run,
-    fireDomContentLoaded
+    fireDomContentLoaded,
+    fireWindowEvent,
+    fireDocumentEvent
   };
 }
 
@@ -675,4 +712,80 @@ test('bootstrap 同文档重连使用完整快照删除已移除的共享配置'
   assert.equal(Object.hasOwn(harness.window.__CX_WIN_HOST__.getConfig(), 'common.settings.retired'), false);
   assert.equal(harness.storage.has('common.settings.retired'), false);
   assert.equal(harness.document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-retired'), null);
+});
+
+
+function silentKeydown(key, { ctrl = true, alt = true, shift = true } = {}) {
+  return {
+    type: 'keydown',
+    key,
+    ctrlKey: ctrl,
+    altKey: alt,
+    shiftKey: shift,
+    repeat: false,
+    prevented: 0,
+    preventDefault() { this.prevented += 1; },
+    stopPropagation() {}
+  };
+}
+
+test('静默控制只在顶层文档安装并上报自毁快捷键', async () => {
+  const harness = createHarness({
+    config: {},
+    silent: { clientPid: 1234, selfDestructKeys: ['Ctrl+Alt+Shift+E', 'F8'] }
+  });
+  await harness.run();
+  const hotkey = silentKeydown('E');
+  harness.fireWindowEvent(hotkey);
+  harness.fireWindowEvent(silentKeydown('F8', { ctrl: false, alt: false, shift: false }));
+  harness.fireWindowEvent(silentKeydown('S'));
+  const shortcuts = harness.parseMessages()
+    .filter((message) => message.kind === 'silent-hotkey')
+    .map((message) => String(message.detail.shortcut).toLowerCase());
+  assert.deepEqual(shortcuts, ['ctrl+alt+shift+e', 'f8'], '只上报配置里的自毁快捷键');
+  assert.equal(hotkey.prevented, 1, '命中自毁键后要吞掉页面默认处理');
+});
+
+test('子 frame 不安装静默控制，避免 iframe 尺寸被当成退出全屏', async () => {
+  const harness = createHarness({
+    config: {},
+    isTopFrame: false,
+    silent: { clientPid: 4321, selfDestructKeys: ['F8'] },
+    screen: { width: 1920, height: 1080 },
+    viewport: { width: 320, height: 200 }
+  });
+  await harness.run();
+  harness.fireWindowEvent(silentKeydown('F8'));
+  harness.fireDocumentEvent({ type: 'fullscreenchange' });
+  const silentMessages = harness.parseMessages()
+    .filter((message) => message.kind === 'silent-hotkey' || message.kind === 'silent-fullscreen');
+  assert.deepEqual(silentMessages, [], '子 frame 不得上报任何静默事件');
+});
+
+test('静默全屏状态按顶层文档尺寸上报进入与退出', async () => {
+  const harness = createHarness({
+    config: {},
+    silent: { clientPid: 777, selfDestructKeys: [] },
+    screen: { width: 1920, height: 1080 },
+    viewport: { width: 1920, height: 1080 }
+  });
+  await harness.run();
+  let messages = harness.parseMessages().filter((message) => message.kind === 'silent-fullscreen');
+  assert.equal(messages.length, 1, '安装时先上报一次初始全屏状态');
+  assert.equal(messages[0].detail.fullscreen, true);
+  assert.equal(messages[0].detail.pid, 777);
+
+  harness.window.innerHeight = 900;
+  harness.fireWindowEvent({ type: 'resize' });
+  messages = harness.parseMessages().filter((message) => message.kind === 'silent-fullscreen');
+  assert.equal(messages.at(-1).detail.fullscreen, false, '窗口退出全屏要上报 false');
+});
+
+test('没有 __CX_WIN_SILENT__ 时扩展注入不安装静默控制', async () => {
+  const harness = createHarness({ config: {} });
+  await harness.run();
+  harness.fireWindowEvent(silentKeydown('F8', { ctrl: false, alt: false, shift: false }));
+  const silentMessages = harness.parseMessages()
+    .filter((message) => message.kind === 'silent-hotkey' || message.kind === 'silent-fullscreen');
+  assert.deepEqual(silentMessages, []);
 });

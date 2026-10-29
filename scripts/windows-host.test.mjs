@@ -940,28 +940,22 @@ test('配置层 deleteConfig 在最终合并后仍会删除显式外部配置', 
   }
 });
 
-test('第一阶段启动清理参数在任何磁盘写入或清理前报错', async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-wipe-disabled-'));
+test('启动清理与自毁参数已接入，--help 下不执行清理或落盘', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-advanced-help-'));
   const configPath = path.join(directory, 'config.json');
   const dataDirectory = path.join(directory, 'data');
-  const originalConfig = JSON.stringify({ wipeOwnedFilesOnStart: true });
+  const originalConfig = JSON.stringify({ settings: {} });
   await fs.writeFile(configPath, originalConfig, 'utf8');
   try {
-    for (const args of [
-      ['--wipe-owned-files-on-start'],
-      ['--options-json', '{"wipeRuntimeRetry":false}'],
-      ['--config', configPath]
-    ]) {
-      const result = await runCommand(process.execPath, [
-        path.resolve(root, 'windows', 'host', 'main.mjs'),
-        ...args, '--attach', '1', '--assets', path.join(directory, 'missing-assets'),
-        '--data-dir', dataDirectory, '--no-log', '--no-diagnose', '--quiet'
-      ]);
-      assert.notEqual(result.code, 0);
-      assert.match(result.stderr, /尚未实现/u);
-      assert.equal(await fs.readFile(configPath, 'utf8'), originalConfig);
-      await assert.rejects(fs.access(dataDirectory), { code: 'ENOENT' });
-    }
+    const result = await runCommand(process.execPath, [
+      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      '--wipe-owned-files-on-start', '--wipe-retries', '7',
+      '--self-destruct-key', 'Ctrl+Alt+Shift+E', '--no-self-destruct-confirm',
+      '--config', configPath, '--data-dir', dataDirectory, '--help'
+    ]);
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /--wipe-owned-files-on-start/u);
+    assert.equal(await fs.readFile(configPath, 'utf8'), originalConfig);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -1084,7 +1078,7 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
     assert.equal(report.host, 'node');
     assert.equal(report.failures.length, 0);
     assert.equal(report.capabilities.unsupported.implemented, false);
-    assert.deepEqual(report.capabilities.unsupported.executionModes.supported, ['normal', 'memory']);
+    assert.deepEqual(report.capabilities.unsupported.executionModes.supported, ['normal', 'memory', 'delete-suspend']);
     assert.equal(report.checks.some((check) => check.name.includes('原生客户端选择窗口') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('WebSocket') && check.ok), true);
     assert.equal(report.checks.some((check) => check.name.includes('调试端口') && check.ok), true);
@@ -1345,7 +1339,7 @@ test('Node --capabilities 如实列出已支持的数据、诊断与配置能力
   const capabilities = JSON.parse(result.stdout);
   assert.equal(capabilities.hostVersion, '6.2.0');
   assert.equal(capabilities.executionMode, 'normal');
-  assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory']);
+  assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory', 'delete-suspend']);
   for (const key of [
     'scanner',
     'parameterGenerator',
@@ -1456,8 +1450,8 @@ test('Node --execution-mode memory 保持正常可见启动且宿主侧零落盘
       path.resolve(root, 'windows', 'host', 'main.mjs'), '--execution-mode', 'memory', '--capabilities'
     ], { env: { CXPLUS_NO_LOG_FILE: '1' } })).stdout);
     assert.equal(capabilities.executionMode, 'memory');
-    assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory']);
-    assert.deepEqual(capabilities.unsupported.executionModes.unsupportedValues, ['delete-suspend']);
+    assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory', 'delete-suspend']);
+    assert.deepEqual(capabilities.unsupported.nodeOnly, ['delete-suspend', 'startup-wipe', 'self-destruct', 'silent-scenario']);
   } finally {
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

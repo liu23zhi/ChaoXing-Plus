@@ -11,6 +11,7 @@
 #include "session.h"
 #include "selection.h"
 #include "audit.h"
+#include "silent.h"
 #include "config-store.h"
 #include "diagnostics.h"
 #include "elevation.h"
@@ -251,6 +252,102 @@ static void h_sample_page(H_NATIVE_PAGE *page) {
     h_report.errors += stats->errors - page->reported.errors;
     page->reported = *stats;
 }
+/* ---------- 原生静默场景：程序痕迹清理 + 自毁接线 ---------- */
+static CX_SILENT h_silent;
+static BOOL h_silent_active = FALSE;
+static BOOL h_silent_simulate = FALSE;
+static BOOL h_silent_done = FALSE;
+static CX_CLEANUP_PLAN *h_silent_plan = NULL;
+static DWORD h_silent_next_tick = 0;
+static WCHAR h_silent_parked[CX_CLEANUP_PATH_CAP];
+
+static BOOL h_silent_join(WCHAR *dst, DWORD cap, const WCHAR *base, const WCHAR *suffix) {
+    DWORD length;
+    if (!h_copy(dst, cap, base)) return FALSE;
+    length = (DWORD)h_wlen(dst);
+    if (length + (DWORD)h_wlen(suffix) + 1 > cap) return FALSE;
+    h_copy(dst + length, cap - length, suffix);
+    return TRUE;
+}
+
+/* 程序痕迹根目录 = EXE 所在目录。 */
+static BOOL h_silent_root(WCHAR *root, DWORD cap) {
+    DWORD i = 0, last = 0;
+    if (!h_exe_path[0]) return FALSE;
+    while (h_exe_path[i]) { if (h_exe_path[i] == L'\\' || h_exe_path[i] == L'/') last = i; ++i; }
+    if (!last || last + 1 > cap) return FALSE;
+    for (i = 0; i < last; ++i) root[i] = h_exe_path[i];
+    root[last] = 0;
+    return TRUE;
+}
+
+/* 只信任发布包布局（EXE 同级有 SHA256SUMS.txt）：源码/构建目录只允许模拟，
+   绝不把仓库里的构建产物当成程序痕迹删掉。判定逻辑在 silent.c，便于单测。 */
+
+static void h_silent_cleanup_pass(void) {
+    WCHAR root[CX_CLEANUP_PATH_CAP];
+    int failed = 0;
+    if (!h_silent_plan) {
+        if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) { h_audit_event("warn", "cleanup", "Program root is unavailable"); return; }
+        if (!h_silent_simulate && !cx_cleanup_is_release_layout(root)) {
+            h_silent_plan = NULL;
+            h_audit_event("warn", "cleanup", "Not a release layout; program deletion is skipped");
+            return;
+        }
+        h_silent_plan = (CX_CLEANUP_PLAN *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLEANUP_PLAN));
+        if (!h_silent_plan) { h_audit_event("warn", "cleanup", "Cleanup plan allocation failed"); return; }
+        if (!cx_cleanup_collect(root, h_silent_plan)) { h_audit_event("warn", "cleanup", "Program traces could not be collected"); return; }
+    }
+    if (!h_silent_simulate && !h_silent_parked[0] && h_exe_path[0]) {
+        if (cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP))
+            h_audit_event("info", "cleanup", "Running executable renamed; original path removed");
+        else
+            h_audit_event("warn", "cleanup", "Running executable could not be renamed");
+    }
+    (void)cx_cleanup_apply(h_silent_plan, h_silent_simulate, 5, &failed);
+    if (failed) h_audit_event("warn", "cleanup", "Some program files are still locked; retrying while running");
+    else h_audit_event("info", "cleanup", h_silent_simulate ? "Program deletion planned (simulate)" : "Program traces removed");
+}
+
+static void h_silent_begin_destruct(void) {
+    WCHAR reason[CX_SILENT_REASON_CAP];
+    if (!h_silent_active || h_silent_done) return;
+    reason[0] = 0;
+    if (!cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP)) return;
+    h_silent_done = TRUE;
+    h_audit_event("info", "self-destruct", "Destruction requested; removing program traces");
+    h_silent_cleanup_pass();
+    if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
+    h_report.stopReason = "self-destruct";
+}
+
+static void h_silent_tick(void) {
+    DWORD now;
+    if (!h_silent_active || h_silent_done) return;
+    now = GetTickCount();
+    if (h_client_pid && !proc_alive(h_client_pid)) cx_silent_client_exited(&h_silent, h_client_pid);
+    if (h_silent.state == CX_SILENT_DESTRUCT_REQUESTED) { h_silent_begin_destruct(); return; }
+    if (h_silent_next_tick && now - h_silent_next_tick < 5000) return;
+    h_silent_next_tick = now;
+    h_silent_cleanup_pass();
+}
+
+static void h_silent_widen(const char *src, WCHAR *dst, DWORD cap) {
+    DWORD i = 0;
+    if (!dst || cap == 0) return;
+    while (src && src[i] && i + 1 < cap) { dst[i] = (WCHAR)(unsigned char)src[i]; ++i; }
+    dst[i] = 0;
+}
+
+static BOOL h_append_uint(char *dst, DWORD cap, DWORD *at, DWORD value) {
+    char digits[12];
+    DWORD used = 0, i;
+    do { digits[used++] = (char)('0' + value % 10); value /= 10; } while (value);
+    if (*at + used + 1 > cap) return FALSE;
+    for (i = 0; i < used; ++i) dst[(*at)++] = digits[used - 1 - i];
+    dst[*at] = 0;
+    return TRUE;
+}
 static void h_audit_page_message(const char *json, const JT *tokens, int params) {
     const char prefix[] = "__CX_WIN_MSG__";
     int args = jkey(json, tokens, params, "args"), arg, i, length;
@@ -273,11 +370,36 @@ static void h_audit_page_message(const char *json, const JT *tokens, int params)
                 && cx_session_can_sync_config(h_current_page->state, jint(json, tokens, jkey(json, tokens, params, "executionContextId"), -1)))
                 h_config_queue(h_page_message + i + h_page_message_tokens[detail].start,
                     (DWORD)(h_page_message_tokens[detail].end - h_page_message_tokens[detail].start));
+        } else if (h_silent_active
+            && (jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "silent-hotkey")
+                || jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "silent-fullscreen"))) {
+            int silentDetail = jkey(h_page_message + i, h_page_message_tokens, 0, "detail");
+            if (silentDetail >= 0 && h_page_message_tokens[silentDetail].type == '{'
+                && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "source"), "chaoxing-plus-windows")
+                && jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "instance"), h_instance)) {
+                if (jeq(h_page_message + i, h_page_message_tokens, jkey(h_page_message + i, h_page_message_tokens, 0, "kind"), "silent-hotkey")) {
+                    char rawShortcut[CX_SILENT_KEY_CAP];
+                    WCHAR shortcut[CX_SILENT_KEY_CAP];
+                    if (jstr(h_page_message + i, h_page_message_tokens,
+                             jkey(h_page_message + i, h_page_message_tokens, silentDetail, "shortcut"),
+                             rawShortcut, CX_SILENT_KEY_CAP)) {
+                        h_silent_widen(rawShortcut, shortcut, CX_SILENT_KEY_CAP);
+                        if (cx_silent_hotkey(&h_silent, shortcut)) h_silent_begin_destruct();
+                    }
+                } else {
+                    int flag = jkey(h_page_message + i, h_page_message_tokens, silentDetail, "fullscreen");
+                    BOOL fullscreen = FALSE;
+                    if (flag >= 0 && h_page_message_tokens[flag].type == 't'
+                        && h_page_message_tokens[flag].end - h_page_message_tokens[flag].start == 4) fullscreen = TRUE;
+                    if (cx_silent_fullscreen(&h_silent, fullscreen, h_client_pid)) h_silent_begin_destruct();
+                }
+            }
         }
         return;
     }
 }
 static BOOL h_operation_active(void) {
+    if (h_silent_done) return FALSE;
     if (h_client_pid && !proc_alive(h_client_pid)) return FALSE;
     if (h_duration && GetTickCount() - h_started >= h_duration) return FALSE;
     if (h_ui_sending && (!h_current_page || !h_current_page->uiReady || h_current_page->uiEpoch != h_ui_epoch
@@ -473,7 +595,7 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
     if (!style || styleLength > (HOST_SOURCE_CAP - configLength - 256) / 6) {
         h_error(error, errorCap, L"native style exceeds its size limit"); goto done;
     }
-    capacity = configLength + styleLength * 6 + 256;
+    capacity = configLength + styleLength * 6 + 640;
     expression = (char *)HeapAlloc(GetProcessHeap(), 0, capacity);
     if (!expression) { h_error(error, errorCap, L"out of memory setting native config"); goto done; }
     if (!h_append_bytes(expression, capacity, &at, prefix, sizeof(prefix) - 1)
@@ -484,6 +606,15 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
         || !h_json_quote(expression, capacity, &at, style, styleLength)
         || !h_append_bytes(expression, capacity, &at, ";true;", 6)) {
         h_error(error, errorCap, L"native page config exceeds its size limit"); goto done;
+    }
+    if (h_silent_active) {
+        const char silentPrefix[] = ";window.__CX_WIN_SILENT__={\"clientPid\":";
+        const char silentKeys[] = ",\"selfDestructKeys\":[\"Ctrl+Alt+Shift+E\",\"F8\"]};";
+        if (!h_append_bytes(expression, capacity, &at, silentPrefix, sizeof(silentPrefix) - 1)
+            || !h_append_uint(expression, capacity, &at, h_client_pid)
+            || !h_append_bytes(expression, capacity, &at, silentKeys, sizeof(silentKeys) - 1)) {
+            h_error(error, errorCap, L"native page config exceeds its size limit"); goto done;
+        }
     }
     if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
     ok = preflight || h_send_eval(ws, (*nextId)++, expression, at, error, errorCap);
@@ -828,6 +959,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         || !cx_asset_load(L"trampoline.js", options->assetsDirSet ? options->assetsDir : NULL, &trampoline, &trampolineLength, error, errorCap)) goto done;
     if (!h_preflight_assets(options, bootstrapLength, bundleLength, style, styleLength, error, errorCap)) goto done;
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
+    if (options->silentScenario) {
+        cx_silent_init(&h_silent, TRUE);
+        h_silent_active = TRUE;
+        h_silent_simulate = options->silentDeleteSimulate;
+        h_silent_cleanup_pass();
+        h_silent_next_tick = GetTickCount();
+        h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
+    }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
         CX_DPI_OVERRIDE *dpi = NULL;
@@ -874,6 +1013,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         }
     }
     h_report.clientPid = h_client_pid; h_report.port = port;
+    if (h_silent_active && h_client_pid) cx_silent_client_started(&h_silent, h_client_pid);
     h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
     h_zero(auditError, sizeof(auditError));
     h_diagnostics = cx_diagnostics_create(options, auditError, 256);
@@ -968,6 +1108,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --debug-timeout <1000-120000 ms> --bundle-timeout <1000-300000 ms>\n"
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
             "运行: --execution-mode normal --port <0|1024-65534> --stop-client-on-exit\n"
+            "静默: --silent-scenario（固定场景：无面板/无日志/手动放行/自毁） --silent-delete-simulate（只报告删除计划）\n"
+            "       --silent-client <path>（测试/诊断：显式指定客户端，跳过扫描）\n"
             "  启动前检查已有 CXExam 进程；请先关闭已有客户端，宿主不会结束它们。\n"
             "  --no-elevate（禁止启动遇到 740 时通过 Windows UAC 重启宿主）\n"
             "  --elevate-on-start（扫描及窗口前请求管理员权限；与 --no-elevate 互斥）\n"
@@ -983,7 +1125,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
             "执行模式: --execution-mode normal|memory；memory 表示宿主侧零落盘（客户端仍正常可见启动）。\n"
-            "删除挂起、启动清理和自毁当前会明确拒绝，不会降级执行。\n");
+            "静默场景（--silent-scenario）已原生支持自毁与程序痕迹清理；删除挂起/启动清理仍拒绝执行。\n");
         return 0;
     }
     if (h_base_options.version) { h_print_utf8("6.2.0\n"); return 0; }
@@ -997,7 +1139,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"wipe\":false}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false}\n");
         return 0;
     }
     if (h_base_options.selfCheck) return h_self_check(&h_base_options);
@@ -1039,3 +1181,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
+

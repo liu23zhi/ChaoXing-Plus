@@ -48,7 +48,7 @@ jobs:
       - name: 导出原生编译测试路径
         shell: pwsh
         run: |
-          $bin = (Resolve-Path '.\windows\native\.tmp-native-host\bin').Path
+          $bin = (Resolve-Path '.\build-windows\bin').Path
           $executables = [ordered]@{
             CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
             CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'
@@ -102,11 +102,13 @@ jobs:
           $package = Join-Path (Resolve-Path 'release-ci').Path 'chaoxing-plus-6.2.0-windows'
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
-          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'windows\host\main.mjs', 'chaoxing_plus.exe', 'start-windows-silent.cmd', 'windows\host\silent-launch.vbs', 'windows\config.example.json')) {
+          # 发布包默认只含原生 EXE（Node 宿主已弃用）；这里同时确认没有混入 Node 产物。
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\config.example.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
-          node (Join-Path $package 'windows\host\main.mjs') --self-check --no-disk-write --quiet
-          if ($LASTEXITCODE -ne 0) { throw "发布包 Node 自检失败: $LASTEXITCODE" }
+          foreach ($forbidden in @('windows\host\main.mjs', 'start-windows-silent.cmd', 'runtime\node.exe')) {
+            if (Test-Path -LiteralPath (Join-Path $package $forbidden)) { throw "原生发布包不应包含 Node 产物: $forbidden" }
+          }
           $native = Start-Process -FilePath (Join-Path $package 'chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
 
@@ -116,3 +118,4 @@ jobs:
           name: windows-release
           path: release-ci/*.zip
           if-no-files-found: error
+

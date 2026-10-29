@@ -10,7 +10,14 @@ const root = path.resolve('.');
 const packageScript = path.join(root, 'scripts', 'package-windows.mjs');
 
 function runPackager(args) {
-  return spawnSync(process.execPath, [packageScript, ...args], {
+  // 夹具默认不内嵌真实 node.exe（约 100MB），避免每个用例都拷一遍；
+  // 需要验证自带运行时行为的用例显式传 --runtime-exe。
+  // 夹具默认按"原生 + Node 备用"布局断言；新的默认（只打原生）由专门用例覆盖。
+  let effective = args.includes('--with-node') || args.includes('--no-node') || args.includes('--skip-native')
+    ? args
+    : [...args, '--with-node'];
+  if (!effective.includes('--no-runtime') && !effective.includes('--runtime-exe')) effective = [...effective, '--no-runtime'];
+  return spawnSync(process.execPath, [packageScript, ...effective], {
     encoding: 'utf8', timeout: 300000, windowsHide: true
   });
 }
@@ -42,7 +49,7 @@ async function createFixture() {
     await writeFixtureFile(path.join(host, script), '# fixture runtime script\n');
   }
   // 这些文件属于内部原型/构建期模块，不得进入发布包运行闭包。
-  for (const decoy of ['self-destruct.mjs', 'wipe.mjs', 'owned-files.mjs', 'chrome75-syntax.mjs', 'trampoline.js', 'wipe-runtime.mjs']) {
+  for (const decoy of ['chrome75-syntax.mjs', 'trampoline.js', 'wipe-runtime.mjs']) {
     await writeFixtureFile(path.join(host, decoy), '// internal prototype\n');
   }
   const launcher = path.join(directory, 'start-windows.cmd');
@@ -115,7 +122,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   }
   assert.equal(await fs.readFile(path.join(packageRoot, 'windows', 'config.example.json'), 'utf8'),
     '{"settings":{"common.settings.windows-panel-theme":"pink"}}\n', '发布包必须携带首跑配置模板');
-  for (const forbidden of ['self-destruct.mjs', 'wipe.mjs', 'owned-files.mjs', 'chrome75-syntax.mjs', 'trampoline.js']) {
+  for (const forbidden of ['chrome75-syntax.mjs', 'trampoline.js']) {
     assert.equal(files.some((name) => name === `windows/host/${forbidden}`), false, forbidden);
   }
   assert.equal(files.some((name) => name.startsWith('windows/data/')), false,
@@ -129,7 +136,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   assert.equal(info.nativeHost, true);
   assert.equal(info.nodeHost, true);
   assert.deepEqual(info.entrypoints, {
-    native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd'
+    native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd', nodeSilentDebug: 'start-windows-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-silent-no-full-scan-debug.cmd'
   });
   assert.equal(info.payloadFiles, files.length - 2, 'payload files exclude release-info and SHA256SUMS');
   assert.equal(info.verifier, 'verify-release.mjs');
@@ -240,16 +247,18 @@ test('--skip-native 生成仅 Node 宿主发布包', async (t) => {
   assert.equal(summary.nativeHost, false);
   assert.equal(summary.archive, null);
   const packageRoot = path.join(out, 'node-only');
-  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows.cmd'))).isFile(), true);
-  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-silent.cmd'))).isFile(), true);
-  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-debug.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-silent.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-debug.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-silent-debug.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-silent-no-full-scan-debug.cmd'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'host', 'silent-launch.vbs'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'config.example.json'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'verify-release.mjs'))).isFile(), true);
   assert.equal(await fs.access(path.join(packageRoot, 'chaoxing_plus.exe')).then(() => true, () => false), false);
   const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
   assert.equal(info.nativeHost, false);
-  assert.deepEqual(info.entrypoints, { node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' });
+  assert.deepEqual(info.entrypoints, { node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' });
 });
 
 test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', async (t) => {
@@ -280,7 +289,7 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
   assert.match(external.stderr, /只能依赖 Node 内置模块/u);
 
   await writeFixtureFile(path.join(fixture.host, 'launch.mjs'), "export function launch() { return 1; }\n");
-  await writeFixtureFile(path.join(fixture.host, 'main.mjs'), "import './self-destruct.mjs';\n");
+  await writeFixtureFile(path.join(fixture.host, 'main.mjs'), "import './chrome75-syntax.mjs';\n");
   const prototype = runPackager(commonArgs);
   assert.equal(prototype.status, 2);
   assert.match(prototype.stderr, /内部原型/u);
@@ -302,8 +311,10 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /actions\/upload-artifact@v4/u);
   assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
   assert.match(workflow, /发布包解压入口自检/u);
-  assert.match(workflow, /windows\\host\\main\.mjs.*--self-check/us, 'CI must self-check the packaged Node launcher');
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');
+  // 原生包里没有 Node 宿主：CI 不得再运行包内 main.mjs，只保留原生自检与禁入清单。
+  assert.doesNotMatch(workflow, /node \(Join-Path \$package 'windows\\host\\main\.mjs'\)/u, '原生发布包里没有 Node 宿主，CI 不应再运行它');
+  assert.match(workflow, /原生发布包不应包含 Node 产物/u, 'CI 必须拒绝混入 Node 产物的原生包');
   assert.match(workflow, /verify-release\.mjs/u, 'CI must run the packaged checksum verifier');
   assert.doesNotMatch(workflow, /secrets\./u);
   const nativeExecutables = [
@@ -341,3 +352,93 @@ test('原生构建脚本保持 ASCII 且不依赖 PowerShell 模块自动加载'
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native/build.ps1 -BuildTests');
 });
+
+test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖', { skip: process.platform !== 'win32' }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const out = path.join(fixture.directory, 'out');
+  const runtimeStub = path.join(fixture.directory, 'fake-node.exe');
+  await fs.writeFile(runtimeStub, Buffer.from('MZ fake node runtime'));
+  const baseArgs = [
+    '--dist-dir', fixture.dist,
+    '--host-dir', fixture.host,
+    '--launcher', fixture.launcher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
+    '--config-example', fixture.configExample,
+    '--verifier', fixture.verifier,
+    '--exe', fixture.exe,
+    '--out', out,
+    '--skip-docs',
+    '--skip-zip'
+  ];
+
+  const withRuntime = runPackager([...baseArgs, '--name', 'runtime-pack', '--version', '9.9.9', '--runtime-exe', runtimeStub]);
+  assert.equal(withRuntime.status, 0, withRuntime.stderr || withRuntime.stdout);
+  const runtimeRoot = path.join(out, 'runtime-pack');
+  const bundled = path.join(runtimeRoot, 'runtime', 'node.exe');
+  assert.equal(await fs.readFile(bundled, 'utf8'), 'MZ fake node runtime', '运行时必须落在 runtime/node.exe');
+  const info = JSON.parse(await fs.readFile(path.join(runtimeRoot, 'release-info.json'), 'utf8'));
+  assert.equal(info.runtime, 'runtime/node.exe');
+  const sums = (await fs.readFile(path.join(runtimeRoot, 'SHA256SUMS.txt'), 'utf8')).trim().split(/\r?\n/u);
+  assert.equal(sums.some((line) => line.endsWith('*runtime/node.exe')), true, '运行时必须进入 SHA256SUMS');
+  const verify = spawnSync(process.execPath, [path.join(runtimeRoot, 'verify-release.mjs')], {
+    encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: runtimeRoot
+  });
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+
+  const without = runPackager([...baseArgs, '--name', 'plain-pack', '--version', '9.9.9', '--no-runtime']);
+  assert.equal(without.status, 0, without.stderr || without.stdout);
+  const plainRoot = path.join(out, 'plain-pack');
+  await assert.rejects(fs.access(path.join(plainRoot, 'runtime', 'node.exe')));
+  const plainInfo = JSON.parse(await fs.readFile(path.join(plainRoot, 'release-info.json'), 'utf8'));
+  assert.equal(plainInfo.runtime, '', '--no-runtime 时不得声明自带运行时');
+});
+
+test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时）', { skip: process.platform !== 'win32' }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const out = path.join(fixture.directory, 'native-only');
+  // 直接调用打包脚本：不附加 --with-node，验证默认行为。
+  const result = spawnSync(process.execPath, [packageScript,
+    '--dist-dir', fixture.dist,
+    '--host-dir', fixture.host,
+    '--launcher', fixture.launcher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
+    '--config-example', fixture.configExample,
+    '--verifier', fixture.verifier,
+    '--exe', fixture.exe,
+    '--out', out,
+    '--name', 'native-only',
+    '--version', '9.9.9',
+    '--skip-docs', '--skip-zip'
+  ], { encoding: 'utf8', timeout: 300000, windowsHide: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const packageRoot = path.join(out, 'native-only');
+  const files = [];
+  async function walk(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(absolute);
+      else files.push(path.relative(packageRoot, absolute).split(path.sep).join('/'));
+    }
+  }
+  await walk(packageRoot);
+  for (const expected of ['chaoxing_plus.exe', 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'windows/config.example.json', 'start-windows.cmd', 'start-windows-silent.cmd']) {
+    assert.equal(files.includes(expected), true, `默认包缺少 ${expected}`);
+  }
+  for (const forbidden of ['start-windows-node.cmd', 'start-windows-node-silent.cmd', 'runtime/node.exe']) {
+    assert.equal(files.includes(forbidden), false, `默认包不得包含 ${forbidden}`);
+  }
+  assert.equal(files.some((name) => name.startsWith('windows/host/')), false, '默认包不得包含 Node 宿主闭包');
+  assert.equal(files.some((name) => name.startsWith('dist-windows/')), false, '默认包不得包含 Node 注入资源');
+  const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
+  assert.equal(info.nodeHost, false);
+  assert.deepEqual(info.entrypoints, { native: 'chaoxing_plus.exe' });
+  assert.equal(info.assetsDir, '');
+  assert.equal(info.runtime, '');
+  const verify = spawnSync(process.execPath, [path.join(packageRoot, 'verify-release.mjs')], {
+    encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: packageRoot
+  });
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+});
+

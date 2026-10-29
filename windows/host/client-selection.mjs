@@ -45,6 +45,7 @@ export async function resolveClientSelection(options, config, {
   const scan = (scanMode, forceRescan = options.rescan === true, overrides = {}) => discover({
     scanMode,
     stopOnMachine: options.listClients || mayPrompt || options.clientIndex !== null ? null : 0x014c,
+    earlyStopOnPreferred: options.earlyLaunchOnPreferred === true,
     onFullScan: () => logger.info(scanMode === 'all'
       ? '[client] 开始固定磁盘根目录递归扫描'
       : '[client] 常规路径未找到客户端，开始固定磁盘根目录递归扫描'),

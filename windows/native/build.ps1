@@ -6,8 +6,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $scriptRoot '.tmp-native-host' }
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
+# Native build output goes to <repo>/build-windows (EXE in build-windows\bin),
+# next to dist-windows; an explicit -OutputDirectory still overrides it.
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $root 'build-windows' }
 $compiler = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x86\cl.exe' -File |
     Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $compiler) { throw 'MSVC x86 compiler is required.' }
@@ -42,7 +44,7 @@ $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
 & $resourceCompiler /nologo ('/i' + $scriptRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $scriptRoot))
-$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','host')
+$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','host')
 foreach ($source in $sources) {
     & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $scriptRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
@@ -58,7 +60,7 @@ try {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
-        $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi') | ForEach-Object { Join-Path $build ($_ + '.obj') }
+        $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent') | ForEach-Object { Join-Path $build ($_ + '.obj') }
         $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' -and $_ -notlike '/MANIFESTINPUT:*' }
         & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }
@@ -66,7 +68,7 @@ try {
             @{ Name = 'assets-tests'; Entry = 'AssetTestMain'; Objects = @('memory','assets'); Resources = @($resourceObject) },
             @{ Name = 'options-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','options','config-store'); Resources = @() },
             @{ Name = 'discovery-cache-driver'; Entry = 'DiscoveryCacheDriverMain'; Objects = @('memory','process','discovery'); Resources = @() },
-            @{ Name = 'discovery-cache-host-tests'; Entry = 'DiscoveryCacheHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) },
+            @{ Name = 'discovery-cache-host-tests'; Entry = 'DiscoveryCacheHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent'); Resources = @($resourceObject) },
             @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() },
             @{ Name = 'session-tests'; Entry = 'SessionTestMain'; Objects = @('memory','json','session'); Resources = @() },
             @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @() },
@@ -75,13 +77,14 @@ try {
             @{ Name = 'config-store-tests'; Entry = 'ConfigStoreTestMain'; Objects = @('memory','json','config-store'); Resources = @() },
             @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() },
             @{ Name = 'elevation-tests'; Entry = 'ElevationTestMain'; Objects = @('memory'); Resources = @() },
-            @{ Name = 'elevation-host-tests'; Entry = 'ElevationHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) },
+            @{ Name = 'elevation-host-tests'; Entry = 'ElevationHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent'); Resources = @($resourceObject) },
             @{ Name = 'dpi-tests'; Entry = 'DpiTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'dpi-child'; Entry = 'DpiChildMain'; Objects = @('memory'); Resources = @(); Manifest = 'tests\dpi-child.manifest' },
             @{ Name = 'dpi-process-tests'; Entry = 'DpiProcessTestMain'; Objects = @('memory','process','dpi'); Resources = @() },
             @{ Name = 'process-check-tests'; Entry = 'ProcessCheckTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'process-fixture'; Entry = 'ProcessFixtureMain'; Objects = @('memory'); Resources = @() },
-            @{ Name = 'cli-selection-tests'; Entry = 'CliSelectionTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi'); Resources = @($resourceObject) }
+            @{ Name = 'cli-selection-tests'; Entry = 'CliSelectionTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent'); Resources = @($resourceObject) },
+            @{ Name = 'silent-tests'; Entry = 'SilentTestMain'; Objects = @('memory','silent'); Resources = @() }
         )) {
             $testObject = Join-Path $build ($test.Name + '.obj')
             & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot ('tests\' + $test.Name + '.c'))
@@ -106,3 +109,7 @@ Get-Item -LiteralPath $hostExe | Select-Object FullName,Length
 # and build must not depend on PowerShell module auto-loading.
 & certutil.exe -hashfile $hostExe SHA256
 if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }
+
+
+
+

@@ -26,6 +26,10 @@ import {
   waitForDebugEndpoint
 } from './launch.mjs';
 import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, mergeHostConfigLayers } from './config.mjs';
+import { createWipeController, WipeAbortedError } from './wipe.mjs';
+import { listOwnedHostFiles } from './owned-files.mjs';
+import { createProgramCleanupController } from './program-cleanup.mjs';
+import { createSelfDestructController } from './self-destruct-control.mjs';
 import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateLaunchPort, validateSupportedJsonOptions } from './options.mjs';
 import { probeClientSelectionWindow } from './selection-window.mjs';
 import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
@@ -110,7 +114,17 @@ function usage() {
     '  --delete-config      退出时删除 --config 指定的外部配置文件（必须同时指定 --config）',
     '  --diagnose/--no-diagnose 开启或关闭页面与窗口渲染诊断',
     '  --diagnostics-dir <path> 诊断输出目录',
-    '  --wipe-*             启动清理仅保留参数设计，当前尚未实现并会报错',
+    '  --wipe-owned-files-on-start 启动时清理宿主登记的自有文件',
+    '  --wipe-failure-policy <retry|background|ignore|abort>  清理失败策略（默认 retry）',
+    '  --wipe-retries <1-20>  启动清理重试次数（默认 5）',
+    '  --wipe-retry-delay <ms>  启动清理重试间隔（50-5000，默认 200）',
+    '  --wipe-runtime-retry/--no-wipe-runtime-retry  运行期是否继续重试',
+    '  --wipe-runtime-interval <sec>  运行期重试间隔（1-86400，默认 30）',
+    '  --self-destruct-key <shortcut>  自毁热键（可重复）',
+    '  --self-destruct-on-fullscreen-exit  退出全屏触发自毁',
+    '  --self-destruct-delay <ms>  自毁延迟（0-60000）',
+    '  --no-self-destruct-confirm  跳过自毁确认（无交互控制台时必须）',
+    '  --delete-suspend     删除挂起执行模式（启动完成后删除程序/数据，退出时再次清理）',
     '  --execution-mode normal|memory 选择执行模式；memory 为宿主侧零落盘（客户端仍正常可见启动）',
     '  --memory-exec        --execution-mode memory 的简写',
     '  --version            输出宿主版本号 6.2.0',
@@ -151,6 +165,10 @@ function createLogger({ quiet = false, logFile = '' } = {}) {
 }
 
 async function loadAssets(assetsDir, logger) {
+  if (globalThis.__CX_SILENT_EMBEDDED_ASSETS__) {
+    logger.info('[assets] 使用静默内存启动器中预加载的资源');
+    return { ...globalThis.__CX_SILENT_EMBEDDED_ASSETS__ };
+  }
   const bootstrapPath = path.join(assetsDir, 'windows-bootstrap.js');
   const bundlePath = path.join(assetsDir, 'chaoxing-plus.windows.js');
   const trampolinePath = path.join(assetsDir, 'trampoline.js');
@@ -413,7 +431,11 @@ async function main() {
       hostVersion: '6.2.0',
       executionMode: options.executionMode,
       supported: {
-        executionModes: ['normal', 'memory'],
+        executionModes: ['normal', 'memory', 'delete-suspend'],
+        silentScenario: true,
+        startupWipe: true,
+        selfDestruct: true,
+        programSelfDelete: true,
         scanner: true,
         parameterGenerator: true,
         nativeClientSelection: process.platform === 'win32',
@@ -441,6 +463,7 @@ async function main() {
     await hideConsoleWindow();
   }
 
+
   const isConsoleQuiet = () => options.quiet || options.printEffectiveConfig;
 
   let dataDirectory = options.dataDirExplicit
@@ -448,8 +471,18 @@ async function main() {
     : path.join(repositoryRoot, 'windows', 'data');
   options.scanCachePath = path.join(dataDirectory, 'scan-cache.json');
   let logger = createLogger({ quiet: isConsoleQuiet() });
+  if (options.silentScenario) {
+    const stats = globalThis.__CX_SILENT_EMBEDDED_STATS__ || {};
+    logger.info('[silent] ' + (globalThis.__CX_SILENT_MEMORY_BOOTSTRAP__
+      ? '内存启动引导已加载：' + (stats.modules || 0) + ' 个模块、' + (stats.scripts || 0) + ' 个脚本、' + (stats.assets || 0) + ' 个资源来自内存'
+      : '磁盘入口启动：调试/兼容模式'));
+  }
+
   let loggerQuiet = options.quiet;
   let configStoreForCleanup = null;
+  let wipeController = null;
+  let programCleanup = null;
+  let selfDestructControl = null;
   let cleanupAfterStartupFailure = null;
   let diagnosticsChanged = () => {};
   const diagnostics = createHostDiagnostics({ onChange: () => diagnosticsChanged() });
@@ -479,6 +512,15 @@ async function main() {
   const finalizeDataLifecycle = async () => {
     if (dataLifecycleFinalized) return;
     dataLifecycleFinalized = true;
+    if (wipeController) {
+      await wipeController.close().catch(() => {});
+      wipeController = null;
+    }
+    if (programCleanup) {
+      await programCleanup.finalPass().catch(() => {});
+      await programCleanup.close().catch(() => {});
+      programCleanup = null;
+    }
     if (options.retainData === false) {
       for (const filePath of runArtifacts.files) {
         await fs.rm(filePath, { force: true }).catch(() => {});
@@ -567,6 +609,41 @@ async function main() {
       await logger.close();
       logger = createLogger({ quiet: isConsoleQuiet() });
       loggerQuiet = isConsoleQuiet();
+    }
+
+    // 启动清理：在 scan/launch 之前删除上一轮宿主自有文件。只枚举宿主登记的
+    // 数据文件，不删除程序本体、外部 --config、CXExam 或未登记用户文件。
+    if (options.wipeOwnedFilesOnStart && !options.wipeCompleted) {
+      const ownedFiles = await listOwnedHostFiles(dataDirectory, {
+        externalConfigPath: options.configPath ? path.resolve(options.configPath) : ''
+      });
+      wipeController = createWipeController({
+        ownedFiles,
+        failurePolicy: options.wipeFailurePolicy,
+        retries: options.wipeRetries,
+        retryDelayMs: options.wipeRetryDelayMs,
+        runtimeRetry: options.wipeRuntimeRetry,
+        runtimeIntervalMs: options.wipeRuntimeIntervalSec * 1000,
+        onEvent: (event) => {
+          if (event.type === 'failure') logger.warn('[wipe] 删除失败 ' + event.path + '：' + event.error);
+          else if (event.type === 'aborted') logger.error('[wipe] 启动清理失败，按 abort 策略中止');
+          else if (event.type === 'complete') logger.info('[wipe] 启动清理完成：删除 ' + event.summary.deleted.length + ' 个文件');
+          else if (event.type === 'pending') logger.warn('[wipe] 启动清理仍有 ' + event.summary.pending.length + ' 个文件待重试');
+        }
+      });
+      try {
+        await wipeController.start();
+      } catch (error) {
+        if (error instanceof WipeAbortedError) {
+          logger.error('[wipe] 启动清理失败，终止本次启动');
+          await logger.close();
+          await finalizeDataLifecycle();
+          process.exitCode = 3;
+          return;
+        }
+        throw error;
+      }
+      options.wipeCompleted = true;
     }
 
     let selectedConfigCreated = false;
@@ -743,6 +820,7 @@ async function main() {
     }
 
     let clientChild = null;
+    let clientFullscreenSeen = false;
     let detachClientProcessObserver = null;
     let stopping = false;
     let configWatcherOff = null;
@@ -840,6 +918,39 @@ async function main() {
     };
     cleanupAfterStartupFailure = () => stop('启动失败，清理本次启动的客户端与注入资源', true);
 
+    const selfDestructConfigured = (Array.isArray(options.selfDestructKeys) && options.selfDestructKeys.length > 0)
+      || options.selfDestructOnFullscreenExit === true
+      || options.silentScenario === true;
+    const programCleanupNeeded = selfDestructConfigured
+      || options.executionMode === 'delete-suspend'
+      || options.silentScenario === true;
+    if (programCleanupNeeded) {
+      programCleanup = createProgramCleanupController({
+        appRoot: repositoryRoot,
+        dataDirectory,
+        simulate: options.silentDeleteSimulate === true,
+        // 静默/删除挂起场景：每个文件启动期最多尝试 5 次，之后继续运行并在
+        // 运行期每 5 秒重试剩余文件；失败只记录，不阻塞启动。
+        retries: 5,
+        runtimeRetryMs: 5000,
+        logger: (event) => {
+          if (options.silentDeleteSimulate) logger.info('[cleanup] ' + JSON.stringify(event));
+          else if (event.type === 'failure') logger.warn('[cleanup] 删除失败 ' + event.path + '：' + event.error);
+          else if (event.type === 'complete') logger.info('[cleanup] 清理完成：' + event.summary.deleted.length + ' 个文件');
+        }
+      });
+      if (selfDestructConfigured) {
+        selfDestructControl = createSelfDestructController({
+          keys: options.selfDestructKeys,
+          fullscreenExit: options.selfDestructOnFullscreenExit,
+          delayMs: options.selfDestructDelayMs,
+          confirm: options.selfDestructConfirm !== false,
+          logger: (message) => logger.info(message),
+          onDestruct: async (reason) => { await stop('self-destruct:' + reason); }
+        });
+      }
+    }
+
     // 监听归属校验同时接受本次启动 PID 及其后代链（客户端可能把调试监听交给
     // 子进程）；每个监听 PID 最多一次 PowerShell 父链查询，直接 PID 不查询。
     const listenerOwnershipVerifier = createListenerOwnershipVerifier();
@@ -866,6 +977,26 @@ async function main() {
 
     process.on('SIGINT', () => { void stop('SIGINT'); });
     process.on('SIGTERM', () => { void stop('SIGTERM'); });
+
+    let startupProgramCleanupDone = false;
+    if (options.silentScenario && programCleanup) {
+      // 静默场景：先把运行期还要用到的 PowerShell 脚本并入内存副本，再删除程序文件；
+      // 引导阶段已经把四个脚本读进 __CX_SILENT_EMBEDDED_SCRIPTS__，这里只补齐
+      // 缺失项（合并而不是覆盖），否则删除后 system-probe/选择窗口脚本会丢失。
+      const launchScriptPath = path.join(repositoryRoot, 'windows', 'host', 'launch-client.ps1');
+      const embeddedScripts = { ...(globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ || {}) };
+      if (!embeddedScripts['launch-client.ps1']) {
+        try {
+          embeddedScripts['launch-client.ps1'] = await fs.readFile(launchScriptPath, 'utf8');
+        } catch {
+          throw new Error('静默场景需要在删除程序文件前把 launch-client.ps1 读入内存');
+        }
+      }
+      globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = Object.freeze(embeddedScripts);
+      // 启动期最多 5 次/文件，失败不阻塞；剩余文件在运行期由 runtimeRetry 继续尝试。
+      await programCleanup.start();
+      startupProgramCleanupDone = true;
+    }
 
     // ---- 启动阶段 ----
     let port = options.attachPort;
@@ -898,15 +1029,22 @@ async function main() {
         const launch = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) });
         clientChild = launch.child;
         if (launch.started) await launch.started;
-        if (Number.isInteger(clientChild.pid) && clientChild.pid > 0) diagnostics.record('client-started');
+        if (Number.isInteger(clientChild.pid) && clientChild.pid > 0) {
+          diagnostics.record('client-started');
+          if (selfDestructControl) selfDestructControl.attachClient(clientChild.pid);
+        }
         detachClientProcessObserver = observeClientProcess(clientChild, {
           onExit: ({ code, signal }) => {
             logger.warn(`[launch] 本次启动的 CXExam 已退出（code=${code === null ? '?' : code}，signal=${signal || '?'}）`);
-            if (!stopping) void stop('本次启动的 CXExam 进程已退出');
+            if (stopping) return;
+            if (selfDestructControl) selfDestructControl.clientExited();
+            else void stop('本次启动的 CXExam 进程已退出');
           },
           onError: (error) => {
             logger.error(`[launch] 启动 CXExam 进程失败：${error && error.message ? error.message : String(error)}`);
-            if (!stopping) void stop('本次启动的 CXExam 进程启动失败');
+            if (stopping) return;
+            if (selfDestructControl) selfDestructControl.clientExited();
+            else void stop('本次启动的 CXExam 进程启动失败');
           }
         });
       } catch (error) {
@@ -924,6 +1062,7 @@ async function main() {
         }
         logger.warn('[launch] 客户端普通启动返回 Win32 740，正在通过系统 UAC 重新启动宿主');
         const passthrough = options.rawArgs.filter((argument) => argument !== '--elevated');
+        if (options.wipeCompleted && !passthrough.includes('--wipe-completed')) passthrough.push('--wipe-completed');
         await configStore.close();
         await relaunchElevated({
           scriptPath: hostScriptPath,
@@ -958,6 +1097,10 @@ async function main() {
       if (!(await verifyEndpointOwnership())) return;
       diagnostics.record('endpoint-ready');
       logger.info(`[launch] 监听归属校验通过：pid=${clientChild.pid}（或其后代进程），127.0.0.1:${port}`);
+      if (programCleanup && !startupProgramCleanupDone
+        && (options.executionMode === 'delete-suspend' || options.silentScenario)) {
+        await programCleanup.start();
+      }
     } else {
       logger.warn(`[attach] 测试/调试模式：只连接 127.0.0.1:${port}，不启动客户端、不校验监听归属`);
       diagnostics.record('endpoint-waiting');
@@ -1033,6 +1176,16 @@ async function main() {
             } catch (error) {
               if (session.isTopContext(contextId)) recordConfigFailure();
               logger.warn(`[config] 页面共享配置无效（忽略本次）：${error.message}`);
+            }
+          },
+          silentControl: programCleanupNeeded ? { clientPid: report.clientPid || 0, selfDestructKeys: options.selfDestructKeys } : null,
+          onSilentEvent: (kind, detail) => {
+            if (kind === 'silent-hotkey' && selfDestructControl) selfDestructControl.handleHotkey(detail && detail.shortcut);
+            if (kind === 'silent-fullscreen') {
+              const fullscreen = Boolean(detail && detail.fullscreen);
+              if (fullscreen) clientFullscreenSeen = true;
+              if (selfDestructControl) selfDestructControl.handleFullscreen(fullscreen, report.clientPid);
+              else if (clientFullscreenSeen && !fullscreen && programCleanup) void programCleanup.finalPass();
             }
           },
           onBundleInjected: (contextId, url) => {

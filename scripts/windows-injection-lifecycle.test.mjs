@@ -431,7 +431,10 @@ test('归属校验在 attach 中不查询进程，停止后的迟到结果不能
 function diagnosticsGlobals() {
   return {
     diagnostics: { record() {} }, connectedTargets: new Set(), retryingTargets: new Set(),
-    targetRefreshFailed: false, configFailureReported: false, recordConfigFailure() {}
+    targetRefreshFailed: false, configFailureReported: false, recordConfigFailure() {},
+    // pollTargets 创建页面会话时会读静默场景的清理开关；夹具里视为"未启用清理"，
+    // 因此 silentControl 传 null，不会触碰静默自毁/热键链路。
+    programCleanupNeeded: false
   };
 }
 

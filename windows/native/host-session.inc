@@ -408,6 +408,7 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
             }
         }
         h_current_page = NULL; h_task_pending = FALSE;
+        h_silent_tick();
         Sleep(20);
     } while (h_operation_active());
     ok = !h_config_enabled(options) || h_bundles_completed > 0;
@@ -430,3 +431,4 @@ done:
     h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0;
     return ok;
 }
+

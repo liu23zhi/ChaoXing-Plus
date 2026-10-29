@@ -38,7 +38,7 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(host, /WriteFile\(out, utf8/);
   assert.match(options, /cx_valid_mode\(const WCHAR \*value\)[\s\S]{0,160}L"memory"/u);
   assert.match(options, /cx_json_execution_mode\(CX_OPTIONS \*o/u);
-  assert.match(options, /delete-suspend, wipe and self-destruct options are not supported/);
+  assert.match(options, /delete-suspend\/wipe\/self-destruct flags are not supported by the native host/);
   assert.match(host, /executionModeMemory \? "memory" : "normal"/u);
 
   assert.match(build, /\/NODEFAULTLIB/);
@@ -77,7 +77,7 @@ test('compiled native injection honors strategy order, retry limits and unique r
 
 test('native host build output is not treated as a checked-in artifact', async () => {
   const ignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
-  assert.match(ignore, /\.tmp-native-host/);
+  assert.match(ignore, /build-windows/);
 });
 
 test('compiled native common discovery does not crash while reading default environment roots', {
@@ -238,3 +238,5 @@ test('native host embeds a DPI-aware asInvoker manifest', { skip: !process.env.C
   assert.ok(text.includes('dpiAware'), 'host manifest must declare DPI awareness');
   assert.ok(text.includes('asInvoker'), 'host manifest must keep the standard asInvoker execution level');
 });
+
+

@@ -70,6 +70,72 @@
     }
   }
 
+  var silentFullscreenState = null;
+  var silentControlInstalled = false;
+  function silentShortcutFor(event) {
+    var parts = [];
+    if (event.ctrlKey) parts.push('ctrl');
+    if (event.altKey) parts.push('alt');
+    if (event.shiftKey) parts.push('shift');
+    if (event.metaKey) parts.push('meta');
+    var key = String(event.key || '');
+    if (!key) return '';
+    if (key.length === 1) key = key.toUpperCase();
+    if (key === 'Esc') key = 'Escape';
+    parts.push(key);
+    return parts.join('+');
+  }
+  function silentIsFullscreen() {
+    if (doc.fullscreenElement || doc.webkitFullscreenElement) return true;
+    var screenWidth = Number(win.screen && win.screen.width);
+    var screenHeight = Number(win.screen && win.screen.height);
+    if (!screenWidth || !screenHeight) return false;
+    return win.innerWidth >= screenWidth - 4 && win.innerHeight >= screenHeight - 4;
+  }
+  function reportSilentFullscreen(force) {
+    var next = silentIsFullscreen();
+    if (!force && next === silentFullscreenState) return;
+    silentFullscreenState = next;
+    send('silent-fullscreen', { fullscreen: next, pid: Number(win.__CX_WIN_SILENT__ && win.__CX_WIN_SILENT__.clientPid) || 0 });
+  }
+  function installSilentControl() {
+    if (silentControlInstalled) return;
+    var silent = win.__CX_WIN_SILENT__;
+    if (!silent || typeof silent !== "object") return;
+    // 只有顶层文档可以上报静默热键/全屏状态：答题页会注入大量 about:blank
+    // iframe，子 frame 的 innerWidth/innerHeight 永远小于屏幕，一旦把它当成
+    // "已退出全屏"就会在考试进行中误触发自毁。
+    try {
+      if (win.self !== win.top) return;
+    } catch (error) {
+      return;
+    }
+    silentControlInstalled = true;
+    var keys = Array.isArray(silent.selfDestructKeys) ? silent.selfDestructKeys : [];
+    try {
+      win.addEventListener('keydown', function (event) {
+        if (!event || event.repeat) return;
+        var shortcut = silentShortcutFor(event);
+        if (!shortcut) return;
+        for (var i = 0; i < keys.length; i += 1) {
+          if (String(keys[i]).toLowerCase() === shortcut.toLowerCase()) {
+            try { event.preventDefault(); } catch (ignore) {}
+            try { event.stopPropagation(); } catch (ignore2) {}
+            send('silent-hotkey', { shortcut: shortcut });
+            return;
+          }
+        }
+      }, true);
+    } catch (error) { /* ignore */ }
+    try {
+      win.addEventListener('resize', function () { reportSilentFullscreen(false); });
+      doc.addEventListener('fullscreenchange', function () { reportSilentFullscreen(false); });
+      doc.addEventListener('webkitfullscreenchange', function () { reportSilentFullscreen(false); });
+      setInterval(function () { reportSilentFullscreen(false); }, 1000);
+    } catch (error2) { /* ignore */ }
+    reportSilentFullscreen(true);
+  }
+
   function notifyDiagnostics() {
     try {
       var CustomEventCtor = win.CustomEvent || (typeof CustomEvent !== 'undefined' ? CustomEvent : undefined);
@@ -846,6 +912,8 @@
       send('bootstrap-error', { stage: 'on-config', message: String((error && error.message) || error) });
     }
   };
+
+  installSilentControl();
 
   // 初始配置水合：先落 localStorage（业务 runtimeStore 读取主路径），属性在 documentElement 可用后补写。
   applySharedValues(config, false);

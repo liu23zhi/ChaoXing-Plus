@@ -333,10 +333,9 @@ test('no-diagnose CLI 开关覆盖 options-json，且禁用的 JSON 能力显式
   assert.equal(memoryJson.noDiskWrite, true);
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { memoryExec: 'yes' }), /布尔值/u);
   assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { memoryExec: true }).executionMode, 'memory');
-  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { wipeOwnedFilesOnStart: true }), /尚未实现/u);
-  assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { settings: { selfDestructOnFullscreenExit: true } }), /尚未实现/u);
-  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /尚未实现/u);
-  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-execution-mode': 'memory' } }), /尚未实现/u);
+  assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { wipeOwnedFilesOnStart: true, wipeRetries: 6 }).wipeRetries, 6);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /只能作为顶层字段/u);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-execution-mode': 'memory' } }), /只能作为顶层字段/u);
   assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { retainData: false }).retainData, false);
   assert.equal(applyOptionsJsonToOptions(parseHostArgs([]), { retainData: true }).retainData, true);
   assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), { deleteConfig: true }), /--config/u);
@@ -370,12 +369,13 @@ test('--version 开关可解析且默认关闭', () => {
   assert.equal(parseHostArgs(['-v']).version, true);
 });
 
-test('未实现能力暴露机器可读 schema / capability 标记', () => {
+test('能力标记区分 Node 已支持与原生 Node-only', () => {
   assert.equal(parseHostArgs(['--capabilities']).capabilities, true);
   assert.equal(UNSUPPORTED_CAPABILITIES.implemented, false);
-  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.implemented, false);
-  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal', 'memory']);
-  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.unsupportedValues], ['delete-suspend']);
+  assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.implemented, true);
+  assert.equal(UNSUPPORTED_CAPABILITIES.selfDestruct.implemented, true);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.executionModes.supported], ['normal', 'memory', 'delete-suspend']);
+  assert.deepEqual([...UNSUPPORTED_CAPABILITIES.nodeOnly], ['delete-suspend', 'startup-wipe', 'self-destruct', 'silent-scenario']);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.min, 1);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retries.max, 20);
   assert.equal(UNSUPPORTED_CAPABILITIES.startupWipe.retryDelayMs.min, 50);
@@ -385,8 +385,7 @@ test('未实现能力暴露机器可读 schema / capability 标记', () => {
   assert.equal(UNSUPPORTED_CAPABILITIES.selfDestruct.confirmDefault, true);
   const notes = describeUnsupportedCapabilities();
   assert.equal(notes.length, 3);
-  assert.match(notes.join('\n'), /startup-wipe/u);
-  assert.match(notes.join('\n'), /self-destruct/u);
+  assert.match(notes.join('\n'), /Node 宿主支持/u);
 });
 
 test('文档中的普通启动示例参数均可通过宿主解析器', () => {
@@ -428,44 +427,32 @@ test('终端客户端选择输入支持序号或带引号的手动路径', () =>
   assert.deepEqual(parseClientSelectionInput("'D:\\Exam Files\\CXExam.exe'", 0), { index: 0, path: 'D:\\Exam Files\\CXExam.exe' });
 });
 
-test('第一阶段启动清理、自毁和删除挂起的 CLI 参数都显式拒绝', () => {
-  const memory = parseHostArgs(['--memory-exec']);
-  assert.equal(memory.executionMode, 'memory');
-  assert.equal(memory.noDiskWrite, true);
-  assert.equal(parseHostArgs(['--execution-mode', 'memory']).executionMode, 'memory');
-  for (const argument of [
-    '--wipe-owned-files-on-start',
-    '--wipe-failure-policy',
-    '--wipe-retries',
-    '--wipe-retry-delay',
-    '--wipe-runtime-retry',
-    '--no-wipe-runtime-retry',
-    '--wipe-runtime-interval',
-    '--delete-suspend',
-    '--self-destruct-key',
-    '--self-destruct-on-fullscreen-exit',
-    '--self-destruct-delay',
-    '--no-self-destruct-confirm'
-  ]) {
-    assert.throws(() => parseHostArgs([argument]), /尚未实现/u);
-  }
+test('启动清理、自毁和删除挂起 CLI 参数已接入并做冲突校验', () => {
+  assert.equal(parseHostArgs(['--delete-suspend']).executionMode, 'delete-suspend');
+  assert.equal(parseHostArgs(['--execution-mode', 'delete-suspend']).executionMode, 'delete-suspend');
+  const wipe = parseHostArgs(['--wipe-owned-files-on-start', '--wipe-retries', '7', '--wipe-failure-policy', 'abort']);
+  assert.equal(wipe.wipeOwnedFilesOnStart, true);
+  assert.equal(wipe.wipeRetries, 7);
+  assert.throws(() => parseHostArgs(['--wipe-retries', '7']), /一起使用/u);
+  const destruct = parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X', '--no-self-destruct-confirm', '--self-destruct-delay', '1000']);
+  assert.deepEqual(destruct.selfDestructKeys, ['Ctrl+Alt+X']);
+  assert.equal(destruct.selfDestructConfirm, false);
+  assert.equal(destruct.selfDestructDelayMs, 1000);
+  assert.throws(() => parseHostArgs(['--self-destruct-delay', '1000']), /至少启用/u);
+  assert.throws(() => parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+Shift+E', '--answer-key', 'Ctrl+Alt+Shift+E']), /不能与/u);
 });
 
-test('第一阶段所有配置层的启动清理参数都显式拒绝，包括关闭值', () => {
-  for (const values of [
-    { wipeOwnedFilesOnStart: true },
-    { wipeOwnedFilesOnStart: false },
-    { wipeFailurePolicy: 'retry' },
-    { wipeRetries: 5 },
-    { wipeRetryDelayMs: 200 },
-    { wipeRuntimeRetry: false },
-    { wipeRuntimeIntervalSec: 30 },
-    { settings: { 'common.settings.windows-wipe-runtime-retry': false } }
-  ]) {
-    assert.throws(() => validateSupportedJsonOptions(values), /尚未实现/u);
-    assert.throws(() => applyOptionsJsonToOptions(parseHostArgs([]), values), /尚未实现/u);
-    assert.throws(() => applyHostOptionLayers(parseHostArgs([]), values), /尚未实现/u);
-  }
+test('启动清理/自毁 JSON 只允许顶层，页面共享设置仍拒绝', () => {
+  const wipe = applyOptionsJsonToOptions(parseHostArgs([]), { wipeOwnedFilesOnStart: true, wipeRetries: 6, wipeFailurePolicy: 'background' });
+  assert.equal(wipe.wipeOwnedFilesOnStart, true);
+  assert.equal(wipe.wipeRetries, 6);
+  assert.equal(wipe.wipeFailurePolicy, 'background');
+  const destruct = applyOptionsJsonToOptions(parseHostArgs([]), { selfDestructKeys: ['Ctrl+Alt+Shift+E'], noSelfDestructConfirm: true });
+  assert.deepEqual(destruct.selfDestructKeys, ['Ctrl+Alt+Shift+E']);
+  assert.equal(destruct.selfDestructConfirm, false);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-wipe-runtime-retry': false } }), /只能作为顶层字段/u);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-self-destruct-on-fullscreen-exit': true } }), /只能作为顶层字段/u);
+  assert.throws(() => validateSupportedJsonOptions({ settings: { 'common.settings.windows-execution-mode': 'delete-suspend' } }), /只能作为顶层字段/u);
 });
 
 test('答题线程限制为 1 到 4', () => {
@@ -515,7 +502,7 @@ test('宿主参数写入共享配置，供 bootstrap 和业务 runtime 使用', 
   assert.equal(noDiskWriteConfig.settings['common.settings.windows-no-disk-write'], true);
 });
 
-test('内存执行可用且强制零落盘；删除挂起与自毁仍显式拒绝', () => {
+test('内存/delete-suspend 强制零落盘，自毁参数可解析', () => {
   const memory = parseHostArgs(['--execution-mode', 'memory']);
   assert.equal(memory.executionMode, 'memory');
   assert.equal(memory.noDiskWrite, true);
@@ -524,9 +511,10 @@ test('内存执行可用且强制零落盘；删除挂起与自毁仍显式拒�
   assert.equal(memory.noScanCache, true);
   assert.equal(memory.reportPath, '');
   assert.equal(parseHostArgs(['--memory-exec', '--report', 'x.json']).reportPath, '');
-  assert.throws(() => parseHostArgs(['--execution-mode', 'delete-suspend']), /尚未实现/u);
-  assert.throws(() => parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X']), /尚未实现/u);
-  assert.throws(() => parseHostArgs(['--self-destruct-on-fullscreen-exit']), /尚未实现/u);
+  const deleteSuspend = parseHostArgs(['--delete-suspend']);
+  assert.equal(deleteSuspend.executionMode, 'delete-suspend');
+  assert.equal(deleteSuspend.noDiskWrite, true);
+  assert.equal(parseHostArgs(['--self-destruct-key', 'Ctrl+Alt+X']).selfDestructKeys.length, 1);
 });
 
 test('attach 参数与快捷键不合法时直接报错，不得落入普通启动流程', () => {

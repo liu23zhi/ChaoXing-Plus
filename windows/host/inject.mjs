@@ -53,7 +53,7 @@ function targetWebSocketUrl(value, port) {
 }
 
 export class PageSession {
-  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected, diagnostics }) {
+  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected, diagnostics, silentControl = null, onSilentEvent = null }) {
     this.port = port;
     this.target = target;
     this.assets = assets;
@@ -67,6 +67,8 @@ export class PageSession {
     this.logger = logger;
     this.onConfigSync = onConfigSync;
     this.onBundleInjected = onBundleInjected;
+    this.silentControl = silentControl && typeof silentControl === 'object' ? silentControl : null;
+    this.onSilentEvent = typeof onSilentEvent === 'function' ? onSilentEvent : null;
     this.diagnostics = diagnostics;
     this.diagnosticEvents = new Set();
     this.diagnosticDelivery = null;
@@ -385,6 +387,14 @@ export class PageSession {
       this.onConfigSync?.(detail, contextId);
       return;
     }
+    if (payload.kind === 'silent-hotkey' || payload.kind === 'silent-fullscreen') {
+      // 只接受顶层文档的静默控制事件：答题页大量 about:blank iframe 各自上报
+      // 全屏状态时，子 frame 的窗口尺寸必然小于屏幕，会把"已进入全屏"翻成
+      // "退出全屏"并误触发自毁。frame 树未知时保持旧行为（不阻断功能）。
+      if (this.topFrameId && !this.isTopContext(contextId)) return;
+      this.onSilentEvent?.(payload.kind, detail, contextId);
+      return;
+    }
     if (payload.kind === 'bootstrap-error') {
       this.recordDiagnostic('bootstrap-failed', 'error', contextId);
       this.recordError(`bootstrap 错误：${detail.stage || ''} ${detail.message || ''}`.trim());
@@ -580,8 +590,12 @@ export class PageSession {
     this.bootstrapped.add(contextId);
     const context = this.contexts.get(contextId);
     const configJson = JSON.stringify(this.configStore.settingsSnapshot());
+    const silentPrefix = this.silentControl
+      ? `window.__CX_WIN_SILENT__=${JSON.stringify(this.silentControl)};`
+      : '';
     const prefix = `window.__CX_WIN_CONFIG_JSON__=${configJson};`
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
+      + silentPrefix
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
       await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });

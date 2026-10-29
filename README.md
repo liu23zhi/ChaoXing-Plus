@@ -49,6 +49,8 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 
 ```powershell
 npm run build:windows
+# 构建 Windows 单文件 x86 发布包（Git Bash）：bash build-windows.sh
+# 备用（已弃用，仅兼容/对照）：bash build-windows-node.sh  # 只构建 Node 包，不含原生 EXE
 # 首次运行会创建 windows/data/config.json，把 clientPath 指向 CXExam.exe
 .\start-windows.cmd
 # 需要可见控制台日志时使用调试入口（控制台 + GUI）
@@ -117,3 +119,4 @@ chaoxing_plus/
 ## License
 
 MIT
+
