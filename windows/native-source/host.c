@@ -580,6 +580,26 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
     ok = CopyFileW(source, target, FALSE) != 0;
     if (ok) {
+        WCHAR portPath[CX_CLEANUP_PATH_CAP];
+        HANDLE portFile;
+        if (h_copy(portPath, CX_CLEANUP_PATH_CAP, targetDir) && h_cat(portPath, CX_CLEANUP_PATH_CAP, L"\\cxhook-port.txt")) {
+            portFile = CreateFileW(portPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (portFile != INVALID_HANDLE_VALUE) {
+                char text[16];
+                DWORD length = 0, written = 0;
+                int value = options->proxyPort ? options->proxyPort : 9222;
+                char digits[8];
+                int n = 0;
+                while (value > 0 && n < 7) { digits[n++] = (char)('0' + value % 10); value /= 10; }
+                while (n > 0) text[length++] = digits[--n];
+                text[length++] = '\r';
+                text[length++] = '\n';
+                WriteFile(portFile, text, length, &written, NULL);
+                CloseHandle(portFile);
+            }
+        }
+    }
+    if (ok) {
         WCHAR markerPath[CX_CLEANUP_PATH_CAP];
         HANDLE markerFile;
         if (h_copy(markerPath, CX_CLEANUP_PATH_CAP, targetDir) && h_cat(markerPath, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker")) {
@@ -623,6 +643,7 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
     if (DeleteFileW(dll)) removed = TRUE;
     DeleteFileW(marker);
+    { WCHAR portPath[CX_CLEANUP_PATH_CAP]; if (h_copy(portPath, CX_CLEANUP_PATH_CAP, targetDir) && h_cat(portPath, CX_CLEANUP_PATH_CAP, L"\\cxhook-port.txt")) DeleteFileW(portPath); }
     if (removed) { h_print(L"uninstall-proxy: removed "); h_print(dll); }
     else { h_print(L"uninstall-proxy: winmm.dll was already absent"); }
     return TRUE;
@@ -2079,6 +2100,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
     "调试: --install-proxy [--proxy-source <winmm.dll>]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
+    "调试: --proxy-port <1024-65534>（安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
     "启动: --console（GUI 宿主附加或分配控制台）--stage-boot（静默暂存启动）\n"
     "调试: --pipe-call <exe> [--pipe-expr <js>]（管道 CDP 全链路诊断）\n"
@@ -2185,6 +2207,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

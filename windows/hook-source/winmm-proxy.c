@@ -80,6 +80,46 @@ static int proxy_load_real(void) {
    Chromium 在 base::CommandLine::Init 里读到的就是追加后的命令行。 */
 typedef LPWSTR (WINAPI *GETCOMMANDLINEW)(void);
 
+
+/* 固定端口：没有 CX_INJECT_PORT 时（客户端被考试系统等第三方拉起）读取
+   DLL 同目录 cxhook-port.txt，让客户端仍然打开调试端点，供宿主 --attach 连接。 */
+static HINSTANCE g_proxyInstance;
+static char g_fixedPort[16];
+
+static void proxy_read_fixed_port(void) {
+    WCHAR path[MAX_PATH];
+    WCHAR dir[MAX_PATH];
+    DWORD got, at = 0, i;
+    HANDLE file;
+    char text[16];
+    DWORD read = 0;
+    g_fixedPort[0] = 0;
+    if (!g_proxyInstance) return;
+    got = GetModuleFileNameW(g_proxyInstance, path, MAX_PATH);
+    if (!got || got + 20 >= MAX_PATH) return;
+    for (i = 0; i < got; ++i) {
+        if (path[i] == L'\\' || path[i] == L'/') at = i;
+        dir[i] = path[i];
+    }
+    if (!at) return;
+    dir[at] = 0;
+    {
+        static const WCHAR tail[] = L"\\cxhook-port.txt";
+        DWORD k = 0;
+        while (tail[k] && at + k + 1 < MAX_PATH) { dir[at + k] = tail[k]; ++k; }
+        dir[at + k] = 0;
+    }
+    file = CreateFileW(dir, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    if (ReadFile(file, text, sizeof(text) - 1, &read, NULL) && read > 0) {
+        DWORD k = 0, n = 0;
+        text[read] = 0;
+        while (text[k] == ' ' || text[k] == '\r' || text[k] == '\n') ++k;
+        while (text[k] >= '0' && text[k] <= '9' && n < 15) g_fixedPort[n++] = text[k++];
+        g_fixedPort[n] = 0;
+    }
+    CloseHandle(file);
+}
 static WCHAR g_patchedCommandLine[4096];
 static BOOL g_commandLineReady = FALSE;
 static GETCOMMANDLINEW g_realGetCommandLineW = NULL;
@@ -108,7 +148,13 @@ static void proxy_prepare_command_line(void) {
     if (!g_realGetCommandLineW) g_realGetCommandLineW = (GETCOMMANDLINEW)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCommandLineW");
     if (!g_realGetCommandLineW) return;
     got = GetEnvironmentVariableW(L"CX_INJECT_PORT", port, 16);
-    if (!got) return;
+    if (!got) {
+        DWORD k = 0;
+        if (!g_fixedPort[0]) proxy_read_fixed_port();
+        if (!g_fixedPort[0]) return;
+        while (g_fixedPort[k] && k < 15) { port[k] = (WCHAR)g_fixedPort[k]; ++k; }
+        port[k] = 0;
+    }
     original = g_realGetCommandLineW();
     if (!original || !*original) return;
     if (proxy_contains(original, L"--remote-debugging-port=")) return;
@@ -179,6 +225,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         int filled;
         DisableThreadLibraryCalls(instance);
+        g_proxyInstance = instance;
         filled = proxy_load_real();
         proxy_hook_command_line();
         if (filled <= 0) proxy_append("winmm proxy: real winmm not found");
@@ -188,4 +235,5 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
 

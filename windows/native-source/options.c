@@ -165,6 +165,7 @@ void cx_options_init(CX_OPTIONS *o) {
     o->panelTop = 16; o->panelRight = 16; o->panelWidth = 460;
     o->answerModeAuto = TRUE; o->showAnswerDialog = TRUE;
     o->answerThreads = 4; o->answerCountdown = 5; o->answerRetry = 3;
+    o->proxyPort = 9222;
     o->autoSubmit = TRUE; o->executionModeNormal = TRUE; o->executionModeMemory = FALSE;
     o->silentScenario = FALSE; o->silentDeleteSimulate = FALSE; o->silentClientPathSet = FALSE;
     o->extensionEnabled = TRUE;
@@ -298,6 +299,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
     if (cx_streq(a, L"--pipe-test")) { o->pipeTest = TRUE; continue; }
     if (cx_streq(a, L"--probe-all")) { o->probeAll = TRUE; continue; }
     if (cx_streq(a, L"--probe-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->probeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->probeClientPathSet = TRUE; continue; }
+    if (cx_streq(a, L"--proxy-port")) { int value = 0; if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_parse_int(raw, 1024, 65534, &value)) { cx_error(error, errorCap, L"invalid --proxy-port (1024-65534)"); return FALSE; } o->proxyPort = value; o->proxyPortSet = TRUE; continue; }
     if (cx_streq(a, L"--install-proxy")) { o->installProxy = TRUE; continue; }
     if (cx_streq(a, L"--uninstall-proxy")) { o->uninstallProxy = TRUE; continue; }
     if (cx_streq(a, L"--proxy-source")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxySource, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->proxySourceSet = TRUE; continue; }
@@ -850,6 +852,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->panelAllPages) destination->panelAllPages = TRUE;
     if (layer->pipeTest) destination->pipeTest = TRUE;
     if (layer->installProxy) destination->installProxy = TRUE;
+    if (layer->proxyPortSet) { destination->proxyPort = layer->proxyPort; destination->proxyPortSet = TRUE; }
     if (layer->probeClientPathSet) { cx_wcopy(destination->probeClientPath, CX_OPTIONS_PATH_CAP, layer->probeClientPath); destination->probeClientPathSet = TRUE; }
     if (layer->probeAll) destination->probeAll = TRUE;
     if (layer->uninstallProxy) destination->uninstallProxy = TRUE;
@@ -1017,6 +1020,9 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
+
+
 
 
 
