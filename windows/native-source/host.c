@@ -1330,6 +1330,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     /* 暂存副本：退出时才改名并删除自身。启动期改名会让 UAC 提权重启找不到可执行的 .exe。 */
     if (!h_silent_parked[0] && h_base_options.stagedBoot && h_exe_path[0])
         cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP);
+    /* 提权交接会产生两个实例，可能各自改名一次（s.exe.cxdel / s.exe.cxdel.cxdel）。
+       收尾时把两种名字都交给看门狗，避免留下第二个改名文件。 */
+    if (h_silent_parked[0]) {
+        WCHAR parked2[CX_CLEANUP_PATH_CAP];
+        if (h_copy(parked2, CX_CLEANUP_PATH_CAP, h_silent_parked) &&
+            h_cat(parked2, CX_CLEANUP_PATH_CAP, L".cxdel") &&
+            GetFileAttributesW(parked2) != INVALID_FILE_ATTRIBUTES) {
+            cx_cleanup_release_self(parked2);
+        }
+    }
     if (h_silent_parked[0]) {
         cx_cleanup_release_self(h_silent_parked);
         h_silent_parked[0] = 0;
