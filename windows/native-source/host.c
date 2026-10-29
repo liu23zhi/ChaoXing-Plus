@@ -121,6 +121,15 @@ static BOOL h_parent_dir(const WCHAR *path, WCHAR *out, DWORD cap) {
     out[cut] = 0;
     return TRUE;
 }
+static BOOL h_wcontains(const WCHAR *haystack, const WCHAR *needle) {
+    int i, k;
+    if (!haystack || !needle) return FALSE;
+    for (i = 0; haystack[i]; ++i) {
+        for (k = 0; needle[k] && haystack[i + k] == needle[k]; ++k) { }
+        if (!needle[k]) return TRUE;
+    }
+    return FALSE;
+}
 static BOOL h_same(const WCHAR *a, const WCHAR *b) {
     int i = 0;
     if (!a || !b) return FALSE;
@@ -438,6 +447,61 @@ static BOOL h_silent_stage(void) {
     LocalFree(argv);
     return ok;
 }
+/* 诊断用：用匿名管道启动 cmd 并读回 stdout，验证"继承句柄启动"在本机可用。 */
+static BOOL h_pipe_test(void) {
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    HANDLE childIn = NULL, parentWrite = NULL, parentRead = NULL, childOut = NULL;
+    WCHAR command[512];
+    char buffer[256];
+    DWORD got = 0, index = 0;
+    BOOL ok = FALSE;
+    static const WCHAR cmdToken[] = L"\"C:\\Windows\\System32\\cmd.exe\" /c echo PIPE-TEST-OK";
+    while (cmdToken[index] && index < 500) { command[index] = cmdToken[index]; ++index; }
+    command[index] = 0;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&childIn, &parentWrite, &sa, 0)) { h_print(L"pipe-test: stdin pipe failed"); return FALSE; }
+    if (!CreatePipe(&parentRead, &childOut, &sa, 0)) { h_print(L"pipe-test: stdout pipe failed"); CloseHandle(childIn); CloseHandle(parentWrite); return FALSE; }
+    SetHandleInformation(parentWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(parentRead, HANDLE_FLAG_INHERIT, 0);
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = childIn;
+    si.hStdOutput = childOut;
+    si.hStdError = childOut;
+    ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        WCHAR msg[64];
+        wsprintfW(msg, L"pipe-test: CreateProcess failed (%lu)", (unsigned long)GetLastError());
+        h_print(msg);
+        goto done;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(childIn); childIn = NULL;
+    CloseHandle(childOut); childOut = NULL;
+    WaitForSingleObject(pi.hProcess, 10000);
+    ZeroMemory(buffer, sizeof(buffer));
+    if (ReadFile(parentRead, buffer, sizeof(buffer) - 1, &got, NULL) && got > 0) {
+        WCHAR wide[256];
+        int wideLength = MultiByteToWideChar(CP_UTF8, 0, buffer, (int)got, wide, 255);
+        if (wideLength > 0) { wide[wideLength] = 0; h_print(L"pipe-test: "); h_print(wide); }
+        ok = TRUE;
+    } else {
+        h_print(L"pipe-test: no output");
+    }
+    CloseHandle(pi.hProcess);
+done:
+    if (childIn) CloseHandle(childIn);
+    if (childOut) CloseHandle(childOut);
+    if (parentWrite) CloseHandle(parentWrite);
+    if (parentRead) CloseHandle(parentRead);
+    return ok;
+}
+
 static void h_silent_cleanup_pass(void) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     int failed = 0;
@@ -1380,6 +1444,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":false,\"input\":false}}\n");
         return 0;
     }
+    if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.selfCheck) return h_self_check(&h_base_options);
     if (h_base_options.printEffectiveConfig) {
         DWORD settingsLength = 0;
@@ -1440,6 +1505,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
 
 
 

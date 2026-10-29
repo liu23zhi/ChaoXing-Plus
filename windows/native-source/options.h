@@ -152,6 +152,7 @@ typedef struct CX_OPTIONS {
     BOOL capabilities;
     BOOL printEffectiveConfig;
     BOOL selfCheck;
+    BOOL pipeTest;
     /* Resolve path/UI precedence only after the complete configuration is merged. */
     BOOL commandLineLayer;
     BOOL clientPathSuppressedByUi;
@@ -180,6 +181,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *options,
                                              DWORD *length);
 
 #endif
+
 
 
 
