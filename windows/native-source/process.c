@@ -298,7 +298,7 @@ int proc_instances(const WCHAR *exePath, DWORD *pids, int cap) {
     return (int)count;
 }
 
-BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
+static BOOL proc_launch_core(const WCHAR *path, USHORT port, BOOL includePortArgument, DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
     WCHAR *full = NULL, *directory = NULL, *command = NULL;
     DWORD length, i, at, code = 0, slot, running;
     STARTUPINFOW startup;
@@ -325,9 +325,14 @@ BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCH
     for (i = 0; i < length; ++i) if (full[i] == L'"') { p_error(err, cap, L"Invalid quote in executable path", 0); goto done; }
     at = p_copy(command, length + 128, 0, L"\"");
     at = p_copy(command, length + 128, at, full);
-    at = p_copy(command, length + 128, at, L"\" --remote-debugging-port=");
-    at = p_decimal(command, length + 128, at, port);
-    p_copy(command, length + 128, at, L" --remote-debugging-address=127.0.0.1");
+    at = p_copy(command, length + 128, at, L"\"");
+    if (includePortArgument) {
+        at = p_copy(command, length + 128, at, L" --remote-debugging-port=");
+        at = p_decimal(command, length + 128, at, port);
+        p_copy(command, length + 128, at, L" --remote-debugging-address=127.0.0.1");
+    }
+
+
     if (!proc_check_instances(full, &running, err, cap)) { code = GetLastError(); goto done; }
     if (running) { code = ERROR_ALREADY_EXISTS; p_error(err, cap, L"Client is already running; close it before starting a new owned client", code); goto done; }
     p_zero(&startup, sizeof(startup)); startup.cb = sizeof(startup);
@@ -529,4 +534,12 @@ close:
     return TRUE;
 }
 
+/* dll-proxy 模式：不传端口参数，改由代理在进程内追加（调用方负责设置 CX_INJECT_PORT）。 */
+BOOL proc_launch_env(const WCHAR *path, USHORT port, BOOL includePortArgument,
+                     DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
+    return proc_launch_core(path, port, includePortArgument, pid, handle, err, cap);
+}
 
+BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle, WCHAR *err, DWORD cap) {
+    return proc_launch_core(path, port, TRUE, pid, handle, err, cap);
+}

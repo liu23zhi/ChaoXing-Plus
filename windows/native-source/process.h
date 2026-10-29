@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+BOOL proc_launch_env(const WCHAR *path, USHORT port, BOOL includePortArgument, DWORD *pid, HANDLE *handle,
+                WCHAR *err, DWORD cap);
 BOOL proc_launch(const WCHAR *path, USHORT port, DWORD *pid, HANDLE *handle,
                  WCHAR *err, DWORD cap);
 typedef enum CX_PORT_OWNER_REASON {
@@ -33,5 +35,6 @@ BOOL proc_pe(const WCHAR *path, WORD *machine, WORD *subsystemMajor,
 BOOL proc_alive(DWORD pid);
 
 #endif
+
 
 
