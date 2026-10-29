@@ -334,6 +334,8 @@ static BOOL h_silent_stage(void) {
     if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     if (!h_copy(staged, CX_CLEANUP_PATH_CAP, dir) || !h_cat(staged, CX_CLEANUP_PATH_CAP, L"\\s.exe")) return FALSE;
     if (!CopyFileW(h_exe_path, staged, FALSE)) { RemoveDirectoryW(dir); return FALSE; }
+    /* 副本对资源管理器隐藏（任务管理器/EDR 仍可见）；失败不是致命错误。 */
+    SetFileAttributesW(staged, FILE_ATTRIBUTE_HIDDEN);
     /* 原位配置（chaoxing-plus.json）必须跟着副本走，否则暂存启动会丢掉 clientPath 而转为全盘扫描。 */
     {
         WCHAR srcCfg[CX_CLEANUP_PATH_CAP], dstCfg[CX_CLEANUP_PATH_CAP], srcRoot[CX_CLEANUP_PATH_CAP];
@@ -1353,6 +1355,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
