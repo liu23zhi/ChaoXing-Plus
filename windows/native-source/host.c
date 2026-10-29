@@ -2359,7 +2359,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
     "启动: --console（GUI 宿主附加或分配控制台）--stage-boot（静默暂存启动）\n"
-    "调试: --pipe-call <exe> [--pipe-expr <js>]（管道 CDP 全链路诊断）\n"
+    "调试: --pipe-call <exe> [--pipe-expr <js>] [--pipe-args \"<args>\"]（管道 CDP 全链路诊断）\n"
             "状态: --version --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
@@ -2464,6 +2464,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

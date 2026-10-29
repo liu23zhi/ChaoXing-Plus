@@ -33,6 +33,7 @@ void __stdcall ProxyTestMain(void) {
     joyProc = GetProcAddress(module, "joyGetDevCapsA");
     if (!timeProc || !joyProc) { out("FAIL exports\n"); ExitProcess(1); }
     out("PASS exports\n");
+    Sleep(500);
     {
         WCHAR portProbe[8];
         if (1) {
@@ -109,6 +110,4 @@ void __stdcall ProxyTestMain(void) {
     out("PASS log\nPROXY SELF TEST PASS\n");
     ExitProcess(0);
 }
-
-
 
