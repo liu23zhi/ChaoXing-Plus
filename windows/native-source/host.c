@@ -138,6 +138,12 @@ static int h_find_offset(const char *haystack, const char *needle) {
     }
     return -1;
 }
+static void *h_memchr(const void *data, int value, DWORD length) {
+    const unsigned char *p = (const unsigned char *)data;
+    DWORD i;
+    for (i = 0; i < length; ++i) if (p[i] == (unsigned char)value) return (void *)(p + i);
+    return NULL;
+}
 static BOOL h_wcontains_a(const char *haystack, const char *needle) {
     int i, k;
     if (!haystack || !needle) return FALSE;
@@ -310,6 +316,7 @@ static void h_sample_page(H_NATIVE_PAGE *page) {
 static CX_SILENT h_silent;
 static BOOL h_silent_active = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
+static WCHAR h_pipe_extra_args[512];
 static BOOL h_silent_simulate = FALSE;
 static BOOL h_silent_done = FALSE;
 static CX_CLEANUP_PLAN *h_silent_plan = NULL;
@@ -707,6 +714,11 @@ static BOOL h_pipe_open(H_PIPE_CDP *state, const WCHAR *clientPath) {
         static const WCHAR tail[] = L" --remote-debugging-pipe";
         for (k = 0; tail[k] && at < 1000; ++k) command[at++] = tail[k];
     }
+    if (h_pipe_extra_args[0]) {
+        DWORD e = 0;
+        command[at++] = L' ';
+        while (h_pipe_extra_args[e] && at < 1100) command[at++] = h_pipe_extra_args[e++];
+    }
     command[at] = 0;
     inherit.nLength = sizeof(inherit);
     inherit.lpSecurityDescriptor = NULL;
@@ -861,6 +873,95 @@ static BOOL h_pipe_stage2(const WCHAR *clientPath, const WCHAR *expression) {
 static char *h_bundle_source(const char *bundle, DWORD length, DWORD *outLength);
 
 /* cdp-pipe 主流程（第一阶段）：管道启动客户端、attach 目标、注入 bootstrap 源码。 */
+
+/* Chromium 的 --remote-debugging-pipe 采用 NUL 结尾的 JSON 帧（Puppeteer 同款），
+   与 4 字节长度前缀的管道帧不同。这里实现 NUL 帧的请求/响应。 */
+static int h_pipe_write_nul(HANDLE handle, const char *payload, DWORD length) {
+    DWORD written = 0;
+    if (!handle || !payload) return 0;
+    if (!WriteFile(handle, payload, length, &written, NULL) || written != length) return 0;
+    {
+        char terminator = 0;
+        if (!WriteFile(handle, &terminator, 1, &written, NULL) || written != 1) return 0;
+    }
+    return 1;
+}
+
+static int h_pipe_call_nul(H_PIPE_CDP *state, const char *method, const char *params, char **reply, DWORD timeoutMs) {
+    char *command;
+    DWORD capacity, at = 0;
+    DWORD deadline;
+    char digits[16];
+    int id;
+    const char *cursor;
+    DWORD k;
+    if (reply) *reply = NULL;
+    if (!state || !state->toChild || !state->fromChild || !method) return -1;
+    capacity = (DWORD)(lstrlenA(method) + (params ? lstrlenA(params) : 0) + 512);
+    command = (char *)HeapAlloc(GetProcessHeap(), 0, capacity);
+    if (!command) return -1;
+    id = (int)state->nextId++;
+    wsprintfA(digits, "%d", id);
+    command[at++] = '{';
+    command[at++] = '"'; command[at++] = 'i'; command[at++] = 'd'; command[at++] = '"'; command[at++] = ':';
+    for (k = 0; digits[k]; ++k) command[at++] = digits[k];
+    {
+        static const char mid[] = ",\"method\":\"";
+        for (k = 0; mid[k]; ++k) command[at++] = mid[k];
+    }
+    for (cursor = method; *cursor && at + 512 < capacity; ++cursor) command[at++] = *cursor;
+    command[at++] = '"';
+    if (state->sessionId[0]) {
+        static const char sessionPrefix[] = ",\"sessionId\":\"";
+        for (k = 0; sessionPrefix[k]; ++k) command[at++] = sessionPrefix[k];
+        for (cursor = state->sessionId; *cursor && at + 256 < capacity; ++cursor) command[at++] = *cursor;
+        command[at++] = '"';
+    }
+    if (params && *params) {
+        static const char paramsPrefix[] = ",\"params\":";
+        for (k = 0; paramsPrefix[k]; ++k) command[at++] = paramsPrefix[k];
+        for (cursor = params; *cursor && at + 8 < capacity; ++cursor) command[at++] = *cursor;
+    }
+    command[at++] = '}';
+    command[at] = 0;
+    if (!h_pipe_write_nul(state->toChild, command, at)) { HeapFree(GetProcessHeap(), 0, command); return -1; }
+    HeapFree(GetProcessHeap(), 0, command);
+    deadline = GetTickCount() + timeoutMs;
+    {
+        char *buffer = (char *)HeapAlloc(GetProcessHeap(), 0, 1 << 20);
+        DWORD used = 0;
+        if (!buffer) return -1;
+        for (;;) {
+            DWORD available = 0, got = 0;
+            DWORD left;
+            if (!PeekNamedPipe(state->fromChild, NULL, 0, NULL, &available, NULL)) { HeapFree(GetProcessHeap(), 0, buffer); return -1; }
+            if (available > 0) {
+                DWORD want = available;
+                if (used + want > (1 << 20) - 1) want = (1 << 20) - 1 - used;
+                if (want && ReadFile(state->fromChild, buffer + used, want, &got, NULL) && got) {
+                    used += got;
+                    buffer[used] = 0;
+                    if (h_memchr(buffer, 0, used)) {
+                        /* 已收到完整 NUL 帧 */
+                        if (h_wcontains_a(buffer, digits)) {
+                            char *out = (char *)HeapAlloc(GetProcessHeap(), 0, used + 1);
+                            if (out) { CopyMemory(out, buffer, used); out[used] = 0; }
+                            HeapFree(GetProcessHeap(), 0, buffer);
+                            if (reply) *reply = out; else if (out) HeapFree(GetProcessHeap(), 0, out);
+                            return 1;
+                        }
+                        /* 不是本 id 的响应（事件），丢弃 */
+                        used = 0;
+                        buffer[0] = 0;
+                    }
+                }
+            }
+            left = (deadline > GetTickCount()) ? (DWORD)(deadline - GetTickCount()) : 0;
+            if (!left) { HeapFree(GetProcessHeap(), 0, buffer); return 0; }
+            Sleep(5);
+        }
+    }
+}
 static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, const char *bundle, DWORD bundleLength, const char *style, DWORD styleLength, WCHAR *error, DWORD errorCap) {
     H_PIPE_CDP state;
     char *reply = NULL;
@@ -889,7 +990,8 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     {
         int attempt = 0, status = 0;
         for (attempt = 0; attempt < 4; ++attempt) {
-            status = h_pipe_call(&state, "Target.getTargets", NULL, &reply, 6000);
+            status = h_pipe_call_nul(&state, "Target.getTargets", NULL, &reply, 6000);
+            if (status != 1) status = h_pipe_call(&state, "Target.getTargets", NULL, &reply, 3000);
             if (status == 1) break;
             if (!options->quiet) {
                 WCHAR diag[96];
@@ -922,7 +1024,7 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
         for (k = 0; tail[k]; ++k) params[at++] = tail[k];
         params[at] = 0;
     }
-    if (h_pipe_call(&state, "Target.attachToTarget", params, &reply, 8000) != 1) { h_error(error, errorCap, L"cdp-pipe: attachToTarget failed"); goto done; }
+    if (h_pipe_call_nul(&state, "Target.attachToTarget", params, &reply, 8000) != 1 && h_pipe_call(&state, "Target.attachToTarget", params, &reply, 4000) != 1) { h_error(error, errorCap, L"cdp-pipe: attachToTarget failed"); goto done; }
     offset = h_find_offset(reply, "\"sessionId\":\"");
     if (offset >= 0) {
         const char *cursor = reply + offset + (int)sizeof("\"sessionId\":\"") - 1;
@@ -2284,6 +2386,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.probeClientPathSet) { return h_probe_client(h_base_options.probeClientPath) ? 0 : 1; }
     if (h_base_options.probeAll) { return h_probe_all() ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
+    if (h_base_options.pipeExtraArgs[0]) h_copy(h_pipe_extra_args, 512, h_base_options.pipeExtraArgs);
     if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath, h_base_options.pipeExpr) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
         int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
@@ -2361,6 +2464,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
+
 
 
 
