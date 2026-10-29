@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -69,6 +69,34 @@ test('缺少标记时拒绝卸载未知 winmm.dll', { skip: process.platform !==
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+test('dll-proxy 自动安装后在运行结束时自动还原', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-auto-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    // 把首个节名改成 .themida，让宿主把它当作加壳客户端（dll-proxy 只对加壳客户端开放）。
+    const image = await readFile(client);
+    const marker = Buffer.from('.text\0\0\0', 'latin1');
+    const at = image.indexOf(marker);
+    assert.notEqual(at, -1, 'fixture 缺少 .text 节名，无法构造加壳场景');
+    image.write('.themida', at, 'latin1');
+    await writeFile(client, image);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false);
 
+    const result = run([
+      '--inject-mode', 'dll-proxy',
+      '--proxy-source', proxyDll,
+      '--client', client,
+      '--no-elevate', '--no-log', '--no-disk-write',
+      '--duration', '2'
+    ]);
+    assert.match(result.output, /本次运行临时安装代理/u);
+    // 无论注入是否成功，运行结束都必须把临时安装的代理清理干净。
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false, `winmm.dll 残留: ${result.output}`);
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), false, `marker 残留: ${result.output}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 
