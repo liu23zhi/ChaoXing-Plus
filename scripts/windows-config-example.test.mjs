@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const root = path.resolve('.');
-const examplePath = path.join(root, 'windows', 'config.example.json');
-const hostScript = path.join(root, 'windows', 'host', 'main.mjs');
+const examplePath = path.join(root, 'windows', 'share-file', 'config.example.json');
+const hostScript = path.join(root, 'windows', 'node-source', 'main.mjs');
 const nativeExe = process.env.CX_NATIVE_HOST_EXE;
 
 function runNode(args, timeout = 60000) {

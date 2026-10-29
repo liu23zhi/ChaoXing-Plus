@@ -47,36 +47,34 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 
 ## Windows 端（CEF 75 客户端注入）
 
-仓库新增 `windows/host` 宿主：以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 替代扩展平台能力（配置水合、资源注入、Chrome75 API 补丁）。
+Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 提供配置水合、资源注入和 Chrome75 API 补丁。原生宿主源码与入口位于 `windows/native-source/`；已弃用的 Node 宿主及其备用入口位于 `windows/node-source/`，两者共用的 Windows 文件位于 `windows/share-file/`。与插件共用的 `src/`、插件构建脚本 `build.mjs` 与输出目录 `dist/` 保留原位；完整目录说明见 [Windows 文件说明](docs/windows.md#目录)。
 
 ```powershell
 npm run build:windows
-# 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）：.\build-windows.cmd
-# 备用（已弃用，仅兼容/对照）：.\build-windows-node.cmd  # 只打 Node 包，不含原生 EXE
-# Git Bash 等价入口：bash build-windows.sh / bash build-windows-node.sh
-# 首次运行会创建 windows/data/config.json，把 clientPath 指向 CXExam.exe
-.\start-windows.cmd
+# 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）
+.\windows\native-source\build-windows.cmd
+# 备用（已弃用，仅兼容/对照）：只打 Node 包，不含原生 EXE
+.\windows\node-source\build-windows-node.cmd
+# Git Bash 等价入口：bash windows/native-source/build-windows.sh
+# Node 备用包：bash windows/node-source/build-windows-node.sh
+.\windows\native-source\start-windows.cmd
 # 需要可见控制台日志时使用调试入口（控制台 + GUI）
-.\start-windows-debug.cmd
+.\windows\native-source\start-windows-debug.cmd
 # 静默场景入口（零落盘内存模式、快速扫描失败才全盘、自动首选 x86、无面板/控制台）
-.\start-windows-silent.cmd
-# 无控制台窗口启动（发布包内为 start-windows-silent.cmd，只隐藏 Node 控制台）
-.\start-windows-silent.cmd
+.\windows\native-source\start-windows-silent.cmd
 ```
 
-启动模式会自动采集渲染诊断到 `windows/data/diagnostics/<时间戳>/`（DPI/窗口 DPI 感知/面板样式/页面与窗口截图），用于排查“悬浮窗模糊”；若系统缩放为 125%/150% 且客户端 DPI-unaware，可用 `.\start-windows.cmd
-# 无控制台窗口启动（发布包内为 start-windows-silent.cmd，只隐藏 Node 控制台）
-.\start-windows-silent.cmd --dpi-aware` 重试。Windows 端只服务考试/答题场景：悬浮面板仅在考试相关页面出现、**默认折叠为标题条**（点击标题条展开/折叠），并只保留考试答题相关功能（答题结果、题库配置、考试设置）；Chrome 扩展保持完整面板与默认展开。详细设计、配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
+原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-source\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
 
-Windows 发布包（原生单文件 + Node 宿主双入口）：
+Windows 发布包（默认使用原生宿主）：
 
 ```powershell
-npm run build:windows   # dist-windows 注入资源
+npm run build:windows -- --release # dist-windows 注入资源
 npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
 npm run release:windows # release/chaoxing-plus-6.2.0-windows.zip
 ```
 
-包内同时提供 `chaoxing_plus.exe`（资源内嵌，可独立运行）与 `start-windows.cmd`（隐藏控制台常规入口）/ `start-windows-debug.cmd`（控制台调试入口）/ `start-windows-silent.cmd`（零落盘内存场景入口）+ `windows/host` + `dist-windows`，并附 `release-info.json`（含 `entrypoints.nodeSilent`）/ `SHA256SUMS.txt` / `verify-release.mjs`（解压后运行 `node verify-release.mjs` 校验完整性）；第一阶段内部原型与外部 npm 依赖不会进入发布包。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+默认包提供资源内嵌的 `chaoxing_plus.exe`、五个原生 `start-windows*.cmd` 启动器、文档、`windows/share-file/config.example.json`、`release-info.json`、`SHA256SUMS.txt` 与包根 `verify-release.mjs`。显式传 `npm run release:windows -- --with-node` 才增加 Node 运行闭包、运行时和 `start-windows-node*.cmd` 启动器，`--skip-native` 则生成纯 Node 备用包。发布包启动器仍位于包根；解压后运行 `node verify-release.mjs` 校验完整性。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ---
 
@@ -95,15 +93,13 @@ chaoxing_plus/
 │   ├── utils/                   # 学习与答题辅助工具
 │   └── elements/                # 自定义元素
 ├── windows/
-│   ├── bootstrap/               # 页面侧平台层（CEF 75，无 chrome.*）
-│   ├── host/                    # Node 宿主：启动客户端 + CDP 注入
-│   ├── config.example.json      # 配置模板
+│   ├── node-source/             # Node 宿主、备用构建和启动器（已弃用）
+│   ├── native-source/           # 原生源码、编译脚本、构建和启动器
+│   ├── share-file/              # Windows 共用页面资源、构建/打包脚本、配置与生成器
 │   └── data/                    # 本地配置/日志（gitignore）
 ├── build.mjs                    # 扩展注入脚本构建
-├── build.windows.mjs            # Windows 端构建（target chrome75 + 语法闸门）
-├── start-windows.cmd            # Windows 端常规入口（隐藏控制台，显示 GUI）
-├── start-windows-debug.cmd      # Windows 端调试入口（控制台 + GUI）
-├── start-windows-silent.cmd     # Windows 端静默场景入口（零落盘内存模式）
+├── build-browser.sh             # 扩展完整构建入口
+├── scripts/                     # 扩展和 Windows 回归测试
 ├── docs/windows.md              # Windows 端使用与设计说明
 ├── package.json
 └── tsconfig.json

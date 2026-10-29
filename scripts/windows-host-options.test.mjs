@@ -14,7 +14,7 @@ import {
   parseHostArgs,
   UNSUPPORTED_CAPABILITIES,
   validateSupportedJsonOptions
-} from '../windows/host/options.mjs';
+} from '../windows/node-source/options.mjs';
 
 test('Windows 宿主参数解析覆盖客户端选择、面板、答题、日志和线程', () => {
   const options = parseHostArgs([
@@ -553,7 +553,7 @@ test('CEF75 普通启动端口只接受自动或 1024 到 65534，attach 保持�
 });
 
 test('spawnClient 在创建进程前拒绝不支持的 CEF75 端口', async () => {
-  const { spawnClient } = await import('../windows/host/launch.mjs');
+  const { spawnClient } = await import('../windows/node-source/launch.mjs');
   for (const port of [0, 1, 1023, 65535]) {
     assert.throws(() => {
       const result = spawnClient({ exePath: 'must-not-start-CXExam.exe', port });
@@ -599,7 +599,7 @@ test('Windows 业务 runtime 使用宿主下发的面板和答题设置', async 
 });
 
 test('host usage lists scan fallback and client scan controls, including --no-scan-all', () => {
-  const result = spawnSync(process.execPath, [resolve('windows/host/main.mjs'), '--help'], {
+  const result = spawnSync(process.execPath, [resolve('windows/node-source/main.mjs'), '--help'], {
     cwd: resolve('.'), encoding: 'utf8', timeout: 15000, windowsHide: true
   });
   assert.equal(result.status, 0, result.stderr || String(result.error));

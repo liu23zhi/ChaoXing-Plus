@@ -5,12 +5,13 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { buildElevatedRelaunchCommand, hideConsoleWindow } from '../windows/host/launch.mjs';
-import { parseHostArgs } from '../windows/host/options.mjs';
+import { buildElevatedRelaunchCommand, hideConsoleWindow } from '../windows/node-source/launch.mjs';
+import { parseHostArgs } from '../windows/node-source/options.mjs';
 
 const root = path.resolve('.');
-const silentCmdPath = path.join(root, 'start-windows-node-silent.cmd');
-const silentVbsPath = path.join(root, 'windows', 'host', 'silent-memory-launch.vbs');
+const launcherSource = (name) => path.join(root, 'windows', name.startsWith('start-windows-node') ? 'node-source' : 'native-source', name);
+const silentCmdPath = launcherSource('start-windows-node-silent.cmd');
+const silentVbsPath = path.join(root, 'windows', 'node-source', 'silent-memory-launch.vbs');
 const nodeLaunchers = ['start-windows-node.cmd', 'start-windows-node-debug.cmd', 'start-windows-node-silent.cmd', 'start-windows-node-silent-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd'];
 async function symlinkDirectory(target, linkPath) {
   await symlink(target, linkPath, 'junction');
@@ -28,24 +29,24 @@ function readLauncherArgs(source) {
 test('静默启动脚本通过 wscript 隐藏初始 Node 控制台窗口', async () => {
   const cmd = await readFile(silentCmdPath, 'utf8');
   const vbs = await readFile(silentVbsPath, 'utf8');
-  assert.match(cmd, /wscript\.exe\s+\/\/nologo\s+"%~dp0windows\\host\\silent-memory-launch\.vbs"/u);
+  assert.match(cmd, /wscript\.exe\s+\/\/nologo\s+"%CXPLUS_ROOT%\\windows\\node-source\\silent-memory-launch\.vbs"/u);
   // 不能在前台直接运行 node.exe，否则 cmd/Node 控制台窗口会一直可见。
   assert.doesNotMatch(cmd, /^\s*node(?:\.exe)?\s/mu);
   // cmd 不识别反斜杠转义，内联 JSON 会被原样传递成非法参数。
   assert.doesNotMatch(cmd, /--options-json[^\r\n]*\\"/u);
-  // "%~dp0" 以反斜杠结尾，直接加闭引号会让 \" 变成转义引号；用 "%~dp0." 表示工作目录。
-  assert.match(cmd, /"%~dp0\." "%~dp0windows\\host\\silent-memory-bootstrap\.mjs"/u);
+  // 保留工作目录末尾的点，避免尾反斜杠把闭引号解析为转义引号。
+  assert.match(cmd, /"%CXPLUS_ROOT%\\\." "%CXPLUS_ROOT%\\windows\\node-source\\silent-memory-bootstrap\.mjs"/u);
   assert.doesNotMatch(cmd, /wscript\.exe[^\r\n]*"%~dp0"/u);
   assert.match(vbs, /shell\.Run command, 0, False/u);
   // VBS 与 .ps1 一样必须保持纯 ASCII，避免 ANSI 解码破坏脚本。
   assert.equal((vbs.match(/[^\x00-\x7F]/gu) || []).length, 0);
 
   // 宿主自身也要隐藏控制台并让 UAC 提权重启使用 Hidden 窗口。
-  const mainSource = await readFile(path.join(root, 'windows', 'host', 'main.mjs'), 'utf8');
+  const mainSource = await readFile(path.join(root, 'windows', 'node-source', 'main.mjs'), 'utf8');
   assert.match(mainSource, /if \(options\.hideConsole && !options\.printEffectiveConfig\) \{\s*await hideConsoleWindow\(\);/u);
   assert.match(mainSource, /windowStyle: options\.hideConsole \? 'Hidden' : 'Normal'/u);
   assert.match(mainSource, /--hide-console\s+静默启动/u);
-  const launchSource = await readFile(path.join(root, 'windows', 'host', 'launch.mjs'), 'utf8');
+  const launchSource = await readFile(path.join(root, 'windows', 'node-source', 'launch.mjs'), 'utf8');
   assert.match(launchSource, /export async function hideConsoleWindow/u);
   assert.match(launchSource, /ShowWindow\(\$handle, 0\)/u);
 });
@@ -139,10 +140,10 @@ test('静默入口固定零落盘内存场景：快速扫描后回退、自动�
 test('静默入口启动前检查必需产物，缺失时询问是否构建', async () => {
   const cmd = await readFile(silentCmdPath, 'utf8');
   for (const required of [
-    'windows\\host\\main.mjs',
-    'windows\\host\\silent-memory-bootstrap.mjs',
-    'windows\\host\\silent-memory-launch.vbs',
-    'windows\\host\\launch-client.ps1',
+    'windows\\node-source\\main.mjs',
+    'windows\\node-source\\silent-memory-bootstrap.mjs',
+    'windows\\node-source\\silent-memory-launch.vbs',
+    'windows\\node-source\\launch-client.ps1',
     'dist-windows\\windows-bootstrap.js',
     'dist-windows\\chaoxing-plus.windows.js',
     'dist-windows\\trampoline.js'
@@ -159,6 +160,8 @@ test('静默入口启动前检查必需产物，缺失时询问是否构建', as
 test('静默入口缺失产物时拒绝构建会以 9043 退出并列出缺失文件', { skip: process.platform !== 'win32' }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'cx-silent-precheck-'));
   try {
+    await mkdir(path.join(directory, 'windows', 'node-source'), { recursive: true });
+    await writeFile(path.join(directory, 'windows', 'node-source', 'main.mjs'), '// fixture\n', 'utf8');
     const launcher = path.join(directory, 'start-windows-node-silent.cmd');
     await writeFile(launcher, await readFile(silentCmdPath, 'utf8'), 'utf8');
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${launcher}"`], {
@@ -179,8 +182,8 @@ test('静默入口缺失产物时拒绝构建会以 9043 退出并列出缺失�
 
 test('两个静默调试入口只模拟删除并保留控制台', async () => {
   for (const name of ['start-windows-node-silent-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd']) {
-    const source = await readFile(path.join(root, name), 'utf8');
-    assert.match(source, /type "%~dp0windows\\host\\silent-memory-bootstrap\.mjs" \| node --input-type=module -/u);
+    const source = await readFile(launcherSource(name), 'utf8');
+    assert.match(source, /type "%CXPLUS_ROOT%\\windows\\node-source\\silent-memory-bootstrap\.mjs" \| node --input-type=module -/u);
     assert.equal(source.includes('--silent-delete-simulate'), true, `${name} 必须模拟删除`);
     assert.equal(source.includes('--silent-scenario'), true, `${name} 必须复用静默场景`);
     assert.equal(source.includes('--no-disk-write'), true, `${name} 不得写盘`);
@@ -188,32 +191,33 @@ test('两个静默调试入口只模拟删除并保留控制台', async () => {
     assert.doesNotMatch(source, /--quiet/u, `${name} 不得静默输出`);
     assert.doesNotMatch(source, /wscript\.exe|--hide-console/u, `${name} 必须保留控制台`);
   }
-  const noFullScan = await readFile(path.join(root, 'start-windows-node-silent-no-full-scan-debug.cmd'), 'utf8');
+  const noFullScan = await readFile(launcherSource('start-windows-node-silent-no-full-scan-debug.cmd'), 'utf8');
   assert.match(noFullScan, /--scan-mode common/u);
   assert.doesNotMatch(noFullScan, /fallback-all/u, '不完整扫描入口不得回退全盘');
-  const debug = await readFile(path.join(root, 'start-windows-node-silent-debug.cmd'), 'utf8');
+  const debug = await readFile(launcherSource('start-windows-node-silent-debug.cmd'), 'utf8');
   assert.match(debug, /--scan-mode fallback-all/u, '默认调试入口保留全盘回退');
 });
 test('Node 备用入口都先检查 Node.js 22+ 主版本', async () => {
   for (const launcher of ['start-windows-node.cmd', 'start-windows-node-debug.cmd', 'start-windows-node-silent.cmd']) {
-    const source = await readFile(path.join(root, launcher), 'utf8');
+    const source = await readFile(launcherSource(launcher), 'utf8');
     assert.match(source, /node --version/u, launcher);
     assert.match(source, /LSS 22/u, launcher);
   }
-  const normal = await readFile(path.join(root, 'start-windows-node.cmd'), 'utf8');
-  assert.match(normal, /wscript\.exe \/\/nologo "%~dp0windows\\host\\silent-launch\.vbs"/u);
+  const normal = await readFile(launcherSource('start-windows-node.cmd'), 'utf8');
+  assert.match(normal, /wscript\.exe \/\/nologo "%CXPLUS_ROOT%\\windows\\node-source\\silent-launch\.vbs"/u);
   assert.doesNotMatch(normal, /^\s*node(?:\.exe)?\s/mu, '常规入口不得显示控制台');
-  const debug = await readFile(path.join(root, 'start-windows-node-debug.cmd'), 'utf8');
-  assert.match(debug, /node windows\\host\\main\.mjs %\*/u, '调试入口必须保留可见控制台');
+  const debug = await readFile(launcherSource('start-windows-node-debug.cmd'), 'utf8');
+  assert.match(debug, /node windows\\node-source\\main\.mjs %\*/u, '调试入口必须保留可见控制台');
 });
 
-test('start-windows-node-debug.cmd 在版本检查后以 --help 正常退出', { skip: process.platform !== 'win32' }, () => {
-  const launcherPath = path.join(root, 'start-windows-node-debug.cmd');
+test('迁移后的 Node 调试入口从项目外工作目录以 --help 正常退出', { skip: process.platform !== 'win32' }, () => {
+  const launcherPath = launcherSource('start-windows-node-debug.cmd');
   const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${launcherPath}" --help`], {
     encoding: 'utf8',
     timeout: 60000,
     windowsHide: true,
     windowsVerbatimArguments: true,
+    cwd: tmpdir(),
     env: { ...process.env, CXPLUS_NO_LOG_FILE: '1' }
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -243,7 +247,7 @@ test('hideConsoleWindow 在无控制台或非 Windows 环境下安全返回', as
 
 test('宿主带 --hide-console 运行不报错（self-check 冒烟）', { skip: process.platform !== 'win32' }, () => {
   const result = spawnSync(process.execPath, [
-    path.join(root, 'windows', 'host', 'main.mjs'),
+    path.join(root, 'windows', 'node-source', 'main.mjs'),
     '--hide-console',
     '--self-check',
     '--quiet',
@@ -298,9 +302,9 @@ test('静默入口产物齐全时直接隐藏启动，并把固定参数交给 l
   try {
     // 只造出入口要求的文件，launcher 换成记录参数的桩，绝不启动真实宿主。
     for (const relative of [
-      'windows\\host\\main.mjs',
-      'windows\\host\\silent-memory-bootstrap.mjs',
-      'windows\\host\\launch-client.ps1',
+      'windows\\node-source\\main.mjs',
+      'windows\\node-source\\silent-memory-bootstrap.mjs',
+      'windows\\node-source\\launch-client.ps1',
       'dist-windows\\windows-bootstrap.js',
       'dist-windows\\chaoxing-plus.windows.js',
       'dist-windows\\trampoline.js'
@@ -311,7 +315,7 @@ test('静默入口产物齐全时直接隐藏启动，并把固定参数交给 l
     }
     const marker = path.join(directory, 'launch-args.txt');
     await writeFile(
-      path.join(directory, 'windows\\host\\silent-memory-launch.vbs'),
+      path.join(directory, 'windows\\node-source\\silent-memory-launch.vbs'),
       [
         'Option Explicit',
         'Dim args, index, text',
@@ -353,7 +357,7 @@ test('静默入口产物齐全时直接隐藏启动，并把固定参数交给 l
     assert.notEqual(recorded, '', '产物齐全时静默入口必须交给隐藏 launcher');
     const tokens = recorded.split('|');
     assert.equal(path.resolve(tokens[0]), directory, '第一项必须是规范化后的工作目录');
-    assert.equal(path.resolve(tokens[1]), path.join(directory, 'windows\\host\\silent-memory-bootstrap.mjs'));
+    assert.equal(path.resolve(tokens[1]), path.join(directory, 'windows\\node-source\\silent-memory-bootstrap.mjs'));
     for (const expected of ['--hide-console', '--silent-scenario', 'fallback-all', '--client-first', 'memory', '--no-disk-write', '--no-log', '--quiet', '--no-panel', 'Ctrl+Alt+Shift+S']) {
       assert.equal(tokens.includes(expected), true, `launcher 参数缺少 ${expected}`);
     }
@@ -367,13 +371,13 @@ test('五个入口都优先使用包内自带的 Node 运行时', async () => {
   for (const launcher of [
     ...nodeLaunchers
   ]) {
-    const source = await readFile(path.join(root, launcher), 'utf8');
+    const source = await readFile(launcherSource(launcher), 'utf8');
     assert.equal(
-      source.includes('if exist "%~dp0runtime\\node.exe" set "PATH=%~dp0runtime;%PATH%"'),
+      source.includes('if exist "%CXPLUS_ROOT%\\runtime\\node.exe" set "PATH=%CXPLUS_ROOT%\\runtime;%PATH%"'),
       true,
       `${launcher} 必须优先挂载包内 runtime\\node.exe`
     );
-    const prepend = source.indexOf('"%~dp0runtime"');
+    const prepend = source.indexOf('if exist "%CXPLUS_ROOT%\\runtime\\node.exe"');
     const firstNodeUse = [source.indexOf('where node'), source.indexOf('node --version')]
       .filter((index) => index >= 0)
       .sort((left, right) => left - right)[0];
@@ -385,9 +389,9 @@ test('包内运行时存在时静默入口先挂载它，并且版本检查用�
   const directory = await mkdtemp(path.join(tmpdir(), 'cx-silent-runtime-'));
   try {
     for (const relative of [
-      'windows\\host\\main.mjs',
-      'windows\\host\\silent-memory-bootstrap.mjs',
-      'windows\\host\\launch-client.ps1',
+      'windows\\node-source\\main.mjs',
+      'windows\\node-source\\silent-memory-bootstrap.mjs',
+      'windows\\node-source\\launch-client.ps1',
       'dist-windows\\windows-bootstrap.js',
       'dist-windows\\chaoxing-plus.windows.js',
       'dist-windows\\trampoline.js'
@@ -403,7 +407,7 @@ test('包内运行时存在时静默入口先挂载它，并且版本检查用�
     await copyFile(process.execPath, path.join(runtimeDirectory, 'node.exe'));
     const marker = path.join(directory, 'launch-env.json');
     await writeFile(
-      path.join(directory, 'windows\\host\\silent-memory-launch.vbs'),
+      path.join(directory, 'windows\\node-source\\silent-memory-launch.vbs'),
       [
         'Option Explicit',
         'Dim shell, processEnvironment, text',
@@ -460,27 +464,27 @@ test('原生入口直接运行 chaoxing_plus.exe，不依赖 Node/PowerShell', a
     'start-windows-silent-no-full-scan-debug.cmd'
   ];
   for (const name of nativeLaunchers) {
-    const source = await readFile(path.join(root, name), 'utf8');
+    const source = await readFile(launcherSource(name), 'utf8');
     assert.equal(source.includes('chaoxing_plus.exe'), true, `${name} 必须启动原生 EXE`);
     assert.doesNotMatch(source, /^\s*(?:wscript|powershell)(?:\.exe)?\s/im, `${name} 不得执行 wscript/PowerShell`);
     assert.doesNotMatch(source, /^\s*node(?:\.exe)?\s/mu, `${name} 不得直接调用 node`);
     assert.equal(source.includes('\r'), false, `${name} 必须使用 LF 换行`);
   }
-  const silent = await readFile(path.join(root, 'start-windows-silent.cmd'), 'utf8');
+  const silent = await readFile(launcherSource('start-windows-silent.cmd'), 'utf8');
   for (const expected of ['--silent-scenario', '--no-panel', '--no-log', '--no-disk-write', '--quiet', '--answer-key Ctrl+Alt+Shift+S', '--hide-answer-dialog']) {
     assert.equal(silent.includes(expected), true, `原生静默入口缺少 ${expected}`);
   }
-  const simulate = await readFile(path.join(root, 'start-windows-silent-debug.cmd'), 'utf8');
+  const simulate = await readFile(launcherSource('start-windows-silent-debug.cmd'), 'utf8');
   assert.equal(simulate.includes('--silent-delete-simulate'), true);
   assert.doesNotMatch(simulate, /--quiet/u, '调试入口必须保留控制台输出');
-  const noFull = await readFile(path.join(root, 'start-windows-silent-no-full-scan-debug.cmd'), 'utf8');
+  const noFull = await readFile(launcherSource('start-windows-silent-no-full-scan-debug.cmd'), 'utf8');
   assert.match(noFull, /--scan-mode common/u);
   assert.doesNotMatch(noFull, /fallback-all/u, '不完整扫描入口不得回退全盘');
 });
 
 test('原生入口在缺少 chaoxing_plus.exe 时给出中文提示并以 9009 退出', async () => {
   for (const name of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd']) {
-    const source = await readFile(path.join(root, name), 'utf8');
+    const source = await readFile(launcherSource(name), 'utf8');
     assert.equal(source.includes('未找到 chaoxing_plus.exe') || source.includes('chaoxing_plus.exe is missing'), true, `${name} 缺少提示`);
     assert.equal(source.includes('exit /b 9009'), true, `${name} 缺少 9009 退出码`);
   }

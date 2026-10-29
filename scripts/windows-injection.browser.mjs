@@ -6,9 +6,9 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { PageSession } from '../windows/host/inject.mjs';
-import { fetchJson } from '../windows/host/cdp.mjs';
-import { createHostDiagnostics } from '../windows/host/memory-diagnostics.mjs';
+import { PageSession } from '../windows/node-source/inject.mjs';
+import { fetchJson } from '../windows/node-source/cdp.mjs';
+import { createHostDiagnostics } from '../windows/node-source/memory-diagnostics.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
@@ -537,7 +537,7 @@ test('production Node attach exposes memory diagnostics with quiet no-disk-write
       writeFile(join(assetsDir, 'package-manifest.json'), '{"version":"6.2.0"}')
     ]);
     await page.goto(`http://a.chaoxing.com:${port}/exam-ans/production-diagnostics-${++sequence}?private-token=fixture`);
-    child = spawn(process.execPath, [resolve('windows/host/main.mjs'),
+    child = spawn(process.execPath, [resolve('windows/node-source/main.mjs'),
       '--attach', String(browserPort), '--assets', assetsDir, '--config', join(directory, 'config.json'),
       '--data-dir', join(directory, 'data'), '--report', join(directory, 'report.json'),
       '--duration', '3000', '--no-disk-write', '--quiet'

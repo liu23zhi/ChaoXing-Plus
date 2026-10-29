@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 
-import { observeClientProcess } from '../windows/host/client-process.mjs';
+import { observeClientProcess } from '../windows/node-source/client-process.mjs';
 
 test('只观察本次宿主持有的 ChildProcess 退出事件', () => {
   const child = new EventEmitter();

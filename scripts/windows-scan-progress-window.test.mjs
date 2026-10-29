@@ -14,7 +14,7 @@ import {
   openScanProgressWindow,
   parseScanProgressUpdate,
   probeScanProgressWindow
-} from '../windows/host/scan-progress-window.mjs';
+} from '../windows/node-source/scan-progress-window.mjs';
 
 const execFileAsync = promisify(execFile);
 const interactiveWindowTest = process.env.CX_TEST_NATIVE_WINDOW === '1';

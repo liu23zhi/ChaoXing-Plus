@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveClientSelection } from '../windows/host/client-selection.mjs';
-import { applyHostOptionLayers, parseHostArgs } from '../windows/host/options.mjs';
+import { resolveClientSelection } from '../windows/node-source/client-selection.mjs';
+import { applyHostOptionLayers, parseHostArgs } from '../windows/node-source/options.mjs';
 
 function makeOptions(overrides = {}) {
   return {

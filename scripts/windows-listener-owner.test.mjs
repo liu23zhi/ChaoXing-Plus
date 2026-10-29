@@ -11,9 +11,9 @@ import {
   getListenerOwnerPid,
   getProcessParentChain,
   parseProcessParentChain
-} from '../windows/host/launch.mjs';
+} from '../windows/node-source/launch.mjs';
 
-const loadParser = async () => (await import('../windows/host/listener-owner.mjs')).parseNetstatListenerOwner;
+const loadParser = async () => (await import('../windows/node-source/listener-owner.mjs')).parseNetstatListenerOwner;
 const row = (local = '127.0.0.1:49321', state = 'LISTENING', pid = '4242', remote = '0.0.0.0:0') =>
   `  TCP    ${local}    ${remote}    ${state}    ${pid}`;
 const queryOptions = (execFileImpl) => ({ platform: 'win32', systemRoot: 'C:\\Windows', execFileImpl });

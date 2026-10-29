@@ -16,7 +16,7 @@ import {
   isSupportedClientMachine,
   parsePeMachine,
   sanitizeUrl
-} from '../windows/host/launch.mjs';
+} from '../windows/node-source/launch.mjs';
 import {
   createConfigStore,
   isSharedStoreKey,
@@ -24,10 +24,10 @@ import {
   mergeHostConfigLayers,
   normalizeConfig,
   pickSharedValues
-} from '../windows/host/config.mjs';
-import { fetchJson, CdpConnection } from '../windows/host/cdp.mjs';
-import { isBlankishUrl, PageSession } from '../windows/host/inject.mjs';
-import { evaluateDpiDiagnosis, evaluatePageDiagnosis } from '../windows/host/diagnostics.mjs';
+} from '../windows/node-source/config.mjs';
+import { fetchJson, CdpConnection } from '../windows/node-source/cdp.mjs';
+import { isBlankishUrl, PageSession } from '../windows/node-source/inject.mjs';
+import { evaluateDpiDiagnosis, evaluatePageDiagnosis } from '../windows/node-source/diagnostics.mjs';
 
 const root = process.cwd();
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -318,8 +318,8 @@ test('普通启动流程校验有效 PE 后能到达 spawnClient，不启动真�
   await fs.writeFile(clientPath, buffer);
   await fs.writeFile(configPath, '{}', 'utf8');
   await writeFixtureAssets(assetsDir, { bootstrap: 'true;', bundle: 'true;' });
-  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
-  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const launchUrl = new URL('../windows/node-source/launch.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/node-source/main.mjs', import.meta.url).href;
   const args = [
     '--client', clientPath, '--config', configPath, '--assets', assetsDir,
     '--no-disk-write', '--no-log', '--no-diagnose', '--no-elevate'
@@ -354,10 +354,10 @@ test('Windows 无参数 main 入口先选择 GUI，UAC 接续传递实际选择�
   const configPath = path.join(directory, 'config.json');
   const selectedClientPath = path.join(directory, 'CXExam.exe');
   await fs.writeFile(configPath, JSON.stringify({ clientPath: selectedClientPath, ui: 'auto', noDiskWrite: true, quiet: true }), 'utf8');
-  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
-  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
-  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
-  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const launchUrl = new URL('../windows/node-source/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/node-source/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/node-source/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/node-source/main.mjs', import.meta.url).href;
   const source = `
     import { mock } from 'node:test';
     import assert from 'node:assert/strict';
@@ -400,10 +400,10 @@ test('Windows 无参数 main 入口先选择 GUI，UAC 接续传递实际选择�
 test('启动提权在扫描前执行，遵守 quiet、真实 token 和只读模式，并且取消不会循环', { skip: process.platform !== 'win32' }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-early-uac-'));
   const configPath = path.join(directory, 'config.json');
-  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
-  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
-  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
-  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const launchUrl = new URL('../windows/node-source/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/node-source/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/node-source/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/node-source/main.mjs', import.meta.url).href;
   const cases = [
     { args: ['--elevate-on-start'], config: {}, token: false, expected: 'UAC_REQUESTED', code: 0, selected: false },
     { args: ['--ui', 'gui'], config: { elevateOnStart: true }, token: false, expected: 'UAC_REQUESTED', code: 0, selected: false },
@@ -456,10 +456,10 @@ test('客户端默认仅 Win32 740 可触发提权，权限禁用及其他错误
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-demand-uac-'));
   const configPath = path.join(directory, 'config.json');
   const client = path.join(directory, 'CXExam.exe');
-  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
-  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
-  const selectionUrl = new URL('../windows/host/client-selection.mjs', import.meta.url).href;
-  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const launchUrl = new URL('../windows/node-source/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/node-source/config.mjs', import.meta.url).href;
+  const selectionUrl = new URL('../windows/node-source/client-selection.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/node-source/main.mjs', import.meta.url).href;
   await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, quiet: true }), 'utf8');
   const cases = [
     { win32Code: 5, code: 'EACCES', args: [], token: false, uac: false },
@@ -507,10 +507,10 @@ test('help、capabilities、self-check 和 attach 不执行启动提权', { skip
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-readonly-uac-'));
   const configPath = path.join(directory, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({ noDiskWrite: true, quiet: true }), 'utf8');
-  const launchUrl = new URL('../windows/host/launch.mjs', import.meta.url).href;
-  const configUrl = new URL('../windows/host/config.mjs', import.meta.url).href;
-  const cdpUrl = new URL('../windows/host/cdp.mjs', import.meta.url).href;
-  const mainUrl = new URL('../windows/host/main.mjs', import.meta.url).href;
+  const launchUrl = new URL('../windows/node-source/launch.mjs', import.meta.url).href;
+  const configUrl = new URL('../windows/node-source/config.mjs', import.meta.url).href;
+  const cdpUrl = new URL('../windows/node-source/cdp.mjs', import.meta.url).href;
+  const mainUrl = new URL('../windows/node-source/main.mjs', import.meta.url).href;
   try {
     for (const args of [['--help'], ['--capabilities'], ['--self-check', '--no-disk-write'], ['--attach', '9333']]) {
       const source = `
@@ -747,7 +747,7 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
   }), 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
@@ -785,7 +785,7 @@ test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async
   });
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir,
       '--config', path.join(directory, 'config.json'),
       '--target-poll-interval', '250', '--duration', '1800',
@@ -811,7 +811,7 @@ test('CDP 重连后保留前一会话已完成的注入统计及成功退出码'
   });
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir,
       '--config', path.join(directory, 'config.json'), '--report', reportPath,
       '--target-poll-interval', '250', '--duration', '1800', '--no-log', '--quiet'
@@ -840,7 +840,7 @@ test('宿主 --no-disk-write 禁止配置、日志、诊断和报告输出', asy
   });
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
@@ -884,7 +884,7 @@ test('配置文件 noDiskWrite 在创建 config store 前生效', async () => {
   await fs.writeFile(configPath, originalConfig, 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
@@ -924,7 +924,7 @@ test('配置层 deleteConfig 在最终合并后仍会删除显式外部配置', 
   }), 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
@@ -948,7 +948,7 @@ test('启动清理与自毁参数已接入，--help 下不执行清理或落盘'
   await fs.writeFile(configPath, originalConfig, 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--wipe-owned-files-on-start', '--wipe-retries', '7',
       '--self-destruct-key', 'Ctrl+Alt+Shift+E', '--no-self-destruct-confirm',
       '--config', configPath, '--data-dir', dataDirectory, '--help'
@@ -976,7 +976,7 @@ test('不保留本轮数据时保留已有诊断目录及其中用户文件', as
   await fs.writeFile(sentinelPath, 'keep user data', 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
       '--diagnose', '--diagnostics-dir', diagnosticsDir, '--no-retain-data',
       '--no-log', '--duration', '100', '--quiet'
@@ -995,7 +995,7 @@ test('显式指定但不存在的 options-json 文件会在启动前报错', asy
   const missingOptionsPath = path.join(directory, 'missing-options.json');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--options-json', `@${missingOptionsPath}`,
       '--quiet'
     ]);
@@ -1025,7 +1025,7 @@ test('宿主 --diagnose 会采集渲染诊断并写入诊断文件', async () =>
   }), 'utf8');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port),
       '--assets', assetsDir,
       '--config', configPath,
@@ -1063,7 +1063,7 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
   const dataDir = path.join(directory, 'data');
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--self-check',
       '--assets', assetsDir,
       '--config', configPath,
@@ -1086,7 +1086,7 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
       '自检默认必须保持只读，不创建数据目录或隐式日志');
     const explicitLogDir = path.join(directory, 'explicit-log-data');
     const logResult = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--self-check',
       '--assets', assetsDir,
       '--config', configPath,
@@ -1116,7 +1116,7 @@ test('宿主配置热更新保留 CLI 和内联覆盖，同时广播可变磁盘
   let resultPromise;
   try {
     resultPromise = runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
       '--duration', '4000', '--no-disk-write', '--no-panel', '--answer-mode', 'manual',
       '--options-json', JSON.stringify({ settings: { 'common.settings.inline-only': 'inline' } }),
@@ -1174,7 +1174,7 @@ for (const startupNoDiskWrite of [true, false]) {
     let resultPromise;
     try {
       resultPromise = runCommand(process.execPath, [
-        path.resolve(root, 'windows', 'host', 'main.mjs'),
+        path.resolve(root, 'windows', 'node-source', 'main.mjs'),
         '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
         '--duration', '4000', '--no-log', '--no-diagnose', '--report', reportPath, '--no-elevate'
       ]);
@@ -1231,7 +1231,7 @@ test('宿主配置热更新拒绝未实现参数并保留上一有效配置', as
   let resultPromise;
   try {
     resultPromise = runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
       '--duration', '4000', '--no-elevate'
     ]);
@@ -1266,7 +1266,7 @@ test('页面回写受 CLI 和内联约束时仍广播校正值给发起页面', 
   });
   try {
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir, '--config', path.join(directory, 'config.json'),
       '--no-disk-write', '--no-panel', '--answer-mode', 'manual',
       '--options-json', JSON.stringify({ settings: { 'common.settings.inline-only': 'inline' } }),
@@ -1332,7 +1332,7 @@ test('PageSession 支持 runtime、script 与 hybrid 注入策略', async () => 
 });
 test('Node --capabilities 如实列出已支持的数据、诊断与配置能力', async () => {
   const result = await runCommand(process.execPath, [
-    path.resolve(root, 'windows', 'host', 'main.mjs'),
+    path.resolve(root, 'windows', 'node-source', 'main.mjs'),
     '--capabilities'
   ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
   assert.equal(result.code, 0, result.stderr);
@@ -1365,7 +1365,7 @@ test('Node --version 只输出版本号且不创建数据目录', async () => {
   try {
     const dataDir = path.join(directory, 'data');
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--version',
       '--data-dir', dataDir
     ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
@@ -1382,7 +1382,7 @@ test('Node --list-clients --report 写入列表报告且 --no-disk-write 抑制'
   try {
     const reportPath = path.join(directory, 'list-report.json');
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--list-clients',
       '--scan-mode', 'common',
       '--no-scan-cache',
@@ -1410,7 +1410,7 @@ test('Node --list-clients --report 写入列表报告且 --no-disk-write 抑制'
 
     const suppressedPath = path.join(directory, 'suppressed-report.json');
     const suppressed = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--list-clients',
       '--scan-mode', 'common',
       '--no-scan-cache',
@@ -1432,7 +1432,7 @@ test('Node --execution-mode memory 保持正常可见启动且宿主侧零落盘
     const reportPath = path.join(directory, 'memory-report.json');
     const dataDir = path.join(directory, 'data');
     const result = await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'),
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--execution-mode', 'memory',
       '--list-clients',
       '--scan-mode', 'common',
@@ -1447,7 +1447,7 @@ test('Node --execution-mode memory 保持正常可见启动且宿主侧零落盘
     assert.equal(await fs.access(dataDir).then(() => true, () => false), false,
       'memory 模式必须不创建数据目录或日志');
     const capabilities = JSON.parse((await runCommand(process.execPath, [
-      path.resolve(root, 'windows', 'host', 'main.mjs'), '--execution-mode', 'memory', '--capabilities'
+      path.resolve(root, 'windows', 'node-source', 'main.mjs'), '--execution-mode', 'memory', '--capabilities'
     ], { env: { CXPLUS_NO_LOG_FILE: '1' } })).stdout);
     assert.equal(capabilities.executionMode, 'memory');
     assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory', 'delete-suspend']);

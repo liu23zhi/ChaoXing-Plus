@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import vm from 'node:vm';
-import { CdpConnection } from '../windows/host/cdp.mjs';
-import { PageSession } from '../windows/host/inject.mjs';
-import { mergeHostConfigLayers } from '../windows/host/config.mjs';
-import { applyHostOptionLayers, applyHostOptionsToConfig, parseHostArgs } from '../windows/host/options.mjs';
+import { CdpConnection } from '../windows/node-source/cdp.mjs';
+import { PageSession } from '../windows/node-source/inject.mjs';
+import { mergeHostConfigLayers } from '../windows/node-source/config.mjs';
+import { applyHostOptionLayers, applyHostOptionsToConfig, parseHostArgs } from '../windows/node-source/options.mjs';
 
 function makeSession(overrides = {}) {
   const session = new PageSession({
@@ -361,7 +361,7 @@ test('PageSession 把同端口 localhost target 固定到已验证的 IPv4 回�
 });
 
 async function ownershipFixture({ attach = false, owner = 101, queryError = null } = {}) {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const match = source.match(/const verifyEndpointOwnership = (async \(\) => \{[\s\S]*?\n    \});/u);
   assert.ok(match, 'main ownership verifier was not found');
   const state = { owner, queryError, queries: 0, stopping: false };
@@ -439,7 +439,7 @@ function diagnosticsGlobals() {
 }
 
 test('target 轮询先检查监听归属，并在建连前再次检查，失效时不接触端点', async () => {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const match = source.match(/const pollTargets = (async \(\) => \{[\s\S]*?\n    \});/u);
   assert.ok(match);
   for (const failAt of [1, 2]) {
@@ -483,7 +483,7 @@ test('target 轮询先检查监听归属，并在建连前再次检查，失效�
 });
 
 test('旧会话打开失败的迟到结果不会删除已经重建的新会话', async () => {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const match = source.match(/const pollTargets = (async \(\) => \{[\s\S]*?\n    \});/u);
   assert.ok(match, 'main pollTargets function was not found');
   const pending = deferred();
@@ -528,7 +528,7 @@ test('旧会话打开失败的迟到结果不会删除已经重建的新会话',
 });
 
 test('页面共享配置同步不把已选择的客户端路径当成新的启动参数验证', async () => {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const match = source.match(/const pollTargets = (async \(\) => \{[\s\S]*?\n    \});/u);
   assert.ok(match);
   const snapshot = {
@@ -580,7 +580,7 @@ test('页面共享配置同步不把已选择的客户端路径当成新的启�
 });
 
 test('首次轮询在关闭后才完成时不再启动定时器和配置监视', async () => {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('    await pollTargets();');
   const end = source.indexOf('    if (diagnosticsEnabled)', start);
   assert.ok(start >= 0 && end > start);
@@ -598,7 +598,7 @@ test('首次轮询在关闭后才完成时不再启动定时器和配置监视',
 });
 
 test('定时 target 轮询不会重叠，失败后允许下一轮继续', async () => {
-  const source = await fs.readFile(new URL('../windows/host/main.mjs', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../windows/node-source/main.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('    await pollTargets();');
   const end = source.indexOf('    configWatcherOff = configStore.watch(', start);
   assert.ok(start >= 0 && end > start);

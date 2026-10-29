@@ -5,13 +5,13 @@ import { createRequire } from 'node:module';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path, { join, resolve } from 'node:path';
-import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseHostArgs } from '../windows/host/options.mjs';
-import { normalizeConfig } from '../windows/host/config.mjs';
-import { RENDER_DIAGNOSTICS_EXPRESSION } from '../windows/host/diagnostics.mjs';
+import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseHostArgs } from '../windows/node-source/options.mjs';
+import { normalizeConfig } from '../windows/node-source/config.mjs';
+import { RENDER_DIAGNOSTICS_EXPRESSION } from '../windows/node-source/diagnostics.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
-const generatorPath = resolve('windows/parameter-generator.html');
+const generatorPath = resolve('windows/share-file/parameter-generator.html');
 let browser;
 
 before(async () => {
@@ -331,7 +331,7 @@ test('参数生成器离线加载并暴露当前宿主能力接口', async () =>
   assert.equal(await page.title(), '超星学习助手 Windows 参数生成器');
   assert.equal(await page.evaluate(() => Boolean(window.__CX_PARAMETER_GENERATOR__)), true);
   const launcherPath = await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.state().launcherPath);
-  assert.equal(launcherPath.replaceAll('\\', '/'), `${resolve('windows', '..').replaceAll('\\', '/')}/windows/host/main.mjs`);
+  assert.equal(launcherPath.replaceAll('\\', '/'), `${resolve('.').replaceAll('\\', '/')}/windows/node-source/main.mjs`);
   assert.match(await page.$eval('#powershell', (node) => node.value), /ProcessStartInfo/u);
   assert.match(await page.$eval('#powershell', (node) => node.value), /UseShellExecute = \$false/u);
   assert.doesNotMatch(await page.$eval('#powershell', (node) => node.value), /start-windows\.cmd/u);
@@ -650,8 +650,8 @@ test('生成器不为包含 cmd 命令解释符的路径输出 cmd 命令', asyn
 
 test('生成器对 Node 宿主路径使用 PowerShell 安全引用，并在 cmd 不安全时隐藏输出', async () => {
   const page = await openGenerator();
-  await page.$eval('#launcherPath', (node) => { node.value = "C:\\Tools\\O'Brien&Co\\windows\\host\\main.mjs"; node.dispatchEvent(new Event('input', { bubbles: true })); });
-  assert.match(await page.$eval('#powershell', (node) => node.value), /C:\\Tools\\O''Brien&Co\\windows\\host\\main\.mjs/u);
+  await page.$eval('#launcherPath', (node) => { node.value = "C:\\Tools\\O'Brien&Co\\windows\\node-source\\main.mjs"; node.dispatchEvent(new Event('input', { bubbles: true })); });
+  assert.match(await page.$eval('#powershell', (node) => node.value), /C:\\Tools\\O''Brien&Co\\windows\\node-source\\main\.mjs/u);
   assert.equal(await page.$eval('#cmd', (node) => node.value), '');
   assert.match(await page.$eval('#status', (node) => node.textContent), /cmd 输出不可安全表示/u);
   await page.close();
@@ -660,10 +660,10 @@ test('生成器对 Node 宿主路径使用 PowerShell 安全引用，并在 cmd 
 test('生成器拒绝相对、驱动器相对和仅根目录相对的 Node 宿主路径', async () => {
   const page = await openGenerator();
   for (const launcherPath of [
-    'chaoxing_plus\\windows\\host\\main.mjs', '.\\windows\\host\\main.mjs',
-    '..\\chaoxing_plus\\windows\\host\\main.mjs', 'C:chaoxing_plus\\windows\\host\\main.mjs',
-    '\\chaoxing_plus\\windows\\host\\main.mjs', '/chaoxing_plus/windows/host/main.mjs',
-    '\\\\server\\windows\\host\\main.mjs', '\\\\server\\\\windows\\host\\main.mjs'
+    'chaoxing_plus\\windows\\node-source\\main.mjs', '.\\windows\\node-source\\main.mjs',
+    '..\\chaoxing_plus\\windows\\node-source\\main.mjs', 'C:chaoxing_plus\\windows\\node-source\\main.mjs',
+    '\\chaoxing_plus\\windows\\node-source\\main.mjs', '/chaoxing_plus/windows/node-source/main.mjs',
+    '\\\\server\\windows\\node-source\\main.mjs', '\\\\server\\\\windows\\node-source\\main.mjs'
   ]) {
     await page.$eval('#launcherPath', (node, value) => {
       node.value = value;
@@ -686,9 +686,9 @@ test('生成器拒绝相对、驱动器相对和仅根目录相对的 Node 宿�
 test('生成器接受驱动器绝对路径及正斜杠，并为完整 UNC 只生成 PowerShell', async () => {
   const page = await openGenerator();
   for (const launcherPath of [
-    'C:\\Tools\\chaoxing_plus\\windows\\host\\main.mjs',
-    'C:/学习助手/windows/host/main.mjs', 'Z:\\windows\\host\\main.mjs',
-    '\\\\server\\share\\学习助手\\windows\\host\\main.mjs', '//server/share/windows/host/main.mjs'
+    'C:\\Tools\\chaoxing_plus\\windows\\node-source\\main.mjs',
+    'C:/学习助手/windows/node-source/main.mjs', 'Z:\\windows\\node-source\\main.mjs',
+    '\\\\server\\share\\学习助手\\windows\\node-source\\main.mjs', '//server/share/windows/node-source/main.mjs'
   ]) {
     await page.$eval('#launcherPath', (node, value) => {
       node.value = value;
@@ -1026,7 +1026,7 @@ test('生成器拒绝宿主范围以外的运行期清理间隔', async () => {
 });
 
 test('参数生成器保持单文件离线特性且不写用户存储', async () => {
-  const html = await readFile(new URL('../windows/parameter-generator.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('../windows/share-file/parameter-generator.html', import.meta.url), 'utf8');
   assert.doesNotMatch(html, /<script[^>]+src=/iu);
   assert.doesNotMatch(html, /<link[^>]+href=/iu);
   assert.doesNotMatch(html, /https?:\/\//iu);
@@ -1071,7 +1071,7 @@ test('两种宿主可导出 --dpi-aware 与 Node 静默控制台，原生宿主�
       function run(hostType, change) {
         const state = {
           ...generator.state(), hostType,
-          launcherPath: 'C:\\Tools\\windows\\host\\main.mjs',
+          launcherPath: 'C:\\Tools\\windows\\node-source\\main.mjs',
           nativePath: 'C:\\Tools\\chaoxing_plus.exe',
           ...change
         };

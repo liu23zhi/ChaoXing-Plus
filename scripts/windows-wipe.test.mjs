@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createWipeController, WipeAbortedError } from '../windows/host/wipe.mjs';
+import { createWipeController, WipeAbortedError } from '../windows/node-source/wipe.mjs';
 
 async function withTempDirectory(run) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-wipe-'));

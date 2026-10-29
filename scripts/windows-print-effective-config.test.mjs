@@ -6,10 +6,10 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { parseHostArgs } from '../windows/host/options.mjs';
+import { parseHostArgs } from '../windows/node-source/options.mjs';
 
 const root = path.resolve('.');
-const hostScript = path.join(root, 'windows', 'host', 'main.mjs');
+const hostScript = path.join(root, 'windows', 'node-source', 'main.mjs');
 
 function runHost(args) {
   return spawnSync(process.execPath, [hostScript, ...args], {

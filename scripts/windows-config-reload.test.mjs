@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { createConfigStore, mergeHostConfigLayers } from '../windows/host/config.mjs';
-import { applyHostOptionLayers, applyHostOptionsToConfig, parseHostArgs } from '../windows/host/options.mjs';
+import { createConfigStore, mergeHostConfigLayers } from '../windows/node-source/config.mjs';
+import { applyHostOptionLayers, applyHostOptionsToConfig, parseHostArgs } from '../windows/node-source/options.mjs';
 
 test('config layer merging retains unoverridden shared settings from earlier layers', () => {
   const config = mergeHostConfigLayers({

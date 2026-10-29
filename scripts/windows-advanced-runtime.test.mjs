@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { listProgramFiles, createProgramCleanupController } from '../windows/host/program-cleanup.mjs';
-import { createSelfDestructController } from '../windows/host/self-destruct-control.mjs';
-import { parseHostArgs } from '../windows/host/options.mjs';
+import { listProgramFiles, createProgramCleanupController } from '../windows/node-source/program-cleanup.mjs';
+import { createSelfDestructController } from '../windows/node-source/self-destruct-control.mjs';
+import { parseHostArgs } from '../windows/node-source/options.mjs';
 
 async function tempRoot() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-advanced-runtime-'));

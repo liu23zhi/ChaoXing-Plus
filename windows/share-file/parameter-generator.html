@@ -64,7 +64,7 @@
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
         <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="node" selected>Node 开发宿主（需要 Node.js 22+）</option><option value="native">原生单文件 EXE（无需 Node.js）</option></select><p class="hint">选择宿主后再套用预设。两种宿主的能力分别校验，不会自动切换或降级。</p></div>
-        <div class="field full" id="nodeLauncherField"><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\host\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\host\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
+        <div class="field full" id="nodeLauncherField"><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
         <div class="field full" id="nativeLauncherField" hidden><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">请填写已构建的 chaoxing_plus.exe 路径；生成器无法检查文件是否存在。命令直接启动 EXE，不需要 Node.js，并以 EXE 所在目录作为工作目录；相对配置与数据路径均由此解析。原生诊断提供页面布局采样、页面 PNG 截图与自有启动窗口 DPI/BMP；不采集正文、URL 或窗口标题。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
@@ -138,7 +138,7 @@
   function quoteWindowsArgument(text) { return '"' + String(text).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"'; }
   function addArg(list, name, item, quote) { if (item === true) list.push(name); else if (item !== false && item !== '' && item != null) list.push(name + ' ' + quote(item)); }
   function launcherProjectRoot(text) {
-    var match = String(text).match(/^(.*[\\/])windows[\\/]host[\\/]main\.mjs$/i);
+    var match = String(text).match(/^(.*[\\/])windows[\\/]node-source[\\/]main\.mjs$/i);
     return match && /^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/])/i.test(match[1]) ? match[1] : '';
   }
   function nativeDirectory(text) {
@@ -152,8 +152,8 @@
     var pagePath;
     try { pagePath = decodeURIComponent(window.location.pathname || ''); } catch (error) { return ''; }
     pagePath = pagePath.replace(/^\/([a-z]:)/i, '$1');
-    var match = pagePath.match(/^(.*)[\\/]windows[\\/]parameter-generator\.html$/i);
-    return match ? match[1].replace(/[\\/]+$/u, '') + '\\windows\\host\\main.mjs' : '';
+    var match = pagePath.match(/^(.*)[\\/]windows[\\/]share-file[\\/]parameter-generator\.html$/i);
+    return match ? match[1].replace(/[\\/]+$/u, '') + '\\windows\\node-source\\main.mjs' : '';
   }
   function parsedInlineConfig(s) {
     var text = String(s.optionsJson || '').trim();
@@ -346,7 +346,7 @@
   var JSON_NUMBER_KEYS = ['wipeRetries', 'wipeRetryDelayMs', 'wipeRuntimeIntervalSec', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs'];
   var JSON_ENUM_KEYS = ['wipeFailurePolicy', 'injectStrategy', 'executionMode'];
   var JSON_STRING_KEYS = ['clientPath', 'dataDir', 'expectedBrowser', 'panelTheme', 'diagnosticsDir', 'reportPath'];
-  // 与宿主 windows/host/options.mjs 的 options-json 规则保持一致：
+  // 与宿主 windows/node-source/options.mjs 的 options-json 规则保持一致：
   // 只有未被独立命令行参数覆盖的内联 JSON 字段才会被宿主真正应用，也才需要在这里校验。
   function emittedCliOptionKeys(s) {
     var keys = { ui: true, panelEnabled: true, panelCollapsed: true, answerMode: true, answerKey: true, answerThreads: true, answerCountdown: true, showAnswerDialog: true, logFileEnabled: true, diagnose: true };
@@ -449,7 +449,7 @@
   function validate(s) {
     var errors = [], warnings = [];
     if (['node', 'native'].indexOf(s.hostType) < 0) errors.push('请选择 Node 或原生 EXE 宿主。');
-    if (!workingDirectory(s)) errors.push(s.hostType === 'native' ? '请指定原生宿主 EXE 的 Windows 驱动器绝对路径或完整 UNC 路径。' : '请指定项目中 windows\\host\\main.mjs 的 Windows 驱动器绝对路径或完整 UNC 路径。');
+    if (!workingDirectory(s)) errors.push(s.hostType === 'native' ? '请指定原生宿主 EXE 的 Windows 驱动器绝对路径或完整 UNC 路径。' : '请指定项目中 windows\\node-source\\main.mjs 的 Windows 驱动器绝对路径或完整 UNC 路径。');
     if (s.hostType === 'native') {
       if (['panelTop', 'panelRight', 'panelWidth'].some(function (key) { return !/^\d+$/u.test(String(s[key])); })) errors.push('原生宿主的面板位置与宽度必须是整数。');
       if (s.clientIndex && Number(s.clientIndex) > 2147483647) errors.push('原生宿主的扫描序号不能超过 2147483647。');

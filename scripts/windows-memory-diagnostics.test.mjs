@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { PageSession } from '../windows/host/inject.mjs';
+import { PageSession } from '../windows/node-source/inject.mjs';
 
-const load = () => import('../windows/host/memory-diagnostics.mjs');
+const load = () => import('../windows/node-source/memory-diagnostics.mjs');
 
 function fixture(diagnostics, options = {}) {
   const enabled = options.enabled !== false;

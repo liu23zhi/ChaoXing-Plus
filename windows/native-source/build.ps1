@@ -6,8 +6,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
-# Native sources live in <repo>/native-source; only this compile script stays here.
-$sourceRoot = Join-Path (Split-Path (Split-Path $scriptRoot -Parent) -Parent) 'windows\native-source'
+# The compile script and native sources share the same directory.
+$sourceRoot = $scriptRoot
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
 # Native build output goes to <repo>/build-windows (EXE in build-windows\bin),
 # next to dist-windows; an explicit -OutputDirectory still overrides it.

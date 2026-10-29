@@ -3,14 +3,14 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkChrome75Syntax } from './windows/host/chrome75-syntax.mjs';
-import { readWindowsBuildFeatures } from './scripts/windows-build-features.mjs';
+import { checkChrome75Syntax } from './chrome75-syntax.mjs';
+import { readWindowsBuildFeatures } from './windows-build-features.mjs';
 
 process.env.VITE_CJS_IGNORE_WARNING = '1';
 const require = createRequire(import.meta.url);
 const { build } = require('vite');
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const outDir = path.resolve(__dirname, 'dist-windows');
 const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? 'https://tiku.zelly.cn/';
 const packageJson = JSON.parse(await readFile(path.resolve(__dirname, 'package.json'), 'utf8'));
@@ -73,7 +73,7 @@ async function main() {
     path.resolve(__dirname, 'node_modules/sweetalert2/dist/sweetalert2.min.css'),
     path.join(outDir, 'vendor', 'sweetalert2.min.css')
   );
-  await copyAsset(path.resolve(__dirname, 'windows/config.example.json'), path.join(outDir, 'config.example.json'));
+  await copyAsset(path.resolve(__dirname, 'windows/share-file/config.example.json'), path.join(outDir, 'config.example.json'));
 
   console.log('[build:windows] Chrome 75 语法闸门 …');
   const syntaxReports = [];
@@ -98,7 +98,7 @@ async function main() {
     builtAt: new Date().toISOString(),
     chromiumTarget: '75 (CEF 75.1.4 / Chromium 75.0.3770.100)',
     features,
-    entry: 'windows/host/main.mjs',
+    entry: 'windows/node-source/main.mjs',
     files,
     notes: [
       '业务 bundle 由 vite 以 chrome75 为目标构建；内嵌 SweetAlert2 一并转译。',

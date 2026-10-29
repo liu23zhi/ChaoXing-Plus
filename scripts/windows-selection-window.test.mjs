@@ -12,7 +12,7 @@ import {
   parseSelectionWindowResult,
   probeClientSelectionWindow,
   showClientSelectionWindow
-} from '../windows/host/selection-window.mjs';
+} from '../windows/node-source/selection-window.mjs';
 
 const root = resolve('.');
 const interactiveWindowTest = process.env.CX_TEST_NATIVE_WINDOW === '1';
@@ -131,7 +131,7 @@ test('选择窗口使用标准输入输出传递推荐序号，避免创建临�
 });
 
 test('选择窗口保留跨 stdout/stderr 数据块的 UTF-8 中文路径与错误', async () => {
-  const moduleUrl = new URL('../windows/host/selection-window.mjs', import.meta.url).href;
+  const moduleUrl = new URL('../windows/node-source/selection-window.mjs', import.meta.url).href;
   const selectedPath = 'D:\\考试客户端\\CXExam.exe';
   const failureReason = '考试客户端选择失败';
   for (const errorOutput of [false, true]) {
@@ -319,7 +319,7 @@ test('真实原生选择窗口可显示并按定时器关闭', { skip: !interact
 
 function runHost(args, env = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, [resolve(root, 'windows', 'host', 'main.mjs'), ...args], {
+    const child = spawn(process.execPath, [resolve(root, 'windows', 'node-source', 'main.mjs'), ...args], {
       cwd: root,
       env: { ...process.env, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],

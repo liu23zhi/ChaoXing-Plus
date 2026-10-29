@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 浏览器/扩展构建入口：安装依赖 -> 类型检查 -> 构建 dist -> 校验产物。
-# Windows 原生宿主与发布包请用 build-windows.cmd / build-windows.sh。
+# Windows 原生宿主与发布包请用 windows/native-source/build-windows.cmd 或 build-windows.sh。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

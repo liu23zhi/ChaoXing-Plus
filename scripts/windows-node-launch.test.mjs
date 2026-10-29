@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnWindowsClient } from '../windows/host/launch.mjs';
+import { spawnWindowsClient } from '../windows/node-source/launch.mjs';
 
 function createHelper() {
   const helper = new EventEmitter();
@@ -46,7 +46,7 @@ test('ordinary launcher transports arguments as UTF-8 JSON without temporary fil
   assert.deepEqual(await exited, [7, null]);
   assert.equal(launch.child.exitCode, 7);
   helper.emit('close', 0);
-  const source = await readFile(new URL('../windows/host/launch-client.ps1', import.meta.url));
+  const source = await readFile(new URL('../windows/node-source/launch-client.ps1', import.meta.url));
   assert.ok(source.every((byte) => byte < 128), 'PowerShell 5.1 helper must remain ASCII');
 });
 

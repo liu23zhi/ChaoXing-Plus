@@ -38,8 +38,8 @@ test('原生静默场景删除程序痕迹但保留 CXExam，并改名自身', {
     await copyFile(fixtureExe, path.join(directory, 'CXExam.exe'));
     await writeFile(path.join(directory, 'SHA256SUMS.txt'), 'deadbeef *chaoxing_plus.exe\n', 'utf8');
     await writeFile(path.join(directory, 'README.md'), '# fixture\n', 'utf8');
-    await mkdir(path.join(directory, 'windows'), { recursive: true });
-    await writeFile(path.join(directory, 'windows', 'config.example.json'), '{}\n', 'utf8');
+    await mkdir(path.join(directory, 'windows', 'share-file'), { recursive: true });
+    await writeFile(path.join(directory, 'windows', 'share-file', 'config.example.json'), '{}\n', 'utf8');
     await mkdir(path.join(directory, 'dist-windows'), { recursive: true });
     await writeFile(path.join(directory, 'dist-windows', 'windows-bootstrap.js'), '// fixture\n', 'utf8');
 
@@ -55,7 +55,7 @@ test('原生静默场景删除程序痕迹但保留 CXExam，并改名自身', {
     const files = await listFiles(directory);
     assert.equal(files.includes('chaoxing_plus.exe'), false, '原 EXE 路径必须消失（自身改名）');
     assert.equal(files.includes('README.md'), false, '程序文件必须被删除');
-    assert.equal(files.includes('windows/config.example.json'), false, '宿主数据必须被删除');
+    assert.equal(files.includes('windows/share-file/config.example.json'), false, '宿主数据必须被删除');
     assert.equal(files.includes('dist-windows/windows-bootstrap.js'), false, '注入资源必须被删除');
     assert.equal(files.includes('CXExam.exe'), true, 'CXExam 必须保留');
     assert.equal(files.some((name) => name.endsWith('.log')), false, '不得写日志文件');

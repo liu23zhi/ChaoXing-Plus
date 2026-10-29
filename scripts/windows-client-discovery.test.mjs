@@ -13,7 +13,7 @@ import {
   resolveExplicitClientPath,
   getDefaultDiscoveryRoots,
   getDefaultDriveRoots
-} from '../windows/host/client-discovery.mjs';
+} from '../windows/node-source/client-discovery.mjs';
 
 function createTree(entries, validExecutables = new Map()) {
   const directories = new Map();

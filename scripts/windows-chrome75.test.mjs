@@ -5,7 +5,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { checkChrome75Syntax } from '../windows/host/chrome75-syntax.mjs';
+import { checkChrome75Syntax } from '../windows/share-file/chrome75-syntax.mjs';
 
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
@@ -108,13 +108,13 @@ test('bootstrap 保持关键约定：消息前缀、去重标记、共享配置�
 });
 
 test('windows 构建脚本与入口脚本约定', async () => {
-  const buildSource = await readFile(resolve(root, 'build.windows.mjs'), 'utf8');
+  const buildSource = await readFile(resolve(root, 'windows/share-file/build.windows.mjs'), 'utf8');
   assert.equal(buildSource.includes("target: 'chrome75'"), true);
   assert.equal(buildSource.includes('checkChrome75Syntax'), true);
   assert.equal(buildSource.includes('package-manifest.json'), true);
   const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
-  assert.equal(packageJson.scripts['build:windows'], 'node build.windows.mjs');
-  assert.equal(packageJson.scripts.windows, 'node windows/host/main.mjs');
+  assert.equal(packageJson.scripts['build:windows'], 'node windows/share-file/build.windows.mjs');
+  assert.equal(packageJson.scripts.windows, 'node windows/node-source/main.mjs');
 });
 
 test.after(async () => {

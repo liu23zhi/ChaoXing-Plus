@@ -103,10 +103,10 @@ jobs:
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
           # 发布包默认只含原生 EXE（Node 宿主已弃用）；这里同时确认没有混入 Node 产物。
-          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\config.example.json')) {
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\share-file\config.example.json')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
-          foreach ($forbidden in @('windows\host\main.mjs', 'start-windows-silent.cmd', 'runtime\node.exe')) {
+          foreach ($forbidden in @('windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
             if (Test-Path -LiteralPath (Join-Path $package $forbidden)) { throw "原生发布包不应包含 Node 产物: $forbidden" }
           }
           $native = Start-Process -FilePath (Join-Path $package 'chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
+const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 export async function readWindowsBuildFeatures({ root = repositoryRoot, release = false } = {}) {
   // Release builds cannot inherit the developer's ignored local switches.

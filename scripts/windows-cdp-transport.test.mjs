@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { CdpConnection } from '../windows/host/cdp.mjs';
+import { CdpConnection } from '../windows/node-source/cdp.mjs';
 
 async function within(promise, timeoutMs = 1000) {
   let timer;

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { listOwnedHostFiles } from '../windows/host/owned-files.mjs';
+import { listOwnedHostFiles } from '../windows/node-source/owned-files.mjs';
 
 function comparePaths(left, right) {
   const a = left.toLowerCase();

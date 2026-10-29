@@ -1,0 +1,17 @@
+@echo off
+setlocal
+set "CXPLUS_ROOT=%~dp0."
+set "CXPLUS_EXE=%~dp0chaoxing_plus.exe"
+if exist "%~dp0build.ps1" (
+  set "CXPLUS_ROOT=%~dp0..\.."
+  set "CXPLUS_EXE=%~dp0..\..\build-windows\bin\chaoxing_plus.exe"
+)
+for %%d in ("%CXPLUS_ROOT%") do set "CXPLUS_ROOT=%%~fd"
+cd /d "%CXPLUS_ROOT%" || exit /b 1
+rem Native silent entry: no panel/dialog/console/log; Ctrl+Alt+Shift+S releases one question;
+rem Ctrl+Alt+Shift+E or F8 / fullscreen exit / CXExam exit destroys program traces;
+rem CXExam files are never deleted; deletion needs SHA256SUMS.txt next to the EXE.
+rem Node fallback: start-windows-node-silent.cmd
+if not exist "%CXPLUS_EXE%" (echo [windows] chaoxing_plus.exe is missing next to this launcher.& echo [windows] Build it with: windows\native-source\build-windows.cmd& exit /b 9009)
+start "" "%CXPLUS_EXE%" --silent-scenario --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --quiet --no-panel --answer-mode manual --answer-key Ctrl+Alt+Shift+S --answer-threads 1 --hide-answer-dialog
+exit /b 0

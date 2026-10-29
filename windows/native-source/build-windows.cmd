@@ -3,13 +3,17 @@ rem Native Windows build entry: no Git Bash required.
 rem   build-windows.cmd [--skip-tests]
 rem Steps: assets -> native x86 host -> release package -> verify -> in-package self-check.
 setlocal EnableExtensions
-cd /d "%~dp0" || exit /b 1
+cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
 
 :parse
 if "%~1"=="" goto checks
-if /i "%~1"=="--skip-tests" set "SKIP_TESTS=1" & shift & goto parse
+if /i "%~1"=="--skip-tests" (
+  set "SKIP_TESTS=1"
+  shift
+  goto parse
+)
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 echo [build-windows] unknown argument: %~1
@@ -49,7 +53,7 @@ call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
 echo [build-windows] 2/4 building native x86 host (no CRT, embedded assets)
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native\build.ps1" -OutputDirectory "build-windows"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "build-windows"
 if errorlevel 1 exit /b 1
 if not exist "build-windows\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.

@@ -14,7 +14,7 @@ test('native host sources expose ordinary auditable execution boundaries', async
     fs.readFile(path.join(native, 'host.c'), 'utf8'),
     fs.readFile(path.join(native, 'host-session.inc'), 'utf8'),
     fs.readFile(path.join(native, 'options.c'), 'utf8'),
-    fs.readFile(path.join(root, 'windows', 'native', 'build.ps1'), 'utf8')
+    fs.readFile(path.join(root, 'windows', 'native-source', 'build.ps1'), 'utf8')
   ]);
   const host = main + adapter;
   assert.match(host, /proc_launch\s*\(/);

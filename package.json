@@ -7,11 +7,11 @@
   "scripts": {
     "dev": "node build.mjs --watch",
     "build": "node build.mjs",
-    "build:windows": "node build.windows.mjs",
-    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native/build.ps1 -BuildTests",
-    "release:windows": "node scripts/package-windows.mjs",
-    "windows": "node windows/host/main.mjs",
-    "windows:self-check": "node windows/host/main.mjs --self-check",
+    "build:windows": "node windows/share-file/build.windows.mjs",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests",
+    "release:windows": "node windows/share-file/package-windows.mjs",
+    "windows": "node windows/node-source/main.mjs",
+    "windows:self-check": "node windows/node-source/main.mjs --self-check",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

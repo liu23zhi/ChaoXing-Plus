@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { register } from 'node:module';
 
-const hostDirectory = path.join(process.cwd(), 'windows', 'host');
+const hostDirectory = path.join(process.cwd(), 'windows', 'node-source');
 const mainPath = path.join(hostDirectory, 'main.mjs');
 const argumentsList = process.argv.slice(2);
 globalThis.__CX_SILENT_MEMORY_BOOTSTRAP__ = true;

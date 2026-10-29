@@ -3,13 +3,17 @@ rem Legacy Node-only release entry: native EXE is not built.
 rem   build-windows-node.cmd [--skip-tests]
 rem The Node host is deprecated (2026-10-29); use build-windows.cmd for releases.
 setlocal EnableExtensions
-cd /d "%~dp0" || exit /b 1
+cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
 
 :parse
 if "%~1"=="" goto checks
-if /i "%~1"=="--skip-tests" set "SKIP_TESTS=1" & shift & goto parse
+if /i "%~1"=="--skip-tests" (
+  set "SKIP_TESTS=1"
+  shift
+  goto parse
+)
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 echo [build-windows-node] unknown argument: %~1

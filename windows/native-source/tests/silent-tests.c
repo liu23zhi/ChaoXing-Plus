@@ -133,9 +133,9 @@ static void test_cleanup(void) {
     write_file(temp, "asset");
     lstrcpyW(temp, root); lstrcatW(temp, L"\\windows");
     make_directory(temp);
-    lstrcpyW(temp, root); lstrcatW(temp, L"\\windows\\host");
+    lstrcpyW(temp, root); lstrcatW(temp, L"\\windows\\node-source");
     make_directory(temp);
-    lstrcpyW(temp, root); lstrcatW(temp, L"\\windows\\host\\main.mjs");
+    lstrcpyW(temp, root); lstrcatW(temp, L"\\windows\\node-source\\main.mjs");
     write_file(temp, "host");
     lstrcpyW(temp, root); lstrcatW(temp, L"\\windows\\data");
     make_directory(temp);
@@ -153,7 +153,7 @@ static void test_cleanup(void) {
     check(plan->protectedCount == 1, "exactly one CXExam file is protected");
     check(!plan_contains(plan, L"CXExam.exe"), "CXExam never enters the deletion plan");
     check(!plan_contains(plan, L"runtime"), "runtime directory never enters the deletion plan");
-    check(plan_contains(plan, L"windows\\host\\main.mjs"), "host modules are scheduled for deletion");
+    check(plan_contains(plan, L"windows\\node-source\\main.mjs"), "host modules are scheduled for deletion");
     check(plan_contains(plan, L"windows\\data\\config.json"), "host data files are scheduled for deletion");
 
     deleted = cx_cleanup_apply(plan, TRUE, 5, &failed);

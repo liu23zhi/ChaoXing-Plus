@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createSelfDestructMonitor } from '../windows/host/self-destruct.mjs';
+import { createSelfDestructMonitor } from '../windows/node-source/self-destruct.mjs';
 
 function startOwnedClient(monitor, pid = 42) {
   return monitor.dispatch({ type: 'client-started', pid, owned: true });

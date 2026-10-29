@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildElevatedRelaunchCommand } from '../windows/host/launch.mjs';
-import { applyHostOptionLayers, parseHostArgs } from '../windows/host/options.mjs';
+import { buildElevatedRelaunchCommand } from '../windows/node-source/launch.mjs';
+import { applyHostOptionLayers, parseHostArgs } from '../windows/node-source/options.mjs';
 
 for (const shell of ['powershell.exe', 'pwsh.exe']) {
   test(`GUI selection survives ${shell} handoff without selecting again`, {

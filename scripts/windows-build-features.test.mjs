@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readWindowsBuildFeatures } from './windows-build-features.mjs';
+import { readWindowsBuildFeatures } from '../windows/share-file/windows-build-features.mjs';
 
 async function fixture(t, value) {
   const root = await mkdtemp(join(tmpdir(), 'cx-build-features-'));
