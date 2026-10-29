@@ -327,8 +327,8 @@ static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static BOOL h_proxy_target_auto;
-static const WCHAR *const h_proxy_carriers[] = { L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi" };
-static const int h_proxy_carrier_count = 5;
+static const WCHAR *const h_proxy_carriers[] = { L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32" };
+static const int h_proxy_carrier_count = 7;
 
 static WCHAR h_proxy_target[16] = L"winmm";
 static const WCHAR *h_proxy_dll_suffix(void) {
@@ -2693,7 +2693,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
-    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version|uxtheme|msimg32|sensapi|auto]（把代理装到 --client 目录，配合 auto 使用）\n"
+    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version|uxtheme|msimg32|sensapi|oledlg|wtsapi32|auto]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
@@ -2803,6 +2803,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

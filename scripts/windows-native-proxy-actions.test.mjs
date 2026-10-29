@@ -214,8 +214,8 @@ test('端口拿不到端点时自动改用 settings-only 代理重试（端口�
     await rm(dir, { recursive: true, force: true });
   }
 });
-test('小载体 msimg32 / sensapi 可安装并卸载', { skip: process.platform !== 'win32' || !ready() }, async () => {
-  for (const carrier of ['msimg32', 'sensapi']) {
+test('小载体 msimg32 / sensapi / oledlg / wtsapi32 可安装并卸载', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  for (const carrier of ['msimg32', 'sensapi', 'oledlg', 'wtsapi32']) {
     const src = resolve(`build-windows/hook/${carrier}.dll`);
     if (!existsSync(src)) continue;
     const dir = await mkdtemp(join(tmpdir(), `cx-proxy-${carrier}-`));
@@ -248,4 +248,5 @@ test('KnownDLLs 里的名字（imm32）拒绝作为载体', { skip: process.plat
     await rm(dir, { recursive: true, force: true });
   }
 });
+
 
