@@ -1290,7 +1290,24 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
    cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
     h_report.injectMode = "auto";
     if (options->injectModeSet) h_report.injectMode = h_inject_mode_name(options->injectMode);
-    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
+    if ((!options->injectModeSet || h_same(options->injectMode, L"auto")) && !options->attachPortSet) {
+        /* auto：客户端目录里已有 winmm 代理时优先走代理注入（命令行开关由代理在进程内追加），
+           这样即使客户端忽略外部参数也能拿到调试端点；显式 --inject-mode cdp-port 可强制走端口。 */
+        WCHAR autoDir[CX_CLEANUP_PATH_CAP], autoDll[CX_CLEANUP_PATH_CAP];
+        BOOL autoOk = h_parent_dir(h_selected_path, autoDir, CX_CLEANUP_PATH_CAP) &&
+                      h_copy(autoDll, CX_CLEANUP_PATH_CAP, autoDir) &&
+                      h_cat(autoDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                      GetFileAttributesW(autoDll) != INVALID_FILE_ATTRIBUTES;
+        if (autoOk) {
+            h_dll_proxy_mode = TRUE;
+            h_report.commandLineInjected = TRUE;
+            if (!options->quiet) {
+                h_print(L"auto selected dll-proxy: winmm proxy found at ");
+                h_print(autoDll);
+                h_print(L"\n");
+            }
+        }
+    }    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
         WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
         BOOL dirOk = options->injectProxyDirSet
             ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
@@ -1622,6 +1639,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
