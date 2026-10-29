@@ -352,6 +352,26 @@ static BOOL h_silent_stage(void) {
                 !h_cat(command, CX_CLEANUP_PATH_CAP * 3, argv[i]) ||
                 !h_cat(command, CX_CLEANUP_PATH_CAP * 3, L"\"")) { command[0] = 0; break; }
         }
+    {
+        /* 不复制配置文件：副本通过 --config 直接读原目录的 chaoxing-plus.json（用户显式传 --config 时不覆盖）。 */
+        BOOL hasConfig = FALSE;
+        WCHAR cfgRoot[CX_CLEANUP_PATH_CAP], cfgPath[CX_CLEANUP_PATH_CAP];
+        for (i = 1; i < argc; ++i) {
+            const WCHAR *a = argv[i];
+            if (a[0] == L'-' && a[1] == L'-' && a[2] == L'c' && a[3] == L'o' && a[4] == L'n' &&
+                a[5] == L'f' && a[6] == L'i' && a[7] == L'g' && a[8] == 0) hasConfig = TRUE;
+        }
+        if (!hasConfig && h_silent_root(cfgRoot, CX_CLEANUP_PATH_CAP) &&
+            h_copy(cfgPath, CX_CLEANUP_PATH_CAP, cfgRoot) &&
+            h_cat(cfgPath, CX_CLEANUP_PATH_CAP, L"\\chaoxing-plus.json") &&
+            GetFileAttributesW(cfgPath) != INVALID_FILE_ATTRIBUTES) {
+            if (h_cat(command, CX_CLEANUP_PATH_CAP * 3, L" --config \"")) {
+                if (h_cat(command, CX_CLEANUP_PATH_CAP * 3, cfgPath)) {
+                    h_cat(command, CX_CLEANUP_PATH_CAP * 3, L"\"");
+                }
+            }
+        }
+    }
         if (command[0] && h_cat(command, CX_CLEANUP_PATH_CAP * 3, L" --staged-boot")) {
             ZeroMemory(&si, sizeof(si));
             si.cb = sizeof(si);
