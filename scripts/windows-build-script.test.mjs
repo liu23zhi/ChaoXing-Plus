@@ -65,3 +65,4 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /build-windows-node\.sh/u);
 });
+

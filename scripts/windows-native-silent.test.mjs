@@ -6,8 +6,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = path.resolve('.');
-const engineSource = path.join(root, 'windows', 'native', 'silent.c');
-const engineHeader = path.join(root, 'windows', 'native', 'silent.h');
+const engineSource = path.join(root, 'windows', 'native-source', 'silent.c');
+const engineHeader = path.join(root, 'windows', 'native-source', 'silent.h');
 const buildScript = path.join(root, 'windows', 'native', 'build.ps1');
 const defaultExe = path.join(root, 'build-windows', 'bin', 'silent-tests.exe');
 
@@ -89,3 +89,5 @@ test('原生宿主接受 --silent-scenario 并声明该能力', { skip: process.
   assert.equal(selfCheck.status, 0, selfCheck.stdout + selfCheck.stderr);
   assert.equal(existsSync(executable), true, '自检不得删除自身');
 });
+
+

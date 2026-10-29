@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const nativeRoot = path.join(root, 'windows', 'native');
+const nativeRoot = path.join(root, 'windows', 'native-source');
 
 async function runHostHttpDeadline({ delayVersion = 0, delayList = 0, trickleVersion = false, args }) {
   const requests = [];
@@ -253,3 +253,4 @@ for (const trickleUpgrade of [false, true]) {
     assert.equal(result.stdout + result.stderr, '');
   });
 }
+

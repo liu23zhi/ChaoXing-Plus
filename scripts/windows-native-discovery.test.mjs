@@ -12,7 +12,7 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const driverCandidates = [
   process.env.CX_DISCOVERY_TEST_DRIVER,
   path.join(repositoryRoot, '.tmp-native-discovery', 'discovery-testdriver.exe'),
-  path.join(repositoryRoot, 'windows', 'native', 'discovery-testdriver.exe')
+  path.join(repositoryRoot, 'windows', 'native-source', 'discovery-testdriver.exe')
 ].filter(Boolean);
 let driver = '';
 for (const candidate of driverCandidates) {
@@ -236,3 +236,4 @@ test('native discovery skips directory junctions and excluded system directories
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+

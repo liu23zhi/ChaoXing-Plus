@@ -6,6 +6,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
+# Native sources live in <repo>/native-source; only this compile script stays here.
+$sourceRoot = Join-Path (Split-Path (Split-Path $scriptRoot -Parent) -Parent) 'windows\native-source'
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
 # Native build output goes to <repo>/build-windows (EXE in build-windows\bin),
 # next to dist-windows; an explicit -OutputDirectory still overrides it.
@@ -32,7 +34,7 @@ $assetSources = [ordered]@{
     TRAMPOLINE = Join-Path $root 'dist-windows\trampoline.js'
     SWAL_STYLE = Join-Path $root 'dist-windows\vendor\sweetalert2.min.css'
 }
-$resourceSource = Get-Content -LiteralPath (Join-Path $scriptRoot 'assets.rc.in') -Raw -Encoding UTF8
+$resourceSource = Get-Content -LiteralPath (Join-Path $sourceRoot 'assets.rc.in') -Raw -Encoding UTF8
 foreach ($entry in $assetSources.GetEnumerator()) {
     if (-not (Test-Path -LiteralPath $entry.Value -PathType Leaf)) { throw "Missing injection asset: $($entry.Value). Run npm run build:windows first." }
     $resourcePath = (Resolve-Path -LiteralPath $entry.Value).Path.Replace('\', '\\')
@@ -41,24 +43,24 @@ foreach ($entry in $assetSources.GetEnumerator()) {
 $resourceFile = Join-Path $build 'assets.rc'
 $resourceObject = Join-Path $build 'assets.res'
 $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
-& $resourceCompiler /nologo ('/i' + $scriptRoot) ('/fo' + $resourceObject) $resourceFile
+& $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
-$common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $scriptRoot))
+$common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $sourceRoot))
 $sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','host')
 foreach ($source in $sources) {
-    & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $scriptRoot ($source + '.c'))
+    & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $sourceRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
 }
 $originalPath = $env:Path
 try {
     $env:Path = (Join-Path $kitRoot ('bin\' + $sdk.Name + '\x64')) + ';' + $originalPath
     $objects = $sources | ForEach-Object { Join-Path $build ($_ + '.obj') }
-    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $scriptRoot 'host.manifest')),('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
+    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
     & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
     if ($BuildTests) {
         $testObject = Join-Path $build 'injection-tests.obj'
-        & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot 'tests\injection-tests.c')
+        & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $sourceRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
         $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent') | ForEach-Object { Join-Path $build ($_ + '.obj') }
         $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' -and $_ -notlike '/MANIFESTINPUT:*' }
@@ -87,12 +89,12 @@ try {
             @{ Name = 'silent-tests'; Entry = 'SilentTestMain'; Objects = @('memory','silent'); Resources = @() }
         )) {
             $testObject = Join-Path $build ($test.Name + '.obj')
-            & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $scriptRoot ('tests\' + $test.Name + '.c'))
+            & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $sourceRoot ('tests\' + $test.Name + '.c'))
             if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($test.Name)" }
             $testObjects = @($test.Objects | ForEach-Object { Join-Path $build ($_ + '.obj') })
             $testResources = $test.Resources
             $testManifest = @()
-            if ($test.ContainsKey('Manifest')) { $testManifest = @('/MANIFESTINPUT:' + (Join-Path $scriptRoot $test.Manifest)) }
+            if ($test.ContainsKey('Manifest')) { $testManifest = @('/MANIFESTINPUT:' + (Join-Path $sourceRoot $test.Manifest)) }
             & $linker @testArgs @testManifest ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $bin ($test.Name + '.exe')) -PathType Leaf)) { throw "Native test link failed or output is missing: $($test.Name)" }
         }
@@ -109,6 +111,8 @@ Get-Item -LiteralPath $hostExe | Select-Object FullName,Length
 # and build must not depend on PowerShell module auto-loading.
 & certutil.exe -hashfile $hostExe SHA256
 if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }
+
+
 
 
 

@@ -442,3 +442,5 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
   assert.equal(verify.status, 0, verify.stderr || verify.stdout);
 });
 
+
+

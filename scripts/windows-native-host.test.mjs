@@ -7,14 +7,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const native = path.join(root, 'windows', 'native');
+const native = path.join(root, 'windows', 'native-source');
 
 test('native host sources expose ordinary auditable execution boundaries', async () => {
   const [main, adapter, options, build] = await Promise.all([
     fs.readFile(path.join(native, 'host.c'), 'utf8'),
     fs.readFile(path.join(native, 'host-session.inc'), 'utf8'),
     fs.readFile(path.join(native, 'options.c'), 'utf8'),
-    fs.readFile(path.join(native, 'build.ps1'), 'utf8')
+    fs.readFile(path.join(root, 'windows', 'native', 'build.ps1'), 'utf8')
   ]);
   const host = main + adapter;
   assert.match(host, /proc_launch\s*\(/);
@@ -238,5 +238,7 @@ test('native host embeds a DPI-aware asInvoker manifest', { skip: !process.env.C
   assert.ok(text.includes('dpiAware'), 'host manifest must declare DPI awareness');
   assert.ok(text.includes('asInvoker'), 'host manifest must keep the standard asInvoker execution level');
 });
+
+
 
 

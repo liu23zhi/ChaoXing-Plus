@@ -18,9 +18,9 @@ const run = (executable, args = [], cwd) => spawnSync(executable, args, {
 
 test('native asset build embeds all resources without a runtime extraction path', async () => {
   const [source, build, template] = await Promise.all([
-    fs.readFile(path.join(root, 'windows/native/assets.c'), 'utf8'),
+    fs.readFile(path.join(root, 'windows/native-source/assets.c'), 'utf8'),
     fs.readFile(path.join(root, 'windows/native/build.ps1'), 'utf8'),
-    fs.readFile(path.join(root, 'windows/native/assets.rc.in'), 'utf8')
+    fs.readFile(path.join(root, 'windows/native-source/assets.rc.in'), 'utf8')
   ]);
   for (const name of names) assert.ok(source.includes(name), name);
   assert.match(source, /FindResourceW/);
@@ -72,3 +72,4 @@ test('compiled native assets load safely and match every packaged source byte', 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
