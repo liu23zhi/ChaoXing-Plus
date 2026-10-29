@@ -1021,6 +1021,39 @@ done:
     return ok;
 }
 /* 离线兼容性探测：不启动客户端，只读文件判断可用的注入通道。 */
+
+/* 检查 PE 是否包含指定节（例如 Themida 加壳的 .themida）。 */
+static BOOL h_pe_section_named(const WCHAR *path, const char *sectionName) {
+    HANDLE file;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS nt;
+    DWORD read = 0, i;
+    BOOL found = FALSE;
+    if (!path || !sectionName) return FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!ReadFile(file, &dos, sizeof(dos), &read, NULL) || read != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) { CloseHandle(file); return FALSE; }
+    if (SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) { CloseHandle(file); return FALSE; }
+    if (!ReadFile(file, &nt, sizeof(nt), &read, NULL) || read != sizeof(nt) || nt.Signature != IMAGE_NT_SIGNATURE) { CloseHandle(file); return FALSE; }
+    {
+        IMAGE_SECTION_HEADER section;
+        for (i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
+            if (!ReadFile(file, &section, sizeof(section), &read, NULL) || read != sizeof(section)) break;
+            {
+                int k = 0, same = 1;
+                for (k = 0; k < 8; ++k) {
+                    char a = (char)section.Name[k];
+                    char b = sectionName[k];
+                    if (a != b) { same = 0; break; }
+                    if (!b) break;
+                }
+                if (same) { found = TRUE; break; }
+            }
+        }
+    }
+    CloseHandle(file);
+    return found;
+}
 static BOOL h_file_contains(const WCHAR *path, const char *needle) {
     static char buffer[1 << 20];
     HANDLE file;
@@ -1142,8 +1175,10 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         h_print(L" portfile="); h_print(portFilePresent ? L"present" : L"absent");
         h_print(L"\n");
     }
+    h_print(L"probe: packed="); h_print(h_pe_section_named(clientPath, ".themida") ? L"themida" : L"none"); h_print(L"\n");
     h_print(L"probe: suggested=");
     if (markerPresent && proxyUsable) h_print(L"dll-proxy");
+    else if (h_pe_section_named(clientPath, ".themida")) h_print(L"none-packed");
     else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
     else h_print(L"cdp-port");
     h_print(L"\n");
@@ -2016,6 +2051,9 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_exit_code = 4;
         goto done;
     }
+    if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida") && !options->quiet) {
+        h_print(L"警告：该客户端带 Themida 壳，实测会忽略 --remote-debugging-port；如无面板请改用 4.1.4.25512 版本客户端\n");
+    }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
         CX_DPI_OVERRIDE *dpi = NULL;
@@ -2323,6 +2361,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
