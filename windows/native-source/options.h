@@ -138,6 +138,7 @@ typedef struct CX_OPTIONS {
     BOOL silentScenario;
     BOOL silentDeleteSimulate;
     BOOL silentClientPathSet;
+    BOOL consoleWindow;
     BOOL stagedBoot;
     BOOL stageRequest;
     BOOL unsupportedRequested;
@@ -174,6 +175,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *options,
                                              DWORD *length);
 
 #endif
+
 
 
 

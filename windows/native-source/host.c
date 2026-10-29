@@ -1178,17 +1178,35 @@ done:
     h_cleanup_run_data(options, h_needs_elevation);
     return ok;
 }
+/* 命令行里是否带 --console（选项尚未解析，先按原始命令行判断）。 */
+static BOOL h_wants_console(void) {
+    const WCHAR *cmd = GetCommandLineW();
+    const WCHAR needle[] = L"--console";
+    int i, k;
+    if (!cmd) return FALSE;
+    for (i = 0; cmd[i]; ++i) {
+        for (k = 0; needle[k] && cmd[i + k] == needle[k]; ++k) { }
+        if (!needle[k]) return TRUE;
+    }
+    return FALSE;
+}
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
     /* GUI 子系统进程默认没有控制台；调试入口从 cmd 启动时必须附加父控制台，
        否则 GetStdHandle 无效，h_print 的日志会被全部丢弃。 */
     {
         HANDLE stdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        if ((!stdOut || stdOut == INVALID_HANDLE_VALUE) && AttachConsole(ATTACH_PARENT_PROCESS)) {
-            HANDLE console = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-            if (console && console != INVALID_HANDLE_VALUE) {
-                SetStdHandle(STD_OUTPUT_HANDLE, console);
-                SetStdHandle(STD_ERROR_HANDLE, console);
+        if (!stdOut || stdOut == INVALID_HANDLE_VALUE) {
+            if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+                /* 没有父控制台：--console 时自己开一个窗口（暂存副本尤其需要）。 */
+                if (h_wants_console()) AllocConsole();
+            }
+            {
+                HANDLE console = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+                if (console && console != INVALID_HANDLE_VALUE) {
+                    SetStdHandle(STD_OUTPUT_HANDLE, console);
+                    SetStdHandle(STD_ERROR_HANDLE, console);
+                }
             }
         }
     }
@@ -1321,6 +1339,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

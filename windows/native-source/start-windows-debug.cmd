@@ -11,7 +11,7 @@ cd /d "%CXPLUS_ROOT%" || exit /b 1
 rem Native debug entry: keeps this console visible and waits for the host.
 rem Node fallback: start-windows-node-debug.cmd
 if not exist "%CXPLUS_EXE%" (echo [windows] chaoxing_plus.exe is missing next to this launcher.& echo [windows] Build it with: windows\native-source\build-windows.cmd& exit /b 9009)
-"%CXPLUS_EXE%" %*
+"%CXPLUS_EXE%" --console %*
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" pause
 exit /b %EXIT_CODE%
