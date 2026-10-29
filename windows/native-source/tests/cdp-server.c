@@ -221,7 +221,7 @@ static void ws_serve(SOCKET client, const char *request) {
     if (send(client, response, lstrlenA(response), 0) <= 0) return;
     started = GetTickCount();
     while (GetTickCount() - started < 20000) {
-        char reply[128];
+        static char reply[1024];
         int id = 1;
         int i;
         payloadLength = read_frame(client, payload, sizeof(payload));
@@ -236,7 +236,7 @@ static void ws_serve(SOCKET client, const char *request) {
                 break;
             }
         }
-        wsprintfA(reply, "{\"id\":%d,\"result\":{}}", id);
+        wsprintfA(reply, "{\"id\":%d,\"result\":{\"result\":{\"type\":\"boolean\",\"value\":true},\"identifier\":\"1\",\"frameTree\":{\"frame\":{\"id\":\"CXFIXTURE\",\"url\":\"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/fixture\",\"mimeType\":\"text/html\",\"securityOrigin\":\"https://mooc1.chaoxing.com\",\"loaderId\":\"1\"},\"childFrames\":[]},\"frameId\":\"CXFIXTURE\",\"targetInfos\":[{\"targetId\":\"CXFIXTURE\",\"type\":\"page\",\"title\":\"fixture\",\"url\":\"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/fixture\",\"attached\":true}]}}", id);
         if (!write_frame(client, reply, lstrlenA(reply))) break;
     }
 }
@@ -289,6 +289,8 @@ void __stdcall CdpServerMain(void) {
     WSACleanup();
     ExitProcess(0);
 }
+
+
 
 
 
