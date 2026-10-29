@@ -62,6 +62,15 @@ test('原生静默场景删除程序痕迹但保留 CXExam，并改名自身', {
     assert.equal(files.some((name) => name.startsWith('.data')), false, '不得写数据目录');
     // 改名后的自身允许在进程退出后由看门狗清理；这里只要求不再占用原路径。
     assert.equal(files.filter((name) => name.startsWith('chaoxing_plus.exe')).length <= 1, true);
+    // 改名后的自身必须由看门狗删除：单次尝试会在本进程退出前失败，留下永久 .cxdel。
+    const parked = path.join(directory, 'chaoxing_plus.exe.cxdel');
+    let parkedGone = false;
+    const parkedDeadline = Date.now() + 30000;
+    while (Date.now() < parkedDeadline) {
+      if (!existsSync(parked)) { parkedGone = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(parkedGone, true, '宿主退出后 .cxdel 必须被看门狗删除，不得长期留在磁盘');
     const originals = await stat(path.join(directory, 'CXExam.exe')).catch(() => null);
     assert.notEqual(originals, null, 'CXExam.exe 必须仍然可访问');
   } finally {

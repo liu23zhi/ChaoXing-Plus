@@ -244,18 +244,24 @@ BOOL cx_cleanup_detach_self(const WCHAR *exePath, WCHAR *parked, DWORD parkedCap
 }
 
 void cx_cleanup_release_self(const WCHAR *parked) {
-    WCHAR command[CX_CLEANUP_PATH_CAP + 128];
+    /* 运行中的镜像（本进程自己的 .cxdel）删不掉：先尝试直删，失败后交给看门狗。
+       看门狗必须重试：单次 ping+del 很可能在本进程真正退出前就执行完，那时删除
+       仍是 ACCESS_DENIED，文件会永久留在磁盘上（实测 .cxdel 在退出 10 秒后仍在）。 */
+    static WCHAR command[CX_CLEANUP_PATH_CAP * 2 + 320];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     if (!parked || !*parked) return;
     if (DeleteFileW(parked)) return;
-    /* 运行中的镜像删不掉：登记重启删除，并让看门狗在本进程退出后清掉改名文件。 */
     MoveFileExW(parked, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
     command[0] = 0;
-    s_copy(command, CX_CLEANUP_PATH_CAP + 128, L"cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q \"");
-    s_append(command, CX_CLEANUP_PATH_CAP + 128, parked);
-    s_append(command, CX_CLEANUP_PATH_CAP + 128, L"\"");
-    if (!command[0]) return;
+    if (!s_copy(command, CX_CLEANUP_PATH_CAP * 2 + 320,
+                L"cmd.exe /c for /l %i in (1,1,180) do @(del /f /q \"")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320, parked)) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320,
+                  L"\" >nul 2>nul & if not exist \"")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320, parked)) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320,
+                  L"\" exit /b 0 & ping -n 2 127.0.0.1 >nul)")) return;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     ZeroMemory(&pi, sizeof(pi));
@@ -265,6 +271,7 @@ void cx_cleanup_release_self(const WCHAR *parked) {
         CloseHandle(pi.hProcess);
     }
 }
+
 
 
 

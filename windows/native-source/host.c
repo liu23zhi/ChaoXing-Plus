@@ -1177,12 +1177,18 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!ok && !h_base_options.quiet) h_print(h_main_error);
         return (int)childCode;
     }
-    return ok ? h_exit_code : 1;
+    /* 任何退出路径（正常停止/错误停止）都要把改名后的自身交给看门狗删除；
+       提权交接在上面已 return，由子实例继续负责。 */
+    if (h_silent_parked[0]) {
+        cx_cleanup_release_self(h_silent_parked);
+        h_silent_parked[0] = 0;
+    }    return ok ? h_exit_code : 1;
 }
 
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
