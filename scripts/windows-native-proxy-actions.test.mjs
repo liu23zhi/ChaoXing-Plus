@@ -98,5 +98,30 @@ test('dll-proxy 自动安装后在运行结束时自动还原', { skip: process.
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('auto 模式对加壳客户端自动选择 dll-proxy 并清理临时代理', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-auto2-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    const image = await readFile(client);
+    const at = image.indexOf(Buffer.from('.text\0\0\0', 'latin1'));
+    image.write('.themida', at, 'latin1');
+    await writeFile(client, image);
 
+    const report = join(dir, 'report.json');
+    const result = run([
+      '--client', client,
+      '--report', report,
+      '--no-elevate', '--no-log',
+      '--duration', '2'
+    ]);
+    assert.match(result.output, /已自动安装代理并启用 dll-proxy/u);
+    const parsed = JSON.parse(await readFile(report, 'utf8'));
+    assert.equal(parsed.injectMode, 'dll-proxy');
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false, `winmm.dll 残留: ${result.output}`);
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), false, `marker 残留: ${result.output}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
