@@ -770,7 +770,14 @@ static BOOL h_set_page_config(NET_WS *ws, DWORD *nextId, const CX_OPTIONS *optio
             h_error(error, errorCap, L"native page config exceeds its size limit"); goto done;
         }
     }
-    if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
+    if (options->panelAllPages) {
+        static const char panelAll[] = ";window.__CX_WIN_PANEL_ALL_PAGES__=true";
+        DWORD panelAt = 0;
+        while (panelAll[panelAt]) {
+            if (at + 1 >= capacity) { h_error(error, errorCap, L"panel flag exceeds size limit"); goto done; }
+            expression[at++] = panelAll[panelAt++];
+        }
+    }    if (at > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native page config exceeds CDP expression limit"); goto done; }
     ok = preflight || h_send_eval(ws, (*nextId)++, expression, at, error, errorCap);
 done:
     if (config) HeapFree(GetProcessHeap(), 0, config);
@@ -1433,6 +1440,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

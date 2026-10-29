@@ -142,6 +142,7 @@ typedef struct CX_OPTIONS {
     WCHAR injectProxyDir[CX_OPTIONS_PATH_CAP];
     BOOL injectProxyDirSet;
     BOOL injectModeSet;
+    BOOL panelAllPages;
     BOOL consoleWindow;
     BOOL stagedBoot;
     BOOL stageRequest;
@@ -179,6 +180,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *options,
                                              DWORD *length);
 
 #endif
+
 
 
 

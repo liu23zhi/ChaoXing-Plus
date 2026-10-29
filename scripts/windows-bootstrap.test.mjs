@@ -789,4 +789,14 @@ test('没有 __CX_WIN_SILENT__ 时扩展注入不安装静默控制', async () =
     .filter((message) => message.kind === 'silent-hotkey' || message.kind === 'silent-fullscreen');
   assert.deepEqual(silentMessages, []);
 });
+test('bootstrap 支持宿主强制在所有页面显示面板（--panel-all-pages）', async () => {
+  const source = await readFile(bootstrapPath, 'utf8');
+  assert.match(source, /__CX_WIN_PANEL_ALL_PAGES__/u);
+  assert.match(source, /panelAllPagesForced\(\)/u);
+  const business = await readFile(resolve(process.cwd(), 'src', 'projects', 'common.ts'), 'utf8');
+  assert.match(business, /__CX_WIN_PANEL_ALL_PAGES__/u);
+  const host = await readFile(resolve(process.cwd(), 'windows', 'native-source', 'host.c'), 'utf8');
+  assert.match(host, /__CX_WIN_PANEL_ALL_PAGES__/u);
+  assert.match(host, /panelAllPages/u);
+});
 

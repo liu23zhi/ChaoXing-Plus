@@ -279,7 +279,8 @@ function canShowFloatingPanel() {
     if (isWindowsHostRuntime() && runtimeStore.get<boolean>(WINDOWS_PANEL_ENABLED_KEY, true) === false) {
       return false;
     }
-    if (isWindowsHostRuntime() && !isWindowsExamRelatedUrl(window.location.href)) {
+    const forcePanelAllPages = (window as unknown as { __CX_WIN_PANEL_ALL_PAGES__?: unknown }).__CX_WIN_PANEL_ALL_PAGES__ === true;
+  if (isWindowsHostRuntime() && !forcePanelAllPages && !isWindowsExamRelatedUrl(window.location.href)) {
       return false;
     }
 
@@ -2843,3 +2844,4 @@ export const CommonProject = Project.create({
     }
   }
 });
+

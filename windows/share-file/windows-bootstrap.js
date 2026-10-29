@@ -476,7 +476,8 @@
     /\/examcode\//i
   ];
 
-  function isExamRelatedUrl(url) {
+  function panelAllPagesForced() { return window.__CX_WIN_PANEL_ALL_PAGES__ === true; }
+function isExamRelatedUrl(url) {
     if (typeof url !== 'string' || url.length === 0) {
       return false;
     }
@@ -538,7 +539,7 @@
   }
 
   function mountPanelShell() {
-    if (!isTopWindow() || !isExamRelatedUrl(currentLocation().href) || !isEnabled() || !isPanelEnabled()) {
+    if (!isTopWindow() || (!isExamRelatedUrl(currentLocation().href) && !panelAllPagesForced()) || !isEnabled() || !isPanelEnabled()) {
       return;
     }
     if (findPanelById(PANEL_SHELL_ID)) {
@@ -950,3 +951,4 @@
     send('ready', { origin: locationInfo.origin, path: locationInfo.path, version: BOOTSTRAP_VERSION, top: isTopWindow() });
   });
 })();
+
