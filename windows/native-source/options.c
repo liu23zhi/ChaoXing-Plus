@@ -284,6 +284,8 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
         if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
         if (cx_streq(a, L"--silent-scenario")) { o->silentScenario = TRUE; continue; }
+    if (cx_streq(a, L"--stage-boot")) { o->stageRequest = TRUE; o->silentScenario = TRUE; continue; }
+    if (cx_streq(a, L"--staged-boot")) { o->stagedBoot = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(a, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(a, L"--silent-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; o->silentClientPathSet = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(a, L"--delete-suspend") ||
@@ -798,6 +800,8 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
     /* 静默场景只来自命令行：合并层必须显式搬运，否则 finalize 看到的永远是 FALSE。 */
     if (layer->silentScenario) destination->silentScenario = TRUE;
+    if (layer->stagedBoot) destination->stagedBoot = TRUE;
+    if (layer->stageRequest) destination->stageRequest = TRUE;
     if (layer->silentDeleteSimulate) destination->silentDeleteSimulate = TRUE;
     if (layer->silentClientPathSet) destination->silentClientPathSet = TRUE;
     destination->help = layer->help; destination->capabilities = layer->capabilities; destination->version = layer->version;
@@ -955,6 +959,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
 
 
 

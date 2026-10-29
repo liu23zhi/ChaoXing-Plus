@@ -146,3 +146,46 @@ test('CXExam 进程结束触发自毁并提前结束等待', { skip: process.pla
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
   }
 });
+test('--stage-boot 从 %TEMP% 副本启动：原目录清空，副本与副本目录都消失', { skip: process.platform !== 'win32' }, async (t) => {
+  if (!existsSync(hostExe) || !existsSync(fixtureExe)) {
+    t.skip('未构建 chaoxing_plus.exe / process-fixture.exe');
+    return;
+  }
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-native-staged-'));
+  let stagedDirectory = '';
+  try {
+    await copyFile(hostExe, path.join(directory, 'chaoxing_plus.exe'));
+    await copyFile(fixtureExe, path.join(directory, 'CXExam.exe'));
+    await writeFile(path.join(directory, 'SHA256SUMS.txt'), 'deadbeef *chaoxing_plus.exe\n', 'utf8');
+    await writeFile(path.join(directory, 'README.md'), '# fixture\n', 'utf8');
+    const result = spawnSync(path.join(directory, 'chaoxing_plus.exe'), [
+      '--silent-scenario', '--stage-boot',
+      '--silent-client', path.join(directory, 'CXExam.exe'),
+      '--quiet', '--no-log', '--no-disk-write', '--no-panel',
+      '--debug-timeout', '1000', '--duration', '3000', '--no-elevate', '--port', '0'
+    ], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+    assert.notEqual(result.error && result.error.code, 'ETIMEDOUT', '暂存交接不得挂住');
+    assert.equal(result.status, 0, `交接进程应以 0 退出：${result.stdout}${result.stderr}`);
+    stagedDirectory = path.join(tmpdir(), `cx-${result.pid}`);
+    let files = [];
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      files = await listFiles(directory);
+      if (files.length === 1 && files[0] === 'CXExam.exe') break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.deepEqual(files, ['CXExam.exe'], `原目录必须只剩 CXExam，实际：${files.join(', ')}`);
+    let stagedLeft = true;
+    const stagedDeadline = Date.now() + 30000;
+    while (Date.now() < stagedDeadline) {
+      stagedLeft = existsSync(stagedDirectory);
+      if (!stagedLeft) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(stagedLeft, false, '暂存副本目录（连同 s.exe）必须在退出后删除');
+  } finally {
+    killOwnedClients(directory);
+    if (stagedDirectory) await rm(stagedDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  }
+});

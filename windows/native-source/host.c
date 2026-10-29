@@ -284,6 +284,60 @@ static BOOL h_silent_root(WCHAR *root, DWORD cap) {
 /* 只信任发布包布局（EXE 同级有 SHA256SUMS.txt）：源码/构建目录只允许模拟，
    绝不把仓库里的构建产物当成程序痕迹删掉。判定逻辑在 silent.c，便于单测。 */
 
+static BOOL h_cat(WCHAR *dst, DWORD cap, const WCHAR *src) {
+    DWORD len = 0;
+    if (!dst || !src || cap == 0) return FALSE;
+    while (dst[len]) ++len;
+    while (*src) { if (len + 1 >= cap) return FALSE; dst[len++] = *src++; }
+    dst[len] = 0;
+    return TRUE;
+}
+
+/* 把自身复制到 %TEMP%\cx-<pid>\s.exe，用原参数拉起副本（追加 --staged-boot）。 */
+static BOOL h_silent_stage(void) {
+    WCHAR temp[CX_CLEANUP_PATH_CAP], dir[CX_CLEANUP_PATH_CAP], staged[CX_CLEANUP_PATH_CAP];
+    WCHAR command[CX_CLEANUP_PATH_CAP * 3], number[16];
+    LPWSTR *argv;
+    int argc = 0;
+    int i;
+    BOOL ok = FALSE;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD got;
+    if (!h_exe_path[0]) return FALSE;
+    got = GetTempPathW(CX_CLEANUP_PATH_CAP, temp);
+    if (!got || got >= CX_CLEANUP_PATH_CAP) return FALSE;
+    if (!h_copy(dir, CX_CLEANUP_PATH_CAP, temp) || !h_cat(dir, CX_CLEANUP_PATH_CAP, L"cx-")) return FALSE;
+    wsprintfW(number, L"%lu", (unsigned long)GetCurrentProcessId());
+    if (!h_cat(dir, CX_CLEANUP_PATH_CAP, number)) return FALSE;
+    if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    if (!h_copy(staged, CX_CLEANUP_PATH_CAP, dir) || !h_cat(staged, CX_CLEANUP_PATH_CAP, L"\\s.exe")) return FALSE;
+    if (!CopyFileW(h_exe_path, staged, FALSE)) { RemoveDirectoryW(dir); return FALSE; }
+    argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) { DeleteFileW(staged); RemoveDirectoryW(dir); return FALSE; }
+    if (h_copy(command, CX_CLEANUP_PATH_CAP * 3, L"\"") &&
+        h_cat(command, CX_CLEANUP_PATH_CAP * 3, staged) &&
+        h_cat(command, CX_CLEANUP_PATH_CAP * 3, L"\"")) {
+        for (i = 1; i < argc; ++i) {
+            if (!h_cat(command, CX_CLEANUP_PATH_CAP * 3, L" \"") ||
+                !h_cat(command, CX_CLEANUP_PATH_CAP * 3, argv[i]) ||
+                !h_cat(command, CX_CLEANUP_PATH_CAP * 3, L"\"")) { command[0] = 0; break; }
+        }
+        if (command[0] && h_cat(command, CX_CLEANUP_PATH_CAP * 3, L" --staged-boot")) {
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            ZeroMemory(&pi, sizeof(pi));
+            if (CreateProcessW(staged, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                ok = TRUE;
+            }
+        }
+    }
+    if (!ok) { DeleteFileW(staged); RemoveDirectoryW(dir); }
+    LocalFree(argv);
+    return ok;
+}
 static void h_silent_cleanup_pass(void) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     int failed = 0;
@@ -963,6 +1017,18 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         cx_silent_init(&h_silent, TRUE);
         h_silent_active = TRUE;
         h_silent_simulate = options->silentDeleteSimulate;
+    /* 暂存启动：副本接管后，本进程清空原目录并退出。 */
+    if (options->stageRequest && !options->stagedBoot && !h_silent_simulate && h_silent_stage()) {
+        h_silent_cleanup_pass();
+        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
+        h_silent_done = TRUE;
+        h_report.stopReason = "staged-handoff";
+        return TRUE;
+    }
+        /* 暂存副本目录没有 SHA256SUMS，信任闸门会跳过整段清理；副本自身仍必须消失。 */
+        if (options->stagedBoot && !h_silent_simulate && !h_silent_parked[0] && h_exe_path[0]) {
+            cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP);
+        }
         h_silent_cleanup_pass();
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
@@ -1062,6 +1128,19 @@ done:
     return ok;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
+    /* GUI 子系统进程默认没有控制台；调试入口从 cmd 启动时必须附加父控制台，
+       否则 GetStdHandle 无效，h_print 的日志会被全部丢弃。 */
+    {
+        HANDLE stdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if ((!stdOut || stdOut == INVALID_HANDLE_VALUE) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+            HANDLE console = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            if (console && console != INVALID_HANDLE_VALUE) {
+                SetStdHandle(STD_OUTPUT_HANDLE, console);
+                SetStdHandle(STD_ERROR_HANDLE, console);
+            }
+        }
+    }
     LPWSTR *argv; int argc, argument; BOOL ok, elevated = FALSE; WSADATA data; (void)instance; (void)previous; (void)commandLine; (void)show;
     h_zero(h_main_error, sizeof(h_main_error)); h_zero(h_exe_path, sizeof(h_exe_path)); GetModuleFileNameW(NULL, h_exe_path, HOST_PATH_CAP);
     cx_options_init(&h_base_options); cx_options_init(&h_cli_options); cx_options_init(&h_config_options); cx_options_init(&h_json_options);
@@ -1188,6 +1267,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

@@ -247,21 +247,31 @@ void cx_cleanup_release_self(const WCHAR *parked) {
     /* 运行中的镜像（本进程自己的 .cxdel）删不掉：先尝试直删，失败后交给看门狗。
        看门狗必须重试：单次 ping+del 很可能在本进程真正退出前就执行完，那时删除
        仍是 ACCESS_DENIED，文件会永久留在磁盘上（实测 .cxdel 在退出 10 秒后仍在）。 */
-    static WCHAR command[CX_CLEANUP_PATH_CAP * 2 + 320];
+    static WCHAR command[CX_CLEANUP_PATH_CAP * 2 + 384];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     if (!parked || !*parked) return;
     if (DeleteFileW(parked)) return;
     MoveFileExW(parked, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
     command[0] = 0;
-    if (!s_copy(command, CX_CLEANUP_PATH_CAP * 2 + 320,
-                L"cmd.exe /c for /l %i in (1,1,180) do @(del /f /q \"")) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320, parked)) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320,
-                  L"\" >nul 2>nul & if not exist \"")) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320, parked)) return;
-    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 320,
-                  L"\" exit /b 0 & ping -n 2 127.0.0.1 >nul)")) return;
+    if (!s_copy(command, CX_CLEANUP_PATH_CAP * 2 + 384,
+                L"cmd.exe /c for /l %i in (1,1,120) do @(del /f /q \"")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, parked)) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"\" >nul 2>nul & ")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"if not exist \"")) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, parked)) return;
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, L"\" rmdir /q \"")) return;
+    {
+        WCHAR folder[CX_CLEANUP_PATH_CAP];
+        DWORD cut = 0, k = 0;
+        while (parked[k]) { if (parked[k] == L'\\' || parked[k] == L'/') cut = k; ++k; }
+        if (cut == 0) return;
+        for (k = 0; k < cut; ++k) folder[k] = parked[k];
+        folder[cut] = 0;
+        if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384, folder)) return;
+    }
+    if (!s_append(command, CX_CLEANUP_PATH_CAP * 2 + 384,
+                  L"\" >nul 2>nul & ping -n 2 127.0.0.1 >nul)")) return;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     ZeroMemory(&pi, sizeof(pi));
@@ -271,6 +281,8 @@ void cx_cleanup_release_self(const WCHAR *parked) {
         CloseHandle(pi.hProcess);
     }
 }
+
+
 
 
 
