@@ -598,5 +598,69 @@ int net_pipe_frame_parse(const char *buffer, DWORD available,
     if (frameLength) *frameLength = length + 4;
     return 1;
 }
+BOOL net_pipe_send_frame(HANDLE writeHandle, const char *payload, DWORD length) {
+    char header[4];
+    DWORD written = 0;
+    if (!writeHandle || writeHandle == INVALID_HANDLE_VALUE) return FALSE;
+    if (length && !payload) return FALSE;
+    if (length > CX_PIPE_MAX_FRAME) return FALSE;
+    header[0] = (char)(length & 0xFF);
+    header[1] = (char)((length >> 8) & 0xFF);
+    header[2] = (char)((length >> 16) & 0xFF);
+    header[3] = (char)((length >> 24) & 0xFF);
+    if (!WriteFile(writeHandle, header, 4, &written, NULL) || written != 4) return FALSE;
+    if (length) {
+        if (!WriteFile(writeHandle, payload, length, &written, NULL) || written != length) return FALSE;
+    }
+    return TRUE;
+}
+static BOOL net_pipe_read_exact(HANDLE handle, char *buffer, DWORD need, DWORD deadline, DWORD timeoutMs) {
+    DWORD got = 0;
+    while (got < need) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(handle, NULL, 0, NULL, &available, NULL)) return FALSE;
+        if (available == 0) {
+            if (timeoutMs && GetTickCount() >= deadline) return FALSE;
+            Sleep(5);
+            continue;
+        }
+        {
+            DWORD want = available;
+            DWORD chunk = 0;
+            if (want > need - got) want = need - got;
+            if (!ReadFile(handle, buffer + got, want, &chunk, NULL) || !chunk) return FALSE;
+            got += chunk;
+        }
+    }
+    return TRUE;
+}
 
+int net_pipe_recv_frame(HANDLE readHandle, char **payload, DWORD *length, DWORD timeoutMs) {
+    char header[4];
+    DWORD deadline;
+    DWORD bodyLength;
+    char *body;
+    if (payload) *payload = NULL;
+    if (length) *length = 0;
+    if (!readHandle || readHandle == INVALID_HANDLE_VALUE) return -1;
+    deadline = GetTickCount() + (timeoutMs ? timeoutMs : 0);
+    if (!net_pipe_read_exact(readHandle, header, 4, deadline, timeoutMs)) {
+        return (timeoutMs && GetTickCount() >= deadline) ? 0 : -1;
+    }
+    bodyLength = (DWORD)(unsigned char)header[0]
+               | ((DWORD)(unsigned char)header[1] << 8)
+               | ((DWORD)(unsigned char)header[2] << 16)
+               | ((DWORD)(unsigned char)header[3] << 24);
+    if (bodyLength > CX_PIPE_MAX_FRAME) return -1;
+    body = (char *)HeapAlloc(GetProcessHeap(), 0, bodyLength + 1);
+    if (!body) return -1;
+    if (bodyLength && !net_pipe_read_exact(readHandle, body, bodyLength, deadline, timeoutMs)) {
+        HeapFree(GetProcessHeap(), 0, body);
+        return -1;
+    }
+    body[bodyLength] = 0;
+    if (payload) *payload = body; else HeapFree(GetProcessHeap(), 0, body);
+    if (length) *length = bodyLength;
+    return 1;
+}
 

@@ -247,15 +247,64 @@ static void test_pipe_frames(void) {
     status = net_pipe_frame_parse(two + 6, 6, &offset, &length, &whole);
     check("parse second of two frames", status == 1 && length == 2 && two[6 + 4] == 'c');
 }
+static void test_pipe_send_raw(void) {
+    SECURITY_ATTRIBUTES sa;
+    HANDLE readEnd = NULL, writeEnd = NULL;
+    char buffer[16];
+    DWORD got = 0;
+    BOOL ok;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&readEnd, &writeEnd, &sa, 0)) { check("create send pipe", FALSE); return; }
+    ok = net_pipe_send_frame(writeEnd, "abc", 3);
+    check("send frame to pipe", ok);
+    ZeroMemory(buffer, sizeof(buffer));
+    ok = ReadFile(readEnd, buffer, 7, &got, NULL) && got == 7;
+    check("read raw frame bytes", ok && (unsigned char)buffer[0] == 3 && buffer[4] == 'a' && buffer[6] == 'c');
+    CloseHandle(readEnd);
+    CloseHandle(writeEnd);
+}
+static void test_pipe_roundtrip(void) {
+    SECURITY_ATTRIBUTES sa;
+    HANDLE readEnd = NULL, writeEnd = NULL;
+    char big[4096];
+    char *payload = NULL;
+    DWORD length = 0;
+    int status;
+    int i;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&readEnd, &writeEnd, &sa, 65536)) { check("create roundtrip pipe", FALSE); return; }
+    check("send roundtrip frame", net_pipe_send_frame(writeEnd, "{\"id\":1}", 8));
+    status = net_pipe_recv_frame(readEnd, &payload, &length, 2000);
+    check("recv roundtrip frame", status == 1 && length == 8 && payload && payload[0] == '{');
+    if (payload) net_free(payload);
+    status = net_pipe_recv_frame(readEnd, &payload, &length, 50);
+    check("recv roundtrip timeout", status == 0);
+    for (i = 0; i < (int)sizeof(big); ++i) big[i] = (char)('A' + (i % 26));
+    check("send roundtrip large", net_pipe_send_frame(writeEnd, big, sizeof(big)));
+    status = net_pipe_recv_frame(readEnd, &payload, &length, 2000);
+    check("recv roundtrip large", status == 1 && length == sizeof(big) && payload && payload[4095] == big[4095]);
+    if (payload) net_free(payload);
+    CloseHandle(readEnd);
+    CloseHandle(writeEnd);
+}
 void __stdcall TransportTestMain(void) {
     WSADATA data;
     if (WSAStartup(MAKEWORD(2, 2), &data)) ExitProcess(2);
     http_get_mode();
     test_pipe_frames();
+    test_pipe_send_raw();
+    test_pipe_roundtrip();
     test_upgrade_zero_deadline(); test_deadlines(); test_frames(); test_poll_fairness(); test_failures();
     WSACleanup();
     output(failedChecks ? "PROTOCOL SELF TEST FAIL\n" : "PROTOCOL SELF TEST PASS\n");
     ExitProcess(failedChecks ? 1 : 0);
 }
+
+
+
 
 
