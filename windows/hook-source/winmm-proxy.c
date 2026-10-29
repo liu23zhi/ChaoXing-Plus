@@ -537,6 +537,22 @@ static int __cdecl proxy_cef_init_wrapper(const void *args, void *settings, void
         if (size >= 228) offset = 184;
         else if (size == 216) offset = 172;
         if (offset > 0 && (DWORD)offset + 4 <= size) {
+            /* IG5 实测 cef_settings_t 布局：size=0xE4(228)、command_line_args_disabled=0x2C(44)、
+               remote_debugging_port=0xB8(184)。这里同时解除命令行开关禁用。 */
+            if (size >= 0x30) {
+                int *disabled = (int *)((BYTE *)settings + 44);
+                if (*disabled != 0) {
+                    char line[72];
+                    static const char prefix[] = "winmm proxy: command_line_args_disabled=";
+                    int k = 0;
+                    while (prefix[k]) { line[k] = prefix[k]; ++k; }
+                    line[k++] = (char)('0' + (*disabled % 10));
+                    line[k++] = '>'; line[k++] = '0';
+                    line[k] = 0;
+                    proxy_append(line);
+                    *disabled = 0;
+                }
+            }
             *(int *)((BYTE *)settings + offset) = g_forcedPort;
             proxy_append("winmm proxy: cef settings port applied");
         }
@@ -849,6 +865,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
 
 
 
