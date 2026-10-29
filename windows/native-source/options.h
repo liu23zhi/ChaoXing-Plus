@@ -154,6 +154,8 @@ typedef struct CX_OPTIONS {
     BOOL selfCheck;
     BOOL pipeTest;
     BOOL installProxy;
+    WCHAR probeClientPath[CX_OPTIONS_PATH_CAP];
+    BOOL probeClientPathSet;
     BOOL uninstallProxy;
     WCHAR proxySource[CX_OPTIONS_PATH_CAP];
     BOOL proxySourceSet;
@@ -190,6 +192,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *options,
                                              DWORD *length);
 
 #endif
+
 
 
 

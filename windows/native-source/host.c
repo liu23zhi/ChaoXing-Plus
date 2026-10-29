@@ -942,6 +942,81 @@ done:
     h_pipe_close(&state);
     return ok;
 }
+/* 离线兼容性探测：不启动客户端，只读文件判断可用的注入通道。 */
+static BOOL h_file_contains(const WCHAR *path, const char *needle) {
+    static char buffer[1 << 20];
+    HANDLE file;
+    DWORD got = 0, keep = 0;
+    int needleLength;
+    BOOL found = FALSE;
+    if (!path || !needle) return FALSE;
+    needleLength = (int)lstrlenA(needle);
+    if (needleLength <= 0 || needleLength > 256) return FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    for (;;) {
+        DWORD chunk = 0;
+        DWORD i;
+        if (!ReadFile(file, buffer + keep, (DWORD)sizeof(buffer) - keep, &chunk, NULL) || chunk == 0) break;
+        got = keep + chunk;
+        for (i = 0; i + (DWORD)needleLength <= got; ++i) {
+            int k = 0;
+            while (k < needleLength && buffer[i + k] == needle[k]) ++k;
+            if (k == needleLength) { found = TRUE; break; }
+        }
+        if (found) break;
+        keep = (DWORD)(needleLength - 1);
+        if (got > keep) CopyMemory(buffer, buffer + got - keep, keep);
+    }
+    CloseHandle(file);
+    return found;
+}
+
+static BOOL h_probe_client(const WCHAR *clientPath) {
+    WCHAR dir[CX_CLEANUP_PATH_CAP], cef[CX_CLEANUP_PATH_CAP], winmm[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
+    WCHAR version[64];
+    WORD machine = 0, major = 0, minor = 0;
+    BOOL hasPort = FALSE, hasPipe = FALSE, proxyPresent = FALSE, markerPresent = FALSE;
+    if (!clientPath || !*clientPath) { h_print(L"probe: pass --probe-client <CXExam.exe>"); return FALSE; }
+    h_print(L"probe: client="); h_print(clientPath); h_print(L"\n");
+    if (!proc_pe(clientPath, &machine, &major, &minor, version, 64)) { h_print(L"probe: not a valid PE"); return FALSE; }
+    {
+        WCHAR line[192];
+        wsprintfW(line, L"probe: machine=%s version=%s", machine == 0x8664 ? L"x64" : L"x86", version);
+        h_print(line);
+        h_print(L"\n");
+    }
+    if (!h_parent_dir(clientPath, dir, CX_CLEANUP_PATH_CAP)) { h_print(L"probe: cannot resolve client directory"); return FALSE; }
+    h_copy(cef, CX_CLEANUP_PATH_CAP, dir); h_cat(cef, CX_CLEANUP_PATH_CAP, L"\\libcef.dll");
+    h_copy(winmm, CX_CLEANUP_PATH_CAP, dir); h_cat(winmm, CX_CLEANUP_PATH_CAP, L"\\winmm.dll");
+    h_copy(marker, CX_CLEANUP_PATH_CAP, dir); h_cat(marker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker");
+    if (GetFileAttributesW(cef) != INVALID_FILE_ATTRIBUTES) {
+        WCHAR line[192];
+        HANDLE cefFile = CreateFileW(cef, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        LARGE_INTEGER size;
+        size.QuadPart = 0;
+        if (cefFile != INVALID_HANDLE_VALUE) { GetFileSizeEx(cefFile, &size); CloseHandle(cefFile); }
+        hasPort = h_file_contains(cef, "remote-debugging-port");
+        hasPipe = h_file_contains(cef, "remote-debugging-pipe");
+        wsprintfW(line, L"probe: libcef=%luMB port=%s pipe=%s",
+                  (unsigned long)(size.QuadPart >> 20),
+                  hasPort ? L"yes" : L"no", hasPipe ? L"yes" : L"no");
+        h_print(line); h_print(L"\n");
+    } else {
+        h_print(L"probe: libcef.dll not found\n");
+    }
+    proxyPresent = GetFileAttributesW(winmm) != INVALID_FILE_ATTRIBUTES;
+    markerPresent = GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
+    h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
+    h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent"); h_print(L"\n");
+    h_print(L"probe: suggested=");
+    if (markerPresent) h_print(L"dll-proxy");
+    else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
+    else h_print(L"cdp-port");
+    h_print(L"\n");
+    return TRUE;
+}
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOW si;
@@ -1998,6 +2073,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
+    if (h_base_options.probeClientPathSet) { return h_probe_client(h_base_options.probeClientPath) ? 0 : 1; }
     if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.pipeCallPathSet) { return h_pipe_stage2(h_base_options.pipeCallPath, h_base_options.pipeExpr) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
@@ -2076,6 +2152,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
