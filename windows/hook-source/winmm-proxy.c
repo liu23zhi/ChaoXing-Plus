@@ -4,6 +4,11 @@
      绝不能在加载器锁内 LoadLibrary / 枚举 Toolhelp（会让宿主 DLL 初始化失败）。
    - 跳转表由 lazy 桩按需填充：先看表项，为空则调用 proxy_ensure() 再跳。 */
 #include <windows.h>
+
+/* 目标系统 DLL：由构建脚本通过 /DCX_PROXY_TARGET_DLL=L"version.dll" 指定。 */
+#ifndef CX_PROXY_TARGET_DLL
+#define CX_PROXY_TARGET_DLL L"winmm.dll"
+#endif
 #include <tlhelp32.h>
 
 #pragma function(memset)
@@ -737,8 +742,13 @@ static void proxy_init_table(void) {
     got = GetSystemDirectoryW(dir, MAX_PATH);
     if (!got || got + 16 >= MAX_PATH) return;
     while (dir[at]) { path[at] = dir[at]; ++at; }
-    path[at++] = L'\\'; path[at++] = L'w'; path[at++] = L'i'; path[at++] = L'n'; path[at++] = L'm'; path[at++] = L'm';
-    path[at++] = L'.'; path[at++] = L'd'; path[at++] = L'l'; path[at++] = L'l'; path[at] = 0;
+    path[at++] = L'\\';
+    {
+        const WCHAR *target = CX_PROXY_TARGET_DLL;
+        int k;
+        for (k = 0; target[k] && at < MAX_PATH - 2; ++k) path[at++] = target[k];
+    }
+    path[at] = 0;
     g_realWinmm = LoadLibraryW(path);
     if (!g_realWinmm) { proxy_append("winmm proxy: real winmm not found"); return; }
     for (i = 0; i < (DWORD)g_winmm_count; ++i) {
@@ -911,6 +921,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
+
 
 
 

@@ -124,4 +124,24 @@ test('auto 模式对加壳客户端自动选择 dll-proxy 并清理临时代理'
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('--proxy-target version 安装/卸载到 version.dll 且不动 winmm.dll', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const proxyVersion = resolve('build-windows/hook/version.dll');
+  if (!existsSync(proxyVersion)) return; // 未构建 version 目标时跳过（build-proxy.ps1 -Target version）
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-version-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    const install = run(['--install-proxy', '--proxy-target', 'version', '--proxy-source', proxyVersion, '--client', client]);
+    assert.equal(install.status, 0, install.output);
+    assert.equal(existsSync(join(dir, 'version.dll')), true);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false, '不得写到 winmm.dll');
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), true);
+    const uninstall = run(['--uninstall-proxy', '--proxy-target', 'version', '--client', client]);
+    assert.equal(uninstall.status, 0, uninstall.output);
+    assert.equal(existsSync(join(dir, 'version.dll')), false);
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 

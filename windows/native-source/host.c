@@ -326,6 +326,12 @@ static BOOL h_silent_active = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
+static WCHAR h_proxy_target[16] = L"winmm";
+static const WCHAR *h_proxy_dll_suffix(void) {
+    return h_same(h_proxy_target, L"version") ? L"\\version.dll" : L"\\winmm.dll";
+}
+static const WCHAR *h_proxy_marker_suffix(void) { return L"\\cxhook-proxy.marker"; }
+
 static BOOL h_silent_simulate = FALSE;
 static BOOL h_silent_done = FALSE;
 static CX_CLEANUP_PLAN *h_silent_plan = NULL;
@@ -576,27 +582,30 @@ static BOOL h_proxy_file_present(const WCHAR *clientPath) {
     for (k = 0; path[k]; ++k) if (path[k] == L'\\') cut = k;
     for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) { }
     path[cut] = 0;
-    if (!h_cat(path, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
+    if (!h_cat(path, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
+    if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
     WCHAR hostDir[CX_CLEANUP_PATH_CAP];
     BOOL ok;
     if (options->proxySourceSet) {
         if (!h_copy(source, CX_CLEANUP_PATH_CAP, options->proxySource)) { h_print(L"install-proxy: invalid --proxy-source"); return FALSE; }
     } else {
-        static const WCHAR *const candidates[] = {
-            L"\\winmm-proxy.dll",
-            L"\\winmm.dll",
-            L"\\hook\\winmm.dll",
-            L"\\..\\hook\\winmm.dll",
-            L"\\build-windows\\hook\\winmm.dll"
+        static const WCHAR *const winmmCandidates[] = {
+            L"\\winmm-proxy.dll", L"\\winmm.dll", L"\\hook\\winmm.dll",
+            L"\\..\\hook\\winmm.dll", L"\\build-windows\\hook\\winmm.dll"
         };
+        static const WCHAR *const versionCandidates[] = {
+            L"\\version-proxy.dll", L"\\version.dll", L"\\hook\\version.dll",
+            L"\\..\\hook\\version.dll", L"\\build-windows\\hook\\version.dll"
+        };
+        const WCHAR *const *candidates = h_same(h_proxy_target, L"version") ? versionCandidates : winmmCandidates;
         DWORD i = 0;
         BOOL found = FALSE;
         if (!h_parent_dir(h_exe_path, hostDir, CX_CLEANUP_PATH_CAP)) { h_print(L"install-proxy: cannot locate host directory"); return FALSE; }
-        for (i = 0; i < (DWORD)(sizeof(candidates) / sizeof(candidates[0])); ++i) {
+        for (i = 0; i < 5; ++i) {
             if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, candidates[i])) continue;
             if (GetFileAttributesW(source) != INVALID_FILE_ATTRIBUTES) { found = TRUE; break; }
         }
@@ -620,7 +629,7 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         h_print(L"install-proxy: pass --client <CXExam.exe> to select the target client");
         return FALSE;
     }
-    if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
+    if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) { h_print(L"install-proxy: path too long"); return FALSE; }
     ok = CopyFileW(source, target, FALSE) != 0;
     if (ok && options->proxyPortSet) {
         WCHAR portPath[CX_CLEANUP_PATH_CAP];
@@ -674,6 +683,7 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
 }
 /* 卸载代理：只有当目录里有安装标记时才删除，避免误删第三方的 winmm.dll。 */
 static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
+    if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
     WCHAR targetDir[CX_CLEANUP_PATH_CAP], dll[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     BOOL removed = FALSE;
     if (options->clientPath[0]) {
@@ -689,7 +699,7 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
         h_print(L"uninstall-proxy: marker not found; refusing to delete an unknown winmm.dll (use --install-proxy to place ours)");
         return FALSE;
     }
-    if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
+    if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
     /* 客户端子进程可能短暂占用 winmm.dll：重试约 5 秒再判定失败。 */
     {
         int attempt;
@@ -2134,7 +2144,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         static WCHAR autoDir[CX_CLEANUP_PATH_CAP], autoDll[CX_CLEANUP_PATH_CAP], autoMarker[CX_CLEANUP_PATH_CAP];
         BOOL autoOk = h_parent_dir(h_selected_path, autoDir, CX_CLEANUP_PATH_CAP) &&
                       h_copy(autoDll, CX_CLEANUP_PATH_CAP, autoDir) &&
-                      h_cat(autoDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                      h_cat(autoDll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) &&
                       GetFileAttributesW(autoDll) != INVALID_FILE_ATTRIBUTES &&
                       h_copy(autoMarker, CX_CLEANUP_PATH_CAP, autoDir) &&
                       h_cat(autoMarker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker") &&
@@ -2159,7 +2169,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
             : h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP);
         BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
-                       h_cat(proxyDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                       h_cat(proxyDll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) &&
                        GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
         if (!present) {
             /* 自动安装：本次运行临时装入，结束后（含失败路径）自动还原。 */
@@ -2208,7 +2218,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             for (k = 0; proxyPath[k]; ++k) if (proxyPath[k] == L'\\') cut = k;
             for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = proxyPath[k];
             dirOnly[k] = 0;
-            if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) present = TRUE;
+            if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) present = TRUE;
         }
         if (!present && h_install_proxy(options)) {
             h_proxy_auto_installed = TRUE;
@@ -2227,7 +2237,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
                 for (k = 0; probeWinmm[k]; ++k) if (probeWinmm[k] == L'\\') cut = k;
                 for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = probeWinmm[k];
                 dirOnly[k] = 0;
-                if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) proxyReady = TRUE;
+                if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) proxyReady = TRUE;
             }
             if (proxyReady) {
             h_dll_proxy_mode = TRUE;
@@ -2449,7 +2459,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
-    "调试: --install-proxy [--proxy-source <winmm.dll>]（把代理装到 --client 目录，配合 auto 使用）\n"
+    "调试: --install-proxy [--proxy-source <dll>] [--proxy-target winmm|version]（把代理装到 --client 目录，配合 auto 使用）\n"
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
@@ -2559,6 +2569,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
+
+
+
 
 
 
