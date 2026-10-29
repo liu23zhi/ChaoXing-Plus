@@ -1067,7 +1067,7 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     WCHAR dir[CX_CLEANUP_PATH_CAP], cef[CX_CLEANUP_PATH_CAP], winmm[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     WCHAR version[64];
     WORD machine = 0, major = 0, minor = 0;
-    BOOL hasPort = FALSE, hasPipe = FALSE, proxyPresent = FALSE, markerPresent = FALSE;
+    BOOL hasPort = FALSE, hasPipe = FALSE, proxyPresent = FALSE, markerPresent = FALSE, proxyUsable = TRUE;
     if (!clientPath || !*clientPath) { h_print(L"probe: pass --probe-client <CXExam.exe>"); return FALSE; }
     h_print(L"probe: client="); h_print(clientPath); h_print(L"\n");
     if (!proc_pe(clientPath, &machine, &major, &minor, version, 64)) { h_print(L"probe: not a valid PE"); return FALSE; }
@@ -1101,12 +1101,12 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     {
         BOOL clientUsesWinmm = h_file_contains_ci(clientPath, "winmm.dll");
         h_print(L"probe: client-winmm="); h_print(clientUsesWinmm ? L"yes" : L"no"); h_print(L"\n");
-        if (!clientUsesWinmm) markerPresent = FALSE;
+        if (!clientUsesWinmm) proxyUsable = FALSE;
     }
     h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
     h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent"); h_print(L"\n");
     h_print(L"probe: suggested=");
-    if (markerPresent) h_print(L"dll-proxy");
+    if (markerPresent && proxyUsable) h_print(L"dll-proxy");
     else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
     else h_print(L"cdp-port");
     h_print(L"\n");
@@ -2281,6 +2281,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

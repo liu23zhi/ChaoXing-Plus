@@ -28,6 +28,7 @@ test('代理安装/探测/卸载的完整闭环', { skip: process.platform !== '
     const before = run(['--probe-client', client]);
     assert.equal(before.status, 0, before.output);
     assert.match(before.output, /marker=absent/u);
+    assert.match(before.output, /client-winmm=/u);
     assert.match(before.output, /suggested=cdp-port/u);
 
     const install = run(['--install-proxy', '--proxy-source', proxyDll, '--client', client]);
@@ -38,7 +39,10 @@ test('代理安装/探测/卸载的完整闭环', { skip: process.platform !== '
     const after = run(['--probe-client', client]);
     assert.equal(after.status, 0, after.output);
     assert.match(after.output, /marker=present/u);
-    assert.match(after.output, /suggested=dll-proxy/u);
+    // 夹具不导入 winmm.dll：标记如实显示 present，但不建议 dll-proxy（真实客户端导入时才建议）。
+    assert.match(after.output, /marker=present/u);
+    assert.match(after.output, /client-winmm=no/u);
+    assert.match(after.output, /suggested=cdp-port/u);
 
     const uninstall = run(['--uninstall-proxy', '--client', client]);
     assert.equal(uninstall.status, 0, uninstall.output);
@@ -63,3 +67,4 @@ test('缺少标记时拒绝卸载未知 winmm.dll', { skip: process.platform !==
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
