@@ -1472,6 +1472,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
     "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（默认 auto，按顺序探测）\n"
+    "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
@@ -1479,6 +1480,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --no-scan-cache（禁读写缓存）；缓存有效期 5 分钟，仅扫描列表始终实时。\n"
             "配置: --config <path> --options-json <JSON|@file> --print-effective-config\n"
             "面板: --panel|--no-panel --panel-expanded|--panel-collapsed\n"
+    "面板: --panel-all-pages（非考试页也显示面板，便于确认注入是否生效）\n"
             "  --panel-top <0-10000> --panel-right <0-10000> --panel-width <320-800>\n"
             "  --panel-theme <pink|blue|green>（面板主题，未知值回退 pink）\n"
             "答题: --answer-mode auto|manual --answer-key <shortcut> --answer-threads <1-4> --answer-retry <0-20>\n"
@@ -1501,6 +1503,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --retain-data|--no-retain-data（退出时是否删除本次运行创建的日志/报告/诊断；默认保留）\n"
             "  --delete-config（退出时删除显式 --config 文件；不能与 --no-disk-write 同用）\n"
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
+    "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
             "状态: --version --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
@@ -1599,6 +1602,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
