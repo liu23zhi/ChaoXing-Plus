@@ -702,6 +702,13 @@ static BOOL h_proxy_destination_free(const WCHAR *targetDir) {
     return GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options);
+/* 自愈是否有意义：端口被别的进程占用时不要重试（换代理也没用，还可能干扰别人）。 */
+static BOOL h_selfheal_worthwhile(void) {
+    if (h_report.endpointProbe.listenerSeen) return FALSE;
+    if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_LISTENER_NOT_OWNED] > 0) return FALSE;
+    if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_HTTP_FAILED] > 0) return FALSE;
+    return TRUE;
+}
 /* 端口方式没拿到端点时，尝试改用 settings-only 代理重试一次（自愈）。 */
 static BOOL h_selfheal_retry(const CX_OPTIONS *options, HANDLE clientProcess) {
     if (h_dll_proxy_mode) return FALSE;
@@ -2547,7 +2554,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     /* Window DPI/snapshot sampling runs once the CDP endpoint is ready (owned launch only). */
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
     ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);        if (ok || h_needs_elevation || options->attachPortSet) break;
-        if (attempt == 0 && h_selfheal_retry(options, client)) {
+        if (attempt == 0 && h_selfheal_worthwhile() && h_selfheal_retry(options, client)) {
             h_audit_event("warn", "inject", "Endpoint unavailable; retrying with settings-only proxy");
             if (!options->quiet) h_print(L"端口方式未拿到端点，改用 settings-only 代理重试\n");
             continue;
@@ -2803,6 +2810,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
