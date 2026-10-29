@@ -1968,6 +1968,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_dll_proxy_mode = TRUE;
         h_report.commandLineInjected = TRUE;
         if (!options->quiet) {
+                h_print(L"注意：实测 dll-proxy 在 CEF 75 客户端上无效（命令行早于 winmm 加载即被读取），仅作研究保留\n");
             h_print(L"dll-proxy: proxy found at ");
             h_print(proxyDll);
             h_print(L"; launching without --remote-debugging-port and letting the proxy append it\n");
@@ -2205,7 +2206,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":true,\"dll-proxy\":true,\"input\":false}}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":true,\"dll-proxy\":false,\"input\":false}}\n");
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2290,6 +2291,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
