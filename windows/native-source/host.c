@@ -1528,6 +1528,10 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         h_print(L"\n");
     }
     h_print(L"probe: packed="); h_print(h_pe_section_named(clientPath, ".themida") ? L"themida" : L"none"); h_print(L"\n");
+    h_print(L"probe: channel=");
+    if (h_pe_section_named(clientPath, ".themida")) h_print(L"dll-proxy");
+    else h_print(L"cdp-port");
+    h_print(L"\n");
     h_print(L"probe: proxies=");
     {
         int printed = 0, ci;
@@ -1579,6 +1583,20 @@ static BOOL h_probe_all(void) {
     for (i = 0; i < result.count; ++i) {
         h_print(L"---\n");
         if (!h_probe_client(result.items[i].path)) ok = FALSE;
+    }
+    {
+        /* 汇总：每个客户端按 auto 逻辑会走哪条通道。 */
+        DWORD portableClients = 0, proxyClients = 0;
+        for (i = 0; i < result.count; ++i) {
+            if (h_pe_section_named(result.items[i].path, ".themida")) ++proxyClients;
+            else ++portableClients;
+        }
+        {
+            WCHAR line[128];
+            wsprintfW(line, L"plan: clients=%lu cdp-port=%lu dll-proxy=%lu", (unsigned long)result.count,
+                      (unsigned long)portableClients, (unsigned long)proxyClients);
+            h_print(line); h_print(L"\n");
+        }
     }
     cx_discovery_free(&result);
     return ok;
@@ -2810,6 +2828,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

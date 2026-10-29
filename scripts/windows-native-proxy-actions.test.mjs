@@ -30,6 +30,7 @@ test('代理安装/探测/卸载的完整闭环', { skip: process.platform !== '
     assert.match(before.output, /marker=absent/u);
     assert.match(before.output, /client-winmm=/u);
     assert.match(before.output, /suggested=cdp-port/u);
+    assert.match(before.output, /probe: channel=cdp-port/u);
 
     const install = run(['--install-proxy', '--proxy-source', proxyDll, '--client', client]);
     assert.equal(install.status, 0, install.output);
@@ -248,5 +249,10 @@ test('KnownDLLs 里的名字（imm32）拒绝作为载体', { skip: process.plat
     await rm(dir, { recursive: true, force: true });
   }
 });
-
+test('--probe-all 输出通道汇总 plan 行', { skip: process.platform !== 'win32' || !ready() }, () => {
+  const result = run(['--probe-all', '--no-disk-write']);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /probe-all: candidates=\d+/u);
+  assert.match(result.output, /plan: clients=\d+ cdp-port=\d+ dll-proxy=\d+/u);
+});
 
