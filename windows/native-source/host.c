@@ -1941,7 +1941,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
-    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto 有代理时优先 dll-proxy；cdp-pipe 目前注入 bootstrap+bundle，无配置同步）\n"
+    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto 有代理时优先 dll-proxy；cdp-pipe 已完成 bootstrap+bundle+配置同步）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
@@ -1994,7 +1994,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true,\"input\":false}}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":true,\"dll-proxy\":true,\"input\":false}}\n");
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2077,6 +2077,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
