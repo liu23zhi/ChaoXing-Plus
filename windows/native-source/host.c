@@ -297,7 +297,24 @@ static BOOL h_cat(WCHAR *dst, DWORD cap, const WCHAR *src) {
     return TRUE;
 }
 
-/* 把自身复制到 %TEMP%\cx-<pid>\s.exe，用原参数拉起副本（追加 --staged-boot）。 */
+/* 生成随机文件名主干（8 位十六进制），避免固定 s.exe 被针对性查找。 */
+static void h_random_stem(WCHAR *out, DWORD cap) {
+    LARGE_INTEGER counter;
+    DWORD seed, value;
+    int i;
+    if (!out || cap < 9) { if (out && cap) out[0] = 0; return; }
+    QueryPerformanceCounter(&counter);
+    seed = GetTickCount() ^ (GetCurrentProcessId() * 2654435761u) ^ (DWORD)counter.LowPart ^ (DWORD)counter.HighPart;
+    if (!seed) seed = 0x9E3779B9u;
+    value = seed;
+    for (i = 0; i < 8; ++i) {
+        static const WCHAR hex[] = L"0123456789abcdef";
+        value ^= value << 13; value ^= value >> 17; value ^= value << 5;
+        out[i] = hex[value & 0xF];
+    }
+    out[8] = 0;
+}
+/* 把自身复制到 %TEMP%\cx-<pid>\<随机>.exe，用原参数拉起副本（追加 --staged-boot）。 */
 /* 镜像已经位于 %TEMP%\cx-* 时说明本进程就是副本：绝不再复制，避免无限递归。 */
 static BOOL h_stage_under_temp(void) {
     WCHAR prefix[CX_CLEANUP_PATH_CAP];
@@ -332,7 +349,14 @@ static BOOL h_silent_stage(void) {
     wsprintfW(number, L"%lu", (unsigned long)GetCurrentProcessId());
     if (!h_cat(dir, CX_CLEANUP_PATH_CAP, number)) return FALSE;
     if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
-    if (!h_copy(staged, CX_CLEANUP_PATH_CAP, dir) || !h_cat(staged, CX_CLEANUP_PATH_CAP, L"\\s.exe")) return FALSE;
+    if (!h_copy(staged, CX_CLEANUP_PATH_CAP, dir)) return FALSE;
+    {
+        WCHAR stem[16];
+        h_random_stem(stem, 16);
+        if (!h_cat(staged, CX_CLEANUP_PATH_CAP, L"\\") ||
+            !h_cat(staged, CX_CLEANUP_PATH_CAP, stem) ||
+            !h_cat(staged, CX_CLEANUP_PATH_CAP, L".exe")) return FALSE;
+    }
     if (!CopyFileW(h_exe_path, staged, FALSE)) { RemoveDirectoryW(dir); return FALSE; }
     /* 副本打上 隐藏+系统 双属性：资源管理器默认（含"显示隐藏项"但未取消"隐藏受保护的操作系统文件"）都看不到；任务管理器/EDR 仍可见。 */
     SetFileAttributesW(staged, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
@@ -1355,6 +1379,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

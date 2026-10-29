@@ -182,7 +182,7 @@ test('--stage-boot 从 %TEMP% 副本启动：原目录清空，副本与副本�
       if (!stagedLeft) break;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    assert.equal(stagedLeft, false, '暂存副本目录（连同 s.exe）必须在退出后删除');
+    assert.equal(stagedLeft, false, '暂存副本目录（连同随机命名的副本文件）必须在退出后删除');
   } finally {
     killOwnedClients(directory);
     if (stagedDirectory) await rm(stagedDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
@@ -221,3 +221,4 @@ test('模拟 + 暂存：原目录不删文件，但副本与副本目录仍清�
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
   }
 });
+
