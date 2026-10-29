@@ -168,4 +168,27 @@ test('--proxy-target uxtheme 与 auto 解析', { skip: process.platform !== 'win
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('载体冲突时 auto 换下一个载体，marker 记录载体名且卸载不动第三方 DLL', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const proxyVersion = resolve('build-windows/hook/version.dll');
+  if (!existsSync(proxyVersion)) return;
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-clash-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    // 伪造第三方 winmm.dll（无 marker），auto 应改用 version
+    await copyFile(fixtureExe, join(dir, 'winmm.dll'));
+    const install = run(['--install-proxy', '--proxy-target', 'auto', '--proxy-source', proxyVersion, '--client', client]);
+    assert.equal(install.status, 0, install.output);
+    assert.match(install.output, /载体冲突，改用 version/u);
+    assert.equal(existsSync(join(dir, 'version.dll')), true);
+    const marker = await readFile(join(dir, 'cxhook-proxy.marker'), 'utf8');
+    assert.match(marker, /carrier=version/u);
+    const uninstall = run(['--uninstall-proxy', '--client', client]);
+    assert.equal(uninstall.status, 0, uninstall.output);
+    assert.equal(existsSync(join(dir, 'version.dll')), false, '卸载应删除我们装的载体');
+    assert.equal(existsSync(join(dir, 'winmm.dll')), true, '不得删除第三方 winmm.dll');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 

@@ -326,6 +326,7 @@ static BOOL h_silent_active = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
+static BOOL h_proxy_target_auto;
 static WCHAR h_proxy_target[16] = L"winmm";
 static const WCHAR *h_proxy_dll_suffix(void) {
     static WCHAR suffix[32];
@@ -668,9 +669,19 @@ static void h_resolve_proxy_target(const WCHAR *clientPath) {
     }
     h_copy(h_proxy_target, 16, L"winmm");
 }
+/* 目标位置的 <carrier>.dll 是否可被我们使用：不存在，或存在且 marker 是我们写的。 */
+static BOOL h_proxy_destination_free(const WCHAR *targetDir) {
+    WCHAR path[CX_CLEANUP_PATH_CAP];
+    WCHAR marker[CX_CLEANUP_PATH_CAP];
+    if (!h_copy(path, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(path, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return TRUE;
+    if (!h_copy(marker, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(marker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker")) return FALSE;
+    return GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
+}
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
-    if (h_same(h_proxy_target, L"auto")) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
+    h_proxy_target_auto = (options->proxyTarget[0] == 0) || h_same(h_proxy_target, L"auto");
+    if (h_proxy_target_auto) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
     WCHAR hostDir[CX_CLEANUP_PATH_CAP];
     BOOL ok;
@@ -714,6 +725,24 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         return FALSE;
     }
     if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) { h_print(L"install-proxy: path too long"); return FALSE; }
+    /* 载体冲突：目标位置已有第三方同名 DLL 时，auto 模式换下一个载体，显式模式直接报错。 */
+    if (!h_proxy_destination_free(targetDir)) {
+        BOOL autoTarget = h_proxy_target_auto;
+        static const WCHAR *const order[3] = { L"winmm", L"version", L"uxtheme" };
+        int i, picked = -1;
+        if (autoTarget) {
+            for (i = 0; i < 3; ++i) {
+                h_copy(h_proxy_target, 16, order[i]);
+                if (h_proxy_destination_free(targetDir)) { picked = i; break; }
+            }
+        }
+        if (picked < 0) {
+            h_print(L"install-proxy: 目标位置已有同名的第三方 DLL，且没有我们的 marker；请换 --proxy-target 或先手工清理\n");
+            return FALSE;
+        }
+        if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) { h_print(L"install-proxy: path too long"); return FALSE; }
+        if (!options->quiet) { h_print(L"install-proxy: 载体冲突，改用 "); h_print(h_proxy_target); h_print(L"\n"); }
+    }
     ok = CopyFileW(source, target, FALSE) != 0;
     if (ok && options->proxyPortSet) {
         WCHAR portPath[CX_CLEANUP_PATH_CAP];
@@ -742,7 +771,15 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
             markerFile = CreateFileW(markerPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (markerFile != INVALID_HANDLE_VALUE) {
                 DWORD written = 0;
-                WriteFile(markerFile, "cxhook-proxy\r\n", 14, &written, NULL);
+                {
+                    char markerText[64];
+                    DWORD at = 0, k = 0;
+                    static const char prefix[] = "cxhook-proxy\r\ncarrier=";
+                    while (prefix[at]) { markerText[at] = prefix[at]; ++at; }
+                    while (h_proxy_target[k] && at < 56) { markerText[at++] = (char)h_proxy_target[k++]; }
+                    markerText[at++] = '\r'; markerText[at++] = '\n';
+                    WriteFile(markerFile, markerText, at, &written, NULL);
+                }
                 CloseHandle(markerFile);
             }
         }
@@ -768,7 +805,8 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
 /* 卸载代理：只有当目录里有安装标记时才删除，避免误删第三方的 winmm.dll。 */
 static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
-    if (h_same(h_proxy_target, L"auto")) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
+    h_proxy_target_auto = (options->proxyTarget[0] == 0) || h_same(h_proxy_target, L"auto");
+    if (h_proxy_target_auto) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     WCHAR targetDir[CX_CLEANUP_PATH_CAP], dll[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
     BOOL removed = FALSE;
     if (options->clientPath[0]) {
@@ -783,6 +821,29 @@ static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) {
         h_print(L"uninstall-proxy: marker not found; refusing to delete an unknown winmm.dll (use --install-proxy to place ours)");
         return FALSE;
+    }
+    /* marker 里记录了载体名（旧版 marker 无此行，则回落到当前目标）。 */
+    {
+        HANDLE markerRead = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (markerRead != INVALID_HANDLE_VALUE) {
+            char text[128];
+            DWORD got = 0;
+            if (ReadFile(markerRead, text, 127, &got, NULL) && got > 0) {
+                DWORD i;
+                text[got] = 0;
+                for (i = 0; i + 8 < got; ++i) {
+                    if (text[i] == 'c' && text[i + 1] == 'a' && text[i + 2] == 'r' && text[i + 3] == 'r') {
+                        DWORD j = i + 8, k = 0;
+                        WCHAR name[16];
+                        while (text[j] && text[j] != '\r' && text[j] != '\n' && k < 15) { name[k++] = (WCHAR)text[j++]; }
+                        name[k] = 0;
+                        if (k) h_copy(h_proxy_target, 16, name);
+                        break;
+                    }
+                }
+            }
+            CloseHandle(markerRead);
+        }
     }
     if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
     /* 客户端子进程可能短暂占用 winmm.dll：重试约 5 秒再判定失败。 */
@@ -2666,6 +2727,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
+
 
 
 
