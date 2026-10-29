@@ -688,6 +688,7 @@ typedef struct {
     char sessionId[80];
 } H_PIPE_CDP;
 
+static DWORD h_pipe_open_error;
 static BOOL h_pipe_open(H_PIPE_CDP *state, const WCHAR *clientPath) {
     SECURITY_ATTRIBUTES inherit;
     STARTUPINFOW si;
@@ -698,6 +699,7 @@ static BOOL h_pipe_open(H_PIPE_CDP *state, const WCHAR *clientPath) {
     if (!state || !clientPath || !*clientPath) return FALSE;
     ZeroMemory(state, sizeof(*state));
     state->nextId = 1;
+    h_pipe_open_error = 0;
     command[at++] = L'"';
     for (k = 0; clientPath[k] && at < 900; ++k) command[at++] = clientPath[k];
     command[at++] = L'"';
@@ -724,6 +726,7 @@ static BOOL h_pipe_open(H_PIPE_CDP *state, const WCHAR *clientPath) {
     si.hStdError = childOut;
     ZeroMemory(&pi, sizeof(pi));
     if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        h_pipe_open_error = GetLastError();
         CloseHandle(childIn); CloseHandle(childOut);
         CloseHandle(state->toChild); CloseHandle(state->fromChild);
         state->toChild = NULL; state->fromChild = NULL;
@@ -868,7 +871,14 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     BOOL ok = FALSE;
     targetId[0] = 0;
     if (!options->quiet) h_print(L"cdp-pipe: launching client with --remote-debugging-pipe\n");
-    if (!h_pipe_open(&state, h_selected_path)) { h_error(error, errorCap, L"cdp-pipe: launch failed"); return FALSE; }
+    if (!h_pipe_open(&state, h_selected_path)) {
+        if (h_pipe_open_error == ERROR_ELEVATION_REQUIRED) {
+            h_error(error, errorCap, L"cdp-pipe: client requires administrator rights; 请以管理员身份运行宿主后再用 cdp-pipe（宿主当前无法为该模式自动提权）");
+        } else {
+            h_error(error, errorCap, L"cdp-pipe: launch failed");
+        }
+        return FALSE;
+    }
     h_client_pid = state.pid;
     Sleep(1200);
     if (h_pipe_call(&state, "Target.getTargets", NULL, &reply, 8000) != 1) { h_error(error, errorCap, L"cdp-pipe: Target.getTargets failed"); goto done; }
@@ -1904,7 +1914,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         || !cx_asset_load(L"trampoline.js", options->assetsDirSet ? options->assetsDir : NULL, &trampoline, &trampolineLength, error, errorCap)) goto done;
     if (!h_preflight_assets(options, bootstrapLength, bundleLength, style, styleLength, error, errorCap)) goto done;
     if (options->injectModeSet && h_same(options->injectMode, L"cdp-pipe")) {
-        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, error, errorCap)) goto done;
+        h_report.injectMode = "cdp-pipe";
+        if (!h_pipe_bootstrap(options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, error, errorCap)) {
+            h_report.stopReason = "pipe-launch-failed";
+            goto done;
+        }
         h_report.stopReason = "pipe-bootstrap-complete";
         h_report.injectMode = "cdp-pipe";
         ok = TRUE;
@@ -2291,6 +2305,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
