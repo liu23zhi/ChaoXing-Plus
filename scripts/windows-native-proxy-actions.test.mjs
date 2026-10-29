@@ -235,4 +235,17 @@ test('小载体 msimg32 / sensapi 可安装并卸载', { skip: process.platform 
     }
   }
 });
+test('KnownDLLs 里的名字（imm32）拒绝作为载体', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-known-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    const result = run(['--install-proxy', '--proxy-target', 'imm32', '--proxy-source', proxyDll, '--client', client]);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /KnownDLLs/u);
+    assert.equal(existsSync(join(dir, 'imm32.dll')), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 

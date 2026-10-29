@@ -664,7 +664,22 @@ static BOOL h_proxy_file_present(const WCHAR *clientPath) {
     if (!h_cat(path, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) return FALSE;
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
-/* auto 载体选择：按客户端导入表挑一个能用的代理 DLL（winmm → version → uxtheme）。 */
+/* KnownDLLs 里的名字会被系统强制从 System32 加载，应用目录的同名 DLL 不起作用。
+   这里维护一份实测清单（imm32 已在 KnownDLLs 中，无法作为载体）。 */
+static BOOL h_carrier_is_known_dll(const WCHAR *name) {
+    static const WCHAR *const denied[] = {
+        L"imm32", L"kernel32", L"user32", L"gdi32", L"advapi32", L"ole32", L"oleaut32",
+        L"shell32", L"shlwapi", L"comdlg32", L"comctl32", L"rpcrt4", L"ws2_32", L"msvcrt",
+        L"ntdll", L"userenv", L"wininet", L"crypt32", L"msvcrt20"
+    };
+    int i;
+    if (!name) return FALSE;
+    for (i = 0; i < (int)(sizeof(denied) / sizeof(denied[0])); ++i) {
+        if (h_same(name, denied[i])) return TRUE;
+    }
+    return FALSE;
+}
+/* auto 载体选择：按客户端导入表挑一个能用的代理 DLL（跳过 KnownDLLs）。 */
 static void h_resolve_proxy_target(const WCHAR *clientPath) {
     int i;
     for (i = 0; i < h_proxy_carrier_count; ++i) {
@@ -672,6 +687,7 @@ static void h_resolve_proxy_target(const WCHAR *clientPath) {
         int k = 0;
         while (h_proxy_carriers[i][k] && k < 24) { dll[k] = h_proxy_carriers[i][k]; ++k; }
         dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+        if (h_carrier_is_known_dll(h_proxy_carriers[i])) continue;
         if (h_pe_imports_dll(clientPath, dll)) { h_copy(h_proxy_target, 16, h_proxy_carriers[i]); return; }
     }
     h_copy(h_proxy_target, 16, L"winmm");
@@ -718,6 +734,10 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
     h_proxy_target_auto = (options->proxyTarget[0] == 0) || h_same(h_proxy_target, L"auto");
     if (h_proxy_target_auto) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
+    else if (h_carrier_is_known_dll(h_proxy_target)) {
+        h_print(L"install-proxy: 该名字在 KnownDLLs 里（系统强制从 System32 加载），应用目录放同名 DLL 无效；请换一个载体\n");
+        return FALSE;
+    }
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
     WCHAR hostDir[CX_CLEANUP_PATH_CAP];
     BOOL ok;
@@ -1509,6 +1529,7 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
             int k = 0;
             while (h_proxy_carriers[ci][k] && k < 24) { dll[k] = h_proxy_carriers[ci][k]; ++k; }
             dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+            if (h_carrier_is_known_dll(h_proxy_carriers[ci])) continue;
             if (h_pe_imports_dll(h_probe_path_global(), dll)) {
                 if (printed) h_print(L",");
                 h_print(h_proxy_carriers[ci]);
@@ -2782,6 +2803,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
