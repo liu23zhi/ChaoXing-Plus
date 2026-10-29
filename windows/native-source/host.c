@@ -1103,8 +1103,17 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         h_print(L"probe: client-winmm="); h_print(clientUsesWinmm ? L"yes" : L"no"); h_print(L"\n");
         if (!clientUsesWinmm) proxyUsable = FALSE;
     }
-    h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
-    h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent"); h_print(L"\n");
+    {
+        WCHAR portFile[CX_CLEANUP_PATH_CAP];
+        BOOL portFilePresent = FALSE;
+        if (h_copy(portFile, CX_CLEANUP_PATH_CAP, dir) && h_cat(portFile, CX_CLEANUP_PATH_CAP, L"\\cxhook-port.txt")) {
+            portFilePresent = GetFileAttributesW(portFile) != INVALID_FILE_ATTRIBUTES;
+        }
+        h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
+        h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent");
+        h_print(L" portfile="); h_print(portFilePresent ? L"present" : L"absent");
+        h_print(L"\n");
+    }
     h_print(L"probe: suggested=");
     if (markerPresent && proxyUsable) h_print(L"dll-proxy");
     else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
@@ -2281,6 +2290,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
