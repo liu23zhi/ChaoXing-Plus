@@ -40,7 +40,13 @@ done
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*) ;;
   *)
+    # 在 WSL / Linux bash 下：若能看到 Windows 命令解释器，直接委托给 .cmd 入口。
+    if command -v cmd.exe >/dev/null 2>&1; then
+      echo "[build-windows] 当前不是 Git Bash/MSYS2，转交 windows/native-source/build-windows.cmd 执行。" >&2
+      exec cmd.exe /c "windows\\native-source\\build-windows.cmd" "$@"
+    fi
     echo "[build-windows] 该脚本需在 Windows 的 Git Bash / MSYS2 / Cygwin 中运行（检测到 $(uname -s 2>/dev/null || echo unknown)）。" >&2
+    echo "[build-windows] 也可以直接运行：windows\\native-source\\build-windows.cmd" >&2
     exit 2
     ;;
 esac
@@ -98,3 +104,4 @@ echo "[build-windows] 完成："
 echo "  原生 x86 单文件：${PACKAGE_DIR}/chaoxing_plus.exe（无外部 DLL/运行库依赖）"
 echo "  原生启动入口：   ${PACKAGE_DIR}/start-windows.cmd"
 echo "  完整性校验：      node ${PACKAGE_DIR}/verify-release.mjs"
+
