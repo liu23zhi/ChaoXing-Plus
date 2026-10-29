@@ -189,3 +189,27 @@ test('Windows 专用文件归入三目录，插件构建继续使用原位共享
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts.build, 'node build.mjs');
 });
+test('windows 脚本保持纯 ASCII，避免控制台/PS 5.1 解码乱码', async () => {
+  const directories = ['windows/native-source', 'windows/node-source', 'windows/share-file'];
+  const extensions = ['.cmd', '.ps1', '.vbs'];
+  for (const directory of directories) {
+    let entries;
+    try {
+      entries = await readdir(path.join(root, directory), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const extension = extensions.find((ext) => entry.name.endsWith(ext));
+      if (!extension) continue;
+      const bytes = await readFile(path.join(root, directory, entry.name));
+      assert.equal(bytes.filter((value) => value > 127).length, 0,
+        `${directory}/${entry.name} 必须保持纯 ASCII（中文会按 ANSI 解码成乱码）`);
+      if (extension === '.cmd') {
+        assert.equal(bytes.includes(13), false, `${directory}/${entry.name} 必须使用 LF 换行`);
+      }
+    }
+  }
+});
+

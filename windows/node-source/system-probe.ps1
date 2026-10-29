@@ -1,4 +1,4 @@
-﻿param(
+param(
   [int]$ClientPid = 0,
   [string]$ProcessName = 'CXExam',
   [string]$ScreenshotPath = ''
@@ -39,7 +39,7 @@ $result = [ordered]@{
 try {
   $result.appliedDpi = (Get-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name AppliedDPI -ErrorAction Stop).AppliedDPI
 } catch {
-  # AppliedDPI 在部分 Windows 版本不存在，用 GetDpiForSystem 兜底，不记为错误
+  # AppliedDPI is missing on some Windows builds; fall back to GetDpiForSystem and do not count it as an error
 }
 try {
   [CxRenderProbe]::SetProcessDPIAware() | Out-Null
@@ -84,7 +84,7 @@ try {
   $result.errors += ('processes: ' + $_.Exception.Message)
 }
 
-# 找客户端主窗口：优先目标 PID，其次任意可见的 CXExam 窗口（CEF 主窗口可能在子进程）。
+# Find the client main window: prefer the target PID, then any visible CXExam window (CEF main window may live in a child process).
 $candidates = @()
 if ($ClientPid -gt 0) {
   $direct = Get-Process -Id $ClientPid
