@@ -191,4 +191,27 @@ test('载体冲突时 auto 换下一个载体，marker 记录载体名且卸载�
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('端口拿不到端点时自动改用 settings-only 代理重试（端口自愈）', { skip: process.platform !== 'win32' || !ready() }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-heal-'));
+  try {
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+    // 把 .text 改名成 .xemida0：既有 PE 结构不变，又不会被判为加壳 → auto 走 cdp-port
+    const image = await readFile(client);
+    const at = image.indexOf(Buffer.from('.text\0\0\0', 'latin1'));
+    image.write('.xemida0', at, 'latin1');
+    await writeFile(client, image);
+
+    const result = run([
+      '--client', client,
+      '--no-elevate', '--no-log', '--no-disk-write',
+      '--debug-timeout', '1500', '--duration', '2000'
+    ]);
+    assert.match(result.output, /改用 settings-only 代理重试/u);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false, `自愈后必须清理代理: ${result.output}`);
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 

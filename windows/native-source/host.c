@@ -419,6 +419,7 @@ static BOOL h_silent_stage(void) {
     int argc = 0;
     int i;
     BOOL ok = FALSE;
+    int attempt = 0;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD got;
@@ -516,6 +517,7 @@ static int h_pipe_client_test(const WCHAR *clientPath) {
     DWORD index = 0;
     int status;
     BOOL ok = FALSE;
+    int attempt = 0;
     int elevationRequired = 0;
     static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
     if (!clientPath || !*clientPath) { h_print(L"pipe-client: missing client path"); return 0; }
@@ -677,6 +679,35 @@ static BOOL h_proxy_destination_free(const WCHAR *targetDir) {
     if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return TRUE;
     if (!h_copy(marker, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(marker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker")) return FALSE;
     return GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
+}
+static BOOL h_install_proxy(const CX_OPTIONS *options);
+/* 端口方式没拿到端点时，尝试改用 settings-only 代理重试一次（自愈）。 */
+static BOOL h_selfheal_retry(const CX_OPTIONS *options, HANDLE clientProcess) {
+    if (h_dll_proxy_mode) return FALSE;
+    if (options->injectModeSet && !h_same(options->injectMode, L"auto")) return FALSE;
+    if (options->attachPortSet) return FALSE;
+    /* 先停掉本次启动的客户端，避免两个实例并存。 */
+    if (clientProcess) {
+        TerminateProcess(clientProcess, 0);
+        WaitForSingleObject(clientProcess, 5000);
+    }
+    /* 等实例彻底退出，否则启动前的实例检查会判定为"已在运行"。 */
+    {
+        int wait = 0;
+        DWORD running = 1;
+        WCHAR waitError[256];
+        while (wait < 25) {
+            if (!proc_check_instances(h_selected_path, &running, waitError, 256)) break;
+            if (!running) break;
+            Sleep(200);
+            ++wait;
+        }
+    }
+    if (!h_install_proxy(options)) return FALSE;
+    h_proxy_auto_installed = TRUE;
+    h_dll_proxy_mode = TRUE;
+    h_report.injectMode = "dll-proxy";
+    return TRUE;
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
@@ -1154,6 +1185,7 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     DWORD paramsCap, at = 0;
     int offset;
     BOOL ok = FALSE;
+    int attempt = 0;
     targetId[0] = 0;
     if (!options->quiet) h_print(L"cdp-pipe: launching client with --remote-debugging-pipe\n");
     if (!h_pipe_open(&state, h_selected_path)) {
@@ -1520,6 +1552,7 @@ static BOOL h_pipe_test(void) {
     char buffer[256];
     DWORD got = 0, index = 0;
     BOOL ok = FALSE;
+    int attempt = 0;
     static const WCHAR cmdToken[] = L"\"C:\\Windows\\System32\\cmd.exe\" /c echo PIPE-TEST-OK";
     while (cmdToken[index] && index < 500) { command[index] = cmdToken[index]; ++index; }
     command[index] = 0;
@@ -1869,6 +1902,7 @@ static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DW
     char *config = NULL, *expression = NULL;
     DWORD configLength = 0, capacity, at = 0;
     BOOL ok = FALSE;
+    int attempt = 0;
     if (outExpression) *outExpression = NULL;
     if (outLength) *outLength = 0;
     config = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
@@ -2186,6 +2220,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     char *bootstrap = NULL, *bundle = NULL, *style = NULL, *trampoline = NULL;
     DWORD bootstrapLength, bundleLength, styleLength, trampolineLength;
     BOOL ok = FALSE;
+    int attempt = 0;
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
@@ -2413,7 +2448,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     }
 
 
-    if (options->attachPortSet) port = (USHORT)options->attachPort;
+    h_zero(auditError, sizeof(auditError));
+    h_diagnostics = cx_diagnostics_create(options, auditError, 256);
+    if (!h_diagnostics) h_audit_event("warn", "diagnostics", "Page diagnostics unavailable; continuing without page diagnostics");
+    else if (auditError[0]) h_audit_event("warn", "diagnostics", "Page diagnostics path unavailable; continuing without page diagnostics");
+    for (attempt = 0; attempt < 2; ++attempt) {    if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
         CX_DPI_OVERRIDE *dpi = NULL;
         BOOL launched;
@@ -2471,13 +2510,17 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_report.clientPid = h_client_pid; h_report.port = port;
     if (h_silent_active && h_client_pid) cx_silent_client_started(&h_silent, h_client_pid);
     h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
-    h_zero(auditError, sizeof(auditError));
-    h_diagnostics = cx_diagnostics_create(options, auditError, 256);
-    if (!h_diagnostics) h_audit_event("warn", "diagnostics", "Page diagnostics unavailable; continuing without page diagnostics");
-    else if (auditError[0]) h_audit_event("warn", "diagnostics", "Page diagnostics path unavailable; continuing without page diagnostics");
+
     /* Window DPI/snapshot sampling runs once the CDP endpoint is ready (owned launch only). */
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
-    ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
+    ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);        if (ok || h_needs_elevation || options->attachPortSet) break;
+        if (attempt == 0 && h_selfheal_retry(options, client)) {
+            h_audit_event("warn", "inject", "Endpoint unavailable; retrying with settings-only proxy");
+            if (!options->quiet) h_print(L"端口方式未拿到端点，改用 settings-only 代理重试\n");
+            continue;
+        }
+        break;
+    }
     /* Publish the host-level diagnostics index after the run; failures are nonfatal. */
     if (h_diagnostics && cx_diagnostics_enabled(h_diagnostics)) {
         WCHAR summaryError[256];
@@ -2727,6 +2770,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
