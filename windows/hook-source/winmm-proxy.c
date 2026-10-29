@@ -182,6 +182,40 @@ static void proxy_patch_module_iat(HMODULE module) {
     }
 }
 
+
+/* 通过 PEB 遍历已加载模块（不调用 Toolhelp，避免加载器锁死锁）。 */
+typedef struct MY_LIST_ENTRY { struct MY_LIST_ENTRY *Flink; struct MY_LIST_ENTRY *Blink; } MY_LIST_ENTRY;
+typedef struct MY_LDR_ENTRY {
+    MY_LIST_ENTRY InLoadOrder;
+    MY_LIST_ENTRY InMemoryOrder;
+    MY_LIST_ENTRY InInitializationOrder;
+    PVOID DllBase;
+} MY_LDR_ENTRY;
+
+static void proxy_patch_all_modules_peb(void) {
+    void *peb = NULL;
+    MY_LIST_ENTRY *head;
+    MY_LIST_ENTRY *cursor;
+    int guard = 0;
+    __asm {
+        mov eax, fs:[0x30]
+        mov peb, eax
+    }
+    if (!peb) return;
+    /* PEB->Ldr 在 0x0C；Ldr->InMemoryOrderModuleList 在 0x14 */
+    {
+        unsigned char *ldr = *(unsigned char **)((unsigned char *)peb + 0x0C);
+        if (!ldr) return;
+        head = (MY_LIST_ENTRY *)(ldr + 0x14);
+    }
+    cursor = head->Flink;
+    while (cursor && cursor != head && guard++ < 512) {
+        BYTE *entry = (BYTE *)cursor;
+        HMODULE base = *(HMODULE *)(entry + 0x10); /* InMemoryOrderLinks(0x08) + DllBase(0x18) */
+        if (base) proxy_patch_module_iat(base);
+        cursor = cursor->Flink;
+    }
+}
 static void proxy_hook_command_line(void) {
     HANDLE snapshot;
     MODULEENTRY32W entry;
@@ -247,11 +281,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         /* 只做 LoadLibrary + GetProcAddress 填表；Toolhelp/日志交给工作线程，
            避免在加载器锁内枚举模块导致宿主 0xc0000142。 */
         proxy_init_table();
-        CreateThread(NULL, 0, proxy_warmup, NULL, 0, NULL);
+        proxy_prepare_command_line();
+        proxy_patch_all_modules_peb();
+        proxy_append(g_commandLineReady ? "winmm proxy: peb hook done" : "winmm proxy: peb hook skipped");
     } else if (reason == DLL_PROCESS_DETACH) {
         if (g_realWinmm) { FreeLibrary(g_realWinmm); g_realWinmm = NULL; }
     }
     return TRUE;
 }
+
 
 
