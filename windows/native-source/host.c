@@ -346,6 +346,8 @@ static BOOL h_silent_stage(void) {
             ZeroMemory(&pi, sizeof(pi));
             if (CreateProcessW(staged, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
                 CloseHandle(pi.hThread);
+                /* 模拟/调试模式：父进程等待副本，否则副本还没附加控制台父进程就已退出，日志全丢。 */
+                if (h_silent_simulate) WaitForSingleObject(pi.hProcess, INFINITE);
                 CloseHandle(pi.hProcess);
                 ok = TRUE;
             }
