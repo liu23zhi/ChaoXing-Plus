@@ -74,7 +74,8 @@
       <div class="section"><h2>CEF 注入兼容性</h2><div class="grid">
         <div class="field full"><label for="expectedBrowser">调试端点 Browser 校验文本</label><input id="expectedBrowser" value="Chrome/" placeholder="例如 Chrome/75"><p class="hint">只连接本次启动客户端的本机 CDP 端点；不匹配时中止，避免误连其它浏览器。</p></div>
         <div class="field"><label for="injectStrategy">注入策略</label><select id="injectStrategy"><option value="hybrid" selected>hybrid（Runtime 优先，script 回退）</option><option value="runtime">runtime（CDP 主世界）</option><option value="script">script（DOM script，Runtime 回退）</option></select></div>
-        <div class="field"><label for="injectRetries">注入重试次数 <small>0-5</small></label><input id="injectRetries" type="number" min="0" max="5" step="1" value="2"></div>
+        <div class="field"><label for="injectMode">注入方式 <small>仅原生宿主</small></label><select id="injectMode"><option value="auto" selected>auto（端口优先）</option><option value="cdp-port">cdp-port（已实现）</option><option value="cdp-pipe">cdp-pipe（未实现）</option><option value="dll-proxy">dll-proxy（未实现）</option><option value="input">input（未实现）</option></select></div>
+<div class="field"><label for="injectRetries">注入重试次数 <small>0-5</small></label><input id="injectRetries" type="number" min="0" max="5" step="1" value="2"></div>
         <div class="field"><label for="debugTimeout">调试端点超时（毫秒）</label><input id="debugTimeout" type="number" min="1000" max="120000" value="30000"></div>
         <div class="field"><label for="targetPollInterval">target 轮询间隔（毫秒）</label><input id="targetPollInterval" type="number" min="250" max="10000" value="1000"></div>
         <div class="field"><label for="bundleTimeout">bundle 执行超时（毫秒）</label><input id="bundleTimeout" type="number" min="1000" max="300000" value="120000"></div>
@@ -127,7 +128,7 @@
 <script>
 (function () {
   'use strict';
-  var ids = ['elevateOnStart','hideConsole','hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','dpiAware','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
+  var ids = ['elevateOnStart','hideConsole','hostType','nativePath','clientPath','scanMode','clientIndex','selection','ui','listClients','rescan','noScanCache','configPath','dataDir','optionsJson','report','noDiskWrite','retainData','deleteConfig','launcherPath','executionMode','stopClient','expectedBrowser','injectStrategy','injectMode','injectRetries','debugTimeout','targetPollInterval','bundleTimeout','injectBlankFrames','captureConsole','dpiAware','panel','panelExpanded','panelTop','panelRight','panelWidth','panelTheme','log','quiet','diagnose','diagnosticsDir','answerMode','answerKey','answerThreads','answerCountdown','answerRetry','showAnswerDialog','noAutoSubmit','wipeOnStart','wipePolicy','wipeRetries','wipeDelay','wipeInterval','wipeRuntimeRetry','selfDestructKey','selfDestructDelay','selfDestructOnFullscreenExit','noSelfDestructConfirm'];
   function el(id) { return document.getElementById(id); }
   function value(id) { var node = el(id); return node.type === 'checkbox' ? node.checked : node.value.trim(); }
   function setValue(id, next) { var node = el(id); if (!node) return; if (node.type === 'checkbox') node.checked = !!next; else node.value = next == null ? '' : next; }
@@ -548,7 +549,7 @@
     both('--execution-mode', s.executionMode || 'normal');
     var memoryMode = String(s.executionMode || 'normal') === 'memory';
     if (s.elevateOnStart) both('--elevate-on-start', true);
-    if (s.expectedBrowser !== 'Chrome/') both('--expected-browser', s.expectedBrowser); if (s.injectStrategy !== 'hybrid') both('--inject-strategy', s.injectStrategy); if (s.injectRetries !== '2') both('--inject-retries', s.injectRetries); if (!s.injectBlankFrames) both('--no-inject-blank-frames', true); if (!s.captureConsole) both('--no-capture-console', true); if (s.debugTimeout !== '30000') both('--debug-timeout', s.debugTimeout); if (s.targetPollInterval !== '1000') both('--target-poll-interval', s.targetPollInterval); if (s.bundleTimeout !== '120000') both('--bundle-timeout', s.bundleTimeout);
+    if (s.expectedBrowser !== 'Chrome/') both('--expected-browser', s.expectedBrowser); if (s.injectStrategy !== 'hybrid') both('--inject-strategy', s.injectStrategy); if (native && s.injectMode && s.injectMode !== 'auto') both('--inject-mode', s.injectMode); if (s.injectRetries !== '2') both('--inject-retries', s.injectRetries); if (!s.injectBlankFrames) both('--no-inject-blank-frames', true); if (!s.captureConsole) both('--no-capture-console', true); if (s.debugTimeout !== '30000') both('--debug-timeout', s.debugTimeout); if (s.targetPollInterval !== '1000') both('--target-poll-interval', s.targetPollInterval); if (s.bundleTimeout !== '120000') both('--bundle-timeout', s.bundleTimeout);
     if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== defaultDataDir(s)) both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite && !memoryMode) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.dpiAware) both('--dpi-aware', true); if (s.hideConsole && !native) both('--hide-console', true); if (s.noDiskWrite || memoryMode) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
     if (s.optionsJson) both('--options-json', s.optionsJson);
     both('--answer-mode', s.answerMode); both('--answer-key', s.answerKey); both('--answer-threads', s.answerThreads); both('--answer-countdown', s.answerCountdown); if (s.answerRetry !== '') both('--answer-retry', s.answerRetry); both(s.showAnswerDialog ? '--show-answer-dialog' : '--hide-answer-dialog', true); if (s.noAutoSubmit) both('--no-auto-submit', true);
@@ -741,3 +742,4 @@
 </script>
 </body>
 </html>
+
