@@ -1723,7 +1723,23 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
    cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
     h_report.injectMode = "auto";
     if (options->injectModeSet) h_report.injectMode = h_inject_mode_name(options->injectMode);
-    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
+    /* 显式 --inject-mode auto：若客户端目录存在我们安装的代理，则改走代理通道。
+       不传 --inject-mode 时保持 cdp-port，避免改变默认行为（elevation 夹具在不传该参数的情况下运行）。 */
+    if (options->injectModeSet && h_same(options->injectMode, L"auto") && !options->attachPortSet) {
+        static WCHAR autoDir[CX_CLEANUP_PATH_CAP], autoDll[CX_CLEANUP_PATH_CAP], autoMarker[CX_CLEANUP_PATH_CAP];
+        BOOL autoOk = h_parent_dir(h_selected_path, autoDir, CX_CLEANUP_PATH_CAP) &&
+                      h_copy(autoDll, CX_CLEANUP_PATH_CAP, autoDir) &&
+                      h_cat(autoDll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll") &&
+                      GetFileAttributesW(autoDll) != INVALID_FILE_ATTRIBUTES &&
+                      h_copy(autoMarker, CX_CLEANUP_PATH_CAP, autoDir) &&
+                      h_cat(autoMarker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker") &&
+                      GetFileAttributesW(autoMarker) != INVALID_FILE_ATTRIBUTES;
+        if (autoOk) {
+            h_dll_proxy_mode = TRUE;
+            h_report.commandLineInjected = TRUE;
+            if (!options->quiet) { h_print(L"auto selected dll-proxy: proxy installed at "); h_print(autoDll); h_print(L"\n"); }
+        }
+    }    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
         WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
         BOOL dirOk = options->injectProxyDirSet
             ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
@@ -1924,7 +1940,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
-    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（dll-proxy 需显式指定；cdp-pipe 已完成 bootstrap+bundle+配置同步）\n"
+    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（显式 auto 且已装代理时优先 dll-proxy；不带 --inject-mode 时等同 cdp-port）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
@@ -2060,6 +2076,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
