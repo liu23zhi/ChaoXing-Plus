@@ -522,6 +522,169 @@ static BOOL proxy_patch_module_iat_named(HMODULE module, const char *importName,
     }
     return patched;
 }
+
+/* ---- 通过 GetProcAddress 钩子拦截 cef_initialize（应对 Themida 运行时重建导入表） ---- */
+typedef FARPROC (WINAPI *GPA_FN)(HMODULE module, LPCSTR name);
+static GPA_FN g_realGetProcAddress;
+static void *g_realCefInitAddr;
+
+static int __cdecl proxy_cef_init_wrapper(const void *args, void *settings, void *application, void *sandbox) {
+    typedef int (__cdecl *CEF_INIT_FN)(const void *, void *, void *, void *);
+    CEF_INIT_FN real = (CEF_INIT_FN)g_realCefInitAddr;
+    if (settings && g_forcedPort) {
+        DWORD size = *(DWORD *)settings;
+        int offset = -1;
+        if (size >= 228) offset = 184;
+        else if (size == 216) offset = 172;
+        if (offset > 0 && (DWORD)offset + 4 <= size) {
+            *(int *)((BYTE *)settings + offset) = g_forcedPort;
+            proxy_append("winmm proxy: cef settings port applied");
+        }
+    }
+    if (!real) return -1;
+    return real(args, settings, application, sandbox);
+}
+
+static BOOL proxy_inline_hook(void *targetAddr, void *hookAddr, void **trampolineOut) {
+    BYTE *target = (BYTE *)targetAddr;
+    BYTE *trampoline;
+    DWORD oldProtect = 0;
+    int patchLength;
+    if (!target || !hookAddr) return FALSE;
+    if (target[0] == 0xE9) patchLength = 5;
+    else if (target[0] == 0xFF && target[1] == 0x25) patchLength = 6;
+    else return FALSE;
+    trampoline = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!trampoline) return FALSE;
+    CopyMemory(trampoline, target, patchLength);
+    trampoline[patchLength] = 0xE9;
+    *(DWORD *)(trampoline + patchLength + 1) = (DWORD)((target + patchLength) - (trampoline + patchLength + 5));
+    if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &oldProtect)) return FALSE;
+    if (patchLength == 5) {
+        target[0] = 0xE9;
+        *(DWORD *)(target + 1) = (DWORD)((BYTE *)hookAddr - (target + 5));
+    } else {
+        void **slot = (void **)VirtualAlloc(NULL, sizeof(void *), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!slot) return FALSE;
+        *slot = hookAddr;
+        target[0] = 0xFF;
+        target[1] = 0x25;
+        *(DWORD *)(target + 2) = (DWORD)slot;
+    }
+    VirtualProtect(target, 16, oldProtect, &oldProtect);
+    if (trampolineOut) *trampolineOut = trampoline;
+    return TRUE;
+}
+
+static FARPROC WINAPI proxy_GetProcAddress(HMODULE module, LPCSTR name) {
+    FARPROC result;
+    if (!g_realGetProcAddress) return NULL;
+    result = g_realGetProcAddress(module, name);
+    if (name && result && lstrcmpA(name, "cef_initialize") == 0) {
+        g_realCefInitAddr = (void *)result;
+        proxy_append("winmm proxy: cef_initialize resolved");
+        return (FARPROC)proxy_cef_init_wrapper;
+    }
+    return result;
+}
+
+static void proxy_hook_getprocaddress(void) {
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    void *target;
+    void *trampoline = NULL;
+    if (!k32 || g_realGetProcAddress) return;
+    target = (void *)GetProcAddress(k32, "GetProcAddress");
+    if (!target) return;
+    if (!proxy_inline_hook(target, (void *)proxy_GetProcAddress, &trampoline)) {
+        proxy_append("winmm proxy: GetProcAddress hook skipped");
+        return;
+    }
+    g_realGetProcAddress = (GPA_FN)trampoline;
+    proxy_append("winmm proxy: GetProcAddress hooked");
+}
+
+/* 6 字节 prologue 补丁：55 8B EC 83 EC xx → push <hook>; ret
+   用于 libcef!cef_initialize（不能假设 5 字节边界，但 6 字节是完整指令边界）。 */
+static void *g_cefInitTrampoline;
+
+static BOOL proxy_patch_pushret(void *targetAddr, void *hookAddr, void **trampolineOut) {
+    BYTE *target = (BYTE *)targetAddr;
+    BYTE *trampoline;
+    DWORD oldProtect = 0;
+    if (!target || !hookAddr) return FALSE;
+    /* 支持两种 32 位序言：
+       55 8B EC 83 EC xx        → 6 字节 push/ret 补丁
+       8B FF 55 8B EC           → 热补丁序言，5 字节边界，patch 在 +2 */
+    if (target[0] == 0x8B && target[1] == 0xFF && target[2] == 0x55 && target[3] == 0x8B && target[4] == 0xEC) {
+        BYTE *tramp2 = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tramp2) return FALSE;
+        CopyMemory(tramp2, target, 5);
+        tramp2[5] = 0xE9;
+        *(DWORD *)(tramp2 + 6) = (DWORD)((target + 5) - (tramp2 + 10));
+        if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &oldProtect)) return FALSE;
+        target[2] = 0xE9;
+        *(DWORD *)(target + 3) = (DWORD)((BYTE *)hookAddr - (target + 7));
+        VirtualProtect(target, 16, oldProtect, &oldProtect);
+        if (trampolineOut) *trampolineOut = tramp2;
+        return TRUE;
+    }
+    /* GCC/MinGW 序言：55 89 E5 53 57 56（6 字节边界）→ 同样用 push/ret */
+    if (target[0] == 0x55 && target[1] == 0x89 && target[2] == 0xE5 && target[3] == 0x53 && target[4] == 0x57 && target[5] == 0x56) {
+        BYTE *tramp3 = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tramp3) return FALSE;
+        CopyMemory(tramp3, target, 6);
+        tramp3[6] = 0xE9;
+        *(DWORD *)(tramp3 + 7) = (DWORD)((target + 6) - (tramp3 + 11));
+        if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &oldProtect)) return FALSE;
+        target[0] = 0x68;
+        *(DWORD *)(target + 1) = (DWORD)hookAddr;
+        target[5] = 0xC3;
+        VirtualProtect(target, 16, oldProtect, &oldProtect);
+        if (trampolineOut) *trampolineOut = tramp3;
+        return TRUE;
+    }
+    if (target[0] != 0x55 || target[1] != 0x8B || target[2] != 0xEC || target[3] != 0x83 || target[4] != 0xEC) {
+        char line[96];
+        int k = 0, i;
+        static const char *hex = "0123456789abcdef";
+        static const char prefix[] = "winmm proxy: cef_init prologue=";
+        while (prefix[k]) { line[k] = prefix[k]; ++k; }
+        for (i = 0; i < 8 && k < 90; ++i) { line[k++] = hex[target[i] >> 4]; line[k++] = hex[target[i] & 0xF]; line[k++] = ' '; }
+        line[k] = 0;
+        proxy_append(line);
+        return FALSE;
+    }
+    trampoline = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!trampoline) return FALSE;
+    CopyMemory(trampoline, target, 6);
+    trampoline[6] = 0xE9;
+    *(DWORD *)(trampoline + 7) = (DWORD)((target + 6) - (trampoline + 11));
+    if (!VirtualProtect(target, 16, PAGE_EXECUTE_READWRITE, &oldProtect)) return FALSE;
+    target[0] = 0x68;                 /* push imm32 */
+    *(DWORD *)(target + 1) = (DWORD)hookAddr;
+    target[5] = 0xC3;                 /* ret */
+    VirtualProtect(target, 16, oldProtect, &oldProtect);
+    if (trampolineOut) *trampolineOut = trampoline;
+    return TRUE;
+}
+
+static void proxy_hook_cef_initialize(void) {
+    HMODULE cef = GetModuleHandleW(L"libcef.dll");
+    void *target;
+    void *trampoline = NULL;
+    if (!cef || g_cefInitTrampoline) return;
+    target = (void *)GetProcAddress(cef, "cef_initialize");
+    if (!target) { proxy_append("winmm proxy: cef_initialize not exported"); return; }
+    g_realCefInitAddr = target;
+    if (!proxy_patch_pushret(target, (void *)proxy_cef_init_wrapper, &trampoline)) {
+        proxy_append("winmm proxy: cef_initialize patch skipped");
+        return;
+    }
+    g_cefInitTrampoline = trampoline;
+    /* wrapper 通过 g_realCefInitAddr 调用真实函数；我们改用 trampoline */
+    g_realCefInitAddr = trampoline;
+    proxy_append("winmm proxy: cef_initialize patched (pushret)");
+}
 static void proxy_init_table(void) {
     WCHAR dir[MAX_PATH];
     WCHAR path[MAX_PATH];
@@ -577,6 +740,8 @@ static DWORD WINAPI proxy_warmup(LPVOID unused) {
     int attempt;
     (void)unused;
     proxy_prepare_command_line();
+    proxy_hook_getprocaddress();
+    proxy_hook_cef_initialize();
     {
         DWORD p = 0;
         const WCHAR *src = NULL;
@@ -684,6 +849,13 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     }
     return TRUE;
 }
+
+
+
+
+
+
+
 
 
 

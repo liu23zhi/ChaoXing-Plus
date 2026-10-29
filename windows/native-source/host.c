@@ -1280,7 +1280,7 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
     h_print(L"probe: packed="); h_print(h_pe_section_named(clientPath, ".themida") ? L"themida" : L"none"); h_print(L"\n");
     h_print(L"probe: suggested=");
     if (markerPresent && proxyUsable) h_print(L"dll-proxy");
-    else if (h_pe_section_named(clientPath, ".themida")) h_print(L"none-packed");
+    else if (h_pe_section_named(clientPath, ".themida")) h_print(markerPresent ? L"dll-proxy" : L"dll-proxy-required");
     else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
     else h_print(L"cdp-port");
     h_print(L"\n");
@@ -2154,7 +2154,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         goto done;
     }
     if (!options->attachPortSet && h_pe_section_named(h_selected_path, ".themida") && !options->quiet) {
-        h_print(L"警告：该客户端带 Themida 壳，实测会忽略 --remote-debugging-port；如无面板请改用 4.1.4.25512 版本客户端\n");
+        h_print(L"提示：该客户端带 Themida 壳并禁用命令行开关；请用 --install-proxy 安装代理后再启动（代理会在 cef_initialize 里强制调试端口）\n");
     }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
@@ -2378,7 +2378,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":false,\"input\":false}}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true,\"input\":false}}\n");
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2464,6 +2464,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
