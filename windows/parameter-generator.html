@@ -41,6 +41,10 @@
       <div class="section"><h2>预设</h2><div class="preset-list">
         <button data-preset="silent">绝对静默型（安全子集）</button><button data-preset="friendly">友好交互型</button><button data-preset="lazy">懒人型（普通启动）</button><button data-preset="manual">手动答题型</button><button data-preset="startupClean">启动清理型（设计）</button><button data-preset="scan">仅扫描型</button><button data-preset="path">直接路径型</button><button data-preset="all">全盘扫描型</button>
       </div><p class="hint">第一阶段导出普通运行、扫描、面板、答题、日志和诊断参数；绝对静默型会为 Node 宿主附加 --hide-console（原生 EXE 无控制台，不附加），配合发布包 start-windows-silent.cmd 可无黑框启动；启动清理型只展示设计配置，启动清理、删除挂起与自毁不会生成可运行命令；内存执行会生成零落盘（不写日志/配置/诊断/报告）的普通可见启动命令。</p></div>
+      <div class="section"><h2>加载已有配置</h2><div class="grid">
+        <div class="field full"><label for="configFile">选择 chaoxing-plus.json</label><input id="configFile" type="file" accept=".json,application/json"><p class="hint">读取本地配置并填回表单（顶层字段与 settings 共享设置）；不上传、不保存文件。</p></div>
+        <div class="field full"><button id="loadConfig" type="button">加载配置</button> <span id="loadStatus" class="hint"></span></div>
+      </div></div>
       <div class="section"><h2>客户端扫描</h2><div class="grid">
         <div class="field full"><label for="clientPath">直接指定客户端路径</label><input id="clientPath" placeholder="例如 D:\\Exam\\CXExam.exe"><p class="hint">与扫描序号、首个候选互斥。</p></div>
         <div class="field"><label for="scanMode">扫描模式</label><select id="scanMode"><option value="common">仅常规路径</option><option value="fallback-all" selected>常规无结果才全盘</option><option value="all">强制全盘扫描</option></select></div>
@@ -630,7 +634,103 @@
     path: { clientPath: 'D:\\Exam\\CXExam.exe', selection: 'interactive', scanMode: 'common', panel: true, log: true },
     all: { scanMode: 'all', selection: 'first', ui: 'cli', panel: false, log: false }
   };
-  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: capabilityBlocked };
+  var CONFIG_FIELD_MAP = {
+    clientPath: 'clientPath', clientIndex: 'clientIndex', scanMode: 'scanMode', ui: 'ui',
+    rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir', expectedBrowser: 'expectedBrowser',
+    injectStrategy: 'injectStrategy', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames',
+    captureConsole: 'captureConsole', debugEndpointTimeoutMs: 'debugTimeout', targetPollIntervalMs: 'targetPollInterval',
+    bundleTimeoutMs: 'bundleTimeout', noDiskWrite: 'noDiskWrite', retainData: 'retainData',
+    deleteConfig: 'deleteConfig', quiet: 'quiet', logFileEnabled: 'log', log: 'log', diagnose: 'diagnose',
+    reportPath: 'report', report: 'report', panelEnabled: 'panel', panel: 'panel', panelCollapsed: 'panelExpanded',
+    panelTop: 'panelTop', panelRight: 'panelRight', panelWidth: 'panelWidth', panelTheme: 'panelTheme',
+    answerMode: 'answerMode', answerKey: 'answerKey', answerThreads: 'answerThreads',
+    answerCountdown: 'answerCountdown', answerRetry: 'answerRetry', showAnswerDialog: 'showAnswerDialog',
+    autoSubmit: 'noAutoSubmit', stopClientOnExit: 'stopClient', dpiAware: 'dpiAware',
+    elevateOnStart: 'elevateOnStart', executionMode: 'executionMode'
+  };
+  var CONFIG_SETTINGS_MAP = {
+    'common.settings.windows-panel-enabled': 'panel',
+    'common.settings.windows-panel-collapsed': 'panelExpanded',
+    'common.settings.windows-panel-top': 'panelTop',
+    'common.settings.windows-panel-right': 'panelRight',
+    'common.settings.windows-panel-width': 'panelWidth',
+    'common.settings.windows-panel-theme': 'panelTheme',
+    'common.settings.windows-answer-mode': 'answerMode',
+    'common.settings.windows-answer-key': 'answerKey',
+    'common.settings.windows-answer-threads': 'answerThreads',
+    'common.settings.windows-answer-countdown': 'answerCountdown',
+    'common.settings.windows-answer-retry': 'answerRetry',
+    'common.settings.windows-show-answer-dialog': 'showAnswerDialog',
+    'common.settings.windows-auto-submit': 'noAutoSubmit',
+    'common.settings.windows-log-enabled': 'log',
+    'common.settings.windows-no-disk-write': 'noDiskWrite'
+  };
+  function configValueToForm(field, value) {
+    if (field === 'panelExpanded' || field === 'autoSubmit' || field === 'showAnswerDialog' || field === 'log' || field === 'noDiskWrite') {
+      if (typeof value !== 'boolean') return undefined;
+      if (field === 'panelExpanded' || field === 'autoSubmit') return !value;
+      return value;
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return undefined;
+  }
+  function applyLoadedConfig(parsed) {
+    var applied = [], ignored = [];
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('配置文件顶层必须是 JSON 对象');
+    Object.keys(CONFIG_FIELD_MAP).forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, key)) return;
+      var field = CONFIG_FIELD_MAP[key];
+      var value = configValueToForm(field, parsed[key]);
+      if (value === undefined) { ignored.push(key); return; }
+      setValue(field, value);
+      applied.push(key);
+    });
+    if (parsed.listClients === true) { setValue('listClients', true); applied.push('listClients'); }
+    if (parsed.clientFirst === true) { setValue('selection', 'first'); applied.push('clientFirst'); }
+    else if (parsed.selectClient === true) { setValue('selection', 'interactive'); applied.push('selectClient'); }
+    var settings = parsed.settings;
+    if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+      Object.keys(CONFIG_SETTINGS_MAP).forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(settings, key)) return;
+        var field = CONFIG_SETTINGS_MAP[key];
+        var value = configValueToForm(field, settings[key]);
+        if (value === undefined) { ignored.push(key); return; }
+        setValue(field, value);
+        applied.push(key);
+      });
+      Object.keys(settings).forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(CONFIG_SETTINGS_MAP, key) && key.indexOf('common.settings.') === 0) ignored.push(key);
+      });
+    }
+    return { applied: applied, ignored: ignored };
+  }
+  function loadConfigFromFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error('读取配置文件失败')); };
+      reader.onload = function () {
+        try { resolve(applyLoadedConfig(JSON.parse(String(reader.result || '')))); }
+        catch (error) { reject(error); }
+      };
+      reader.readAsText(file, 'utf-8');
+    });
+  }
+  function handleConfigFile() {
+    var input = el('configFile');
+    var file = input.files && input.files[0];
+    if (!file) return;
+    loadConfigFromFile(file).then(function (result) {
+      render();
+      el('loadStatus').textContent = '已加载配置：应用 ' + result.applied.length + ' 项' + (result.ignored.length ? '，忽略 ' + result.ignored.length + ' 项未支持字段' : '') + '。';
+    }).catch(function (error) {
+      el('loadStatus').textContent = '加载失败：' + error.message;
+      input.value = '';
+    });
+  }
+  el('configFile').addEventListener('change', handleConfigFile);
+  el('loadConfig').addEventListener('click', function () { el('configFile').click(); });
+  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: capabilityBlocked, applyLoadedConfig: applyLoadedConfig };
+
   Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; applyDefaults(); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); if (name === 'silent') setValue('hideConsole', state().hostType !== 'native'); render(); }); });
   ids.forEach(function (id) { el(id).addEventListener('input', function () { selectedPreset = ''; render(); }); el(id).addEventListener('change', function () { selectedPreset = ''; render(); }); });
   document.querySelectorAll('[data-copy]').forEach(function (button) { button.addEventListener('click', function () { var target = el(button.getAttribute('data-copy')); if (!target.value) return; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(target.value); else { target.select(); document.execCommand('copy'); } button.textContent = '已复制'; setTimeout(function () { button.textContent = button.getAttribute('data-copy') === 'json' ? '复制 JSON' : button.getAttribute('data-copy') === 'cmd' ? '复制 cmd' : '复制 PowerShell'; }, 900); }); });

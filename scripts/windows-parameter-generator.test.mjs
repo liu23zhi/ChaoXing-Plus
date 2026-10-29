@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import path, { join, resolve } from 'node:path';
 import { applyHostOptionsToConfig, applyOptionsJsonToOptions, parseHostArgs } from '../windows/host/options.mjs';
 import { normalizeConfig } from '../windows/host/config.mjs';
 import { RENDER_DIAGNOSTICS_EXPRESSION } from '../windows/host/diagnostics.mjs';
@@ -798,6 +798,70 @@ test('生成器覆盖数据保留、自毁快捷键冲突和启动清理范围�
   await page.click('#reset');
   assert.match(await page.$eval('.capability', (node) => node.textContent), /删除挂起|自毁/u);
   await page.close();
+});
+
+test('生成器可加载 config 文件并回填表单、命令与 JSON', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-generator-load-'));
+  const page = await openGenerator();
+  try {
+    const configPath = path.join(directory, 'chaoxing-plus.json');
+    await writeFile(configPath, JSON.stringify({
+      clientPath: 'D:\\Exam\\CXExam.exe',
+      scanMode: 'common',
+      executionMode: 'memory',
+      logFileEnabled: false,
+      diagnose: false,
+      panelWidth: 520,
+      answerKey: 'Ctrl+Alt+Shift+S',
+      answerThreads: 1,
+      showAnswerDialog: false,
+      settings: {
+        'common.settings.windows-panel-width': 600,
+        'common.settings.windows-panel-theme': 'blue',
+        'common.settings.windows-answer-key': 'Ctrl+Alt+Shift+S',
+        'common.settings.windows-answer-threads': 1,
+        'common.settings.windows-show-answer-dialog': false,
+        'common.settings.windows-no-disk-write': true,
+        'common.settings.windows-log-enabled': false,
+        'common.settings.unknown-key': 'keep-out-of-form'
+      }
+    }, null, 2), 'utf8');
+    const input = await page.$('#configFile');
+    await input.uploadFile(configPath);
+    await page.evaluate(() => document.querySelector('#configFile').dispatchEvent(new Event('change', { bubbles: true })));
+    await page.waitForFunction(() => document.querySelector('#loadStatus').textContent.includes('已加载配置'), { timeout: 6000 });
+    assert.equal(await page.$eval('#clientPath', (node) => node.value), 'D:\\Exam\\CXExam.exe');
+    assert.equal(await page.$eval('#executionMode', (node) => node.value), 'memory');
+    assert.equal(await page.$eval('#scanMode', (node) => node.value), 'common');
+    assert.equal(await page.$eval('#panelWidth', (node) => node.value), '600');
+    assert.equal(await page.$eval('#panelTheme', (node) => node.value), 'blue');
+    assert.equal(await page.$eval('#answerKey', (node) => node.value), 'Ctrl+Alt+Shift+S');
+    assert.equal(await page.$eval('#answerThreads', (node) => node.value), '1');
+    assert.equal(await page.$eval('#showAnswerDialog', (node) => node.checked), false);
+    assert.equal(await page.$eval('#noDiskWrite', (node) => node.checked), true);
+    assert.equal(await page.$eval('#log', (node) => node.checked), false);
+    assert.match(await page.$eval('#loadStatus', (node) => node.textContent), /忽略/u);
+    const generated = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { args: generator.commandFor(state).args, config: generator.configFor(state) };
+    });
+    for (const expected of ['--client', 'D:\\Exam\\CXExam.exe', '--execution-mode', 'memory', '--no-disk-write', '--no-log']) {
+      assert.equal(generated.args.includes(expected), true, `missing generated argument ${expected}`);
+    }
+    assert.equal(generated.config.executionMode, 'memory');
+    assert.equal(generated.config.noDiskWrite, true);
+
+    const badPath = path.join(directory, 'bad.json');
+    await writeFile(badPath, '{not json', 'utf8');
+    const badInput = await page.$('#configFile');
+    await badInput.uploadFile(badPath);
+    await page.evaluate(() => document.querySelector('#configFile').dispatchEvent(new Event('change', { bubbles: true })));
+    await page.waitForFunction(() => document.querySelector('#loadStatus').textContent.includes('加载失败'), { timeout: 6000 });
+  } finally {
+    await page.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('生成器内联 JSON 与宿主解析规则一致，并拦截非法序号与 -- 开头值', async () => {

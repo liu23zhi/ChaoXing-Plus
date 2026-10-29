@@ -47,6 +47,8 @@ async function createFixture() {
   }
   const launcher = path.join(directory, 'start-windows.cmd');
   await writeFixtureFile(launcher, '@echo off\n');
+  const debugLauncher = path.join(directory, 'start-windows-debug.cmd');
+  await writeFixtureFile(debugLauncher, '@echo off\n');
   const silentLauncher = path.join(directory, 'start-windows-silent.cmd');
   await writeFixtureFile(silentLauncher, '@echo off\n');
   const configExample = path.join(directory, 'config.example.json');
@@ -54,7 +56,7 @@ async function createFixture() {
   const verifier = path.join(root, 'scripts', 'verify-release.mjs');
   const exe = path.join(directory, 'chaoxing_plus.exe');
   await fs.writeFile(exe, Buffer.from('MZ fake native host'));
-  return { directory, dist, host, launcher, silentLauncher, configExample, verifier, exe };
+  return { directory, dist, host, launcher, debugLauncher, silentLauncher, configExample, verifier, exe };
 }
 
 async function sha256(filePath) {
@@ -71,7 +73,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
     '--dist-dir', fixture.dist,
     '--host-dir', fixture.host,
     '--launcher', fixture.launcher,
-    '--silent-launcher', fixture.silentLauncher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
@@ -98,7 +100,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   }
   await walk(packageRoot, packageRoot);
   for (const expected of [
-    'chaoxing_plus.exe', 'start-windows.cmd', 'start-windows-silent.cmd',
+    'chaoxing_plus.exe', 'start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd',
     'dist-windows/windows-bootstrap.js', 'dist-windows/chaoxing-plus.windows.js',
     'dist-windows/trampoline.js', 'dist-windows/vendor/sweetalert2.min.css',
     'dist-windows/package-manifest.json',
@@ -127,7 +129,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   assert.equal(info.nativeHost, true);
   assert.equal(info.nodeHost, true);
   assert.deepEqual(info.entrypoints, {
-    native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeSilent: 'start-windows-silent.cmd'
+    native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd'
   });
   assert.equal(info.payloadFiles, files.length - 2, 'payload files exclude release-info and SHA256SUMS');
   assert.equal(info.verifier, 'verify-release.mjs');
@@ -179,7 +181,7 @@ test('发布打包拒绝包含本地调试注入日志的构建', async (t) => {
     '--dist-dir', fixture.dist,
     '--host-dir', fixture.host,
     '--launcher', fixture.launcher,
-    '--silent-launcher', fixture.silentLauncher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
@@ -200,7 +202,7 @@ test('发布打包拒绝与发布版本不一致的 dist 构建', async (t) => {
     '--dist-dir', fixture.dist,
     '--host-dir', fixture.host,
     '--launcher', fixture.launcher,
-    '--silent-launcher', fixture.silentLauncher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
@@ -223,7 +225,7 @@ test('--skip-native 生成仅 Node 宿主发布包', async (t) => {
     '--dist-dir', fixture.dist,
     '--host-dir', fixture.host,
     '--launcher', fixture.launcher,
-    '--silent-launcher', fixture.silentLauncher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--out', out,
@@ -240,13 +242,14 @@ test('--skip-native 生成仅 Node 宿主发布包', async (t) => {
   const packageRoot = path.join(out, 'node-only');
   assert.equal((await fs.stat(path.join(packageRoot, 'start-windows.cmd'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-silent.cmd'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-debug.cmd'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'host', 'silent-launch.vbs'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'config.example.json'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'verify-release.mjs'))).isFile(), true);
   assert.equal(await fs.access(path.join(packageRoot, 'chaoxing_plus.exe')).then(() => true, () => false), false);
   const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
   assert.equal(info.nativeHost, false);
-  assert.deepEqual(info.entrypoints, { node: 'start-windows.cmd', nodeSilent: 'start-windows-silent.cmd' });
+  assert.deepEqual(info.entrypoints, { node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' });
 });
 
 test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', async (t) => {
@@ -254,7 +257,7 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
   t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
   const commonArgs = [
     '--dist-dir', fixture.dist, '--host-dir', fixture.host, '--launcher', fixture.launcher,
-    '--silent-launcher', fixture.silentLauncher, '--config-example', fixture.configExample, '--verifier', fixture.verifier,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher, '--config-example', fixture.configExample, '--verifier', fixture.verifier,
     '--out', path.join(fixture.directory, 'out-fail'), '--version', '9.9.9', '--skip-native', '--skip-zip', '--skip-docs'
   ];
 

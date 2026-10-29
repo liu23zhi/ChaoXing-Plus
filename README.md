@@ -51,6 +51,10 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 npm run build:windows
 # 首次运行会创建 windows/data/config.json，把 clientPath 指向 CXExam.exe
 .\start-windows.cmd
+# 需要可见控制台日志时使用调试入口（控制台 + GUI）
+.\start-windows-debug.cmd
+# 静默场景入口（零落盘内存模式、快速扫描失败才全盘、自动首选 x86、无面板/控制台）
+.\start-windows-silent.cmd
 # 无控制台窗口启动（发布包内为 start-windows-silent.cmd，只隐藏 Node 控制台）
 .\start-windows-silent.cmd
 ```
@@ -67,7 +71,7 @@ npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
 npm run release:windows # release/chaoxing-plus-6.2.0-windows.zip
 ```
 
-包内同时提供 `chaoxing_plus.exe`（资源内嵌，可独立运行）与 `start-windows.cmd` / `start-windows-silent.cmd` + `windows/host` + `dist-windows`（Node 宿主，静默入口通过 `wscript.exe` 隐藏控制台），并附 `release-info.json`（含 `entrypoints.nodeSilent`）/ `SHA256SUMS.txt` / `verify-release.mjs`（解压后运行 `node verify-release.mjs` 校验完整性）；第一阶段内部原型与外部 npm 依赖不会进入发布包。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+包内同时提供 `chaoxing_plus.exe`（资源内嵌，可独立运行）与 `start-windows.cmd`（隐藏控制台常规入口）/ `start-windows-debug.cmd`（控制台调试入口）/ `start-windows-silent.cmd`（零落盘内存场景入口）+ `windows/host` + `dist-windows`，并附 `release-info.json`（含 `entrypoints.nodeSilent`）/ `SHA256SUMS.txt` / `verify-release.mjs`（解压后运行 `node verify-release.mjs` 校验完整性）；第一阶段内部原型与外部 npm 依赖不会进入发布包。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ---
 
@@ -92,8 +96,9 @@ chaoxing_plus/
 │   └── data/                    # 本地配置/日志（gitignore）
 ├── build.mjs                    # 扩展注入脚本构建
 ├── build.windows.mjs            # Windows 端构建（target chrome75 + 语法闸门）
-├── start-windows.cmd            # Windows 端入口（可见控制台）
-├── start-windows-silent.cmd     # Windows 端静默入口（隐藏 Node 控制台）
+├── start-windows.cmd            # Windows 端常规入口（隐藏控制台，显示 GUI）
+├── start-windows-debug.cmd      # Windows 端调试入口（控制台 + GUI）
+├── start-windows-silent.cmd     # Windows 端静默场景入口（零落盘内存模式）
 ├── docs/windows.md              # Windows 端使用与设计说明
 ├── package.json
 └── tsconfig.json

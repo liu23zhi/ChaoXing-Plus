@@ -86,32 +86,57 @@ test('静默启动器保真传递尾反斜杠、引号与空格参数', { skip: 
   }
 });
 
-test('官方静默启动入口只隐藏控制台，不强制客户端/面板/磁盘策略', async () => {
+test('静默入口固定零落盘内存场景：快速扫描后回退、自动首选 x86、无面板/日志/控制台', async () => {
   const cmd = await readFile(silentCmdPath, 'utf8');
-  const args = readLauncherArgs(cmd);
-  assert.deepEqual(args, ['--hide-console'], '静默入口只允许隐藏控制台开关');
-  const options = parseHostArgs(args);
+  const pairs = [
+    ['--hide-console'],
+    ['--scan-mode', 'fallback-all'],
+    ['--client-first'],
+    ['--execution-mode', 'memory'],
+    ['--no-disk-write'],
+    ['--no-log'],
+    ['--quiet'],
+    ['--no-panel'],
+    ['--answer-mode', 'manual'],
+    ['--answer-key', 'Ctrl+Alt+Shift+S'],
+    ['--answer-threads', '1'],
+    ['--hide-answer-dialog']
+  ];
+  for (const pair of pairs) {
+    assert.equal(cmd.includes(pair.join(' ')), true, `静默入口缺少固定参数 ${pair.join(' ')}`);
+  }
+  const flat = pairs.flat();
+  const options = parseHostArgs(flat);
   assert.equal(options.hideConsole, true);
-  assert.equal(options.noDiskWrite, false);
-  assert.equal(options.noDiagnose, false);
-  assert.ok(!options.clientIndex);
-  assert.ok(!options.clientPath);
-  assert.doesNotMatch(cmd, /--client-index|--no-panel|--no-disk-write|--no-log|--no-diagnose/u);
+  assert.equal(options.executionMode, 'memory');
+  assert.equal(options.noDiskWrite, true);
+  assert.equal(options.logFileEnabled, false);
+  assert.equal(options.panelEnabled, false);
+  assert.equal(options.quiet, true);
+  assert.equal(options.scanMode, 'fallback-all');
+  assert.equal(options.clientFirst, true);
+  assert.equal(options.answerMode, 'manual');
+  assert.equal(options.answerKey, 'Ctrl+Alt+Shift+S');
+  assert.equal(options.answerThreads, 1);
+  // 自毁、删除挂起、启动清理和程序文件删除尚未实现，静默入口不得偷偷启用。
+  assert.doesNotMatch(cmd, /--self-destruct|--delete-suspend|--wipe-/u);
 });
-
-test('两个启动脚本都先检查 Node.js 22+ 主版本', async () => {
-  for (const launcher of ['start-windows.cmd', 'start-windows-silent.cmd']) {
+test('三个启动脚本都先检查 Node.js 22+ 主版本', async () => {
+  for (const launcher of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd']) {
     const source = await readFile(path.join(root, launcher), 'utf8');
     assert.match(source, /node --version/u, launcher);
     assert.match(source, /LSS 22/u, launcher);
     assert.equal((source.match(/[^\x00-\x7F]/gu) || []).length, 0, `${launcher} 必须保持纯 ASCII`);
   }
   const normal = await readFile(path.join(root, 'start-windows.cmd'), 'utf8');
-  assert.match(normal, /node windows\\host\\main\.mjs %\*/u);
+  assert.match(normal, /wscript\.exe \/\/nologo "%~dp0windows\\host\\silent-launch\.vbs"/u);
+  assert.doesNotMatch(normal, /^\s*node(?:\.exe)?\s/mu, '常规入口不得显示控制台');
+  const debug = await readFile(path.join(root, 'start-windows-debug.cmd'), 'utf8');
+  assert.match(debug, /node windows\\host\\main\.mjs %\*/u, '调试入口必须保留可见控制台');
 });
 
-test('start-windows.cmd 在版本检查后以 --help 正常退出', { skip: process.platform !== 'win32' }, () => {
-  const launcherPath = path.join(root, 'start-windows.cmd');
+test('start-windows-debug.cmd 在版本检查后以 --help 正常退出', { skip: process.platform !== 'win32' }, () => {
+  const launcherPath = path.join(root, 'start-windows-debug.cmd');
   const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${launcherPath}" --help`], {
     encoding: 'utf8',
     timeout: 60000,

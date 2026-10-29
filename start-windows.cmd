@@ -1,39 +1,24 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0" || exit /b 1
 
-where node >nul 2>nul
-if errorlevel 1 (
-  echo [windows] Node.js not found. Node.js 22 or newer is required.
-  pause
-  exit /b 1
-)
+rem Normal launch: the Node host runs without a visible console window, but all
+rem normal GUI (client selection) and behavior is unchanged. wscript.exe starts
+rem node.exe hidden; see windows\host\silent-launch.vbs.
+rem Use start-windows-debug.cmd when console output is needed.
+where node.exe >nul 2>nul
+if errorlevel 1 exit /b 9009
 
-rem The Node host runtime requires Node.js 22+; fail fast before starting it.
 set "NODE_VERSION="
 for /f "delims=" %%v in ('node --version 2^>nul') do set "NODE_VERSION=%%v"
-if not defined NODE_VERSION (
-  echo [windows] Unable to read the Node.js version. Node.js 22 or newer is required.
-  pause
-  exit /b 1
-)
+if not defined NODE_VERSION exit /b 9009
 set "NODE_VERSION=%NODE_VERSION:v=%"
 for /f "tokens=1 delims=." %%a in ("%NODE_VERSION%") do set "NODE_MAJOR=%%a"
-if not defined NODE_MAJOR (
-  echo [windows] Unable to parse the Node.js version: %NODE_VERSION%
-  pause
-  exit /b 1
-)
-if %NODE_MAJOR% LSS 22 (
-  echo [windows] Node.js %NODE_VERSION% is too old. Node.js 22 or newer is required.
-  pause
-  exit /b 1
-)
+if not defined NODE_MAJOR exit /b 9040
+if %NODE_MAJOR% LSS 22 exit /b 9041
 
-node windows\host\main.mjs %*
-set EXIT_CODE=%ERRORLEVEL%
-if not "%EXIT_CODE%"=="0" (
-  echo [windows] host exited with code %EXIT_CODE%
-  pause
-)
-exit /b %EXIT_CODE%
+rem Pass "%~dp0." instead of "%~dp0": a trailing backslash before the closing
+rem quote would escape that quote in Windows command-line parsing.
+wscript.exe //nologo "%~dp0windows\host\silent-launch.vbs" "%~dp0." "%~dp0windows\host\main.mjs" %*
+
+exit /b %ERRORLEVEL%

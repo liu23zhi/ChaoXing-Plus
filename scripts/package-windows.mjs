@@ -100,6 +100,7 @@ function parseArgs(argv) {
     distDir: path.join(repoRoot, 'dist-windows'),
     hostDir: path.join(repoRoot, 'windows', 'host'),
     launcher: path.join(repoRoot, 'start-windows.cmd'),
+    debugLauncher: path.join(repoRoot, 'start-windows-debug.cmd'),
     silentLauncher: path.join(repoRoot, 'start-windows-silent.cmd'),
     configExample: path.join(repoRoot, 'windows', 'config.example.json'),
     verifier: path.join(repoRoot, 'scripts', 'verify-release.mjs'),
@@ -123,6 +124,7 @@ function parseArgs(argv) {
       case '--dist-dir': options.distDir = path.resolve(value()); break;
       case '--host-dir': options.hostDir = path.resolve(value()); break;
       case '--launcher': options.launcher = path.resolve(value()); break;
+      case '--debug-launcher': options.debugLauncher = path.resolve(value()); break;
       case '--silent-launcher': options.silentLauncher = path.resolve(value()); break;
       case '--config-example': options.configExample = path.resolve(value()); break;
       case '--verifier': options.verifier = path.resolve(value()); break;
@@ -138,7 +140,8 @@ function parseArgs(argv) {
           '  --out <dir>        输出目录（默认 release/）',
           '  --dist-dir <dir>   dist-windows 资源目录',
           '  --host-dir <dir>   Node 宿主目录（默认 windows/host）',
-          '  --launcher <file>  start-windows.cmd',
+          '  --launcher <file>  start-windows.cmd（无控制台常规入口）',
+      '  --debug-launcher <file>  start-windows-debug.cmd（可见控制台调试入口）',
           '  --silent-launcher <file>  start-windows-silent.cmd（无控制台启动入口）',
           '  --config-example <file>   windows/config.example.json（首跑配置模板）',
           '  --verifier <file>          scripts/verify-release.mjs（包内完整性校验器）',
@@ -191,6 +194,7 @@ async function main() {
     fail('dist-windows 包含本地调试注入日志（features.injectionLog=true），发布包拒绝打包；请先运行 npm run build:windows -- --release 并重新构建原生宿主');
   }
   if (!(await pathExists(options.launcher))) fail(`缺少启动脚本：${options.launcher}`);
+  if (!(await pathExists(options.debugLauncher))) fail(`缺少调试启动脚本：${options.debugLauncher}`);
   if (!(await pathExists(options.silentLauncher))) fail(`缺少静默启动脚本：${options.silentLauncher}`);
   if (!(await pathExists(options.configExample))) fail(`缺少配置模板：${options.configExample}`);
   if (!(await pathExists(options.verifier))) fail(`缺少发布包校验器：${options.verifier}`);
@@ -215,6 +219,7 @@ async function main() {
     await fs.copyFile(path.join(options.hostDir, relative), path.join(hostTarget, relative));
   }
   await fs.copyFile(options.launcher, path.join(packageRoot, 'start-windows.cmd'));
+  await fs.copyFile(options.debugLauncher, path.join(packageRoot, 'start-windows-debug.cmd'));
   await fs.copyFile(options.silentLauncher, path.join(packageRoot, 'start-windows-silent.cmd'));
   await fs.copyFile(options.configExample, path.join(packageRoot, 'windows', 'config.example.json'));
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
@@ -241,8 +246,8 @@ async function main() {
     nodeHost: true,
     node: process.version,
     entrypoints: includeNative
-      ? { native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeSilent: 'start-windows-silent.cmd' }
-      : { node: 'start-windows.cmd', nodeSilent: 'start-windows-silent.cmd' },
+      ? { native: 'chaoxing_plus.exe', node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' }
+      : { node: 'start-windows.cmd', nodeDebug: 'start-windows-debug.cmd', nodeSilent: 'start-windows-silent.cmd' },
     assetsDir: 'dist-windows',
     payloadFiles: files.length,
     verifier: 'verify-release.mjs'
