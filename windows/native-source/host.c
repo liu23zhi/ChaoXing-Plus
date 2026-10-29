@@ -112,6 +112,12 @@ static JT h_diagnostic_tokens[HOST_REPLY_TOKENS];
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static void h_zero(void *p, SIZE_T n) { volatile BYTE *b = (volatile BYTE *)p; while (n--) *b++ = 0; }
+static BOOL h_same(const WCHAR *a, const WCHAR *b) {
+    int i = 0;
+    if (!a || !b) return FALSE;
+    while (a[i] && b[i]) { if (a[i] != b[i]) return FALSE; ++i; }
+    return a[i] == b[i];
+}
 static BOOL h_copy(WCHAR *out, DWORD cap, const WCHAR *in) {
     DWORD i = 0; if (!out || !cap || !in) return FALSE;
     while (in[i] && i + 1 < cap) { out[i] = in[i]; ++i; }
@@ -1114,6 +1120,19 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
     }
+    /* 注入方式分派：目前只有 auto/cdp-port 具备完整实现；其余模式必须显式失败，
+       不能静默退回端口模式，否则用户会误以为换了注入链路。 */
+    if (options->injectModeSet &&
+        !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port")) {
+        if (!options->quiet) {
+            h_print(L"inject mode is not implemented in this build: ");
+            h_print(options->injectMode);
+            h_print(L" (available: auto, cdp-port)");
+        }
+        h_report.stopReason = "inject-mode-unavailable";
+        h_exit_code = 4;
+        goto done;
+    }
     if (options->attachPortSet) port = (USHORT)options->attachPort;
     else {
         CX_DPI_OVERRIDE *dpi = NULL;
@@ -1374,12 +1393,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_silent_parked[0]) {
         cx_cleanup_release_self(h_silent_parked);
         h_silent_parked[0] = 0;
-    }    return ok ? h_exit_code : 1;
+    }
+    return h_exit_code ? h_exit_code : (ok ? 0 : 1);
 }
 
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
