@@ -114,7 +114,9 @@ test('windows 构建脚本与入口脚本约定', async () => {
   assert.equal(buildSource.includes('package-manifest.json'), true);
   const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['build:windows'], 'node windows/share-file/build.windows.mjs');
-  assert.equal(packageJson.scripts.windows, 'node windows/node-source/main.mjs');
+  assert.equal(packageJson.scripts.windows, 'windows\\native-source\\start-windows.cmd');
+  assert.equal(packageJson.scripts['windows:node'], 'node windows/node-source/main.mjs');
+  assert.equal(packageJson.scripts['windows:self-check'], 'build-windows\\bin\\chaoxing_plus.exe --self-check');
 });
 
 test.after(async () => {

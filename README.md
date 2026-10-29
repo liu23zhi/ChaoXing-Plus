@@ -31,9 +31,12 @@ bash build-browser.sh
 Windows 端（超星考试客户端 / CEF 75）额外命令：
 
 ```bash
-npm run build:windows
-npm run windows:self-check
-npm run windows        # 需要管理员权限时宿主会自动申请 UAC
+npm run build:windows      # 注入资源（dist-windows）
+npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
+npm run windows:self-check # 检查已构建的原生 EXE（build-windows/bin）
+npm run windows            # 启动原生宿主（需要管理员权限时自动申请 UAC）
+npm run windows:silent     # 原生静默场景入口
+# 已弃用的 Node 宿主（仅兼容/对照）：npm run windows:node
 ```
 
 构建产物输出到：
@@ -50,7 +53,8 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 提供配置水合、资源注入和 Chrome75 API 补丁。原生宿主源码与入口位于 `windows/native-source/`；已弃用的 Node 宿主及其备用入口位于 `windows/node-source/`，两者共用的 Windows 文件位于 `windows/share-file/`。与插件共用的 `src/`、插件构建脚本 `build.mjs` 与输出目录 `dist/` 保留原位；完整目录说明见 [Windows 文件说明](docs/windows.md#目录)。
 
 ```powershell
-npm run build:windows
+npm run build:windows      # 注入资源（dist-windows）
+npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
 # 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）
 .\windows\native-source\build-windows.cmd
 # 备用（已弃用，仅兼容/对照）：只打 Node 包，不含原生 EXE
