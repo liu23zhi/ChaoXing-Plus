@@ -2136,7 +2136,15 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_report.commandLineInjected = TRUE;
             if (!options->quiet) { h_print(L"auto selected dll-proxy: proxy installed at "); h_print(autoDll); h_print(L"\n"); }
         }
-    }    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy") && !h_pe_section_named(h_selected_path, ".themida")) {
+    }    if (options->injectModeSet && h_same(options->injectMode, L"input")) {
+        if (!options->quiet) {
+            h_print(L"input 模式未实现：请改用 cdp-port（4.1.4 客户端）或 dll-proxy（加壳客户端，如 4.3.0.4）\n");
+        }
+        h_report.stopReason = "inject-input-unavailable";
+        h_exit_code = 4;
+        goto done;
+    }
+    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy") && !h_pe_section_named(h_selected_path, ".themida")) {
         if (!options->quiet) {
             h_print(L"非加壳客户端无需 dll-proxy：它支持命令行开关，请改用默认的 cdp-port\n");
             h_print(L"（实测 4.1.4 客户端装代理后会在 libcef.dll 内 0xC0000005 崩溃）\n");
@@ -2455,7 +2463,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\",\"input\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true,\"input\":false}}\n");
+        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2541,6 +2549,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
