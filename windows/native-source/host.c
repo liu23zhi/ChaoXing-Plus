@@ -47,6 +47,10 @@ typedef struct H_NATIVE_PAGE {
     CX_SESSION_STATS reported;
 } H_NATIVE_PAGE;
 
+/* 先声明后使用：host-session.inc 在后面才包含，避免隐式 int 声明（C4013/C4211）。 */
+static BOOL h_send_command(H_NATIVE_PAGE *page, const char *method, const char *params,
+                           char **reply, DWORD *replyLength, WCHAR *error, DWORD errorCap);
+
 typedef struct H_UI_ENTRY {
     DWORD sequence, elapsed;
     const char *level, *code;
