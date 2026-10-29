@@ -189,3 +189,35 @@ test('--stage-boot 从 %TEMP% 副本启动：原目录清空，副本与副本�
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
   }
 });
+test('模拟 + 暂存：原目录不删文件，但副本与副本目录仍清理', { skip: process.platform !== 'win32' }, async (t) => {
+  if (!existsSync(hostExe) || !existsSync(fixtureExe)) { t.skip('未构建'); return; }
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-native-staged-sim-'));
+  let stagedDirectory = '';
+  try {
+    await copyFile(hostExe, path.join(directory, 'chaoxing_plus.exe'));
+    await copyFile(fixtureExe, path.join(directory, 'CXExam.exe'));
+    await writeFile(path.join(directory, 'SHA256SUMS.txt'), 'deadbeef *chaoxing_plus.exe\n', 'utf8');
+    await writeFile(path.join(directory, 'README.md'), '# fixture\n', 'utf8');
+    const result = spawnSync(path.join(directory, 'chaoxing_plus.exe'), [
+      '--silent-scenario', '--stage-boot', '--silent-delete-simulate',
+      '--silent-client', path.join(directory, 'CXExam.exe'),
+      '--no-log', '--no-disk-write', '--no-panel',
+      '--debug-timeout', '1000', '--duration', '3000', '--no-elevate', '--port', '0'
+    ], { encoding: 'utf8', timeout: 60000, windowsHide: true });
+    assert.equal(result.status, 0, `交接进程应以 0 退出：${result.stdout}${result.stderr}`);
+    stagedDirectory = path.join(tmpdir(), `cx-${result.pid}`);
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline && existsSync(stagedDirectory)) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert.equal(existsSync(stagedDirectory), false, '暂存副本目录必须被清理');
+    const files = await listFiles(directory);
+    assert.equal(files.includes('chaoxing_plus.exe'), true, '模拟模式不得删除程序文件');
+    assert.equal(files.includes('README.md'), true, '模拟模式不得删除程序文件');
+    assert.equal(files.includes('CXExam.exe'), true);
+  } finally {
+    killOwnedClients(directory);
+    if (stagedDirectory) await rm(stagedDirectory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  }
+});

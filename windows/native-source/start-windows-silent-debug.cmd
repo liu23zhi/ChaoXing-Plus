@@ -15,8 +15,9 @@ for %%d in ("%CXPLUS_EXE%") do set "CXPLUS_EXE_DIR=%%~dpd"
 echo [silent-debug] simulate mode: this entry reports the deletion plan only and deletes no file.
 echo [silent-debug] Task Manager shows the path used at process creation; renaming or deleting the file cannot change it.
 if not exist "%CXPLUS_EXE_DIR%SHA256SUMS.txt" echo [silent-debug] not a release layout (no SHA256SUMS.txt): real deletion would be skipped too.
-start "" /wait "%CXPLUS_EXE%" --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel
+start "" /wait "%CXPLUS_EXE%" --silent-scenario --stage-boot --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" pause
 exit /b %EXIT_CODE%
+
 

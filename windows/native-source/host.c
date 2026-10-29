@@ -1018,7 +1018,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_silent_active = TRUE;
         h_silent_simulate = options->silentDeleteSimulate;
     /* 暂存启动：副本接管后，本进程清空原目录并退出。 */
-    if (options->stageRequest && !options->stagedBoot && !h_silent_simulate && h_silent_stage()) {
+    if (options->stageRequest && !options->stagedBoot && h_silent_stage()) {
         h_silent_cleanup_pass();
         if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
         h_silent_done = TRUE;
@@ -1026,7 +1026,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         return TRUE;
     }
         /* 暂存副本目录没有 SHA256SUMS，信任闸门会跳过整段清理；副本自身仍必须消失。 */
-        if (options->stagedBoot && !h_silent_simulate && !h_silent_parked[0] && h_exe_path[0]) {
+        if (options->stagedBoot && !h_silent_parked[0] && h_exe_path[0]) {
             cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP);
         }
         h_silent_cleanup_pass();
@@ -1267,6 +1267,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
