@@ -1,7 +1,5 @@
-/* winmm.dll 代理（参考项目 cef-hook 的装载方式）。
-   三份目标客户端都只从 WINMM 导入 PlaySoundW，因此代理只需转发这一个导出。
-   当前阶段是"装载探针"：DllMain 里写一行日志，证明 DLL 能被客户端加载；
-   CEF 钩子（Detours）留到下一步，避免一次引入太多变量。 */
+/* winmm.dll 代理：所有导出由生成的 naked 跳转桩转发到系统 winmm。
+   本文件只负责加载真实 winmm、填充跳转表、写装载日志。 */
 #include <windows.h>
 
 #pragma function(memset)
@@ -11,8 +9,11 @@ void *__cdecl memset(void *dst, int value, size_t count) {
     return dst;
 }
 
+extern FARPROC g_winmm_table[];
+extern const char *g_winmm_names[];
+extern int g_winmm_count;
+
 static HMODULE g_realWinmm;
-static FARPROC g_playSound;
 
 static void proxy_append(const char *text) {
     WCHAR temp[MAX_PATH];
@@ -39,7 +40,7 @@ static void proxy_append(const char *text) {
     file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return;
-    { int z; for (z = 0; z < (int)sizeof(line); ++z) line[z] = 0; }
+    for (i = 0; i < (DWORD)sizeof(line); ++i) line[i] = 0;
     exe[0] = 0;
     GetModuleFileNameW(NULL, exe, MAX_PATH);
     while (text[n] && n < 300) { line[n] = text[n]; ++n; }
@@ -50,39 +51,37 @@ static void proxy_append(const char *text) {
     CloseHandle(file);
 }
 
-static BOOL proxy_load_real(void) {
+static int proxy_load_real(void) {
     WCHAR dir[MAX_PATH];
     WCHAR path[MAX_PATH];
-    DWORD got, at = 0, i = 0;
-    if (g_realWinmm) return TRUE;
+    DWORD got, at = 0, i;
+    int filled = 0;
+    if (g_realWinmm) return g_winmm_count;
     got = GetSystemDirectoryW(dir, MAX_PATH);
-    if (!got || got + 16 >= MAX_PATH) return FALSE;
+    if (!got || got + 16 >= MAX_PATH) return 0;
     while (dir[at]) { path[at] = dir[at]; ++at; }
     path[at++] = L'\\'; path[at++] = L'w'; path[at++] = L'i'; path[at++] = L'n'; path[at++] = L'm'; path[at++] = L'm';
     path[at++] = L'.'; path[at++] = L'd'; path[at++] = L'l'; path[at++] = L'l'; path[at] = 0;
     g_realWinmm = LoadLibraryW(path);
-    if (!g_realWinmm) return FALSE;
-    g_playSound = GetProcAddress(g_realWinmm, "PlaySoundW");
-    (void)i;
-    return TRUE;
+    if (!g_realWinmm) return 0;
+    for (i = 0; i < (DWORD)g_winmm_count; ++i) {
+        FARPROC proc = GetProcAddress(g_realWinmm, g_winmm_names[i]);
+        g_winmm_table[i] = proc ? proc : (FARPROC)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetLastError");
+        if (proc) ++filled;
+    }
+    return filled;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        int filled;
         DisableThreadLibraryCalls(instance);
-        if (!proxy_load_real()) proxy_append("winmm proxy: real winmm not found");
+        filled = proxy_load_real();
+        if (filled <= 0) proxy_append("winmm proxy: real winmm not found");
         else proxy_append("winmm proxy loaded");
     } else if (reason == DLL_PROCESS_DETACH) {
-        if (g_realWinmm) { FreeLibrary(g_realWinmm); g_realWinmm = NULL; g_playSound = NULL; }
+        if (g_realWinmm) { FreeLibrary(g_realWinmm); g_realWinmm = NULL; }
     }
     return TRUE;
 }
-
-BOOL WINAPI ProxyPlaySoundW(LPCWSTR name, HMODULE module, DWORD flags) {
-    typedef BOOL (WINAPI *PLAYSOUNDW)(LPCWSTR, HMODULE, DWORD);
-    if (!g_playSound) proxy_load_real();
-    if (!g_playSound) return FALSE;
-    return ((PLAYSOUNDW)g_playSound)(name, module, flags);
-}
-
