@@ -59,6 +59,10 @@ static BOOL cx_json_wstr(const char *s, const JT *t, int value,
                          WCHAR *out, int cap) {
     return value >= 0 && jwstr(s, t, value, out, cap);
 }
+static BOOL cx_valid_inject_mode(const WCHAR *value) {
+    return cx_streq(value, L"auto") || cx_streq(value, L"cdp-port") || cx_streq(value, L"cdp-pipe") ||
+           cx_streq(value, L"dll-proxy") || cx_streq(value, L"input");
+}
 static BOOL cx_valid_mode(const WCHAR *value) {
     return cx_streq(value, L"normal") || cx_streq(value, L"memory");
 }
@@ -383,7 +387,18 @@ static BOOL cx_json_execution_mode(CX_OPTIONS *o, const char *s, const JT *t, in
         }
         o->executionModeNormal = cx_streq(mode, L"normal"); o->executionModeMemory = cx_streq(mode, L"memory"); o->executionModeSet = TRUE;
     }
-    if (cx_skey(s, t, object, "memoryExec", &v)) {
+    if (cx_skey(s, t, object, "injectMode", &v)) {
+        if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP) || !cx_valid_inject_mode(mode)) {
+            cx_error(error, errorCap, L"JSON injectMode must be auto, cdp-port, cdp-pipe, dll-proxy or input");
+            return FALSE;
+        }
+        cx_wcopy(o->injectMode, CX_OPTIONS_SHORT_CAP, mode);
+        o->injectModeSet = TRUE;
+    }
+    if (cx_skey(s, t, object, "panelAllPages", &v)) {
+        if (!cx_json_bool(s, t, v, &boolValue)) { cx_error(error, errorCap, L"JSON panelAllPages must be a boolean"); return FALSE; }
+        o->panelAllPages = boolValue;
+    }    if (cx_skey(s, t, object, "memoryExec", &v)) {
         if (!cx_json_bool(s, t, v, &boolValue)) { cx_error(error, errorCap, L"JSON memoryExec must be a boolean"); return FALSE; }
         o->executionModeNormal = !boolValue; o->executionModeMemory = boolValue; o->executionModeSet = TRUE;
     }
@@ -508,7 +523,7 @@ static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
         "answerMode", "answerKey", "showAnswerDialog", "answerThreads",
         "answerCountdown", "answerRetry", "autoSubmit", "clientIndex", "clientFirst",
         "scanClients", "listClients", "selectClient", "scanMode", "scanAll", "rescan",
-        "noScanCache", "ui", "settings", "executionMode", "memoryExec", "elevateOnStart"
+        "noScanCache", "ui", "settings", "executionMode", "memoryExec", "elevateOnStart", "injectMode", "panelAllPages"
     };
     char name[CX_OPTIONS_SHORT_CAP * 4]; int i;
     if (key < 0 || t[key].type != 's' || !jstr(s, t, key, name, sizeof(name))) return FALSE;
@@ -988,6 +1003,7 @@ BOOL cx_options_effective_settings_json_utf8(const CX_OPTIONS *o, char *out,
     if (!result.ok) { if (length) *length = 0; return FALSE; }
     result.out[result.n] = 0; if (length) *length = result.n; return TRUE;
 }
+
 
 
 

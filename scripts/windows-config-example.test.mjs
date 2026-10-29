@@ -33,7 +33,7 @@ test('config.example.json 保持 ASCII、结构受支持且不含内部原型能
   const example = JSON.parse(bytes.toString('utf8'));
   const topLevel = [
     'clientPath', 'port', 'expectedBrowser', 'stopClientOnExit', 'injectBlankFrames',
-    'captureConsole', 'injectStrategy', 'injectRetries', 'debugEndpointTimeoutMs',
+    'captureConsole', 'injectStrategy', 'injectMode', 'panelAllPages', 'injectRetries', 'debugEndpointTimeoutMs',
     'targetPollIntervalMs', 'bundleTimeoutMs', 'dpiAwareness', 'settings'
   ];
   assert.deepEqual(Object.keys(example).sort(), [...topLevel].sort(), '示例配置顶层键必须与受支持字段一致');
@@ -133,3 +133,4 @@ test('示例配置中的托管设置与宿主默认值一致', async () => {
   }
   assert.equal(existsSync(examplePath), true);
 });
+
