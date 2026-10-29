@@ -562,6 +562,18 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
     ok = CopyFileW(source, target, FALSE) != 0;
     if (ok) {
+        WCHAR markerPath[CX_CLEANUP_PATH_CAP];
+        HANDLE markerFile;
+        if (h_copy(markerPath, CX_CLEANUP_PATH_CAP, targetDir) && h_cat(markerPath, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker")) {
+            markerFile = CreateFileW(markerPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (markerFile != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                WriteFile(markerFile, "cxhook-proxy\r\n", 14, &written, NULL);
+                CloseHandle(markerFile);
+            }
+        }
+    }
+    if (ok) {
         h_print(L"install-proxy: copied ");
         h_print(source);
         h_print(L" -> ");
@@ -572,6 +584,30 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         h_print(message);
     }
     return ok;
+}
+/* 卸载代理：只有当目录里有安装标记时才删除，避免误删第三方的 winmm.dll。 */
+static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
+    WCHAR targetDir[CX_CLEANUP_PATH_CAP], dll[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
+    BOOL removed = FALSE;
+    if (options->clientPath[0]) {
+        if (!h_parent_dir(options->clientPath, targetDir, CX_CLEANUP_PATH_CAP)) { h_print(L"uninstall-proxy: cannot resolve client directory"); return FALSE; }
+    } else if (h_selected_path[0]) {
+        if (!h_parent_dir(h_selected_path, targetDir, CX_CLEANUP_PATH_CAP)) { h_print(L"uninstall-proxy: cannot resolve client directory"); return FALSE; }
+    } else {
+        h_print(L"uninstall-proxy: pass --client <CXExam.exe> to select the target client");
+        return FALSE;
+    }
+    if (!h_copy(marker, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(marker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker")) return FALSE;
+    if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES) {
+        h_print(L"uninstall-proxy: marker not found; refusing to delete an unknown winmm.dll (use --install-proxy to place ours)");
+        return FALSE;
+    }
+    if (!h_copy(dll, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(dll, CX_CLEANUP_PATH_CAP, L"\\winmm.dll")) return FALSE;
+    if (DeleteFileW(dll)) removed = TRUE;
+    DeleteFileW(marker);
+    if (removed) { h_print(L"uninstall-proxy: removed "); h_print(dll); }
+    else { h_print(L"uninstall-proxy: winmm.dll was already absent"); }
+    return TRUE;
 }
 static BOOL h_pipe_test(void) {
     SECURITY_ATTRIBUTES sa;
@@ -1581,6 +1617,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "调试: --attach <port>（显式连接已有端口，跳过启动和归属检查，仅供测试）\n"
     "调试: --pipe-test（自检管道启动）--pipe-client <客户端路径>（管道握手 Browser.getVersion）\n"
     "调试: --install-proxy [--proxy-source <winmm.dll>]（把代理装到 --client 目录，配合 auto 使用）\n"
+    "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
             "状态: --version --help --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
             "配置修改: 共享设置同步到已选配置文件并广播；文件热更新保留 CLI/内联 JSON 优先级。\n"
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
@@ -1604,6 +1641,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
     if (h_base_options.installProxy) { return h_install_proxy(&h_base_options) ? 0 : 1; }
+    if (h_base_options.uninstallProxy) { return h_uninstall_proxy(&h_base_options) ? 0 : 1; }
     if (h_base_options.pipeClientPathSet) {
         int pipeCode = h_pipe_client_test(h_base_options.pipeClientPath);
         if (pipeCode == 740) {
@@ -1680,6 +1718,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 
