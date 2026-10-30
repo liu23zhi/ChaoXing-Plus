@@ -18,8 +18,8 @@ static void check(BOOL passed, const char *name) {
 BOOL test_cache_discovery(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESULT *result,
                           WCHAR *error, DWORD cap) {
     (void)result; ++calls;
-    check(options->cachePath && !lstrcmpW(options->cachePath, L"C:\\owned-cache-fixture\\native-scan-cache-v1.bin"),
-        "host passes the native-specific cache path inside data-dir");
+    check(options->cachePath && !lstrcmpW(options->cachePath, L"C:\\owned-cache-fixture\\chaoxing\\native-scan-cache-v1.bin"),
+        "host passes the native-specific cache path inside the chaoxing data subdirectory");
     check(options->rescan == expectedRescan && options->noScanCache == expectedNoCache
         && options->noDiskWrite == expectedNoDiskWrite, "host preserves all cache policy switches");
     h_error(error, cap, L"fixture stops at discovery"); return FALSE;

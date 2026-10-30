@@ -10,6 +10,10 @@
 #define CX_OPTIONS_SHORT_CAP 128
 #define CX_OPTIONS_JSON_CAP 65536
 
+/* 宿主自有文件统一放在 <data-dir>\chaoxing\ 下：
+   logs / diagnostics / native-scan-cache-v1.bin。 */
+#define CX_HOST_DATA_SUBDIR L"chaoxing"
+
 /* This structure deliberately contains fixed-size buffers.  The native host
    is built without the C runtime, so callers must not rely on malloc/realloc
    or on null-terminated argv storage surviving a parse call. */
@@ -24,8 +28,7 @@ typedef struct CX_OPTIONS {
     WCHAR optionsJsonPath[CX_OPTIONS_PATH_CAP];
     WCHAR answerKey[CX_OPTIONS_SHORT_CAP];
     WCHAR panelTheme[CX_OPTIONS_SHORT_CAP];
-    WCHAR injectStrategy[CX_OPTIONS_SHORT_CAP];
-    WCHAR scanMode[CX_OPTIONS_SHORT_CAP];
+    WCHAR injectStrategy[CX_OPTIONS_SHORT_CAP];    WCHAR scanMode[CX_OPTIONS_SHORT_CAP];
     WCHAR ui[CX_OPTIONS_SHORT_CAP];
     /* CLI-only handoff state; never accepted as a configuration setting. */
     WCHAR elevatedClientPath[32768];
@@ -143,6 +146,7 @@ typedef struct CX_OPTIONS {
     BOOL injectProxyDirSet;
     BOOL injectModeSet;
     BOOL panelAllPages;
+    BOOL explainInject;
     BOOL consoleWindow;
     BOOL stagedBoot;
     BOOL stageRequest;

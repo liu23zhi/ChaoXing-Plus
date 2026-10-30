@@ -149,10 +149,11 @@ async function readReport(path) {
 }
 
 async function logText(dataDir) {
-  const names = await readdir(join(dataDir, 'logs'));
+  const logs = join(dataDir, 'chaoxing', 'logs');
+  const names = await readdir(logs);
   const files = names.filter((name) => /^windows-host-.*\.log$/u.test(name));
   assert.equal(files.length, 1, 'one log file must be written for this native process');
-  const text = await readFile(join(dataDir, 'logs', files[0]), 'utf8');
+  const text = await readFile(join(logs, files[0]), 'utf8');
   assertPrivate(text);
   return text;
 }
@@ -307,7 +308,7 @@ test('compiled native quiet suppresses console output while preserving logs and 
 
 test('compiled native no-log leaves the logs directory absent while writing the report', { skip: !executable }, async () => {
   const value = await runFixture(['--no-log']);
-  assert.equal(await exists(join(value.dataDir, 'logs')), false);
+  assert.equal(await exists(join(value.dataDir, 'chaoxing', 'logs')), false);
   const report = await readReport(value.reportPath);
   assertPageException(value.stdout + value.stderr);
   assertBootstrapError(value.stdout + value.stderr);

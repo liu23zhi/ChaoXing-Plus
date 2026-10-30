@@ -322,6 +322,8 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
     }
     if (cx_streq(a, L"--silent-scenario")) { o->silentScenario = TRUE; continue; }
     if (cx_streq(a, L"--console")) { o->consoleWindow = TRUE; continue; }
+    /* 默认不解释灰化原因；只有显式传这个开关时选择窗口才显示原因行。 */
+    if (cx_streq(a, L"--show-inject-reasons")) { o->explainInject = TRUE; continue; }
     if (cx_streq(a, L"--stage-boot")) { o->stageRequest = TRUE; o->silentScenario = TRUE; continue; }
     if (cx_streq(a, L"--staged-boot")) { o->stagedBoot = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(a, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
@@ -865,6 +867,7 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     if (layer->pipeExpr[0]) cx_wcopy(destination->pipeExpr, CX_OPTIONS_PATH_CAP, layer->pipeExpr);
     if (layer->pipeExtraArgs[0]) cx_wcopy(destination->pipeExtraArgs, CX_OPTIONS_PATH_CAP, layer->pipeExtraArgs);
     if (layer->consoleWindow) destination->consoleWindow = TRUE;
+    if (layer->explainInject) destination->explainInject = TRUE;
     if (layer->stagedBoot) destination->stagedBoot = TRUE;
     if (layer->stageRequest) destination->stageRequest = TRUE;
     if (layer->silentDeleteSimulate) destination->silentDeleteSimulate = TRUE;

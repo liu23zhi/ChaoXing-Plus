@@ -41,6 +41,8 @@ typedef struct CX_SELECTION_PROBE {
     BOOL carrierAutoOnly;
     /** 切到显式 dll-proxy 时载体下拉的项数（应大于 carrierOptionCount）。 */
     DWORD carrierOptionCountForProxy;
+    /** 原因提示行当前是否可见（默认关闭，需要 --show-inject-reasons）。 */
+    BOOL statusShown;
 } CX_SELECTION_PROBE;
 
 /* `notice` is an optional first-line message (for example "全盘扫描已取消");
@@ -48,6 +50,7 @@ typedef struct CX_SELECTION_PROBE {
 CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
                                      BOOL hostIs32Bit,
                                      const WCHAR *notice,
+                                     BOOL explainReasons,
                                      WCHAR *out, DWORD outCap,
                                      WCHAR *error, DWORD errorCap);
 
@@ -65,6 +68,7 @@ BOOL cx_selection_client_caps(const WCHAR *clientPath, DWORD *injectDisabledMask
 BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates,
                          BOOL hostIs32Bit,
                          const WCHAR *notice,
+                         BOOL explainReasons,
                          CX_SELECTION_PROBE *probe,
                          WCHAR *error, DWORD errorCap);
 

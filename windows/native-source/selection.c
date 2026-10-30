@@ -44,6 +44,7 @@ typedef struct SELECTION_WINDOW {
     DWORD injectDisabledMask;
     DWORD carrierDisabledMask;
     DWORD statusReasons;
+    BOOL explainReasons;
     int lastInjectIndex;
     int lastCarrierIndex;
 } SELECTION_WINDOW;
@@ -618,11 +619,16 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
     EnableWindow(state->carrierCombo, state->lastInjectIndex == 2);
     InvalidateRect(state->injectCombo, NULL, TRUE);
     InvalidateRect(state->carrierCombo, NULL, TRUE);
-    /* 灰化必须给出原因：否则用户只看到"两种注入方式都不可用"却无从修复。 */
+    /* 原因提示行默认关闭：只有 --show-inject-reasons 才解释灰化原因。 */
     selection_reason_text(reasons, reasonText, 320);
     if (state->status) {
-        SetWindowTextW(state->status, reasonText);
-        ShowWindow(state->status, reasonText[0] ? SW_SHOW : SW_HIDE);
+        if (state->explainReasons) {
+            SetWindowTextW(state->status, reasonText);
+            ShowWindow(state->status, reasonText[0] ? SW_SHOW : SW_HIDE);
+        } else {
+            SetWindowTextW(state->status, L"");
+            ShowWindow(state->status, SW_HIDE);
+        }
     }
 }
 static BOOL selection_accept(SELECTION_WINDOW *state, const WCHAR *path) {
@@ -839,6 +845,7 @@ static DWORD selection_auto_close(void) {
 
 CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
                                      BOOL hostIs32Bit, const WCHAR *notice,
+                                     BOOL explainReasons,
                                      WCHAR *out, DWORD outCap,
                                      WCHAR *error, DWORD errorCap) {
     SELECTION_WINDOW state;
@@ -855,6 +862,7 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
         selection_error(&state, L"客户端选择参数无效。"); return CX_SELECTION_ERROR;
     }
     state.candidates = candidates; state.hostIs32Bit = hostIs32Bit; state.notice = notice;
+    state.explainReasons = explainReasons ? TRUE : FALSE;
     state.out = out; state.outCap = outCap;
     GetNativeSystemInfo(&system);
     if (system.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) state.hostIs32Bit = TRUE;
@@ -881,12 +889,14 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
 }
 
 BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
-                         const WCHAR *notice, CX_SELECTION_PROBE *probe,
+                         const WCHAR *notice, BOOL explainReasons,
+                         CX_SELECTION_PROBE *probe,
                          WCHAR *error, DWORD errorCap) {
     SELECTION_WINDOW state;
     WCHAR title[128], heading[512];
     ZeroMemory(&state, sizeof(state)); state.candidates = candidates;
     state.hostIs32Bit = hostIs32Bit; state.notice = notice;
+    state.explainReasons = explainReasons ? TRUE : FALSE;
     state.error = error; state.errorCap = errorCap;
     if (error && errorCap) error[0] = 0;
     if (!probe || (candidates && ((candidates->count && !candidates->items)
@@ -914,6 +924,8 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->carrierOptionCount = IsWindow(state.carrierCombo) ? (DWORD)SendMessageW(state.carrierCombo, CB_GETCOUNT, 0, 0) : 0;
     probe->carrierSelectedIndex = IsWindow(state.carrierCombo) ? (LONG)SendMessageW(state.carrierCombo, CB_GETCURSEL, 0, 0) : -1;
     probe->statusControlPresent = IsWindow(state.status) != 0;
+    /* 探针窗口本身不显示，IsWindowVisible 恒为假；这里看控件自身的 WS_VISIBLE。 */
+    probe->statusShown = IsWindow(state.status) && (GetWindowLongW(state.status, GWL_STYLE) & WS_VISIBLE) != 0;
     probe->statusReasons = state.statusReasons;
     probe->carrierAutoOnly = probe->carrierOptionCount == 1;
     if (IsWindow(state.carrierCombo)) {

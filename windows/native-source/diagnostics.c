@@ -437,6 +437,8 @@ CX_DIAGNOSTICS *cx_diagnostics_create(const CX_OPTIONS *options,
     CX_DIAGNOSTICS *state;
     WCHAR *base;
     const WCHAR *configured;
+    /* 64KB 缓冲区不能放栈上（构建禁用栈探针），用静态存储，创建串行调用。 */
+    static WCHAR defaultDir[CX_DIAGNOSTICS_PATH_CAP];
     clear_error(error, errorCap);
     if (!options) {
         fail(error, errorCap, L"Diagnostics options are required.", 0);
@@ -454,7 +456,19 @@ CX_DIAGNOSTICS *cx_diagnostics_create(const CX_OPTIONS *options,
         fail(error, errorCap, L"Unable to allocate render diagnostics path.", 0);
         return state;
     }
-    configured = options->diagnosticsDir[0] ? options->diagnosticsDir : L".data\\diagnostics";
+    if (options->diagnosticsDir[0]) configured = options->diagnosticsDir;
+    else {
+        /* 默认跟随 --data-dir：<data-dir>\chaoxing\diagnostics。 */
+        const WCHAR *data = options->dataDir[0] ? options->dataDir : L".data";
+        if (lstrlenW(data) + (DWORD)lstrlenW(CX_HOST_DATA_SUBDIR) + 16 >= CX_DIAGNOSTICS_PATH_CAP) {
+            fail(error, errorCap, L"Render diagnostics directory path is too long.", 0);
+            HeapFree(GetProcessHeap(), 0, base);
+            return state;
+        }
+        lstrcpynW(defaultDir, data, CX_DIAGNOSTICS_PATH_CAP);
+        lstrcatW(defaultDir, L"\\" CX_HOST_DATA_SUBDIR L"\\diagnostics");
+        configured = defaultDir;
+    }
     if (!resolve_path(configured, base)) {
         fail(error, errorCap, L"Unable to resolve render diagnostics directory. Windows error ", GetLastError());
         HeapFree(GetProcessHeap(), 0, base);

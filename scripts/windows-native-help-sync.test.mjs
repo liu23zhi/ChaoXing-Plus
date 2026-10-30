@@ -33,6 +33,7 @@ const INTERNAL_FLAGS = new Set([
 const MUST_BE_IN_DOCS = [
   '--inject-mode',
   '--inject-proxy-dir',
+  '--show-inject-reasons',
   '--panel-all-pages',
   '--install-proxy',
   '--proxy-source',

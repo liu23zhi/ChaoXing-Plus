@@ -29,7 +29,7 @@ async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cx-native-cache-'));
   const common = path.join(root, 'common');
   const fixed = path.join(root, 'fixed');
-  const cache = path.join(root, 'data', 'native-scan-cache-v1.bin');
+  const cache = path.join(root, 'data', 'chaoxing', 'native-scan-cache-v1.bin');
   await fs.mkdir(common); await fs.mkdir(fixed);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return { root, common, fixed, cache };

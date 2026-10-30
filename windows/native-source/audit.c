@@ -143,7 +143,7 @@ static BOOL open_log(CX_AUDIT *audit, const WCHAR *dataDir) {
     base = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CX_AUDIT_PATH_CAP * sizeof(WCHAR));
     if (!base) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
     if (!resolve_path(dataDir[0] ? dataDir : L".data", base)
-        || !wide_append(base, CX_AUDIT_PATH_CAP, L"\\logs\\")) goto done;
+        || !wide_append(base, CX_AUDIT_PATH_CAP, L"\\" CX_HOST_DATA_SUBDIR L"\\logs\\")) goto done;
     n = (DWORD)lstrlenW(base); stamp(time, TRUE);
     for (attempt = 0; attempt < 32; ++attempt) {
         out.text = name; out.used = 0; out.capacity = sizeof(name); out.valid = TRUE; name[0] = 0;

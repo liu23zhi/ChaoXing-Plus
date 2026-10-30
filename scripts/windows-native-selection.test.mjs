@@ -88,6 +88,8 @@ test('compiled native client selection builds its real hidden controls', { skip:
     /discovery reports visited directory progress/,
     /the cancel callback reports a cancelled full scan/,
     /the injection hint control exists for greyed modes/,
+    /injection reasons stay hidden unless --show-inject-reasons is passed/,
+    /explained mode shows the injection reason line/,
     /auto injection mode keeps only the automatic carrier entry/,
     /dll-proxy mode expands the carrier list/,
     /the winmm proxy DLL is embedded in the executable/,

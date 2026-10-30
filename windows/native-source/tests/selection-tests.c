@@ -89,7 +89,7 @@ static void probe_tests(void) {
     lstrcpyW(items[1].version, L"4.1.4.25512");
     candidates.items = items; candidates.count = 2; candidates.recommendedIndex = 1;
     ZeroMemory(&probe, sizeof(probe));
-    check(cx_selection_probe(&candidates, FALSE, NULL, &probe, errorText, 512), "hidden selection controls can be created");
+    check(cx_selection_probe(&candidates, FALSE, NULL, FALSE, &probe, errorText, 512), "hidden selection controls can be created");
     check(probe.itemCount == 2, "every scanned candidate is listed");
     check(probe.selectedIndex == 1, "the recommended candidate is selected initially");
     check(probe.browseAvailable, "manual browse remains available");
@@ -105,6 +105,13 @@ static void probe_tests(void) {
     check(probe.carrierOptionCountForProxy > probe.carrierOptionCount,
           "dll-proxy mode expands the carrier list");
     check(probe.statusControlPresent, "the injection hint control exists for greyed modes");
+    check(!probe.statusShown, "injection reasons stay hidden unless --show-inject-reasons is passed");
+    {
+        CX_SELECTION_PROBE explained;
+        ZeroMemory(&explained, sizeof(explained));
+        check(cx_selection_probe(&candidates, FALSE, NULL, TRUE, &explained, errorText, 512)
+              && explained.statusShown, "explained mode shows the injection reason line");
+    }
     {
         char *payload = NULL;
         DWORD payloadLength = 0;
@@ -128,14 +135,14 @@ static void probe_tests(void) {
     }
     candidates.items = NULL; candidates.count = 0;
     ZeroMemory(&probe, sizeof(probe));
-    check(cx_selection_probe(&candidates, FALSE, NULL, &probe, errorText, 512) && probe.itemCount == 0
+    check(cx_selection_probe(&candidates, FALSE, NULL, FALSE, &probe, errorText, 512) && probe.itemCount == 0
           && probe.selectedIndex == -1 && probe.browseAvailable && probe.scanAllAvailable, "an empty scan still permits manual browsing and full scanning");
-    check(!cx_selection_probe(&candidates, FALSE, NULL, NULL, errorText, 512), "a missing probe output is rejected");
+    check(!cx_selection_probe(&candidates, FALSE, NULL, FALSE, NULL, errorText, 512), "a missing probe output is rejected");
     ZeroMemory(&probe, sizeof(probe));
-    check(cx_selection_probe(&candidates, FALSE, NULL, &probe, errorText, 512) && probe.noticeShown,
+    check(cx_selection_probe(&candidates, FALSE, NULL, FALSE, &probe, errorText, 512) && probe.noticeShown,
           "the default selection heading is shown without a notice");
     ZeroMemory(&probe, sizeof(probe));
-    check(cx_selection_probe(&candidates, FALSE, L"已取消全盘扫描，保留原候选；可重试或手动浏览。", &probe, errorText, 512)
+    check(cx_selection_probe(&candidates, FALSE, L"已取消全盘扫描，保留原候选；可重试或手动浏览。", FALSE, &probe, errorText, 512)
           && probe.noticeShown, "a cancelled full scan notice becomes the selection heading");
 }
 
@@ -308,7 +315,7 @@ void WINAPI SelectionTestMain(void) {
         lstrcpyW(selectedPath, L"must be cleared");
         chooseTimer = SetTimer(NULL, 0, 100, choose_row);
         check(chooseTimer != 0, "a test-only timer can request a full scan");
-        status = cx_select_client(&empty, FALSE, NULL, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
+        status = cx_select_client(&empty, FALSE, NULL, FALSE, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
         if (chooseTimer) KillTimer(NULL, chooseTimer);
         check(status == CX_SELECTION_SCAN_ALL && !selectedPath[0], "the full scan button requests scanning without selecting or launching a client");
     } else if (choose) {
@@ -320,7 +327,7 @@ void WINAPI SelectionTestMain(void) {
         candidates.items = &item; candidates.count = 1;
         chooseTimer = SetTimer(NULL, 0, 100, choose_row);
         check(chooseTimer != 0, "a test-only timer can choose the current process window");
-        status = cx_select_client(&candidates, FALSE, NULL, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
+        status = cx_select_client(&candidates, FALSE, NULL, FALSE, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
         if (chooseTimer) KillTimer(NULL, chooseTimer);
         check(status == CX_SELECTION_SELECTED && lstrcmpiW(selectedPath, fixturePath) == 0,
               "choosing a row returns its validated Unicode PE path");
@@ -329,7 +336,7 @@ void WINAPI SelectionTestMain(void) {
         CX_SELECTION_STATUS status;
         ZeroMemory(&empty, sizeof(empty));
         lstrcpyW(selectedPath, L"must be cleared");
-        status = cx_select_client(&empty, FALSE, NULL, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
+        status = cx_select_client(&empty, FALSE, NULL, FALSE, selectedPath, CX_DISCOVERY_MAX_PATH, errorText, 512);
         check(status == CX_SELECTION_CANCELLED && !selectedPath[0], "closing the actual window cancels without a selected client");
     } else if (progressMode) {
         CX_SCAN_PROGRESS *window = NULL;
@@ -353,7 +360,7 @@ void WINAPI SelectionTestMain(void) {
     } else {
         probe_tests();
         progress_scan_test();
-        check(cx_select_client(NULL, FALSE, NULL, NULL, 0, errorText, 512) == CX_SELECTION_ERROR,
+        check(cx_select_client(NULL, FALSE, NULL, FALSE, NULL, 0, errorText, 512) == CX_SELECTION_ERROR,
               "invalid selection output fails before opening a window");
     }
     output(failedChecks ? "NATIVE SELECTION TESTS FAIL\n" : "NATIVE SELECTION TESTS PASS\n");

@@ -2273,6 +2273,7 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
         cx_discovery_init(&fullResult);
         for (;;) {
             status = cx_select_client(shown, info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL, notice,
+                options->explainInject,
                 h_selected_path, HOST_PATH_CAP, error, errorCap);
             if (status != CX_SELECTION_SCAN_ALL) break;
             {
@@ -2432,7 +2433,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         {
             DWORD length = (DWORD)h_wlen(h_scan_cache_path);
             if (length && h_scan_cache_path[length - 1] != L'\\' && h_scan_cache_path[length - 1] != L'/') h_scan_cache_path[length++] = L'\\';
-            h_copy(h_scan_cache_path + length, sizeof(h_scan_cache_path) / sizeof(WCHAR) - length, L"native-scan-cache-v1.bin");
+            h_copy(h_scan_cache_path + length, sizeof(h_scan_cache_path) / sizeof(WCHAR) - length, CX_HOST_DATA_SUBDIR L"\\native-scan-cache-v1.bin");
         }
         discover.cachePath = h_scan_cache_path;
         discover.rescan = options->rescan;
@@ -2808,6 +2809,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
     "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（显式 auto 且已装代理时优先 dll-proxy；不带 --inject-mode 时等同 cdp-port）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
+    "注入: --show-inject-reasons（选择窗口显示注入方式不可用的原因；默认不显示）\n"
             "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
