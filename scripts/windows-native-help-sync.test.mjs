@@ -54,7 +54,7 @@ const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_H
 async function acceptedFlags() {
   const source = await readFile(optionsSource, 'utf8');
   const flags = new Set();
-  for (const match of source.matchAll(/cx_streq\(a,\s*L"(--[a-z0-9-]+)"\)/gu)) flags.add(match[1]);
+  for (const match of source.matchAll(/cx_streq\(name,\s*L"(--[a-z0-9-]+)"\)/gu)) flags.add(match[1]);
   return [...flags].sort();
 }
 

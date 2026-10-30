@@ -123,6 +123,36 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(version.status, 0, version.stderr || `version exited with ${version.status}`);
   assert.equal(version.stdout.trim(), '6.2.0');
 
+  /* 兼容 PowerShell/cmd 习惯：帮助与版本别名大小写不敏感，输出必须与主开关一致。 */
+  for (const alias of ['-h', '-H', '--h', '--H', '-help', '--Help', '--HELP', '-?', '/?', '?']) {
+    const aliasHelp = run(alias);
+    assert.equal(aliasHelp.status, 0, `${alias}: ${aliasHelp.stderr || aliasHelp.stdout}`);
+    assert.equal(aliasHelp.stdout, help.stdout, `${alias} must print the same help as --help`);
+  }
+  for (const alias of ['-v', '-V', '--v', '--Version']) {
+    const aliasVersion = run(alias);
+    assert.equal(aliasVersion.status, 0, `${alias}: ${aliasVersion.stderr || aliasVersion.stdout}`);
+    assert.equal(aliasVersion.stdout.trim(), '6.2.0', `${alias} must print only the version`);
+  }
+
+  /* 参数名兼容：不区分大小写、-name、/name、下划线等价连字符、--name=value 内联值。 */
+  for (const args of [
+    ['--QUIET', '--version'],
+    ['-quiet', '--version'],
+    ['/quiet', '--version'],
+    ['--panel_theme', 'blue', '--version'],
+    ['--panel_theme=blue', '--version'],
+    ['--duration=1', '--version'],
+    ['/client=C:\\fixture\\CXExam.exe', '--version']
+  ]) {
+    const compatible = run(...args);
+    assert.equal(compatible.status, 0, `${args.join(' ')}: ${compatible.stderr || compatible.stdout}`);
+    assert.equal(compatible.stdout.trim(), '6.2.0', `${args.join(' ')} must parse and reach --version`);
+  }
+  const unknown = run('--not-an-option=');
+  assert.equal(unknown.status, 2, unknown.stderr || unknown.stdout);
+  assert.match(`${unknown.stdout}${unknown.stderr}`, /unknown command line option \(try --help\)/u);
+
   const capabilities = run('--capabilities');
   assert.equal(capabilities.status, 0, capabilities.stderr || `capabilities exited with ${capabilities.status}`);
   const nativeCapabilities = JSON.parse(capabilities.stdout);

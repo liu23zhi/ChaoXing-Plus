@@ -27,6 +27,19 @@ static BOOL cx_streq(const WCHAR *a, const WCHAR *b) {
     while (a[i] && b[i] && a[i] == b[i]) i++;
     return a[i] == 0 && b[i] == 0;
 }
+/* 兼容 Windows/PowerShell 习惯：帮助与版本开关不区分大小写。 */
+static BOOL cx_streq_ic(const WCHAR *a, const WCHAR *b) {
+    int i = 0;
+    if (!a || !b) return FALSE;
+    while (a[i] && b[i]) {
+        WCHAR x = a[i], y = b[i];
+        if (x >= L'A' && x <= L'Z') x = (WCHAR)(x - L'A' + L'a');
+        if (y >= L'A' && y <= L'Z') y = (WCHAR)(y - L'A' + L'a');
+        if (x != y) return FALSE;
+        ++i;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
 static BOOL cx_skey(const char *s, const JT *t, int object, const char *key,
                     int *value) {
     int v = jkey(s, t, object, key);
@@ -206,22 +219,84 @@ static BOOL cx_int_arg(const WCHAR *arg, int min, int max, int *dst,
     return TRUE;
 }
 
+/* 命令行参数兼容：\\/name、-name、--Name、--NA_ME 均归一为 --name；
+   --name=value 作为内联值。返回是否像选项（以 - 或 / 开头）。 */
+static BOOL cx_normalize_option(const WCHAR *arg, WCHAR *out, DWORD cap, const WCHAR **inlineValue) {
+    DWORD at = 0;
+    const WCHAR *src;
+    BOOL option = TRUE;
+    if (inlineValue) *inlineValue = NULL;
+    if (!arg || !out || cap < 3) return FALSE;
+    out[0] = 0;
+    if (arg[0] == L'/') {
+        if (!arg[1]) return FALSE;
+        src = arg + 1;
+        if (src[0] == L'?') {
+            if (cap < 4) return FALSE;
+            out[at++] = L'-'; out[at++] = L'?'; out[at] = 0;
+            return TRUE;
+        }
+        if (cap < 4) return FALSE;
+        out[at++] = L'-'; out[at++] = L'-';
+    } else if (arg[0] == L'-') {
+        if (arg[1] == L'-') { src = arg + 2; out[at++] = L'-'; out[at++] = L'-'; }
+        else if (!arg[1]) return FALSE;
+        else if (!arg[2]) { src = arg + 1; out[at++] = L'-'; }
+        else { src = arg + 1; out[at++] = L'-'; out[at++] = L'-'; }
+    } else {
+        option = FALSE;
+        src = arg;
+    }
+    {
+        DWORD i = 0;
+        while (src[i]) {
+            WCHAR c = src[i];
+            if (option && c == L'=') { if (inlineValue) *inlineValue = src + i + 1; break; }
+            if (c >= L'A' && c <= L'Z') c = (WCHAR)(c - L'A' + L'a');
+            if (c == L'_') c = L'-';
+            if (at + 1 >= cap) { out[0] = 0; return FALSE; }
+            out[at++] = c;
+            ++i;
+        }
+    }
+    out[at] = 0;
+    return option;
+}
+static BOOL cx_take_value(const WCHAR *inlineValue, int argc, WCHAR **argv, int *i,
+                          const WCHAR **raw, WCHAR *error, DWORD errorCap) {
+    if (inlineValue) { *raw = inlineValue; return TRUE; }
+    return cx_next_arg(argc, argv, i, raw, error, errorCap);
+}
+
 BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
                           WCHAR *error, DWORD errorCap) {
     int i; const WCHAR *raw;
     if (!o || argc < 0 || !argv) { cx_error(error, errorCap, L"invalid command line"); return FALSE; }
     o->commandLineLayer = TRUE;
     for (i = 0; i < argc; i++) {
-        const WCHAR *a = argv[i];
-        if (!a) continue;
-        if (cx_streq(a, L"--help")) { o->help = TRUE; continue; }
-        if (cx_streq(a, L"--capabilities")) { o->capabilities = TRUE; continue; }
-    if (cx_streq(a, L"--version") || cx_streq(a, L"-v")) { o->version = TRUE; continue; }
-        if (cx_streq(a, L"--print-effective-config")) { o->printEffectiveConfig = TRUE; continue; }
-        if (cx_streq(a, L"--self-check")) { o->selfCheck = TRUE; continue; }
-        if (cx_streq(a, L"--config")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->configPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->configPathSet = TRUE; continue; }
-        if (cx_streq(a, L"--options-json")) {
-            if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE;
+        const WCHAR *rawArg = argv[i];
+        const WCHAR *name;
+        const WCHAR *inlineValue = NULL;
+        WCHAR normalized[CX_OPTIONS_SHORT_CAP];
+        BOOL isOption;
+        if (!rawArg) continue;
+        /* 单独的 ? 也当帮助（Windows 习惯）。 */
+        if (cx_streq(rawArg, L"?")) { o->help = TRUE; continue; }
+        isOption = cx_normalize_option(rawArg, normalized, CX_OPTIONS_SHORT_CAP, &inlineValue);
+        name = isOption ? normalized : rawArg;
+        /* 帮助别名：-h / -H / --h / --H / -help / --Help / --HELP / -? / ? 均等价于 --help。 */
+        if (cx_streq(name, L"--help") || cx_streq_ic(name, L"-h") || cx_streq_ic(name, L"--h")
+            || cx_streq_ic(name, L"-help") || cx_streq_ic(name, L"--help")
+            || cx_streq(name, L"-?") || cx_streq(name, L"/?") || cx_streq(name, L"?")) { o->help = TRUE; continue; }
+        if (cx_streq(name, L"--capabilities")) { o->capabilities = TRUE; continue; }
+        /* 版本别名：-v / -V / --v / --version / --Version 均打印 6.2.0。 */
+        if (cx_streq(name, L"--version") || cx_streq_ic(name, L"-v") || cx_streq_ic(name, L"--v")
+            || cx_streq_ic(name, L"--version")) { o->version = TRUE; continue; }
+        if (cx_streq(name, L"--print-effective-config")) { o->printEffectiveConfig = TRUE; continue; }
+        if (cx_streq(name, L"--self-check")) { o->selfCheck = TRUE; continue; }
+        if (cx_streq(name, L"--config")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->configPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->configPathSet = TRUE; continue; }
+        if (cx_streq(name, L"--options-json")) {
+            if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE;
             o->optionsJsonSet = TRUE;
             if (raw[0] == L'@') { if (!cx_copy_arg(o, o->optionsJsonPath, CX_OPTIONS_PATH_CAP, raw + 1, error, errorCap)) return FALSE; o->optionsJsonFile = TRUE; }
             else {
@@ -231,85 +306,85 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
             }
             continue;
         }
-        if (cx_streq(a, L"--client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; continue; }
-        if (cx_streq(a, L"--client-index")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 2147483647, &o->clientIndex, error, errorCap)) return FALSE; o->clientIndexSet = TRUE; continue; }
-        if (cx_streq(a, L"--client-first")) { o->clientFirst = TRUE; o->clientFirstSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--scan-clients")) { o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--list-clients")) { o->listClients = TRUE; o->listClientsSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--select-client")) { o->selectClient = TRUE; o->selectClientSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--scan-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->scanMode, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_scan_mode(o->scanMode)) { cx_error(error, errorCap, L"invalid --scan-mode"); return FALSE; } o->scanModeSet = TRUE; o->scanAll = cx_streq(o->scanMode, L"all"); o->scanAllSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--scan-all")) { o->scanAll = TRUE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"fallback-all"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-scan-all")) { o->scanAll = FALSE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"common"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--rescan")) { o->rescan = TRUE; o->rescanSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-scan-cache")) { o->noScanCache = TRUE; o->noScanCacheSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
-        if (cx_streq(a, L"--ui")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->ui, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_ui(o->ui)) { cx_error(error, errorCap, L"invalid --ui"); return FALSE; } o->uiSet = TRUE; continue; }
-        if (cx_streq(a, L"--data-dir")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->dataDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->dataDirSet = TRUE; continue; }
-        if (cx_streq(a, L"--expected-browser")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->expectedBrowser, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->expectedBrowserSet = TRUE; continue; }
-        if (cx_streq(a, L"--assets")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->assetsDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->assetsDirSet = TRUE; continue; }
-        if (cx_streq(a, L"--inject-blank-frames")) { o->injectBlankFrames = TRUE; o->injectBlankFramesSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-inject-blank-frames")) { o->injectBlankFrames = FALSE; o->injectBlankFramesSet = TRUE; continue; }
-        if (cx_streq(a, L"--capture-console")) { o->captureConsole = TRUE; o->captureConsoleSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-capture-console")) { o->captureConsole = FALSE; o->captureConsoleSet = TRUE; continue; }
-        if (cx_streq(a, L"--inject-strategy")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->injectStrategy, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid --inject-strategy"); return FALSE; } o->injectStrategySet = TRUE; continue; }
-        if (cx_streq(a, L"--inject-retries")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 5, &o->injectRetries, error, errorCap)) return FALSE; o->injectRetriesSet = TRUE; continue; }
-        if (cx_streq(a, L"--debug-timeout")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1000, 120000, &o->debugTimeoutMs, error, errorCap)) return FALSE; o->debugTimeoutSet = TRUE; continue; }
-        if (cx_streq(a, L"--target-poll-interval")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 250, 10000, &o->targetPollIntervalMs, error, errorCap)) return FALSE; o->targetPollIntervalSet = TRUE; continue; }
-        if (cx_streq(a, L"--bundle-timeout")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1000, 300000, &o->bundleTimeoutMs, error, errorCap)) return FALSE; o->bundleTimeoutSet = TRUE; continue; }
-        if (cx_streq(a, L"--port")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 65535, &o->port, error, errorCap)) return FALSE; o->portSet = TRUE; continue; }
-        if (cx_streq(a, L"--attach")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 65535, &o->attachPort, error, errorCap)) return FALSE; o->attachPortSet = TRUE; continue; }
-        if (cx_streq(a, L"--duration")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 2147483647, &o->durationMs, error, errorCap)) return FALSE; o->durationSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-disk-write")) { o->noDiskWrite = TRUE; o->noDiskWriteSet = TRUE; continue; }
-        if (cx_streq(a, L"--retain-data")) { o->retainData = TRUE; o->retainDataSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-retain-data")) { o->retainData = FALSE; o->retainDataSet = TRUE; continue; }
-        if (cx_streq(a, L"--delete-config")) { o->deleteConfig = TRUE; o->deleteConfigSet = TRUE; continue; }
-        if (cx_streq(a, L"--report")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->reportPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->reportPathSet = TRUE; continue; }
-        if (cx_streq(a, L"--diagnose")) { o->diagnose = TRUE; o->noDiagnose = FALSE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-diagnose")) { o->diagnose = FALSE; o->noDiagnose = TRUE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
-        if (cx_streq(a, L"--diagnostics-dir")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->diagnosticsDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->diagnosticsDirSet = TRUE; continue; }
-        if (cx_streq(a, L"--quiet")) { o->quiet = TRUE; o->quietSet = TRUE; continue; }
-        if (cx_streq(a, L"--log")) { o->logFileEnabled = TRUE; o->logFileEnabledSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-log")) { o->logFileEnabled = FALSE; o->logFileEnabledSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel")) { o->panelEnabled = TRUE; o->panelEnabledSet = TRUE; continue; }
-        if (cx_streq(a, L"--no-panel")) { o->panelEnabled = FALSE; o->panelEnabledSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-collapsed")) { o->panelCollapsed = TRUE; o->panelCollapsedSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-expanded")) { o->panelCollapsed = FALSE; o->panelCollapsedSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-top")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 10000, &o->panelTop, error, errorCap)) return FALSE; o->panelTopSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-right")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 10000, &o->panelRight, error, errorCap)) return FALSE; o->panelRightSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-width")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 320, 800, &o->panelWidth, error, errorCap)) return FALSE; o->panelWidthSet = TRUE; continue; }
-        if (cx_streq(a, L"--panel-theme")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->panelTheme, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->panelThemeSet = TRUE; continue; }
-        if (cx_streq(a, L"--answer-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"auto")) o->answerModeAuto = TRUE; else if (cx_streq(raw, L"manual")) o->answerModeAuto = FALSE; else { cx_error(error, errorCap, L"invalid --answer-mode"); return FALSE; } o->answerModeSet = TRUE; continue; }
-        if (cx_streq(a, L"--answer-key")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->answerKey, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->answerKeySet = TRUE; continue; }
-        if (cx_streq(a, L"--show-answer-dialog")) { o->showAnswerDialog = TRUE; o->showAnswerDialogSet = TRUE; continue; }
-        if (cx_streq(a, L"--hide-answer-dialog")) { o->showAnswerDialog = FALSE; o->showAnswerDialogSet = TRUE; continue; }
-        if (cx_streq(a, L"--answer-threads")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 4, &o->answerThreads, error, errorCap)) return FALSE; o->answerThreadsSet = TRUE; continue; }
-        if (cx_streq(a, L"--answer-countdown")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 3600, &o->answerCountdown, error, errorCap)) return FALSE; o->answerCountdownSet = TRUE; continue; }
-        if (cx_streq(a, L"--answer-retry")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 20, &o->answerRetry, error, errorCap)) return FALSE; o->answerRetrySet = TRUE; continue; }
-        if (cx_streq(a, L"--no-auto-submit")) { o->autoSubmit = FALSE; o->autoSubmitSet = TRUE; continue; }
-        if (cx_streq(a, L"--stop-client-on-exit")) { o->stopClientOnExit = TRUE; o->stopClientOnExitSet = TRUE; continue; }
-        if (cx_streq(a, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
-        if (cx_streq(a, L"--execution-mode")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
-        if (cx_streq(a, L"--memory-exec") || cx_streq(a, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
-        if (cx_streq(a, L"--inject-proxy-dir")) {
-        if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) ||
+        if (cx_streq(name, L"--client")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; continue; }
+        if (cx_streq(name, L"--client-index")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 2147483647, &o->clientIndex, error, errorCap)) return FALSE; o->clientIndexSet = TRUE; continue; }
+        if (cx_streq(name, L"--client-first")) { o->clientFirst = TRUE; o->clientFirstSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--scan-clients")) { o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--list-clients")) { o->listClients = TRUE; o->listClientsSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--select-client")) { o->selectClient = TRUE; o->selectClientSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--scan-mode")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->scanMode, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_scan_mode(o->scanMode)) { cx_error(error, errorCap, L"invalid --scan-mode"); return FALSE; } o->scanModeSet = TRUE; o->scanAll = cx_streq(o->scanMode, L"all"); o->scanAllSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--scan-all")) { o->scanAll = TRUE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"fallback-all"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-scan-all")) { o->scanAll = FALSE; o->scanAllSet = TRUE; o->scanModeSet = TRUE; cx_wcopy(o->scanMode, CX_OPTIONS_SHORT_CAP, L"common"); o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--rescan")) { o->rescan = TRUE; o->rescanSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-scan-cache")) { o->noScanCache = TRUE; o->noScanCacheSet = TRUE; o->scanClients = TRUE; o->scanClientsSet = TRUE; continue; }
+        if (cx_streq(name, L"--ui")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->ui, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_ui(o->ui)) { cx_error(error, errorCap, L"invalid --ui"); return FALSE; } o->uiSet = TRUE; continue; }
+        if (cx_streq(name, L"--data-dir")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->dataDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->dataDirSet = TRUE; continue; }
+        if (cx_streq(name, L"--expected-browser")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->expectedBrowser, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->expectedBrowserSet = TRUE; continue; }
+        if (cx_streq(name, L"--assets")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->assetsDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->assetsDirSet = TRUE; continue; }
+        if (cx_streq(name, L"--inject-blank-frames")) { o->injectBlankFrames = TRUE; o->injectBlankFramesSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-inject-blank-frames")) { o->injectBlankFrames = FALSE; o->injectBlankFramesSet = TRUE; continue; }
+        if (cx_streq(name, L"--capture-console")) { o->captureConsole = TRUE; o->captureConsoleSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-capture-console")) { o->captureConsole = FALSE; o->captureConsoleSet = TRUE; continue; }
+        if (cx_streq(name, L"--inject-strategy")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->injectStrategy, CX_OPTIONS_SHORT_CAP, raw, error, errorCap) || !cx_valid_inject_strategy(o->injectStrategy)) { cx_error(error, errorCap, L"invalid --inject-strategy"); return FALSE; } o->injectStrategySet = TRUE; continue; }
+        if (cx_streq(name, L"--inject-retries")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 5, &o->injectRetries, error, errorCap)) return FALSE; o->injectRetriesSet = TRUE; continue; }
+        if (cx_streq(name, L"--debug-timeout")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1000, 120000, &o->debugTimeoutMs, error, errorCap)) return FALSE; o->debugTimeoutSet = TRUE; continue; }
+        if (cx_streq(name, L"--target-poll-interval")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 250, 10000, &o->targetPollIntervalMs, error, errorCap)) return FALSE; o->targetPollIntervalSet = TRUE; continue; }
+        if (cx_streq(name, L"--bundle-timeout")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1000, 300000, &o->bundleTimeoutMs, error, errorCap)) return FALSE; o->bundleTimeoutSet = TRUE; continue; }
+        if (cx_streq(name, L"--port")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 65535, &o->port, error, errorCap)) return FALSE; o->portSet = TRUE; continue; }
+        if (cx_streq(name, L"--attach")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 65535, &o->attachPort, error, errorCap)) return FALSE; o->attachPortSet = TRUE; continue; }
+        if (cx_streq(name, L"--duration")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 2147483647, &o->durationMs, error, errorCap)) return FALSE; o->durationSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-disk-write")) { o->noDiskWrite = TRUE; o->noDiskWriteSet = TRUE; continue; }
+        if (cx_streq(name, L"--retain-data")) { o->retainData = TRUE; o->retainDataSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-retain-data")) { o->retainData = FALSE; o->retainDataSet = TRUE; continue; }
+        if (cx_streq(name, L"--delete-config")) { o->deleteConfig = TRUE; o->deleteConfigSet = TRUE; continue; }
+        if (cx_streq(name, L"--report")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->reportPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->reportPathSet = TRUE; continue; }
+        if (cx_streq(name, L"--diagnose")) { o->diagnose = TRUE; o->noDiagnose = FALSE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-diagnose")) { o->diagnose = FALSE; o->noDiagnose = TRUE; o->diagnoseSet = TRUE; o->noDiagnoseSet = TRUE; continue; }
+        if (cx_streq(name, L"--diagnostics-dir")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->diagnosticsDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->diagnosticsDirSet = TRUE; continue; }
+        if (cx_streq(name, L"--quiet")) { o->quiet = TRUE; o->quietSet = TRUE; continue; }
+        if (cx_streq(name, L"--log")) { o->logFileEnabled = TRUE; o->logFileEnabledSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-log")) { o->logFileEnabled = FALSE; o->logFileEnabledSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel")) { o->panelEnabled = TRUE; o->panelEnabledSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-panel")) { o->panelEnabled = FALSE; o->panelEnabledSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-collapsed")) { o->panelCollapsed = TRUE; o->panelCollapsedSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-expanded")) { o->panelCollapsed = FALSE; o->panelCollapsedSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-top")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 10000, &o->panelTop, error, errorCap)) return FALSE; o->panelTopSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-right")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 10000, &o->panelRight, error, errorCap)) return FALSE; o->panelRightSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-width")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 320, 800, &o->panelWidth, error, errorCap)) return FALSE; o->panelWidthSet = TRUE; continue; }
+        if (cx_streq(name, L"--panel-theme")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->panelTheme, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->panelThemeSet = TRUE; continue; }
+        if (cx_streq(name, L"--answer-mode")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"auto")) o->answerModeAuto = TRUE; else if (cx_streq(raw, L"manual")) o->answerModeAuto = FALSE; else { cx_error(error, errorCap, L"invalid --answer-mode"); return FALSE; } o->answerModeSet = TRUE; continue; }
+        if (cx_streq(name, L"--answer-key")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->answerKey, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE; o->answerKeySet = TRUE; continue; }
+        if (cx_streq(name, L"--show-answer-dialog")) { o->showAnswerDialog = TRUE; o->showAnswerDialogSet = TRUE; continue; }
+        if (cx_streq(name, L"--hide-answer-dialog")) { o->showAnswerDialog = FALSE; o->showAnswerDialogSet = TRUE; continue; }
+        if (cx_streq(name, L"--answer-threads")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 4, &o->answerThreads, error, errorCap)) return FALSE; o->answerThreadsSet = TRUE; continue; }
+        if (cx_streq(name, L"--answer-countdown")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 3600, &o->answerCountdown, error, errorCap)) return FALSE; o->answerCountdownSet = TRUE; continue; }
+        if (cx_streq(name, L"--answer-retry")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 20, &o->answerRetry, error, errorCap)) return FALSE; o->answerRetrySet = TRUE; continue; }
+        if (cx_streq(name, L"--no-auto-submit")) { o->autoSubmit = FALSE; o->autoSubmitSet = TRUE; continue; }
+        if (cx_streq(name, L"--stop-client-on-exit")) { o->stopClientOnExit = TRUE; o->stopClientOnExitSet = TRUE; continue; }
+        if (cx_streq(name, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
+        if (cx_streq(name, L"--execution-mode")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
+        if (cx_streq(name, L"--memory-exec") || cx_streq(name, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
+        if (cx_streq(name, L"--inject-proxy-dir")) {
+        if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) ||
             !cx_copy_arg(o, o->injectProxyDir, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE;
         o->injectProxyDirSet = TRUE;
         continue;
     }
-    if (cx_streq(a, L"--panel-all-pages")) { o->panelAllPages = TRUE; continue; }
-    if (cx_streq(a, L"--pipe-test")) { o->pipeTest = TRUE; continue; }
-    if (cx_streq(a, L"--probe-all")) { o->probeAll = TRUE; continue; }
-    if (cx_streq(a, L"--probe-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->probeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->probeClientPathSet = TRUE; continue; }
-    if (cx_streq(a, L"--proxy-port")) { int value = 0; if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_parse_int(raw, 1024, 65534, &value)) { cx_error(error, errorCap, L"invalid --proxy-port (1024-65534)"); return FALSE; } o->proxyPort = value; o->proxyPortSet = TRUE; continue; }
-    if (cx_streq(a, L"--install-proxy")) { o->installProxy = TRUE; continue; }
-    if (cx_streq(a, L"--uninstall-proxy")) { o->uninstallProxy = TRUE; continue; }
-    if (cx_streq(a, L"--proxy-target")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxyTarget, 16, raw, error, errorCap)) return FALSE; o->proxyTargetSet = TRUE; continue; }
-    if (cx_streq(a, L"--proxy-source")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxySource, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->proxySourceSet = TRUE; continue; }
-    if (cx_streq(a, L"--pipe-args")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeExtraArgs, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; continue; }
-    if (cx_streq(a, L"--pipe-expr")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeExpr, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; continue; }
-    if (cx_streq(a, L"--pipe-call")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeCallPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeCallPathSet = TRUE; continue; }
-    if (cx_streq(a, L"--pipe-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeClientPathSet = TRUE; continue; }
-    if (cx_streq(a, L"--inject-mode")) {
-        if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap) ||
+    if (cx_streq(name, L"--panel-all-pages")) { o->panelAllPages = TRUE; continue; }
+    if (cx_streq(name, L"--pipe-test")) { o->pipeTest = TRUE; continue; }
+    if (cx_streq(name, L"--probe-all")) { o->probeAll = TRUE; continue; }
+    if (cx_streq(name, L"--probe-client")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->probeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->probeClientPathSet = TRUE; continue; }
+    if (cx_streq(name, L"--proxy-port")) { int value = 0; if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_parse_int(raw, 1024, 65534, &value)) { cx_error(error, errorCap, L"invalid --proxy-port (1024-65534)"); return FALSE; } o->proxyPort = value; o->proxyPortSet = TRUE; continue; }
+    if (cx_streq(name, L"--install-proxy")) { o->installProxy = TRUE; continue; }
+    if (cx_streq(name, L"--uninstall-proxy")) { o->uninstallProxy = TRUE; continue; }
+    if (cx_streq(name, L"--proxy-target")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxyTarget, 16, raw, error, errorCap)) return FALSE; o->proxyTargetSet = TRUE; continue; }
+    if (cx_streq(name, L"--proxy-source")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->proxySource, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->proxySourceSet = TRUE; continue; }
+    if (cx_streq(name, L"--pipe-args")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeExtraArgs, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; continue; }
+    if (cx_streq(name, L"--pipe-expr")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeExpr, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; continue; }
+    if (cx_streq(name, L"--pipe-call")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeCallPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeCallPathSet = TRUE; continue; }
+    if (cx_streq(name, L"--pipe-client")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_copy_arg(o, o->pipeClientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->pipeClientPathSet = TRUE; continue; }
+    if (cx_streq(name, L"--inject-mode")) {
+        if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) ||
             !cx_copy_arg(o, o->injectMode, CX_OPTIONS_SHORT_CAP, raw, error, errorCap)) return FALSE;
         if (!cx_streq(o->injectMode, L"auto") && !cx_streq(o->injectMode, L"cdp-port") &&
             !cx_streq(o->injectMode, L"cdp-pipe") && !cx_streq(o->injectMode, L"dll-proxy") &&
@@ -320,33 +395,33 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         o->injectModeSet = TRUE;
         continue;
     }
-    if (cx_streq(a, L"--silent-scenario")) { o->silentScenario = TRUE; continue; }
-    if (cx_streq(a, L"--console")) { o->consoleWindow = TRUE; continue; }
+    if (cx_streq(name, L"--silent-scenario")) { o->silentScenario = TRUE; continue; }
+    if (cx_streq(name, L"--console")) { o->consoleWindow = TRUE; continue; }
     /* 默认不解释灰化原因；只有显式传这个开关时选择窗口才显示原因行。 */
-    if (cx_streq(a, L"--show-inject-reasons")) { o->explainInject = TRUE; continue; }
-    if (cx_streq(a, L"--stage-boot")) { o->stageRequest = TRUE; o->silentScenario = TRUE; continue; }
-    if (cx_streq(a, L"--staged-boot")) { o->stagedBoot = TRUE; o->silentScenario = TRUE; continue; }
-        if (cx_streq(a, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
-        if (cx_streq(a, L"--silent-client")) { if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; o->silentClientPathSet = TRUE; o->silentScenario = TRUE; continue; }
-        if (cx_streq(a, L"--delete-suspend") ||
-            cx_streq(a, L"--wipe-owned-files-on-start") || cx_streq(a, L"--wipe-failure-policy") ||
-            cx_streq(a, L"--wipe-retries") || cx_streq(a, L"--wipe-retry-delay") ||
-            cx_streq(a, L"--wipe-runtime-retry") || cx_streq(a, L"--no-wipe-runtime-retry") ||
-            cx_streq(a, L"--wipe-runtime-interval") || cx_streq(a, L"--self-destruct-key") ||
-            cx_streq(a, L"--self-destruct-on-fullscreen-exit") || cx_streq(a, L"--self-destruct-delay") ||
-            cx_streq(a, L"--no-self-destruct-confirm") || cx_streq(a, L"--execution-mode-delete-suspend")) {
+    if (cx_streq(name, L"--show-inject-reasons")) { o->explainInject = TRUE; continue; }
+    if (cx_streq(name, L"--stage-boot")) { o->stageRequest = TRUE; o->silentScenario = TRUE; continue; }
+    if (cx_streq(name, L"--staged-boot")) { o->stagedBoot = TRUE; o->silentScenario = TRUE; continue; }
+        if (cx_streq(name, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
+        if (cx_streq(name, L"--silent-client")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; o->silentClientPathSet = TRUE; o->silentScenario = TRUE; continue; }
+        if (cx_streq(name, L"--delete-suspend") ||
+            cx_streq(name, L"--wipe-owned-files-on-start") || cx_streq(name, L"--wipe-failure-policy") ||
+            cx_streq(name, L"--wipe-retries") || cx_streq(name, L"--wipe-retry-delay") ||
+            cx_streq(name, L"--wipe-runtime-retry") || cx_streq(name, L"--no-wipe-runtime-retry") ||
+            cx_streq(name, L"--wipe-runtime-interval") || cx_streq(name, L"--self-destruct-key") ||
+            cx_streq(name, L"--self-destruct-on-fullscreen-exit") || cx_streq(name, L"--self-destruct-delay") ||
+            cx_streq(name, L"--no-self-destruct-confirm") || cx_streq(name, L"--execution-mode-delete-suspend")) {
             cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported by the native host; use --silent-scenario (the Node host is deprecated and frozen)");
             o->unsupportedRequested = TRUE; return FALSE;
         }
-        if (cx_streq(a, L"--no-elevate")) { o->noElevate = TRUE; continue; }
-        if (cx_streq(a, L"--elevate-on-start")) { o->elevateOnStart = TRUE; o->elevateOnStartSet = TRUE; continue; }
-        if (cx_streq(a, L"--elevated")) { o->elevated = TRUE; continue; }
-        if (cx_streq(a, L"--elevated-client")) {
-            if (!cx_next_arg(argc, argv, &i, &raw, error, errorCap)
+        if (cx_streq(name, L"--no-elevate")) { o->noElevate = TRUE; continue; }
+        if (cx_streq(name, L"--elevate-on-start")) { o->elevateOnStart = TRUE; o->elevateOnStartSet = TRUE; continue; }
+        if (cx_streq(name, L"--elevated")) { o->elevated = TRUE; continue; }
+        if (cx_streq(name, L"--elevated-client")) {
+            if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)
                 || !cx_copy_arg(o, o->elevatedClientPath, 32768, raw, error, errorCap)) return FALSE;
             o->elevatedClientSet = TRUE; continue;
         }
-        if (a[0] == L'-') { cx_error(error, errorCap, L"unknown command line option"); return FALSE; }
+        if (isOption) { cx_error(error, errorCap, L"unknown command line option (try --help)"); return FALSE; }
         cx_error(error, errorCap, L"unexpected positional argument"); return FALSE;
     }
     o->sourceLayerCount++;
