@@ -231,17 +231,81 @@ static BOOL selection_pe_imports(const WCHAR *path, const WCHAR *dllName) {
     return found;
 }
 
+
+/* 宿主目录里是否真有这个载体的代理 DLL（没有就没法安装，界面应灰化）。 */
+static BOOL selection_proxy_source(int carrierIndex) {
+    WCHAR hostPath[MAX_PATH];
+    WCHAR dir[MAX_PATH];
+    WCHAR candidate[MAX_PATH];
+    static const WCHAR *const rel[4] = { L"\\hook\\", L"\\..\\hook\\", L"\\..\\..\\build-windows\\hook\\", L"\\" };
+    DWORD length, cut = 0, i;
+    int r;
+    if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return FALSE;
+    length = (DWORD)lstrlenW(hostPath);
+    for (i = 0; i < length; ++i) if (hostPath[i] == L'\\' || hostPath[i] == L'/') cut = i;
+    if (!cut) return FALSE;
+    for (r = 0; r < 4; ++r) {
+        lstrcpynW(dir, hostPath, (int)(cut + 1));
+        dir[cut] = 0;
+        if (lstrlenW(dir) + lstrlenW(rel[r]) + 32 >= MAX_PATH) continue;
+        lstrcatW(dir, rel[r]);
+        lstrcpynW(candidate, dir, MAX_PATH);
+        lstrcatW(candidate, selection_carrier_names[carrierIndex]);
+        lstrcatW(candidate, L".dll");
+        if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) return TRUE;
+    }
+    return FALSE;
+}
+
+/* 客户端目录是否可写：dll-proxy 需要往里面放 DLL。 */
+static BOOL selection_dir_writable(const WCHAR *clientPath) {
+    WCHAR dir[MAX_PATH];
+    WCHAR probe[MAX_PATH];
+    HANDLE file;
+    DWORD cut = 0, i;
+    if (!clientPath || !*clientPath) return FALSE;
+    lstrcpynW(dir, clientPath, MAX_PATH);
+    for (i = 0; dir[i]; ++i) if (dir[i] == L'\\' || dir[i] == L'/') cut = i;
+    if (!cut) return FALSE;
+    dir[cut] = 0;
+    if (lstrlenW(dir) + 32 >= MAX_PATH) return FALSE;
+    lstrcpynW(probe, dir, MAX_PATH);
+    lstrcatW(probe, L"\\cxhook-writetest.tmp");
+    file = CreateFileW(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    CloseHandle(file);
+    return TRUE;
+}
+
+/* 代理 DLL 是 x86：客户端不是 x86 时无法侧加载。 */
+static BOOL selection_client_is_x86(const WCHAR *path) {
+    HANDLE file;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS nt;
+    DWORD read = 0;
+    BOOL ok = FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (ReadFile(file, &dos, sizeof(dos), &read, NULL) && read == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+        ReadFile(file, &nt, sizeof(nt), &read, NULL) && read == sizeof(nt) && nt.Signature == IMAGE_NT_SIGNATURE) {
+        ok = nt.FileHeader.Machine == IMAGE_FILE_MACHINE_I386;
+    }
+    CloseHandle(file);
+    return ok;
+}
 static SELECTION_CAPS selection_client_caps(const WCHAR *path) {
     SELECTION_CAPS caps;
     int i;
     caps.portOk = path && *path ? !selection_pe_section(path, ".themida") : TRUE;
     caps.carrierMask = 0;
+    if (!selection_client_is_x86(path) || !selection_dir_writable(path)) return caps;
     for (i = 0; i < 7; ++i) {
         WCHAR dll[32];
         int k = 0;
         while (selection_carrier_names[i][k] && k < 24) { dll[k] = selection_carrier_names[i][k]; ++k; }
         dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
-        if (selection_pe_imports(path, dll)) caps.carrierMask |= (1u << i);
+        if (selection_pe_imports(path, dll) && selection_proxy_source(i)) caps.carrierMask |= (1u << i);
     }
     return caps;
 }
@@ -878,6 +942,7 @@ BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *state, WCHAR *error, DWORD errorCap)
     HeapFree(GetProcessHeap(), 0, state);
     return cancelled;
 }
+
 
 
 
