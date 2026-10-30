@@ -474,9 +474,10 @@ test('原生入口直接运行 chaoxing_plus.exe，不依赖 Node/PowerShell', a
     assert.equal(source.includes('\r'), false, `${name} 必须使用 LF 换行`);
   }
   const silent = await readFile(launcherSource('start-windows-silent.cmd'), 'utf8');
-  for (const expected of ['--silent-scenario', '--no-panel', '--no-log', '--no-disk-write', '--quiet', '--answer-key Ctrl+Alt+Shift+S', '--hide-answer-dialog']) {
+  for (const expected of ['--silent-scenario', '--stage-boot', '--no-panel', '--no-log', '--no-disk-write', '--quiet', '--answer-key Ctrl+Alt+Shift+S', '--hide-answer-dialog']) {
     assert.equal(silent.includes(expected), true, `原生静默入口缺少 ${expected}`);
   }
+  assert.match(silent, /--hide-answer-dialog\s+%\*/u, '原生静默入口必须把调用方追加参数传给暂存副本');
   const simulate = await readFile(launcherSource('start-windows-silent-debug.cmd'), 'utf8');
   assert.equal(simulate.includes('--silent-delete-simulate'), true);
   assert.doesNotMatch(simulate, /--quiet/u, '调试入口必须保留控制台输出');
