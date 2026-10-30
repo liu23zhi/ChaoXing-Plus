@@ -52,3 +52,12 @@ test('chapter answering checks expiry before processing questions and before sub
   assert.match(source, /if \(isChapterTestExpired\(frameDocument\)\) \{[\s\S]*?btnBlueSubmit/u);
 });
 
+test('expired chapter jobs are skipped for the current scan so other task points can continue', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.match(source, /expired\?: boolean;/u);
+  assert.match(source, /const alreadySearchedJob = searchedJobs\.find\(\(job\) => job\.mid === attachment\.property\.mid\);/u);
+  assert.match(source, /if \(alreadySearchedJob\?\.expired\) \{[\s\S]*?visibleContentState: 'finished-job'/u);
+  assert.match(source, /job\.expired = true;/u);
+});
+

@@ -465,7 +465,13 @@ export type Attachment = {
 export type Job = {
   mid: string;
   attachment: Attachment;
-  func: (() => Promise<void>) | undefined;
+  func: (() => Promise<JobExecutionResult | void>) | undefined;
+  expired?: boolean;
+};
+
+type JobExecutionResult = {
+  expired?: boolean;
+  manual?: boolean;
 };
 
 type ChapterTaskResult = {
@@ -473,6 +479,7 @@ type ChapterTaskResult = {
   finishedRate?: number;
   uploadable?: boolean;
   expired?: boolean;
+  manual?: boolean;
 };
 
 type SearchJobResult = {
@@ -1684,10 +1691,16 @@ async function waitForTikuAdapterBalanceRecovery() {
   });
 }
 
+const manualAnswerDeclinedKey = '__chaoxing_plus_manual_answer_declined__';
+
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
   if (isWindowsManualAnswerMode()) return true;
   if (getWindowsRuntimeSetting<boolean>('show-answer-dialog', true) === false) {
     return true;
+  }
+  if ((topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] === true) {
+    worker.emit('stop');
+    return false;
   }
 
   const rawCountdown = Number(getWindowsRuntimeSetting('answer-countdown', 5));
@@ -1704,6 +1717,7 @@ async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continu
   });
 
   if (!result) {
+    (topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] = true;
     worker.emit('stop');
     $message.warn({ content: '已暂停自动答题，请手动作答。', duration: 0 });
   }
@@ -2707,6 +2721,7 @@ export async function study(opts: StudyOptions) {
   }
 
   const searchedJobs: Job[] = [];
+  let manualAnswerPaused = false;
   let searching = true;
   let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
   let visibleContentState: VisibleContentState = 'empty';
@@ -2743,12 +2758,17 @@ export async function study(opts: StudyOptions) {
         // Ignore storage cleanup failures after a runnable task is found.
       }
       CXAnalyses.clearChapterSubTaskProgress();
+      let execution: JobExecutionResult | void = undefined;
       try {
-        await job.func();
+        execution = await job.func();
       } catch (e) {
         $console.error('未知错误', e);
       }
 
+      if (execution?.manual) {
+        manualAnswerPaused = true;
+        return;
+      }
       await sleep(1000);
       await runJobs();
     } else if (visibleContentState === 'finished-job' && !hasPendingCurrentPageJobAttachments()) {
@@ -2770,6 +2790,9 @@ export async function study(opts: StudyOptions) {
   };
 
   await runJobs();
+  if (manualAnswerPaused) {
+    return;
+  }
   (topWindow as Record<string, any>)._preChapterId = '';
 
   const resetWorkResults = () => {
@@ -2780,6 +2803,7 @@ export async function study(opts: StudyOptions) {
   const hasPendingJobAttachments = hasPendingCurrentPageJobAttachments();
   const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;
   const shouldWaitBeforeSiblingSubTaskCheck =
+    opts.mode !== 'next' &&
     getSiblingSubTaskTabs().length > 1 &&
     (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
   if (shouldWaitBeforeSiblingSubTaskCheck) {
@@ -2801,7 +2825,7 @@ export async function study(opts: StudyOptions) {
   }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount} activeChapterId=${chapterCompletionDiagnostics.activeChapterId} activeChapterClassName=${chapterCompletionDiagnostics.activeChapterClassName} completedIconExists=${String(chapterCompletionDiagnostics.completedIconExists)}`, { correlationId: chapterCorrelationId });
   const siblingSubTaskDiagnostics = getSiblingSubTaskDiagnostics();
   const siblingSubTaskProgress = CXAnalyses.getChapterSubTaskProgress();
-  const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));
+  const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));
   logDebug('info', '同章节子任务诊断', {
     visibleContentState,
     currentChapterFinished,
@@ -3131,10 +3155,15 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         return { visibleContentState: 'visible-unmapped' };
       }
 
+      const alreadySearchedJob = searchedJobs.find((job) => job.mid === attachment.property.mid);
+      if (alreadySearchedJob?.expired) {
+        return { visibleContentState: 'finished-job' };
+      }
+
       const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
       const status = chapterTest ? win.document.querySelector<HTMLElement>('.testTit_status') : undefined;
       const chapterStatusComplete = status?.classList.contains('testTit_status_complete') === true;
-      const alreadySearched = searchedJobs.find((job) => job.mid === attachment.property.mid) !== undefined;
+      const alreadySearched = alreadySearchedJob !== undefined;
       const isMediaLikeJob = Boolean(videojs || read || hyperlink || pptWithAudio || timereader);
       const alreadyProcessedMediaJob = alreadySearched && workType === 'job' && isMediaLikeJob && !chapterTest;
       const { name, title, bookname, author } = attachment.property;
@@ -3234,7 +3263,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         }
       }
 
-      let func: (() => Promise<void>) | undefined;
+      let func: Job['func'];
 
       if (videojs) {
         if (!opts.enableMedia) {
@@ -3290,13 +3319,17 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               $console.log(msg);
               const chapterResult = await JobRunner.chapter(root, opts.workOptions);
               if (chapterResult.expired) {
+                job.expired = true;
                 logDebug('info', '章节测试已截止，跳过答题提交', {
                   frameSrc,
                   targetJobId,
                   jobName,
                   fallback: false
                 }, undefined, { correlationId: jobCorrelationId });
-                return;
+                return { expired: true };
+              }
+              if (chapterResult.manual) {
+                return { manual: true };
               }
               if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
@@ -3308,6 +3341,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
                   uploadable: chapterResult.uploadable
                 }, undefined, { correlationId: jobCorrelationId });
               }
+              return chapterResult;
             };
           } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
             func = async () => {
@@ -3326,13 +3360,17 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               $console.log(msg);
               const chapterResult = await JobRunner.chapter(root, opts.workOptions);
               if (chapterResult.expired) {
+                job.expired = true;
                 logDebug('info', '章节测试已截止，跳过答题提交', {
                   frameSrc,
                   targetJobId,
                   jobName,
                   fallback: true
                 }, undefined, { correlationId: jobCorrelationId });
-                return;
+                return { expired: true };
+              }
+              if (chapterResult.manual) {
+                return { manual: true };
               }
               if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
@@ -3344,6 +3382,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
                   uploadable: chapterResult.uploadable
                 }, undefined, { correlationId: jobCorrelationId });
               }
+              return chapterResult;
             };
           }
         }
@@ -3401,7 +3440,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         return { visibleContentState };
       }
 
-      const job = {
+      const job: Job = {
         mid: attachment.property.mid,
         attachment,
         func
@@ -4088,7 +4127,7 @@ const JobRunner = {
     const confirmed = await confirmBeforeAutoAnswer(worker);
     if (!confirmed) {
       clearRuntimeControls();
-      return { finished: false };
+      return { finished: false, manual: true };
     }
 
     try {
@@ -4100,7 +4139,7 @@ const JobRunner = {
         if (isWindowsManualAnswerMode()) {
           $message.info({ content: '手动答题已完成；为避免误操作，本次不会自动保存或提交。', duration: 5000 });
           worker.emit('done');
-          return { finished: false };
+          return { finished: false, manual: true };
         }
         logDebug('info', '动作节点诊断：答题结果已生成', {
           resultCount: retryableResults.length,

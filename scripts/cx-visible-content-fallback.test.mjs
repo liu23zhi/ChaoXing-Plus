@@ -278,16 +278,25 @@ test('cx blocks auto-jump when no visible runnable content is detected but the c
   assert.equal(source.includes("function shouldCheckSiblingSubTasksForState(visibleContentState: VisibleContentState): boolean {"), true);
   assert.equal(source.includes("return visibleContentState === 'finished-job' || visibleContentState === 'empty';"), true);
   assert.equal(source.includes("const siblingSubTaskProgress = CXAnalyses.getChapterSubTaskProgress();"), true);
-  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
   assert.equal(source.includes('当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。'), true);
 });
 
 test('cx checks sibling sub tasks before showing the final-chapter unfinished warning', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
   assert.equal(source.includes("if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {"), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
+});
+
+test('cx prioritizes next-section mode over sibling sub-task recovery', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.match(source, /const shouldWaitBeforeSiblingSubTaskCheck =\r?\n\s+opts\.mode !== 'next' &&/);
+  assert.equal(source.includes("if (opts.mode === 'next') {"), true);
+  assert.equal(source.includes("nextFn(count.length.toString(), curChapterId.value, curCourseId.value, curClazzId.value, '');"), true);
 });
 
 test('cx does not refresh unknown visible content after sibling switching has started', async () => {

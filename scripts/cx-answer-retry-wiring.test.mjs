@@ -130,6 +130,16 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   assert.equal(messageSource.includes('return result.isConfirmed || (defaultConfirmed && result.dismiss === Swal.DismissReason.timer);'), true);
 });
 
+test('cx remembers a manual answer choice for the current page and pauses the chapter scan', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.match(source, /manualAnswerDeclinedKey/u);
+  assert.match(source, /if \(\(topWindow as (?:unknown as )?Record<string, unknown>\)\[manualAnswerDeclinedKey\] === true\) \{[\s\S]*?return false;/u);
+  assert.match(source, /\(topWindow as (?:unknown as )?Record<string, unknown>\)\[manualAnswerDeclinedKey\] = true;[\s\S]*?worker\.emit\('stop'\);/u);
+  assert.match(source, /manual: true/u);
+  assert.match(source, /if \(manualAnswerPaused\) \{[\s\S]*?return;/u);
+});
+
 test('Windows no-auto-submit prevents both chapter and work/exam submit actions', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
   const chapterStart = source.indexOf('const effectiveUpload = !autoSubmitEnabled && upload === \'submit\' ? \'save\' : upload;');
