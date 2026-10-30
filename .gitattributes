@@ -1,4 +1,4 @@
-# ?????shell ???? LF?Windows ????? CRLF
+# Shell/CMD scripts use LF; Windows Script Host files keep CRLF.
 *.sh text eol=lf
-*.cmd text eol=crlf
+*.cmd text eol=lf
 *.vbs text eol=crlf

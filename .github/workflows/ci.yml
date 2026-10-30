@@ -98,22 +98,26 @@ jobs:
 
       - name: 发布包冒烟
         shell: pwsh
-        run: npm run release:windows -- --out release-ci
+        run: npm run release:windows
 
       - name: 发布包解压入口自检
         shell: pwsh
         run: |
-          $package = Join-Path (Resolve-Path 'release-ci').Path 'chaoxing-plus-6.2.0-windows'
+          $build = (Resolve-Path 'windows/native-build').Path
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $unpacked = Join-Path $build 'release-ci'
+          Expand-Archive -LiteralPath (Join-Path $build "chaoxing-plus-$version-windows.zip") -DestinationPath $unpacked -Force
+          $package = Join-Path $unpacked 'release'
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
-          # 发布包默认只含原生 EXE（Node 宿主已弃用）；这里同时确认 GUI/Console 两个变体和根兼容入口。
-          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\share-file\config.example.json', 'single-file\chaoxing_plus.exe', 'multi-file\chaoxing_plus_console.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
+          # 原生发布直接落在 native-build/release，只提供两个变体。
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'single-file\chaoxing_plus.exe', 'multi-file\start-windows.cmd', 'multi-file\windows\share-file\config.example.json', 'multi-file\chaoxing_plus_console.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
-          foreach ($forbidden in @('windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
+          foreach ($forbidden in @('chaoxing_plus.exe', 'start-windows.cmd', 'windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
             if (Test-Path -LiteralPath (Join-Path $package $forbidden)) { throw "原生发布包不应包含 Node 产物: $forbidden" }
           }
-          $native = Start-Process -FilePath (Join-Path $package 'chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
+          $native = Start-Process -FilePath (Join-Path $package 'single-file\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
           node (Join-Path $package 'multi-file\verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "multi-file 变体完整性自校验失败: $LASTEXITCODE" }
@@ -124,6 +128,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: release-ci/*.zip
+          path: windows/native-build/*.zip
           if-no-files-found: error
 

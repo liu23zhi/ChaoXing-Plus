@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 //   1. 优先包含原生单文件 EXE（资源已内嵌，可独立运行）；
 //   2. 同时包含 Node 宿主目录 + dist-windows 资源 + start-windows.cmd；
 //   3. 生成 release-info.json 与 SHA256SUMS.txt，并用系统 Compress-Archive 打 zip。
-// 脚本不修改工作区构建产物，只读取它们；输出目录默认 release/（已 gitignore）。
+// 原生输出直接写入 windows/native-build/release；显式 Node 备用包保持历史布局。
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_REQUIRED = [
@@ -92,7 +92,7 @@ async function collectHostRuntime(hostDir) {
 
 function parseArgs(argv) {
   const options = {
-    out: path.join(repoRoot, 'release'),
+    out: '',
     distDir: path.join(repoRoot, 'dist-windows'),
     hostDir: path.join(repoRoot, 'windows', 'node-source'),
     launcher: path.join(repoRoot, 'windows', 'node-scripts', 'start-windows-node.cmd'),
@@ -145,7 +145,7 @@ function parseArgs(argv) {
       case '--help': case '-h':
         console.log([
           '用法: node windows/share-file/package-windows.mjs [选项]',
-          '  --out <dir>        输出目录（默认 release/）',
+          '  --out <dir>        原生发布目录（默认 windows/native-build/release；Node 为父目录 release/）',
           '  --dist-dir <dir>   dist-windows 资源目录',
           '  --host-dir <dir>   Node 宿主目录（默认 windows/node-source）',
           '  --launcher <file>  start-windows-node.cmd（无控制台常规入口）',
@@ -179,7 +179,8 @@ async function main() {
   const packageJson = JSON.parse(await fs.readFile(path.join(repoRoot, 'package.json'), 'utf8'));
   const version = options.version || packageJson.version;
   const name = options.name || `chaoxing-plus-${version}-windows`;
-  const packageRoot = path.join(options.out, name);
+  const outputRoot = options.out || (options.withNode ? path.join(repoRoot, 'release') : path.join(repoRoot, 'windows', 'native-build', 'release'));
+  const packageRoot = options.withNode ? path.join(outputRoot, name) : outputRoot;
 
   if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(String(version))) fail(`版本号不合法：${version}`);
   if (!(await pathExists(options.distDir))) fail(`缺少 dist-windows 目录：${options.distDir}（先运行 npm run build:windows）`);
@@ -217,6 +218,7 @@ async function main() {
 
   const includeNative = !options.skipNative && await pathExists(options.exe);
   const includeConsole = includeNative && await pathExists(options.consoleExe);
+  if (!options.withNode && !includeNative) fail(`缺少原生 EXE：${options.exe}；请先运行 npm run build:native`);
   if (!options.skipNative && !includeNative) {
     console.warn(`[release] 未找到原生 EXE（${options.exe}），将生成仅含 Node 宿主的发布包；如需原生单文件请先构建原生宿主。`);
   }
@@ -224,6 +226,23 @@ async function main() {
     console.warn(`[release] 未找到 Console 子系统 EXE（${options.consoleExe}），将跳过 multi-file 变体。`);
   }
 
+  if (!options.withNode) {
+    // Native --out is the final directory, so refuse to replace source trees or
+    // unrelated files instead of treating an arbitrary parent as staging space.
+    const inputs = [repoRoot, options.distDir, options.exe, options.consoleExe, options.configExample, options.verifier];
+    for (const input of inputs) {
+      const relative = path.relative(packageRoot, input);
+      if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+        fail('原生发布目录不能包含源码或构建输入文件');
+      }
+    }
+    if (await pathExists(packageRoot)) {
+      const allowed = new Set(['single-file', 'multi-file', 'chaoxing_plus.exe', 'release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs']);
+      for (const entry of await fs.readdir(packageRoot)) {
+        if (!allowed.has(entry)) fail(`原生发布目录包含无关文件，拒绝覆盖：${entry}`);
+      }
+    }
+  }
   await fs.rm(packageRoot, { recursive: true, force: true });
   await fs.mkdir(packageRoot, { recursive: true });
 
@@ -259,15 +278,14 @@ async function main() {
       if (await pathExists(source)) await fs.copyFile(source, path.join(packageRoot, targetName));
     }
   }
-  // Both package variants use the shared configuration template directory.
-  await fs.mkdir(path.join(packageRoot, 'windows', 'share-file'), { recursive: true });
-  await fs.copyFile(options.configExample, path.join(packageRoot, 'windows', 'share-file', 'config.example.json'));
   if (options.withNode) {
+    await fs.mkdir(path.join(packageRoot, 'windows', 'share-file'), { recursive: true });
+    await fs.copyFile(options.configExample, path.join(packageRoot, 'windows', 'share-file', 'config.example.json'));
     const iconDirectory = path.join(packageRoot, 'windows', 'share-file', 'assets');
     await fs.mkdir(iconDirectory, { recursive: true });
     await fs.copyFile(path.join(repoRoot, 'windows', 'share-file', 'assets', 'app-icon.ico'), path.join(iconDirectory, 'app-icon.ico'));
   }
-  if (includeNative) {
+  if (includeNative && options.withNode) {
     // 原生入口：指向包内 chaoxing_plus.exe，不依赖 Node/PowerShell。
     for (const name of [
       'start-windows.cmd',
@@ -284,7 +302,7 @@ async function main() {
   // 发布包只放单个 EXE：winmm 代理已作为 RCDATA 内嵌在 EXE 里，
   // 运行时由 --install-proxy / dll-proxy 从资源释放到客户端目录，不再随包外置。
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
-  if (!options.skipDocs) {
+  if (options.withNode && !options.skipDocs) {
     for (const doc of ['README.md', path.join('docs', 'windows.md')]) {
       const source = path.join(repoRoot, doc);
       if (!(await pathExists(source))) continue;
@@ -293,11 +311,11 @@ async function main() {
       await fs.copyFile(source, target);
     }
   }
-  if (includeNative) {
+  if (includeNative && options.withNode) {
     await fs.copyFile(options.exe, path.join(packageRoot, 'chaoxing_plus.exe'));
   }
 
-  // 保留包根目录的兼容入口，同时提供两个明确的发布变体：
+  // 原生发布根目录只提供两个明确的发布变体，Node 备用包保留兼容入口：
   // single-file 使用 GUI 子系统 EXE，multi-file 使用独立构建的 Console 子系统 EXE。
   // multi-file 复制原生启动器并改写入口文件名，避免把两个子系统混用。
   const nativeLauncherNames = [
@@ -395,7 +413,7 @@ async function main() {
       ? (includeNative
         ? { native: 'chaoxing_plus.exe', node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' }
         : { node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' })
-      : { native: 'chaoxing_plus.exe' },
+      : { native: 'single-file/chaoxing_plus.exe', ...(includeConsole ? { nativeConsole: 'multi-file/chaoxing_plus_console.exe' } : {}) },
     assetsDir: options.withNode ? 'dist-windows' : '',
     runtime: runtimeRelative,
     variants,
@@ -416,7 +434,7 @@ async function main() {
     if (process.platform !== 'win32') {
       fail('创建 zip 需要 Windows 的 Compress-Archive；可在非 Windows 仅生成暂存目录（--skip-zip）');
     }
-    archive = path.join(options.out, `${name}.zip`);
+    archive = path.join(options.withNode ? outputRoot : path.dirname(packageRoot), `${name}.zip`);
     await fs.rm(archive, { force: true });
     const script = [
       `$ErrorActionPreference='Stop'`,
@@ -440,7 +458,7 @@ async function main() {
     variants,
     files: hashTargets.length,
     verifier: 'verify-release.mjs',
-    sizeBytes: (await fs.stat(path.join(packageRoot, includeNative ? 'chaoxing_plus.exe' : 'start-windows-node.cmd'))).size
+    sizeBytes: (await fs.stat(path.join(packageRoot, includeNative ? (options.withNode ? 'chaoxing_plus.exe' : 'single-file/chaoxing_plus.exe') : 'start-windows-node.cmd'))).size
   }, null, 2));
 }
 

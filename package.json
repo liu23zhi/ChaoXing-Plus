@@ -8,7 +8,7 @@
     "dev": "node build.mjs --watch",
     "build": "node build.mjs",
     "build:windows": "node windows/share-file/build.windows.mjs",
-    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests -BuildConsole",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build-windows.ps1 -BuildTests -BuildConsole",
     "build:node:exe": "node windows/node-source/package-node-exe.mjs",
     "release:windows": "node windows/share-file/package-windows.mjs",
     "windows": "windows\\native-scripts\\start-windows.cmd",

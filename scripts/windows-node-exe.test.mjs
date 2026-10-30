@@ -129,7 +129,7 @@ test('embedded PowerShell preserves named arguments and stdin without a script f
 });
 
 test('native and Node release executables use the same repository icon', async (t) => {
-  const native = path.join(root, 'windows/native-build/release/chaoxing_plus.exe');
+  const native = path.join(root, 'windows/native-build/release/single-file/chaoxing_plus.exe');
   try { await fs.access(native); } catch { return t.skip('Native build is not present'); }
   assertIcon(await fs.readFile(native), await fs.readFile(icon));
   assert.deepEqual(await fs.readFile(native), await fs.readFile(path.join(root, 'windows/native-build/bin/chaoxing_plus.exe')));

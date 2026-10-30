@@ -6,7 +6,9 @@ setlocal EnableExtensions
 cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
-set "SINGLE_EXE=windows\native-build\release\chaoxing_plus.exe"
+set "SINGLE_EXE=windows\native-build\release\single-file\chaoxing_plus.exe"
+set "MULTI_EXE=windows\native-build\release\multi-file\chaoxing_plus_console.exe"
+set "PACKAGE_DIR=windows\native-build\release"
 
 :parse
 if "%~1"=="" goto checks
@@ -54,7 +56,7 @@ call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
 echo [build-windows] 2/4 building native x86 hosts (GUI + Console, no CRT, embedded assets)
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "windows\native-build" -BuildConsole
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build-windows.ps1" -OutputDirectory "windows\native-build" -BuildConsole
 if errorlevel 1 exit /b 1
 if not exist "windows\native-build\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.
@@ -68,15 +70,16 @@ if not exist "%SINGLE_EXE%" (
   echo [build-windows] standalone native EXE was not produced: %SINGLE_EXE%
   exit /b 1
 )
+if not exist "%MULTI_EXE%" (
+  echo [build-windows] multi-file native EXE was not produced: %MULTI_EXE%
+  exit /b 1
+)
 
 echo [build-windows] 3/4 generating the release package
 call npm run release:windows
 if errorlevel 1 exit /b 1
-set "VERSION="
-for /f "delims=" %%v in ('node -p "require('./package.json').version"') do set "VERSION=%%v"
-set "PACKAGE_DIR=release\chaoxing-plus-%VERSION%-windows"
-if not exist "%PACKAGE_DIR%\chaoxing_plus.exe" (
-  echo [build-windows] release package is missing chaoxing_plus.exe: %PACKAGE_DIR%
+if not exist "%PACKAGE_DIR%\single-file\chaoxing_plus.exe" (
+  echo [build-windows] release package is missing single-file\chaoxing_plus.exe: %PACKAGE_DIR%
   exit /b 1
 )
 if not exist "%PACKAGE_DIR%\multi-file\chaoxing_plus_console.exe" (
@@ -89,9 +92,9 @@ node "%PACKAGE_DIR%\verify-release.mjs"
 if errorlevel 1 exit /b 1
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%SINGLE_EXE%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%PACKAGE_DIR%\chaoxing_plus.exe' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%MULTI_EXE%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%PACKAGE_DIR%\multi-file\chaoxing_plus_console.exe' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+node "%PACKAGE_DIR%\multi-file\verify-release.mjs"
 if errorlevel 1 exit /b 1
 if "%SKIP_TESTS%"=="0" (
   echo [build-windows] running release regression
@@ -99,7 +102,7 @@ if "%SKIP_TESTS%"=="0" (
   if errorlevel 1 exit /b 1
 )
 
-echo [build-windows] standalone GUI EXE: %SINGLE_EXE%
-echo [build-windows] Console EXE: windows\native-build\bin\chaoxing_plus_console.exe
+echo [build-windows] single-file GUI EXE: %SINGLE_EXE%
+echo [build-windows] multi-file Console EXE: %MULTI_EXE%
 echo [build-windows] full package: %PACKAGE_DIR%
 exit /b 0

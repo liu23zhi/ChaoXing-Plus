@@ -25,7 +25,7 @@ npm run build:windows -- --release
 npm run build:native
 ```
 
-[build.ps1](build.ps1) 默认输出 `windows/native-build/bin/chaoxing_plus.exe`，`-BuildTests` 同时生成 C 测试；`bin/` 保留全部调试 EXE。每次编译成功后另外生成 `windows/native-build/release/chaoxing_plus.exe`，该目录仅放可独立分发的宿主 EXE，资源和共享 [app-icon.ico](../share-file/assets/app-icon.ico) 均已内嵌。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
+[build-windows.ps1](build-windows.ps1) 只负责编译，默认生成 GUI 与 Console 两种 EXE；`-BuildTests` 同时生成 C 测试，`bin/` 保留宿主与调试/测试 EXE。编译后将 GUI EXE 放到 `windows/native-build/release/single-file/chaoxing_plus.exe`，Console EXE 放到 `windows/native-build/release/multi-file/chaoxing_plus_console.exe`。显式传 `-BuildConsole:$false` 时只编译 GUI，并清理 `bin/` 与 `release/multi-file/` 中的旧 Console EXE。资源和共享 [app-icon.ico](../share-file/assets/app-icon.ico) 均已内嵌。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
 
 ```powershell
 $hostExe = Join-Path (Get-Location) 'windows/native-build/bin/chaoxing_plus.exe'
@@ -35,18 +35,18 @@ $check = Start-Process -FilePath $hostExe -ArgumentList '--self-check','--no-dis
 if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 ```
 
-[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、原生编译、默认发布打包和校验。单 EXE 位于 `windows/native-build/release/`；带文档、启动器与清单的完整包仍位于仓库根 `release/`。共享构建与打包实现见 [share-file](../share-file/README.md)。
+[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、双变体编译、完整发布打包和校验。原生最终目录直接为 `windows/native-build/release/`，不追加版本目录：`single-file/` 只含 GUI EXE，`multi-file/` 包含 Console EXE、五个原生启动器、配置、文档及独立清单/校验器；发布根目录另有清单与校验器，不放兼容 EXE 或启动器。ZIP 位于 `windows/native-build/chaoxing-plus-6.2.0-windows.zip`。单独编译后可运行 `npm run release:windows` 补齐发布内容，原生模式 `--out <dir>` 指定最终目录。共享构建与打包实现见 [share-file](../share-file/README.md)。
 
 ## 启动器区别
 
 | 入口 | 行为 |
 | --- | --- |
-| [start-windows.cmd](start-windows.cmd) | 原生普通运行入口 |
-| [start-windows-debug.cmd](start-windows-debug.cmd) | 原生调试入口 |
-| [start-windows-silent.cmd](start-windows-silent.cmd) | 原生固定静默场景入口 |
-| [start-windows-silent-debug.cmd](start-windows-silent-debug.cmd) | 静默场景调试入口 |
-| [start-windows-silent-no-full-scan-debug.cmd](start-windows-silent-no-full-scan-debug.cmd) | 静默调试入口，限定常规扫描 |
+| [start-windows.cmd](../native-scripts/start-windows.cmd) | 原生普通运行入口 |
+| [start-windows-debug.cmd](../native-scripts/start-windows-debug.cmd) | 原生调试入口 |
+| [start-windows-silent.cmd](../native-scripts/start-windows-silent.cmd) | 原生固定静默场景入口 |
+| [start-windows-silent-debug.cmd](../native-scripts/start-windows-silent-debug.cmd) | 静默场景调试入口 |
+| [start-windows-silent-no-full-scan-debug.cmd](../native-scripts/start-windows-silent-no-full-scan-debug.cmd) | 静默调试入口，限定常规扫描 |
 
-这些启动器会进入实际运行；只读检查使用上面的版本与自检命令。源码启动器定位仓库根的构建产物，打包时五个启动器复制到包根并定位同级 EXE；Node 备用启动器另以 `start-windows-node*.cmd` 命名。
+这些启动器会进入实际运行；只读检查使用上面的版本与自检命令。源码启动器定位仓库根的构建产物，原生打包时五个启动器复制到 `multi-file/` 并定位同级 Console EXE；`single-file/` 直接运行 GUI EXE。Node 备用启动器另以 `start-windows-node*.cmd` 命名，保留历史包根布局。
 
 原生默认运行数据位于进程工作目录下 `.data/`，与 Node 的 `windows/data/` 不同。共享模板和本机 `windows/local-features.json` 保持原位；插件共用源码、插件 `dist/` 与 Windows 构建输出目录也不随文档整理迁移。

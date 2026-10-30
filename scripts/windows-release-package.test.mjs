@@ -352,6 +352,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /node --test --test-concurrency=4 --test-timeout=300000 @testFiles/u);
   assert.match(workflow, /node --test --test-concurrency=4 --test-timeout=600000 @browserFiles/u);
   assert.match(workflow, /npm run release:windows/u);
+  assert.match(workflow, /Expand-Archive -LiteralPath/u, 'CI 必须验证 ZIP 解压后的实际产物');
+  assert.match(workflow, /windows\/native-build\/\*\.zip/u, 'CI 只能上传原生构建目录内的发布包');
   assert.match(workflow, /actions\/upload-artifact@v4/u);
   assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
   assert.match(workflow, /发布包解压入口自检/u);
@@ -378,7 +380,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
 
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['release:windows'], 'node windows/share-file/package-windows.mjs');
-  assert.equal(packageJson.scripts['build:native'].includes('windows/native-source/build.ps1'), true);
+  assert.equal(packageJson.scripts['build:native'].includes('windows/native-source/build-windows.ps1'), true);
   assert.equal(packageJson.scripts['build:native'].includes('-BuildConsole'), true);
 
   const gitignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
@@ -388,9 +390,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
 });
 
 test('原生构建脚本保持 ASCII 且不依赖 PowerShell 模块自动加载', async () => {
-  const bytes = await fs.readFile(path.join(root, 'windows', 'native-source', 'build.ps1'));
+  const bytes = await fs.readFile(path.join(root, 'windows', 'native-source', 'build-windows.ps1'));
   for (const byte of bytes) {
-    assert.equal(byte <= 0x7f, true, 'build.ps1 必须保持纯 ASCII（Windows PowerShell 5.1 按 ANSI 解析无 BOM .ps1）');
+    assert.equal(byte <= 0x7f, true, 'build-windows.ps1 必须保持纯 ASCII（Windows PowerShell 5.1 按 ANSI 解析无 BOM .ps1）');
   }
   const source = bytes.toString('utf8');
   // 曾出现 Get-FileHash 在部分启动环境下 CommandNotFound 导致构建误报失败；改用系统 certutil 输出摘要。
@@ -402,8 +404,12 @@ test('原生构建脚本保持 ASCII 且不依赖 PowerShell 模块自动加载'
   assert.match(source, /SUBSYSTEM:WINDOWS,6\.01/u);
   assert.match(source, /SUBSYSTEM:CONSOLE,6\.01/u);
   assert.match(source, /chaoxing_plus_console\.exe/u);
+  assert.match(source, /Join-Path \$release 'single-file'/u);
+  assert.match(source, /Join-Path \$release 'multi-file'/u);
+  assert.match(source, /singleFileExe/u);
+  assert.match(source, /multiFileExe/u);
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
-  assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests -BuildConsole');
+  assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build-windows.ps1 -BuildTests -BuildConsole');
 });
 
 test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖', { skip: process.platform !== 'win32' }, async (t) => {
@@ -447,7 +453,7 @@ test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖',
   assert.equal(plainInfo.runtime, '', '--no-runtime 时不得声明自带运行时');
 });
 
-test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时）', { skip: process.platform !== 'win32' }, async (t) => {
+test('原生发布直接生成输出目录内的两种变体，不增加版本目录或根兼容 EXE', { skip: process.platform !== 'win32' }, async (t) => {
   const fixture = await createFixture();
   t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
   const out = path.join(fixture.directory, 'native-only');
@@ -460,13 +466,18 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
+    '--console-exe', fixture.consoleExe,
     '--out', out,
     '--name', 'native-only',
     '--version', '9.9.9',
-    '--skip-docs', '--skip-zip'
+    '--skip-docs'
   ], { encoding: 'utf8', timeout: 300000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  const packageRoot = path.join(out, 'native-only');
+  const packageRoot = out;
+  assert.equal(JSON.parse(result.stdout).packageRoot, out);
+  const archive = path.join(fixture.directory, 'native-only.zip');
+  assert.equal(JSON.parse(result.stdout).archive, archive);
+  assert.ok((await fs.stat(archive)).size > 0);
   const files = [];
   async function walk(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -476,9 +487,11 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
     }
   }
   await walk(packageRoot);
-  for (const expected of ['chaoxing_plus.exe', 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'windows/share-file/config.example.json', 'start-windows.cmd', 'start-windows-silent.cmd']) {
+  for (const expected of ['single-file/chaoxing_plus.exe', 'multi-file/chaoxing_plus_console.exe', 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'multi-file/windows/share-file/config.example.json', 'multi-file/start-windows.cmd', 'multi-file/start-windows-silent.cmd', 'multi-file/verify-release.mjs', 'multi-file/SHA256SUMS.txt']) {
     assert.equal(files.includes(expected), true, `默认包缺少 ${expected}`);
   }
+  assert.deepEqual(await fs.readdir(path.join(packageRoot, 'single-file')), ['chaoxing_plus.exe']);
+  assert.equal(files.includes('chaoxing_plus.exe'), false, '原生发布根目录不再放兼容 EXE');
   for (const forbidden of ['start-windows-node.cmd', 'start-windows-node-silent.cmd', 'runtime/node.exe']) {
     assert.equal(files.includes(forbidden), false, `默认包不得包含 ${forbidden}`);
   }
@@ -486,7 +499,7 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
   assert.equal(files.some((name) => name.startsWith('dist-windows/')), false, '默认包不得包含 Node 注入资源');
   const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
   assert.equal(info.nodeHost, false);
-  assert.deepEqual(info.entrypoints, { native: 'chaoxing_plus.exe' });
+  assert.deepEqual(info.entrypoints, { native: 'single-file/chaoxing_plus.exe', nativeConsole: 'multi-file/chaoxing_plus_console.exe' });
   assert.equal(info.assetsDir, '');
   assert.equal(info.runtime, '');
   // 发布包只放单个 EXE：代理 DLL 已内嵌在 EXE 里，不再随包外置。
@@ -497,6 +510,18 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
     encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: packageRoot
   });
   assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+});
+
+test('原生发布拒绝覆盖源码或带无关文件的输出目录', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const sentinel = path.join(fixture.directory, 'keep.txt');
+  await fs.writeFile(sentinel, 'user-owned');
+  const result = runPackager(['--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
+    '--console-exe', fixture.consoleExe, '--out', fixture.directory, '--version', '9.9.9', '--skip-zip']);
+  assert.equal(result.status, 2, result.stderr || result.stdout);
+  assert.equal(await fs.readFile(sentinel, 'utf8'), 'user-owned');
+  assert.equal(await fs.readFile(fixture.exe, 'utf8'), 'MZ fake native host');
 });
 
 

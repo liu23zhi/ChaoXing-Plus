@@ -24,7 +24,7 @@ test('build-windows.sh 使用 Git Bash 构建 x86 GUI/Console 双变体发布包
   assert.doesNotMatch(script, /\r\n/u, 'shell 脚本必须使用 LF 换行');
   for (const expected of [
     'npm run build:windows -- --release',
-    'windows/native-source/build.ps1',
+    'windows/native-source/build-windows.ps1',
     'windows/native-build',
     'npm run release:windows',
     'verify-release.mjs',
@@ -38,6 +38,34 @@ test('build-windows.sh 使用 Git Bash 构建 x86 GUI/Console 双变体发布包
   assert.match(script, /x86 无 CRT/u);
   assert.match(script, /CDP 页面注入/u);
   assert.match(script, /不从 x86 进程内存执行 x64 PE/u);
+});
+
+test('原生 PowerShell、CMD、Bash 与 npm 构建入口统一使用 build-windows.ps1', async () => {
+  const nativeSource = path.join(root, 'windows', 'native-source');
+  const psPath = path.join(nativeSource, 'build-windows.ps1');
+  assert.equal(existsSync(psPath), true, '原生 PowerShell 构建入口必须使用统一文件名');
+  assert.equal(existsSync(path.join(nativeSource, 'build.ps1')), false, '旧构建脚本名不得保留');
+
+  const ps = await readFile(psPath, 'utf8');
+  const cmd = await readFile(path.join(nativeSource, 'build-windows.cmd'), 'utf8');
+  const bash = await readFile(path.join(nativeSource, 'build-windows.sh'), 'utf8');
+  const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+  for (const [name, source] of [['CMD', cmd], ['Bash', bash]]) {
+    assert.match(source, /native-source[\\/]build-windows\.ps1/u, `${name} 必须调用统一的 PowerShell 构建脚本`);
+    assert.match(source, /BuildConsole/u, `${name} 必须构建 Console 变体`);
+    assert.match(source, /PACKAGE_DIR[="]+windows[\\/]native-build[\\/]release/u, `${name} 必须校验原生发布目录`);
+    assert.doesNotMatch(source, /PACKAGE_DIR[="]+release[\\/]/u, `${name} 不得重新向仓库根 release 输出`);
+  }
+  assert.match(ps, /\[switch\]\$BuildConsole/u);
+  assert.match(ps, /Join-Path \$release 'single-file'/u);
+  assert.match(ps, /Join-Path \$release 'multi-file'/u);
+  assert.match(ps, /singleFileExe/u);
+  assert.match(ps, /multiFileExe/u);
+  assert.match(packageJson.scripts['build:native'], /windows\/native-source\/build-windows\.ps1/u);
+
+  const launchers = await Promise.all(['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd', 'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd']
+    .map((name) => readFile(path.join(root, 'windows', 'native-scripts', name), 'utf8')));
+  for (const source of launchers) assert.match(source, /native-source\\build-windows\.ps1/u);
 });
 
 test('Windows 打包决策已记录到 AGENTS 与 docs', async () => {
@@ -68,7 +96,7 @@ test('build-windows-node.sh 只构建备用 Node 包，并声明 Node 已弃用'
     assert.equal(script.includes(expected), true, `备用构建缺少：${expected}`);
   }
   // 备用入口不得再构建原生 EXE。
-  assert.equal(script.includes('native/build.ps1'), false, '备用脚本不得调用原生构建');
+  assert.equal(script.includes('native/build-windows.ps1'), false, '备用脚本不得调用原生构建');
   assert.match(script, /已弃用/u);
 });
 
@@ -85,7 +113,7 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
 });
 test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD 入口', async () => {
   const cases = [
-    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build.ps1', 'windows\\native-build', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe', 'chaoxing_plus_console.exe', '-BuildConsole', 'multi-file']],
+    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build-windows.ps1', 'windows\\native-build', 'native-build\\release\\single-file', 'native-build\\release\\multi-file', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe', 'chaoxing_plus_console.exe', '-BuildConsole', 'multi-file']],
     ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'windows\\node-build', '--out', 'start-windows-node.cmd', 'verify-release.mjs']]
   ];
   for (const [name, expected] of cases) {

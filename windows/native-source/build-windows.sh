@@ -9,13 +9,12 @@
 #   - 注入资源（bootstrap/bundle/trampoline/CSS）在原生构建时以 RCDATA 内嵌。
 #
 # 输出：
-#   windows/native-build/release/chaoxing_plus.exe （独立 GUI EXE）
-#   windows/native-build/bin/chaoxing_plus_console.exe （独立 Console EXE）
+#   windows/native-build/release/single-file/chaoxing_plus.exe （GUI 单文件变体）
+#   windows/native-build/release/multi-file/chaoxing_plus_console.exe （Console 多文件变体）
 #   windows/native-build/bin/                    （保留宿主与调试/测试 EXE）
-#   release/chaoxing-plus-<version>-windows/single-file/ （GUI 单文件变体）
-#   release/chaoxing-plus-<version>-windows/multi-file/  （Console 多文件变体）
-#   release/chaoxing-plus-<version>-windows/start-windows*.cmd（原生启动器）
-#   release/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
+#   windows/native-build/release/multi-file/start-windows*.cmd（原生启动器）
+#   windows/native-build/release/SHA256SUMS.txt / verify-release.mjs
+#   windows/native-build/chaoxing-plus-<version>-windows.zip
 #
 # 用法：
 #   bash windows/native-source/build-windows.sh
@@ -68,16 +67,16 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
   exit 2
 fi
 
-VERSION="$(node -p "require('./package.json').version")"
-PACKAGE_DIR="release/chaoxing-plus-${VERSION}-windows"
-SINGLE_EXE="windows/native-build/release/chaoxing_plus.exe"
+PACKAGE_DIR="windows/native-build/release"
+SINGLE_EXE="windows/native-build/release/single-file/chaoxing_plus.exe"
+MULTI_EXE="windows/native-build/release/multi-file/chaoxing_plus_console.exe"
 
 echo "[build-windows] 1/5 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
 
 echo "[build-windows] 2/5 构建 Windows x86 原生宿主（GUI + Console、无 CRT、资源内嵌、无外部 DLL 依赖）"
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -File "windows/native-source/build.ps1" -OutputDirectory "windows/native-build" -BuildConsole
+  -File "windows/native-source/build-windows.ps1" -OutputDirectory "windows/native-build" -BuildConsole
 
 if [ ! -f "windows/native-build/bin/chaoxing_plus.exe" ]; then
   echo "[build-windows] 原生 x86 EXE 没有生成。" >&2
@@ -91,12 +90,16 @@ if [ ! -f "$SINGLE_EXE" ]; then
   echo "[build-windows] 独立发布的原生 EXE 没有生成：${SINGLE_EXE}" >&2
   exit 1
 fi
+if [ ! -f "$MULTI_EXE" ]; then
+  echo "[build-windows] multi-file 原生 EXE 没有生成：${MULTI_EXE}" >&2
+  exit 1
+fi
 
 echo "[build-windows] 3/5 生成发布包（原生 x86 EXE + 原生启动器 + 校验清单）"
 npm run release:windows
 
-if [ ! -f "${PACKAGE_DIR}/chaoxing_plus.exe" ]; then
-  echo "[build-windows] 发布包缺少 chaoxing_plus.exe：${PACKAGE_DIR}" >&2
+if [ ! -f "${PACKAGE_DIR}/single-file/chaoxing_plus.exe" ]; then
+  echo "[build-windows] 发布包缺少 single-file/chaoxing_plus.exe：${PACKAGE_DIR}" >&2
   exit 1
 fi
 if [ ! -f "${PACKAGE_DIR}/multi-file/chaoxing_plus_console.exe" ]; then
@@ -111,10 +114,9 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
   -Command "& '${SINGLE_EXE}' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
 
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -Command "& '${PACKAGE_DIR}/chaoxing_plus.exe' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
+  -Command "& '${MULTI_EXE}' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
 
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -Command "& '${PACKAGE_DIR}/multi-file/chaoxing_plus_console.exe' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
+node "${PACKAGE_DIR}/multi-file/verify-release.mjs"
 
 if [ "$SKIP_TESTS" -eq 0 ]; then
   echo "[build-windows] 5/5 运行发布相关回归"
@@ -124,10 +126,10 @@ else
 fi
 
 echo "[build-windows] 完成："
-echo "  独立发布 GUI EXE：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
-echo "  Console 构建产物：windows/native-build/bin/chaoxing_plus_console.exe"
+echo "  single-file GUI EXE：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
+echo "  multi-file Console EXE：${MULTI_EXE}（无外部 DLL/运行库依赖）"
 echo "  调试/测试 EXE： windows/native-build/bin/（全部保留）"
 echo "  完整发布包：    ${PACKAGE_DIR}"
-echo "  原生启动入口：   ${PACKAGE_DIR}/start-windows.cmd"
+echo "  多文件启动入口： ${PACKAGE_DIR}/multi-file/start-windows.cmd"
 echo "  完整性校验：      node ${PACKAGE_DIR}/verify-release.mjs"
 

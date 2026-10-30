@@ -4,7 +4,7 @@ param(
     [switch]$SkipAssetCopy,
     [switch]$BuildTests,
     [switch]$SkipProxy,
-    [switch]$BuildConsole
+    [switch]$BuildConsole = $true
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
@@ -12,7 +12,7 @@ $scriptRoot = $PSScriptRoot
 $sourceRoot = $scriptRoot
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
 # Native build output goes to <repo>/windows/native-build: bin keeps debug/test
-# executables, release contains the standalone host. -OutputDirectory overrides it.
+# executables, release contains the two distributable native variants. -OutputDirectory overrides it.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path (Split-Path $scriptRoot -Parent) 'native-build' }
 $compiler = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x86\cl.exe' -File |
     Sort-Object FullName -Descending | Select-Object -First 1
@@ -82,6 +82,8 @@ try {
         $consoleLinkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:CONSOLE,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + $consoleHostExe),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
         & $linker @consoleLinkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native console host link failed.' }
+    } elseif (Test-Path -LiteralPath $consoleHostExe -PathType Leaf) {
+        Remove-Item -LiteralPath $consoleHostExe -Force
     }
     if ($BuildTests) {
         $testObject = Join-Path $build 'injection-tests.obj'
@@ -145,12 +147,31 @@ if ($BuildConsole) {
     if ($LASTEXITCODE -ne 0) { throw 'PE console import audit failed.' }
 }
 $release = Join-Path $OutputDirectory 'release'
-New-Item -ItemType Directory -Path $release -Force | Out-Null
-$releaseExe = Join-Path $release 'chaoxing_plus.exe'
-Copy-Item -LiteralPath $hostExe -Destination $releaseExe -Force
-# Release layout is exactly one EXE: the proxy DLL is embedded as RCDATA and is
-# only written into the client directory at runtime when dll-proxy is used.
-Get-Item -LiteralPath $hostExe,$releaseExe | Select-Object FullName,Length
+$singleFileRelease = Join-Path $release 'single-file'
+$multiFileRelease = Join-Path $release 'multi-file'
+New-Item -ItemType Directory -Path $singleFileRelease -Force | Out-Null
+$legacyReleaseExe = Join-Path $release 'chaoxing_plus.exe'
+if (Test-Path -LiteralPath $legacyReleaseExe -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyReleaseExe -Force
+}
+$singleFileExe = Join-Path $singleFileRelease 'chaoxing_plus.exe'
+Copy-Item -LiteralPath $hostExe -Destination $singleFileExe -Force
+$releaseOutputs = @($hostExe, $singleFileExe)
+if ($BuildConsole) {
+    New-Item -ItemType Directory -Path $multiFileRelease -Force | Out-Null
+    $multiFileExe = Join-Path $multiFileRelease 'chaoxing_plus_console.exe'
+    Copy-Item -LiteralPath $consoleHostExe -Destination $multiFileExe -Force
+    $releaseOutputs += $multiFileExe
+} else {
+    $staleConsoleExe = Join-Path $multiFileRelease 'chaoxing_plus_console.exe'
+    if (Test-Path -LiteralPath $staleConsoleExe -PathType Leaf) {
+        Remove-Item -LiteralPath $staleConsoleExe -Force
+    }
+}
+# The proxy DLL is embedded as RCDATA and is only written into the client
+# directory at runtime when dll-proxy is used; no sidecar runtime files are
+# copied into either variant directory.
+Get-Item -LiteralPath $releaseOutputs | Select-Object FullName,Length
 # Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
 # and build must not depend on PowerShell module auto-loading.
 & certutil.exe -hashfile $hostExe SHA256
