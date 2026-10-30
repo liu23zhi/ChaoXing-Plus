@@ -282,12 +282,61 @@ test('work and exam upload waits through a balance pause before upload and befor
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {
   const source = await readCxSource();
 
-  assert.equal(source.includes("const workOrExamTitleSelector = !preview_mode"), true);
+  assert.equal(source.includes('function getWorkOrExamTitleSelector(previewMode: boolean)'), true);
+  assert.equal(source.includes('const workOrExamTitleSelector = getWorkOrExamTitleSelector(preview_mode);'), true);
   assert.equal(source.includes("'.splitS-left .mark_name'"), true);
   assert.equal(source.includes("'.line_wid_half.fl,.line_wid_half.fr'"), true);
   assert.equal(source.includes('function resolveWorkOrExamQuestionTypeRoot('), true);
   assert.equal(source.includes("elements.type.find((element) => element.getAttribute('name')?.match(/type\\d+/))"), true);
   assert.equal(source.includes('resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest(\'.questionLi\') ?? document'), true);
+});
+
+test('work/exam title parsing keeps direct h4 question text in both modes', async () => {
+  const context = vm.createContext({
+    optimizationElementWithImage: (element) => element,
+    removeRedundantWords: (text) => text
+  });
+  const getSelector = await loadCxFunction('getWorkOrExamTitleSelector', context);
+  const transformTitle = await loadCxFunction('transformWorkOrExamQuestionTitle', context);
+
+  assert.match(getSelector(true), /:scope > h4/);
+  assert.match(getSelector(false), /:scope > h4/);
+
+  const makeTitle = (tagName, className, parts) => {
+    const create = (texts) => {
+      const childNodes = texts.map((text) => ({ textContent: text }));
+      const element = {
+        tagName,
+        className,
+        childNodes,
+        matches(selector) {
+          return (selector.includes('h3') && tagName === 'H3')
+            || (selector.includes('.mark_name') && className.split(/\\s+/u).includes('mark_name'));
+        },
+        cloneNode() {
+          return create(this.childNodes.map((node) => node.textContent));
+        }
+      };
+      childNodes.forEach((node) => {
+        node.remove = () => {
+          const index = element.childNodes.indexOf(node);
+          if (index >= 0) element.childNodes.splice(index, 1);
+        };
+      });
+      Object.defineProperty(element, 'innerText', {
+        enumerable: true,
+        get: () => element.childNodes.map((node) => node.textContent).join('')
+      });
+      return element;
+    };
+    return create(parts);
+  };
+
+  const heading = makeTitle('H3', 'mark_name colorDeep', ['10. ', '(简答题)']);
+  const question = makeTitle('H4', '', ['实验心得体会（你对实验的理解、实验难点及改进方向等）']);
+
+  assert.equal(transformTitle([heading, question], ''), '实验心得体会（你对实验的理解、实验难点及改进方向等）');
+  assert.equal(transformTitle([question], ''), '实验心得体会（你对实验的理解、实验难点及改进方向等）');
 });
 
 test('workOrExam applies choice answers with native click before synthetic fallback', async () => {

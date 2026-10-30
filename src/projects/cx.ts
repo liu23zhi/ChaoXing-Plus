@@ -4210,6 +4210,48 @@ const JobRunner = {
   }
 };
 
+function getWorkOrExamTitleSelector(previewMode: boolean) {
+  return previewMode
+    ? [
+        ':scope > h3',
+        ':scope > h4',
+        ':scope > div:not(.stem_answer)',
+        ':scope > p',
+        '.line_wid_half.fl,.line_wid_half.fr'
+      ].join(',')
+    : [
+        '.splitS-left .mark_name',
+        ':scope > h3.mark_name',
+        ':scope > h4',
+        '.line_wid_half.fl,.line_wid_half.fr'
+      ].join(',');
+}
+
+function transformWorkOrExamQuestionTitle(
+  titles: (HTMLElement | undefined)[],
+  redundanceWordsText: string
+) {
+  const isMultipleQuestion = titles.length > 1;
+  const optimizationTitle = titles
+    .map((titleElement, index) => {
+      if (titleElement) {
+        const titleCloneEl = titleElement.cloneNode(true) as HTMLElement;
+        if (index === 0 && titleElement.matches('h3, .mark_name')) {
+          titleCloneEl.childNodes[0]?.remove();
+          titleCloneEl.childNodes[0]?.remove();
+        }
+        return optimizationElementWithImage(titleCloneEl, true).innerText;
+      }
+      return '';
+    })
+    .join('\n');
+
+  return removeRedundantWords(
+    optimizationTitle.replace(/\n/g, isMultipleQuestion ? '\n' : ' ').replace(/ +/g, ' ').trim(),
+    redundanceWordsText.split('\n')
+  );
+}
+
 function workOrExam(
   type: 'work' | 'exam' = 'work',
   {
@@ -4242,36 +4284,9 @@ function workOrExam(
     workResultsMethods().init?.();
   }
 
-  const workOrExamTitleSelector = !preview_mode
-    ? ['.splitS-left .mark_name', '.line_wid_half.fl,.line_wid_half.fr'].join(',')
-    : [
-        ':scope > h3',
-        ':scope > div:not(.stem_answer)',
-        ':scope > p',
-        '.line_wid_half.fl,.line_wid_half.fr'
-      ].join(',');
-
-  const workOrExamQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) => {
-    const isMultipleQuestion = titles.length > 1;
-    const optimizationTitle = titles
-      .map((titleElement, index) => {
-        if (titleElement) {
-          const titleCloneEl = titleElement.cloneNode(true) as HTMLElement;
-          if (index === 0) {
-            titleCloneEl.childNodes[0]?.remove();
-            titleCloneEl.childNodes[0]?.remove();
-          }
-          return optimizationElementWithImage(titleCloneEl, true).innerText;
-        }
-        return '';
-      })
-      .join('\n');
-
-    return removeRedundantWords(
-      optimizationTitle.replace(/\n/g, isMultipleQuestion ? '\n' : ' ').replace(/ +/g, ' ').trim(),
-      redundanceWordsText.split('\n')
-    );
-  };
+  const workOrExamTitleSelector = getWorkOrExamTitleSelector(preview_mode);
+  const workOrExamQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) =>
+    transformWorkOrExamQuestionTitle(titles, redundanceWordsText);
 
   function resolveWorkOrExamQuestionTypeRoot(elements: { type: HTMLElement[]; options: HTMLElement[] }) {
     return elements.type.find((element) => element.getAttribute('name')?.match(/type\d+/)) ?? elements.type[0];
