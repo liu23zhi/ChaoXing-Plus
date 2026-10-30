@@ -135,9 +135,74 @@ static BOOL selection_fill(SELECTION_WINDOW *state) {
 
 
 /* ---- 客户端能力探测：决定 GUI 里哪些注入方式可选 ---- */
-static const WCHAR *const selection_carrier_names[7] = {
-    L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32"
-};
+#define SELECTION_MAX_CARRIERS 16
+static WCHAR selection_carrier_names[SELECTION_MAX_CARRIERS][32];
+static int selection_carrier_count;
+
+/* 直接扫描宿主目录里的代理 DLL（<host>\hook\*.dll 与 <host>\*.dll），不再写死载体名单。 */
+
+/* KnownDLLs 检测：系统强制从 System32 加载同名 DLL，应用目录侧加载无效。 */
+static BOOL selection_is_known_dll(const WCHAR *name) {
+    HKEY key;
+    WCHAR expected[64];
+    DWORD index = 0;
+    int at = 0;
+    if (!name || !*name) return FALSE;
+    while (name[at] && at < 56) { expected[at] = name[at]; ++at; }
+    expected[at++] = L'.'; expected[at++] = L'd'; expected[at++] = L'l'; expected[at++] = L'l'; expected[at] = 0;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs",
+                      0, KEY_READ, &key) != ERROR_SUCCESS) return FALSE;
+    for (;;) {
+        WCHAR valueName[64];
+        WCHAR valueData[128];
+        DWORD nameLength = 64;
+        DWORD dataLength = sizeof(valueData) - sizeof(WCHAR);
+        DWORD type = 0;
+        if (RegEnumValueW(key, index++, valueName, &nameLength, NULL, &type, (LPBYTE)valueData, &dataLength) != ERROR_SUCCESS) break;
+        if (type != REG_SZ && type != REG_EXPAND_SZ) continue;
+        valueData[dataLength / sizeof(WCHAR)] = 0;
+        if (!lstrcmpiW(valueData, expected)) { RegCloseKey(key); return TRUE; }
+    }
+    RegCloseKey(key);
+    return FALSE;
+}
+static void selection_load_carriers(void) {
+    WCHAR hostPath[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH];
+    DWORD length, cut = 0, i, r;
+    static const WCHAR *const rels[4] = { L"\\..\\hook\\", L"\\hook\\", L"\\..\\..\\build-windows\\hook\\", L"\\" };
+    selection_carrier_count = 0;
+    if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return;
+    length = (DWORD)lstrlenW(hostPath);
+    for (i = 0; i < length; ++i) if (hostPath[i] == L'\\' || hostPath[i] == L'/') cut = i;
+    if (!cut) return;
+    for (r = 0; r < 4; ++r) {
+        WIN32_FIND_DATAW data;
+        HANDLE find;
+        lstrcpynW(dir, hostPath, (int)(cut + 1));
+        dir[cut] = 0;
+        if (lstrlenW(dir) + lstrlenW(rels[r]) + 16 >= MAX_PATH) continue;
+        lstrcpynW(pattern, dir, MAX_PATH);
+        lstrcatW(pattern, rels[r]);
+        lstrcatW(pattern, L"*.dll");
+        find = FindFirstFileW(pattern, &data);
+        if (find == INVALID_HANDLE_VALUE) continue;
+        do {
+            WCHAR base[32];
+            int k = 0, dup = 0, j;
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            while (data.cFileName[k] && data.cFileName[k] != L'.' && k < 31) { base[k] = data.cFileName[k]; ++k; }
+            base[k] = 0;
+            if (k < 2) continue;
+            if (!lstrcmpiW(base, L"winmm-proxy")) continue;
+            if (selection_is_known_dll(base)) continue;  /* KnownDLLs 无法侧加载 */
+            for (j = 0; j < selection_carrier_count; ++j) if (!lstrcmpiW(selection_carrier_names[j], base)) { dup = 1; break; }
+            if (dup || selection_carrier_count >= SELECTION_MAX_CARRIERS) continue;
+            lstrcpynW(selection_carrier_names[selection_carrier_count], base, 32);
+            ++selection_carrier_count;
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+}
 
 typedef struct SELECTION_CAPS {
     BOOL portOk;        /* 是否支持命令行开关（未加壳） */
@@ -294,13 +359,63 @@ static BOOL selection_client_is_x86(const WCHAR *path) {
     CloseHandle(file);
     return ok;
 }
+
+/* 通用加壳判定：扫描所有节名是否命中常见壳特征，而不是只认某一个名字。 */
+static BOOL selection_pe_packed(const WCHAR *path, char *reason, int reasonCap) {
+    static const char *const patterns[] = { "themida", "winlicense", "vmp", "upx", "aspack", "mpress",
+                                            "enigma", "obsidium", "packed", "protect", ".boot" };
+    HANDLE file;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS nt;
+    IMAGE_SECTION_HEADER section;
+    DWORD read = 0, i;
+    BOOL packed = FALSE;
+    if (reason && reasonCap > 0) reason[0] = 0;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (ReadFile(file, &dos, sizeof(dos), &read, NULL) && read == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+        ReadFile(file, &nt, sizeof(nt), &read, NULL) && read == sizeof(nt) && nt.Signature == IMAGE_NT_SIGNATURE) {
+        if (SetFilePointer(file, dos.e_lfanew + (LONG)sizeof(DWORD) + (LONG)sizeof(IMAGE_FILE_HEADER) +
+                           (LONG)nt.FileHeader.SizeOfOptionalHeader, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER) {
+            for (i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
+                char name[9];
+                int k;
+                if (!ReadFile(file, &section, sizeof(section), &read, NULL) || read != sizeof(section)) break;
+                for (k = 0; k < 8; ++k) name[k] = (char)section.Name[k];
+                name[8] = 0;
+                for (k = 0; k < (int)(sizeof(patterns) / sizeof(patterns[0])); ++k) {
+                    const char *needle = patterns[k];
+                    int nlen = (int)lstrlenA(needle), at;
+                    for (at = 0; at + nlen <= 8; ++at) {
+                        int m = 1, j;
+                        for (j = 0; j < nlen; ++j) {
+                            char a = name[at + j], b = needle[j];
+                            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+                            if (a != b) { m = 0; break; }
+                        }
+                        if (m) {
+                            packed = TRUE;
+                            if (reason && reasonCap > 0) lstrcpynA(reason, name, reasonCap);
+                            break;
+                        }
+                    }
+                    if (packed) break;
+                }
+                if (packed) break;
+            }
+        }
+    }
+    CloseHandle(file);
+    return packed;
+}
 static SELECTION_CAPS selection_client_caps(const WCHAR *path) {
     SELECTION_CAPS caps;
     int i;
-    caps.portOk = path && *path ? !selection_pe_section(path, ".themida") : TRUE;
+    caps.portOk = path && *path ? !selection_pe_packed(path, NULL, 0) : TRUE;
     caps.carrierMask = 0;
     if (!selection_client_is_x86(path) || !selection_dir_writable(path)) return caps;
-    for (i = 0; i < 7; ++i) {
+    for (i = 0; i < selection_carrier_count; ++i) {
         WCHAR dll[32];
         int k = 0;
         while (selection_carrier_names[i][k] && k < 24) { dll[k] = selection_carrier_names[i][k]; ++k; }
@@ -352,7 +467,7 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
     state->injectDisabledMask = 0;
     if (!caps.portOk) state->injectDisabledMask |= 0x2u;           /* cdp-port */
     if (caps.carrierMask == 0) state->injectDisabledMask |= 0x4u;  /* dll-proxy */
-    state->carrierDisabledMask = 0x1u;                             /* bit0 = auto 永远可用 */
+    state->carrierDisabledMask = 0;                                /* bit0（自动）永远可用 */
     {
         int ci;
         for (ci = 0; ci < 7; ++ci) {
@@ -380,8 +495,7 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
     }
     {
         static const WCHAR *const injectLabels[3] = { L"自动（推荐）", L"端口命令行（cdp-port）", L"DLL 代理（dll-proxy）" };
-        static const WCHAR *const carrierLabels[8] = { L"自动（按导入表）", L"winmm.dll", L"version.dll", L"uxtheme.dll",
-                                                       L"msimg32.dll", L"sensapi.dll", L"oledlg.dll", L"wtsapi32.dll" };
+
         int i;
         for (i = 0; i < 3; ++i) {
             WCHAR text[96];
@@ -392,11 +506,13 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
             SendMessageW(state->injectCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)text);
         }
         SendMessageW(state->injectCombo, CB_SETCURSEL, (WPARAM)state->lastInjectIndex, 0);
-        for (i = 0; i < 8; ++i) {
+        for (i = 0; i <= selection_carrier_count; ++i) {
             WCHAR text[96];
+            WCHAR base[48];
             BOOL disabled = (state->carrierDisabledMask & (1u << i)) != 0;
-            if (i == 0) lstrcpynW(text, carrierLabels[i], 96);
-            else wsprintfW(text, disabled ? L"%s（不可用）" : L"%s", carrierLabels[i]);
+            if (i == 0) lstrcpynW(base, L"自动（按导入表）", 48);
+            else { lstrcpynW(base, selection_carrier_names[i - 1], 48); lstrcatW(base, L".dll"); }
+            wsprintfW(text, disabled ? L"%s（不可用）" : L"%s", base);
             SendMessageW(state->carrierCombo, CB_DELETESTRING, (WPARAM)i, 0);
             SendMessageW(state->carrierCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)text);
         }
@@ -484,10 +600,14 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         state->carrierLabel = selection_control(state, SS_LEFT, L"STATIC", L"代理载体：", -1);
         state->carrierCombo = selection_control(state, CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, L"COMBOBOX", L"", SELECTION_CARRIER);
         if (state->carrierLabel && state->carrierCombo) {
-            static const WCHAR *const carriers[] = { L"自动（按导入表）", L"winmm.dll", L"version.dll", L"uxtheme.dll",
-                                                     L"msimg32.dll", L"sensapi.dll", L"oledlg.dll", L"wtsapi32.dll" };
             int ci;
-            for (ci = 0; ci < 8; ++ci) SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)carriers[ci]);
+            SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)L"自动（按导入表）");
+            for (ci = 0; ci < selection_carrier_count; ++ci) {
+                WCHAR label[48];
+                lstrcpynW(label, selection_carrier_names[ci], 48);
+                lstrcatW(label, L".dll");
+                SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)label);
+            }
             SendMessageW(state->carrierCombo, CB_SETCURSEL, 0, 0);
             lstrcpynW(state->proxyCarrier, L"auto", 16);
             EnableWindow(state->carrierCombo, FALSE);
@@ -547,16 +667,15 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
             return 0;
         }
         if (command == SELECTION_CARRIER && HIWORD(wParam) == CBN_SELCHANGE) {
-            static const WCHAR *const names[] = { L"auto", L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32" };
             LRESULT pick = SendMessageW(state->carrierCombo, CB_GETCURSEL, 0, 0);
-            if (pick < 0 || pick > 7) pick = 0;
+            if (pick < 0 || pick > selection_carrier_count) pick = 0;
             if (state->carrierDisabledMask & (1u << pick)) {
                 MessageBeep(MB_ICONWARNING);
                 SendMessageW(state->carrierCombo, CB_SETCURSEL, (WPARAM)state->lastCarrierIndex, 0);
                 return 0;
             }
             state->lastCarrierIndex = (int)pick;
-            lstrcpynW(state->proxyCarrier, names[pick], 16);
+            lstrcpynW(state->proxyCarrier, pick == 0 ? L"auto" : selection_carrier_names[pick - 1], 16);
             return 0;
         }
         if (command == SELECTION_LIST && HIWORD(wParam) == LBN_SELCHANGE) { selection_apply_caps(state); return 0; }
@@ -577,6 +696,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
 }
 
 static BOOL selection_create(SELECTION_WINDOW *state) {
+    selection_load_carriers();
     WNDCLASSEXW windowClass;
     RECT work;
     int width = selection_scale(960), height = selection_scale(510);
@@ -942,6 +1062,12 @@ BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *state, WCHAR *error, DWORD errorCap)
     HeapFree(GetProcessHeap(), 0, state);
     return cancelled;
 }
+
+
+
+
+
+
 
 
 

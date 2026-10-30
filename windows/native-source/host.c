@@ -678,6 +678,31 @@ static BOOL h_proxy_file_present(const WCHAR *clientPath) {
 /* KnownDLLs 里的名字会被系统强制从 System32 加载，应用目录的同名 DLL 不起作用。
    这里维护一份实测清单（imm32 已在 KnownDLLs 中，无法作为载体）。 */
 static BOOL h_carrier_is_known_dll(const WCHAR *name) {
+    /* 先查注册表（系统真实名单），失败再回退下面的内置表。 */
+    {
+        HKEY key;
+        WCHAR expected[64];
+        DWORD index = 0;
+        int at = 0;
+        if (name && *name) {
+            while (name[at] && at < 56) { expected[at] = name[at]; ++at; }
+            expected[at++] = L'.'; expected[at++] = L'd'; expected[at++] = L'l'; expected[at++] = L'l'; expected[at] = 0;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs",
+                              0, KEY_READ, &key) == ERROR_SUCCESS) {
+                for (;;) {
+                    WCHAR valueName[64];
+                    WCHAR valueData[128];
+                    DWORD nameLength = 64, dataLength = sizeof(valueData) - sizeof(WCHAR), type = 0;
+                    if (RegEnumValueW(key, index++, valueName, &nameLength, NULL, &type,
+                                      (LPBYTE)valueData, &dataLength) != ERROR_SUCCESS) break;
+                    if (type != REG_SZ && type != REG_EXPAND_SZ) continue;
+                    valueData[dataLength / sizeof(WCHAR)] = 0;
+                    if (h_same(valueData, expected)) { RegCloseKey(key); return TRUE; }
+                }
+                RegCloseKey(key);
+            }
+        }
+    }
     static const WCHAR *const denied[] = {
         L"imm32", L"kernel32", L"user32", L"gdi32", L"advapi32", L"ole32", L"oleaut32",
         L"shell32", L"shlwapi", L"comdlg32", L"comctl32", L"rpcrt4", L"ws2_32", L"msvcrt",
@@ -2861,6 +2886,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 
