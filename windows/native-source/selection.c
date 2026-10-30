@@ -7,6 +7,7 @@
 #define SELECTION_BROWSE 1002
 #define SELECTION_TIMER 1003
 #define SELECTION_SCAN_ALL 1004
+#define SELECTION_INJECT 1005
 
 static const WCHAR selectionClass[] = L"CXPlusNativeClientSelection";
 static const WCHAR selectionTitle[] = L"超星学习助手 - 选择考试客户端";
@@ -19,12 +20,16 @@ typedef struct SELECTION_WINDOW {
     DWORD outCap;
     WCHAR *error;
     DWORD errorCap;
-    HWND window, heading, columns, list, browse, scanAll, choose, cancel;
+    HWND window, heading, columns, list, browse, scanAll, choose, cancel, injectLabel, injectCombo;
     const WCHAR *notice;
     HFONT font;
     BOOL finished;
     CX_SELECTION_STATUS result;
+    WCHAR injectMode[16];
 } SELECTION_WINDOW;
+
+static WCHAR selection_last_inject_mode[16] = L"auto";
+const WCHAR *cx_selection_inject_mode(void) { return selection_last_inject_mode; }
 
 static void selection_error(SELECTION_WINDOW *state, const WCHAR *message) {
     if (state->error && state->errorCap) lstrcpynW(state->error, message, (int)state->errorCap);
@@ -131,6 +136,11 @@ static void selection_layout(SELECTION_WINDOW *state) {
     MoveWindow(state->heading, margin, top, width - selection_scale(36), headingHeight, TRUE);
     MoveWindow(state->columns, gap, columnsTop, width - selection_scale(40), columnsHeight, TRUE);
     MoveWindow(state->list, margin, listTop, width - selection_scale(36), height - bottomOffset, TRUE);
+    {
+        int injectTop = buttonTop - selection_scale(46);
+        MoveWindow(state->injectLabel, margin, injectTop + selection_scale(6), selection_scale(96), selection_scale(24), TRUE);
+        MoveWindow(state->injectCombo, margin + selection_scale(100), injectTop, selection_scale(220), selection_scale(220), TRUE);
+    }
     MoveWindow(state->browse, margin, buttonTop, buttonWidth, buttonHeight, TRUE);
     MoveWindow(state->scanAll, selection_scale(168), buttonTop, buttonWidth, buttonHeight, TRUE);
     MoveWindow(state->choose, width - selection_scale(238), buttonTop, chooseWidth, buttonHeight, TRUE);
@@ -164,6 +174,7 @@ static BOOL selection_accept(SELECTION_WINDOW *state, const WCHAR *path) {
             selectionTitle, MB_OK | MB_ICONERROR);
         return FALSE;
     }
+    lstrcpynW(selection_last_inject_mode, state->injectMode[0] ? state->injectMode : L"auto", 16);
     state->result = CX_SELECTION_SELECTED;
     if (state->error && state->errorCap) state->error[0] = 0;
     DestroyWindow(state->window);
@@ -209,6 +220,15 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         state->cancel = selection_control(state, WS_TABSTOP | BS_PUSHBUTTON, L"BUTTON", L"取消", IDCANCEL);
         if (!state->heading || !state->columns || !state->list || !state->browse || !state->scanAll || !state->choose || !state->cancel
             || !selection_fill(state)) { selection_error(state, L"无法创建原生客户端选择控件。"); return -1; }
+        state->injectLabel = selection_control(state, SS_LEFT, L"STATIC", L"注入方式：", -1);
+        state->injectCombo = selection_control(state, CBS_DROPDOWNLIST | WS_VSCROLL, L"COMBOBOX", L"", SELECTION_INJECT);
+        if (state->injectLabel && state->injectCombo) {
+            SendMessageW(state->injectCombo, CB_ADDSTRING, 0, (LPARAM)L"自动（推荐）");
+            SendMessageW(state->injectCombo, CB_ADDSTRING, 0, (LPARAM)L"端口命令行（cdp-port）");
+            SendMessageW(state->injectCombo, CB_ADDSTRING, 0, (LPARAM)L"DLL 代理（dll-proxy）");
+            SendMessageW(state->injectCombo, CB_SETCURSEL, 0, 0);
+            lstrcpynW(state->injectMode, L"auto", 16);
+        } else { selection_error(state, L"无法创建注入方式选择控件。"); return -1; }
         selection_layout(state); return 0;
     }
     if (message == WM_SIZE) { selection_layout(state); return 0; }
@@ -220,6 +240,11 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         int command = LOWORD(wParam);
         if (command == IDCANCEL) { DestroyWindow(window); return 0; }
         if (command == SELECTION_BROWSE) { selection_browse(state); return 0; }
+        if (command == SELECTION_INJECT && HIWORD(wParam) == CBN_SELCHANGE) {
+            LRESULT pick = SendMessageW(state->injectCombo, CB_GETCURSEL, 0, 0);
+            lstrcpynW(state->injectMode, pick == 1 ? L"cdp-port" : (pick == 2 ? L"dll-proxy" : L"auto"), 16);
+            return 0;
+        }
         if (command == SELECTION_SCAN_ALL) {
             state->result = CX_SELECTION_SCAN_ALL; DestroyWindow(window); return 0;
         }
@@ -339,6 +364,8 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->unicodeWindow = IsWindowUnicode(state.window);
     GetWindowTextW(state.window, title, 128); probe->titleMatches = lstrcmpW(title, selectionTitle) == 0;
     probe->layoutScale = selection_ui_dpi();
+    probe->injectOptionCount = IsWindow(state.injectCombo) ? (DWORD)SendMessageW(state.injectCombo, CB_GETCOUNT, 0, 0) : 0;
+    probe->injectSelectedIndex = IsWindow(state.injectCombo) ? (LONG)SendMessageW(state.injectCombo, CB_GETCURSEL, 0, 0) : -1;
     GetWindowTextW(state.heading, heading, 512);
     probe->noticeShown = notice && notice[0]
         ? lstrcmpW(heading, notice) == 0
@@ -591,3 +618,4 @@ BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *state, WCHAR *error, DWORD errorCap)
     HeapFree(GetProcessHeap(), 0, state);
     return cancelled;
 }
+

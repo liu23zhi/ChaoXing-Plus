@@ -326,6 +326,8 @@ static BOOL h_silent_active = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
+static WCHAR h_gui_inject_mode[16];
+static BOOL h_gui_mode_chosen;
 static BOOL h_proxy_target_auto;
 static const WCHAR *const h_proxy_carriers[] = { L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32" };
 static const int h_proxy_carrier_count = 7;
@@ -2486,10 +2488,22 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_proxy_auto_installed = TRUE;
             if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
         }
-    }    if (!options->attachPortSet && !h_dll_proxy_mode && (!options->injectModeSet || h_same(options->injectMode, L"auto")) && !h_pe_section_named(h_selected_path, ".themida")) {
+    }
+    /* GUI 里显式选择的注入方式优先于自动判定。 */
+    if (h_gui_mode_chosen && !options->injectModeSet) {
+        if (h_same(h_gui_inject_mode, L"dll-proxy")) {
+            h_dll_proxy_mode = TRUE;
+            h_report.injectMode = "dll-proxy";
+            if (!options->quiet) h_print(L"GUI: 注入方式=dll-proxy\n");
+        } else if (h_same(h_gui_inject_mode, L"cdp-port")) {
+            h_report.injectMode = "cdp-port";
+            if (!options->quiet) h_print(L"GUI: 注入方式=cdp-port\n");
+        }
+    }
+    if (!options->attachPortSet && !h_dll_proxy_mode && ((!options->injectModeSet && !h_gui_mode_chosen) || h_same(options->injectMode, L"auto")) && !h_pe_section_named(h_selected_path, ".themida")) {
         h_report.injectMode = "cdp-port";
     }
-    if (!options->attachPortSet && !h_dll_proxy_mode && (!options->injectModeSet || h_same(options->injectMode, L"auto")) && h_pe_section_named(h_selected_path, ".themida")) {
+    if (!options->attachPortSet && !h_dll_proxy_mode && ((!options->injectModeSet && !h_gui_mode_chosen) || h_same(options->injectMode, L"auto")) && h_pe_section_named(h_selected_path, ".themida")) {
         {
             WCHAR probeWinmm[CX_CLEANUP_PATH_CAP];
             BOOL proxyReady = FALSE;
@@ -2839,6 +2853,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
 
 
 

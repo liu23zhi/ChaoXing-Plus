@@ -91,6 +91,8 @@ static void probe_tests(void) {
     check(probe.selectedIndex == 1, "the recommended candidate is selected initially");
     check(probe.browseAvailable, "manual browse remains available");
     check(probe.scanAllAvailable, "full disk scan remains available");
+    check(probe.injectOptionCount == 3, "injection mode combo offers auto/cdp-port/dll-proxy");
+    check(probe.injectSelectedIndex == 0, "injection mode defaults to auto");
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
     {
         DWORD expectedDpi = expected_ui_dpi();
@@ -298,3 +300,4 @@ void WINAPI SelectionTestMain(void) {
     output(failedChecks ? "NATIVE SELECTION TESTS FAIL\n" : "NATIVE SELECTION TESTS PASS\n");
     ExitProcess(failedChecks ? 1 : 0);
 }
+
