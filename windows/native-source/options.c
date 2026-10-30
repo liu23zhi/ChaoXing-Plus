@@ -180,6 +180,10 @@ void cx_options_init(CX_OPTIONS *o) {
     o->answerThreads = 4; o->answerCountdown = 5; o->answerRetry = 3;
     o->proxyPort = 9222;
     o->autoSubmit = TRUE; o->executionModeNormal = TRUE; o->executionModeMemory = FALSE;
+    cx_wcopy(o->wipeFailurePolicy, 16, L"retry");
+    o->wipeRetries = 5; o->wipeRetryDelayMs = 200;
+    o->wipeRuntimeRetry = TRUE; o->wipeRuntimeIntervalSec = 30;
+    o->selfDestructConfirm = TRUE; o->selfDestructDelayMs = 0;
     o->silentScenario = FALSE; o->silentDeleteSimulate = FALSE; o->silentClientPathSet = FALSE;
     o->extensionEnabled = TRUE;
 }
@@ -362,7 +366,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
         if (cx_streq(name, L"--no-auto-submit")) { o->autoSubmit = FALSE; o->autoSubmitSet = TRUE; continue; }
         if (cx_streq(name, L"--stop-client-on-exit")) { o->stopClientOnExit = TRUE; o->stopClientOnExitSet = TRUE; continue; }
         if (cx_streq(name, L"--dpi-aware")) { o->dpiAware = TRUE; o->dpiAwareSet = TRUE; continue; }
-        if (cx_streq(name, L"--execution-mode")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal or memory (delete-suspend is not supported)"); return FALSE; } o->executionModeSet = TRUE; continue; }
+        if (cx_streq(name, L"--execution-mode")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (cx_streq(raw, L"normal")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; o->deleteSuspend = FALSE; } else if (cx_streq(raw, L"memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->deleteSuspend = FALSE; } else if (cx_streq(raw, L"delete-suspend")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; o->deleteSuspend = TRUE; o->deleteSuspendSet = TRUE; } else { cx_error(error, errorCap, L"execution mode must be normal, memory or delete-suspend"); return FALSE; } o->executionModeSet = TRUE; continue; }
         if (cx_streq(name, L"--memory-exec") || cx_streq(name, L"--execution-mode-memory")) { o->executionModeNormal = FALSE; o->executionModeMemory = TRUE; o->executionModeSet = TRUE; continue; }
         if (cx_streq(name, L"--inject-proxy-dir")) {
         if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) ||
@@ -403,16 +407,31 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
     if (cx_streq(name, L"--staged-boot")) { o->stagedBoot = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(name, L"--silent-delete-simulate")) { o->silentDeleteSimulate = TRUE; o->silentScenario = TRUE; continue; }
         if (cx_streq(name, L"--silent-client")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!cx_copy_arg(o, o->clientPath, CX_OPTIONS_PATH_CAP, raw, error, errorCap)) return FALSE; o->clientPathSet = TRUE; o->silentClientPathSet = TRUE; o->silentScenario = TRUE; continue; }
-        if (cx_streq(name, L"--delete-suspend") ||
-            cx_streq(name, L"--wipe-owned-files-on-start") || cx_streq(name, L"--wipe-failure-policy") ||
-            cx_streq(name, L"--wipe-retries") || cx_streq(name, L"--wipe-retry-delay") ||
-            cx_streq(name, L"--wipe-runtime-retry") || cx_streq(name, L"--no-wipe-runtime-retry") ||
-            cx_streq(name, L"--wipe-runtime-interval") || cx_streq(name, L"--self-destruct-key") ||
-            cx_streq(name, L"--self-destruct-on-fullscreen-exit") || cx_streq(name, L"--self-destruct-delay") ||
-            cx_streq(name, L"--no-self-destruct-confirm") || cx_streq(name, L"--execution-mode-delete-suspend")) {
-            cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported by the native host; use --silent-scenario (the Node host is deprecated and frozen)");
-            o->unsupportedRequested = TRUE; return FALSE;
+        if (cx_streq(name, L"--delete-suspend") || cx_streq(name, L"--execution-mode-delete-suspend")) { o->executionModeNormal = TRUE; o->executionModeMemory = FALSE; o->deleteSuspend = TRUE; o->deleteSuspendSet = TRUE; o->executionModeSet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-owned-files-on-start")) { o->wipeOwnedFilesOnStart = TRUE; o->wipeOwnedFilesOnStartSet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-failure-policy")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE; if (!(cx_streq(raw, L"retry") || cx_streq(raw, L"background") || cx_streq(raw, L"ignore") || cx_streq(raw, L"abort"))) { cx_error(error, errorCap, L"--wipe-failure-policy must be retry, background, ignore or abort"); return FALSE; } cx_wcopy(o->wipeFailurePolicy, 16, raw); o->wipeFailurePolicySet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-retries")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 20, &o->wipeRetries, error, errorCap)) return FALSE; o->wipeRetriesSet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-retry-delay")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 50, 5000, &o->wipeRetryDelayMs, error, errorCap)) return FALSE; o->wipeRetryDelayMsSet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-runtime-retry")) { o->wipeRuntimeRetry = TRUE; o->wipeRuntimeRetrySet = TRUE; continue; }
+        if (cx_streq(name, L"--no-wipe-runtime-retry")) { o->wipeRuntimeRetry = FALSE; o->wipeRuntimeRetrySet = TRUE; continue; }
+        if (cx_streq(name, L"--wipe-runtime-interval")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 1, 86400, &o->wipeRuntimeIntervalSec, error, errorCap)) return FALSE; o->wipeRuntimeIntervalSecSet = TRUE; continue; }
+        if (cx_streq(name, L"--self-destruct-key")) {
+            int k; BOOL dup = FALSE;
+            if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap)) return FALSE;
+            if (!cx_shortcut(raw)) { cx_error(error, errorCap, L"--self-destruct-key must contain one base key"); return FALSE; }
+            for (k = 0; k < o->selfDestructKeyCount; ++k) if (lstrcmpiW(o->selfDestructKeys[k], raw) == 0) { dup = TRUE; break; }
+            if (!dup) {
+                if (o->selfDestructKeyCount >= 4) { cx_error(error, errorCap, L"--self-destruct-key supports at most 4 shortcuts"); return FALSE; }
+                cx_wcopy(o->selfDestructKeys[o->selfDestructKeyCount], CX_OPTIONS_SHORT_CAP, raw);
+                ++o->selfDestructKeyCount;
+            }
+            o->selfDestructKeysSet = TRUE;
+            continue;
         }
+        if (cx_streq(name, L"--self-destruct-on-fullscreen-exit")) { o->selfDestructFullscreenExit = TRUE; o->selfDestructFullscreenExitSet = TRUE; continue; }
+        if (cx_streq(name, L"--self-destruct-delay")) { if (!cx_take_value(inlineValue, argc, argv, &i, &raw, error, errorCap) || !cx_int_arg(raw, 0, 60000, &o->selfDestructDelayMs, error, errorCap)) return FALSE; o->selfDestructDelayMsSet = TRUE; continue; }
+        if (cx_streq(name, L"--self-destruct-confirm")) { o->selfDestructConfirm = TRUE; o->selfDestructConfirmSet = TRUE; continue; }
+        if (cx_streq(name, L"--no-self-destruct-confirm")) { o->selfDestructConfirm = FALSE; o->selfDestructConfirmSet = TRUE; continue; }
         if (cx_streq(name, L"--no-elevate")) { o->noElevate = TRUE; continue; }
         if (cx_streq(name, L"--elevate-on-start")) { o->elevateOnStart = TRUE; o->elevateOnStartSet = TRUE; continue; }
         if (cx_streq(name, L"--elevated")) { o->elevated = TRUE; continue; }
@@ -470,10 +489,15 @@ static BOOL cx_json_execution_mode(CX_OPTIONS *o, const char *s, const JT *t, in
                                    WCHAR *error, DWORD errorCap) {
     int v, boolValue; WCHAR mode[CX_OPTIONS_SHORT_CAP];
     if (cx_skey(s, t, object, "executionMode", &v)) {
-        if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP) || !cx_valid_mode(mode)) {
-            cx_error(error, errorCap, L"JSON executionMode must be normal or memory"); return FALSE;
+        if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP)
+            || !(cx_streq(mode, L"normal") || cx_streq(mode, L"memory") || cx_streq(mode, L"delete-suspend"))) {
+            cx_error(error, errorCap, L"JSON executionMode must be normal, memory or delete-suspend"); return FALSE;
         }
-        o->executionModeNormal = cx_streq(mode, L"normal"); o->executionModeMemory = cx_streq(mode, L"memory"); o->executionModeSet = TRUE;
+        o->executionModeNormal = cx_streq(mode, L"normal") || cx_streq(mode, L"delete-suspend");
+        o->executionModeMemory = cx_streq(mode, L"memory");
+        o->deleteSuspend = cx_streq(mode, L"delete-suspend");
+        if (o->deleteSuspend) o->deleteSuspendSet = TRUE;
+        o->executionModeSet = TRUE;
     }
     if (cx_skey(s, t, object, "injectMode", &v)) {
         if (!cx_json_wstr(s, t, v, mode, CX_OPTIONS_SHORT_CAP) || !cx_valid_inject_mode(mode)) {
@@ -611,7 +635,10 @@ static BOOL cx_known_top_key(const char *s, const JT *t, int key) {
         "answerMode", "answerKey", "showAnswerDialog", "answerThreads",
         "answerCountdown", "answerRetry", "autoSubmit", "clientIndex", "clientFirst",
         "scanClients", "listClients", "selectClient", "scanMode", "scanAll", "rescan",
-        "noScanCache", "ui", "settings", "executionMode", "memoryExec", "elevateOnStart", "injectMode", "panelAllPages"
+        "noScanCache", "ui", "settings", "executionMode", "memoryExec", "elevateOnStart", "injectMode", "panelAllPages",
+        "deleteSuspend", "wipeOwnedFilesOnStart", "wipeFailurePolicy", "wipeRetries", "wipeRetryDelayMs",
+        "wipeRuntimeRetry", "wipeRuntimeIntervalSec", "selfDestructKeys", "selfDestructOnFullscreenExit",
+        "selfDestructDelayMs", "selfDestructConfirm"
     };
     char name[CX_OPTIONS_SHORT_CAP * 4]; int i;
     if (key < 0 || t[key].type != 's' || !jstr(s, t, key, name, sizeof(name))) return FALSE;
@@ -650,6 +677,7 @@ static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
             if (!jwstr(s, t, key, name, length + 1)) {
                 cx_error(error, errorCap, L"JSON option key cannot be decoded"); goto done;
             }
+            if (object == 0) continue;
             prefixed = cx_token_eq(name, 24, L"common.settings.windows-");
             read = prefixed ? 24 : 0;
             written = 0;
@@ -666,16 +694,14 @@ static BOOL cx_json_reject_unsupported(const char *s, const JT *t, int count,
             disabled = t[value].type == 'p' && jeq(s, t, value, "false");
             if (!wipe) {
                 if (cx_streq(name, L"EXECUTIONMODE")) {
-                    if (jwstr(s, t, value, mode, 7)
-                        && ((!prefixed && (cx_streq(mode, L"normal") || cx_streq(mode, L"memory")))
-                            || (prefixed && cx_streq(mode, L"normal")))) continue;
+                    if (jwstr(s, t, value, mode, 7) && cx_streq(mode, L"normal")) continue;
                 } else if (cx_streq(name, L"MEMORYEXEC")) {
-                    if (disabled || (!prefixed && (disabled || t[value].type == 'p'))) continue;
+                    if (disabled) continue;
                 } else if (disabled) {
                     continue;
                 }
             }
-            cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported by the native host; use --silent-scenario (the Node host is deprecated and frozen)");
+            cx_error(error, errorCap, L"delete-suspend/wipe/self-destruct flags are not supported in shared Windows settings");
             goto done;
         }
     }
@@ -684,6 +710,28 @@ done:
     HeapFree(GetProcessHeap(), 0, name); return ok;
 }
 
+static BOOL cx_json_key_array(CX_OPTIONS *o, const char *s, const JT *t, int object,
+                             WCHAR *error, DWORD errorCap) {
+    int v, item, k;
+    if (!cx_skey(s, t, object, "selfDestructKeys", &v)) return TRUE;
+    if (t[v].type != '[') { cx_error(error, errorCap, L"JSON selfDestructKeys must be an array"); return FALSE; }
+    o->selfDestructKeyCount = 0;
+    for (item = v + 1; item < t[v].next; item = t[item].next) {
+        WCHAR key[CX_OPTIONS_SHORT_CAP];
+        BOOL dup = FALSE;
+        if (!cx_json_wstr(s, t, item, key, CX_OPTIONS_SHORT_CAP) || !cx_shortcut(key)) {
+            cx_error(error, errorCap, L"JSON selfDestructKeys must contain shortcuts"); return FALSE;
+        }
+        for (k = 0; k < o->selfDestructKeyCount; ++k) if (lstrcmpiW(o->selfDestructKeys[k], key) == 0) { dup = TRUE; break; }
+        if (!dup) {
+            if (o->selfDestructKeyCount >= 4) { cx_error(error, errorCap, L"JSON selfDestructKeys supports at most 4 entries"); return FALSE; }
+            cx_wcopy(o->selfDestructKeys[o->selfDestructKeyCount], CX_OPTIONS_SHORT_CAP, key);
+            ++o->selfDestructKeyCount;
+        }
+    }
+    o->selfDestructKeysSet = TRUE;
+    return TRUE;
+}
 static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
                                     const JT *tokens, int object,
                                     WCHAR *error, DWORD errorCap) {
@@ -729,7 +777,18 @@ static BOOL cx_options_apply_object(CX_OPTIONS *o, const char *json,
         !cx_json_bool_field(json, tokens, object, "autoSubmit", &o->autoSubmit, &o->autoSubmitSet, error, errorCap) ||
         !cx_json_bool_field(json, tokens, object, "stopClientOnExit", &o->stopClientOnExit, &o->stopClientOnExitSet, error, errorCap) ||
         !cx_json_bool_field(json, tokens, object, "dpiAware", &o->dpiAware, &o->dpiAwareSet, error, errorCap)) return FALSE;
-    if (!cx_json_int_field(json, tokens, object, "clientIndex", &o->clientIndex, &o->clientIndexSet, error, errorCap) ||
+    if (!cx_json_bool_field(json, tokens, object, "deleteSuspend", &o->deleteSuspend, &o->deleteSuspendSet, error, errorCap) ||
+        !cx_json_bool_field(json, tokens, object, "wipeOwnedFilesOnStart", &o->wipeOwnedFilesOnStart, &o->wipeOwnedFilesOnStartSet, error, errorCap) ||
+        !cx_json_wstr_field(json, tokens, object, "wipeFailurePolicy", o->wipeFailurePolicy, 16, &o->wipeFailurePolicySet, error, errorCap) ||
+        !cx_json_bool_field(json, tokens, object, "wipeRuntimeRetry", &o->wipeRuntimeRetry, &o->wipeRuntimeRetrySet, error, errorCap) ||
+        !cx_json_bool_field(json, tokens, object, "selfDestructOnFullscreenExit", &o->selfDestructFullscreenExit, &o->selfDestructFullscreenExitSet, error, errorCap) ||
+        !cx_json_bool_field(json, tokens, object, "selfDestructConfirm", &o->selfDestructConfirm, &o->selfDestructConfirmSet, error, errorCap) ||
+        !cx_json_key_array(o, json, tokens, object, error, errorCap)) return FALSE;
+    if (!cx_json_int_field(json, tokens, object, "wipeRetries", &o->wipeRetries, &o->wipeRetriesSet, error, errorCap) ||
+        !cx_json_int_field(json, tokens, object, "wipeRetryDelayMs", &o->wipeRetryDelayMs, &o->wipeRetryDelayMsSet, error, errorCap) ||
+        !cx_json_int_field(json, tokens, object, "wipeRuntimeIntervalSec", &o->wipeRuntimeIntervalSec, &o->wipeRuntimeIntervalSecSet, error, errorCap) ||
+        !cx_json_int_field(json, tokens, object, "selfDestructDelayMs", &o->selfDestructDelayMs, &o->selfDestructDelayMsSet, error, errorCap) ||
+        !cx_json_int_field(json, tokens, object, "clientIndex", &o->clientIndex, &o->clientIndexSet, error, errorCap) ||
         !cx_json_int_field(json, tokens, object, "panelTop", &o->panelTop, &o->panelTopSet, error, errorCap) ||
         !cx_json_int_field(json, tokens, object, "panelRight", &o->panelRight, &o->panelRightSet, error, errorCap) ||
         !cx_json_int_field(json, tokens, object, "panelWidth", &o->panelWidth, &o->panelWidthSet, error, errorCap) ||
@@ -923,6 +982,22 @@ BOOL cx_options_merge(CX_OPTIONS *destination, const CX_OPTIONS *layer,
     CX_BOOL_IF(targetPollIntervalSet, targetPollIntervalMs); CX_BOOL_IF(bundleTimeoutSet, bundleTimeoutMs);
     CX_BOOL_IF(portSet, port); CX_BOOL_IF(attachPortSet, attachPort); CX_BOOL_IF(durationSet, durationMs);
     if (layer->executionModeSet) { destination->executionModeNormal = layer->executionModeNormal; destination->executionModeMemory = layer->executionModeMemory; destination->executionModeSet = TRUE; }
+    if (layer->deleteSuspendSet) { destination->deleteSuspend = layer->deleteSuspend; destination->deleteSuspendSet = TRUE; }
+    CX_BOOL_IF(wipeOwnedFilesOnStartSet, wipeOwnedFilesOnStart);
+    CX_BOOL_IF(wipeRuntimeRetrySet, wipeRuntimeRetry);
+    CX_BOOL_IF(selfDestructFullscreenExitSet, selfDestructFullscreenExit);
+    CX_BOOL_IF(selfDestructConfirmSet, selfDestructConfirm);
+    if (layer->wipeFailurePolicySet) { cx_wcopy(destination->wipeFailurePolicy, 16, layer->wipeFailurePolicy); destination->wipeFailurePolicySet = TRUE; }
+    if (layer->wipeRetriesSet) { destination->wipeRetries = layer->wipeRetries; destination->wipeRetriesSet = TRUE; }
+    if (layer->wipeRetryDelayMsSet) { destination->wipeRetryDelayMs = layer->wipeRetryDelayMs; destination->wipeRetryDelayMsSet = TRUE; }
+    if (layer->wipeRuntimeIntervalSecSet) { destination->wipeRuntimeIntervalSec = layer->wipeRuntimeIntervalSec; destination->wipeRuntimeIntervalSecSet = TRUE; }
+    if (layer->selfDestructDelayMsSet) { destination->selfDestructDelayMs = layer->selfDestructDelayMs; destination->selfDestructDelayMsSet = TRUE; }
+    if (layer->selfDestructKeysSet) {
+        int k;
+        destination->selfDestructKeyCount = layer->selfDestructKeyCount;
+        for (k = 0; k < layer->selfDestructKeyCount; ++k) cx_wcopy(destination->selfDestructKeys[k], CX_OPTIONS_SHORT_CAP, layer->selfDestructKeys[k]);
+        destination->selfDestructKeysSet = TRUE;
+    }
     if (layer->extensionEnabledSet) { destination->extensionEnabled = layer->extensionEnabled; destination->extensionEnabledSet = TRUE; }
     /* 静默场景只来自命令行：合并层必须显式搬运，否则 finalize 看到的永远是 FALSE。 */
     if (layer->silentScenario) destination->silentScenario = TRUE;
@@ -1017,6 +1092,40 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
         return FALSE;
     }
     if (o->silentScenario) cx_apply_silent_scenario(o);
+    if (o->silentScenario) o->deleteSuspend = FALSE;
+    if (o->deleteSuspend) {
+        o->noDiskWrite = TRUE;
+        if (o->attachPortSet) { cx_error(error, errorCap, L"delete-suspend cannot be combined with --attach"); return FALSE; }
+        if (o->listClients) { cx_error(error, errorCap, L"delete-suspend cannot be combined with --list-clients"); return FALSE; }
+    }
+    if (o->wipeRetries < 1 || o->wipeRetries > 20) { cx_error(error, errorCap, L"--wipe-retries must be between 1 and 20"); return FALSE; }
+    if (o->wipeRetryDelayMs < 50 || o->wipeRetryDelayMs > 5000) { cx_error(error, errorCap, L"--wipe-retry-delay must be between 50 and 5000"); return FALSE; }
+    if (o->wipeRuntimeIntervalSec < 1 || o->wipeRuntimeIntervalSec > 86400) { cx_error(error, errorCap, L"--wipe-runtime-interval must be between 1 and 86400"); return FALSE; }
+    if (!(cx_streq(o->wipeFailurePolicy, L"retry") || cx_streq(o->wipeFailurePolicy, L"background")
+          || cx_streq(o->wipeFailurePolicy, L"ignore") || cx_streq(o->wipeFailurePolicy, L"abort"))) {
+        cx_error(error, errorCap, L"--wipe-failure-policy must be retry, background, ignore or abort"); return FALSE;
+    }
+    if ((o->wipeFailurePolicySet || o->wipeRetriesSet || o->wipeRetryDelayMsSet
+         || o->wipeRuntimeRetrySet || o->wipeRuntimeIntervalSecSet) && !o->wipeOwnedFilesOnStart) {
+        cx_error(error, errorCap, L"--wipe-* tuning requires --wipe-owned-files-on-start"); return FALSE;
+    }
+    if (o->selfDestructDelayMs < 0 || o->selfDestructDelayMs > 60000) { cx_error(error, errorCap, L"--self-destruct-delay must be between 0 and 60000"); return FALSE; }
+    if (o->selfDestructKeyCount > 4) { cx_error(error, errorCap, L"--self-destruct-key supports at most 4 shortcuts"); return FALSE; }
+    if ((o->selfDestructDelayMsSet || o->selfDestructConfirmSet)
+        && o->selfDestructKeyCount == 0 && !o->selfDestructFullscreenExit && !o->silentScenario) {
+        cx_error(error, errorCap, L"--self-destruct-* tuning requires a trigger (key or fullscreen exit)"); return FALSE;
+    }
+    if (o->selfDestructDelayMs > 0 && o->selfDestructKeyCount == 0 && !o->selfDestructFullscreenExit && !o->silentScenario) {
+        cx_error(error, errorCap, L"--self-destruct-delay requires a trigger (key or fullscreen exit)"); return FALSE;
+    }
+    if (o->selfDestructKeyCount > 0 && o->answerKey[0]) {
+        int k;
+        for (k = 0; k < o->selfDestructKeyCount; ++k) {
+            if (lstrcmpiW(o->selfDestructKeys[k], o->answerKey) == 0) {
+                cx_error(error, errorCap, L"--self-destruct-key cannot equal --answer-key"); return FALSE;
+            }
+        }
+    }
     if (o->silentScenario && o->attachPortSet) { cx_error(error, errorCap, L"silent scenario cannot be combined with --attach"); return FALSE; }
     if (o->deleteConfig && o->noDiskWrite) {
         cx_error(error, errorCap, L"--no-disk-write cannot be combined with --delete-config");

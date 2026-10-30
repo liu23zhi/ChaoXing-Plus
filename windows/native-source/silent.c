@@ -70,7 +70,9 @@ static BOOL s_protected_name(const WCHAR *name) {
 
 /* ---------- 自毁状态机 ---------- */
 
-void cx_silent_init(CX_SILENT *silent, BOOL fullscreenExit) {
+void cx_silent_configure(CX_SILENT *silent, const WCHAR *const *keys, int keyCount,
+                         BOOL fullscreenExit) {
+    int i;
     if (!silent) return;
     silent->state = CX_SILENT_IDLE;
     silent->clientPid = 0;
@@ -79,8 +81,15 @@ void cx_silent_init(CX_SILENT *silent, BOOL fullscreenExit) {
     silent->requested = FALSE;
     silent->reason[0] = 0;
     silent->keyCount = 0;
-    if (s_copy(silent->keys[0], CX_SILENT_KEY_CAP, L"Ctrl+Alt+Shift+E")) ++silent->keyCount;
-    if (s_copy(silent->keys[1], CX_SILENT_KEY_CAP, L"F8")) ++silent->keyCount;
+    if (keyCount > CX_SILENT_MAX_KEYS) keyCount = CX_SILENT_MAX_KEYS;
+    for (i = 0; i < keyCount; ++i) {
+        if (keys && keys[i] && keys[i][0]
+            && s_copy(silent->keys[silent->keyCount], CX_SILENT_KEY_CAP, keys[i])) ++silent->keyCount;
+    }
+}
+void cx_silent_init(CX_SILENT *silent, BOOL fullscreenExit) {
+    static const WCHAR *const defaults[2] = { L"Ctrl+Alt+Shift+E", L"F8" };
+    cx_silent_configure(silent, defaults, 2, fullscreenExit);
 }
 
 BOOL cx_silent_client_started(CX_SILENT *silent, DWORD pid) {

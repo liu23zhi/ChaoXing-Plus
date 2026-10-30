@@ -257,7 +257,10 @@ static void test_invalid_inputs(void) {
     check(errorText[0] != 0, "malformed JSON includes a diagnostic");
     reset(); check(!apply("[]"), "non-object JSON root is rejected");
     reset(); check(!apply("{\"notImplementedNativeFlag\":true}"), "unknown top-level JSON field is rejected");
-    reset(); check(!apply("{\"executionMode\":\"delete-suspend\"}"), "JSON delete-suspend execution mode is rejected");
+    reset(); check(apply("{\"executionMode\":\"delete-suspend\"}")
+        && cx_options_finalize(&baseOptions, errorText, 512)
+        && baseOptions.deleteSuspend && baseOptions.noDiskWrite,
+        "JSON delete-suspend execution mode forces zero-disk-write");
     reset(); check(apply("{\"executionMode\":\"memory\"}")
         && cx_options_finalize(&baseOptions, errorText, 512)
         && baseOptions.executionModeMemory && baseOptions.noDiskWrite,

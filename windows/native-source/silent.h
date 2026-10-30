@@ -53,6 +53,9 @@ typedef struct {
 
 /** 固定两组自毁快捷键（与 Node 静默场景一致）。 */
 void cx_silent_init(CX_SILENT *silent, BOOL fullscreenExit);
+/** 自定义自毁触发条件：keys 为快捷键数组，fullscreenExit 是否监听退出全屏。 */
+void cx_silent_configure(CX_SILENT *silent, const WCHAR *const *keys, int keyCount,
+                         BOOL fullscreenExit);
 /** 记录本次启动的客户端 PID；无效 PID 被忽略。 */
 BOOL cx_silent_client_started(CX_SILENT *silent, DWORD pid);
 /** 快捷键事件；只有客户端已启动且命中配置快捷键时才返回 TRUE。 */

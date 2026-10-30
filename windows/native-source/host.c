@@ -12,14 +12,17 @@
 #include "selection.h"
 #include "audit.h"
 #include "silent.h"
+#include "wipe.h"
 #include "config-store.h"
 #include "diagnostics.h"
 #include "elevation.h"
 #include "dpi.h"
+#include "home.h"
 #include "resource.h"
 
 /* 前置声明：定义在文件后部，早期调用点需要原型，避免隐式声明（C4013）。 */
 static BOOL h_same(const WCHAR *a, const WCHAR *b);
+static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap);
 static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWORD length);
 static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DWORD styleLength,
                                 char **expression, DWORD *expressionLength, WCHAR *error, DWORD errorCap);
@@ -400,6 +403,8 @@ static void h_sample_page(H_NATIVE_PAGE *page) {
 /* ---------- 原生静默场景：程序痕迹清理 + 自毁接线 ---------- */
 static CX_SILENT h_silent;
 static BOOL h_silent_active = FALSE;
+static CX_WIPE h_wipe;
+static BOOL h_wipe_ready = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
@@ -1845,7 +1850,27 @@ static void h_silent_cleanup_pass(void) {
 
 static void h_silent_begin_destruct(void) {
     WCHAR reason[CX_SILENT_REASON_CAP];
+    static BOOL confirmed = FALSE;
+    static DWORD deadline = 0;
+    DWORD now = GetTickCount();
     if (!h_silent_active || h_silent_done) return;
+    if (!confirmed) {
+        if (!h_base_options.silentScenario && h_base_options.selfDestructConfirm) {
+            int answer = MessageBoxW(NULL, L"确认要删除本程序的痕迹并退出吗？",
+                                     L"超星学习助手 - 自毁确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (answer != IDYES) {
+                h_silent.state = CX_SILENT_WATCHING;
+                h_audit_event("warn", "self-destruct", "Self-destruct cancelled by the operator");
+                return;
+            }
+        }
+        confirmed = TRUE;
+    }
+    if (h_base_options.selfDestructDelayMs > 0 && !h_base_options.silentScenario) {
+        if (!deadline) { deadline = now + (DWORD)h_base_options.selfDestructDelayMs; return; }
+        if ((int)(now - deadline) < 0) return;
+        deadline = 0;
+    }
     reason[0] = 0;
     if (!cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP)) return;
     h_silent_done = TRUE;
@@ -2383,6 +2408,11 @@ static BOOL h_pick_client(const CX_OPTIONS *options, const CX_DISCOVERY_RESULT *
         }
         cx_discovery_free(&fullResult);
         if (status == CX_SELECTION_CANCELLED) { h_exit_code = 3; return FALSE; }
+        if (status == CX_SELECTION_SELECTED) {
+            h_gui_mode_chosen = TRUE;
+            h_copy(h_gui_inject_mode, 16, cx_selection_inject_mode());
+            h_copy(h_gui_proxy_carrier, 16, cx_selection_proxy_carrier());
+        }
         return status == CX_SELECTION_SELECTED;
     }
     if (options->clientIndexSet) {
@@ -2455,6 +2485,12 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
+    h_dll_proxy_mode = FALSE; h_proxy_auto_installed = FALSE;
+    h_gui_mode_chosen = FALSE; h_gui_inject_mode[0] = 0; h_gui_proxy_carrier[0] = 0;
+    h_silent_active = FALSE; h_silent_done = FALSE; h_silent_simulate = FALSE;
+    h_proxy_target_auto = FALSE; h_copy(h_proxy_target, 16, L"winmm");
+    h_pipe_extra_args[0] = 0;
+    if (options->pipeExtraArgs[0]) h_copy(h_pipe_extra_args, 512, options->pipeExtraArgs);
     h_ui_active = TRUE; h_ui_sending = FALSE; h_ui_started = runStarted;
     h_ui_count = h_ui_head = h_ui_sequence = 0;
     h_zero(&h_report, sizeof(h_report)); h_exit_code = 0;
@@ -2466,7 +2502,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_created_diagnostics_path[0] = 0;
     h_capture_console = options->captureConsole; h_quiet = options->quiet;
     h_report.attached = options->attachPortSet;
-    h_report.executionMode = options->executionModeMemory ? "memory" : "normal";
+    h_report.executionMode = options->deleteSuspend ? "delete-suspend" : (options->executionModeMemory ? "memory" : "normal");
     h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
     h_report.stopReason = "discovery-failed";
     if (!options->listClients || options->reportPath[0]) {
@@ -2523,6 +2559,17 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             }
         } else if (!h_pick_client(options, &result, error, errorCap)) { if (h_exit_code == 3) { h_report.stopReason = "cancelled"; ok = TRUE; } goto done; }
     }
+    if (h_gui_mode_chosen) {
+        if (!options->injectModeSet) {
+            h_copy(options->injectMode, CX_OPTIONS_SHORT_CAP, h_gui_inject_mode); options->injectModeSet = TRUE;
+        }
+        if (!options->proxyTargetSet && h_gui_proxy_carrier[0]) {
+            h_copy(options->proxyTarget, 16, h_gui_proxy_carrier); options->proxyTargetSet = TRUE;
+        }
+    }
+    h_proxy_target_auto = !options->proxyTarget[0] || h_same(options->proxyTarget, L"auto");
+    if (!h_proxy_target_auto) h_copy(h_proxy_target, 16, options->proxyTarget);
+    else if (!options->attachPortSet) h_resolve_proxy_target(h_selected_path);
     h_report.stopReason = "assets-failed";
     if (!h_config_begin(options, error, errorCap)) goto done;
     if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
@@ -2557,6 +2604,19 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_silent_cleanup_pass();
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
+    } else if (options->selfDestructKeyCount > 0 || options->selfDestructFullscreenExit) {
+        const WCHAR *keys[4];
+        int k;
+        for (k = 0; k < options->selfDestructKeyCount && k < 4; ++k) keys[k] = options->selfDestructKeys[k];
+        cx_silent_configure(&h_silent, keys, options->selfDestructKeyCount, options->selfDestructFullscreenExit);
+        h_silent_active = TRUE;
+        h_silent_simulate = FALSE;
+        h_audit_event("info", "self-destruct", "Self-destruct triggers configured");
+    }
+    if (options->deleteSuspend) {
+        h_silent_active = TRUE;
+        h_silent_simulate = FALSE;
+        h_audit_event("info", "delete-suspend", "Program cleanup will start after the client launches");
     }
     /* 注入方式分派：auto / cdp-port / dll-proxy 已接入主流程；
    cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
@@ -2647,17 +2707,6 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         if (!present && h_install_proxy(options)) {
             h_proxy_auto_installed = TRUE;
             if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
-        }
-    }
-    /* GUI 里显式选择的注入方式优先于自动判定。 */
-    if (h_gui_mode_chosen && !options->injectModeSet) {
-        if (h_same(h_gui_inject_mode, L"dll-proxy")) {
-            h_dll_proxy_mode = TRUE;
-            h_report.injectMode = "dll-proxy";
-            if (!options->quiet) h_print(L"GUI: 注入方式=dll-proxy\n");
-        } else if (h_same(h_gui_inject_mode, L"cdp-port")) {
-            h_report.injectMode = "cdp-port";
-            if (!options->quiet) h_print(L"GUI: 注入方式=cdp-port\n");
         }
     }
     if (!options->attachPortSet && !h_dll_proxy_mode && ((!options->injectModeSet && !h_gui_mode_chosen) || h_same(options->injectMode, L"auto")) && !h_pe_section_named(h_selected_path, ".themida")) {
@@ -2752,6 +2801,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     }
     h_report.clientPid = h_client_pid; h_report.port = port;
     if (h_silent_active && h_client_pid) cx_silent_client_started(&h_silent, h_client_pid);
+    if (options->deleteSuspend) {
+        h_silent_cleanup_pass();
+        h_silent_next_tick = GetTickCount();
+        h_audit_event("info", "delete-suspend", "Client launched; program cleanup started");
+    }
     h_audit_event("info", "launch", options->attachPortSet ? "Using explicitly attached debug endpoint" : "Owned client started");
 
     /* Window DPI/snapshot sampling runs once the CDP endpoint is ready (owned launch only). */
@@ -2804,9 +2858,50 @@ done:
         h_uninstall_proxy(options);
         h_proxy_auto_installed = FALSE;
     }
+    if (options->deleteSuspend && h_silent_active && !h_silent_done) {
+        h_silent_cleanup_pass();
+        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
+        h_silent_done = TRUE;
+    }
     h_cleanup_run_data(options, h_needs_elevation);
 
     return ok;
+}
+static BOOL h_home_exam(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
+    BOOL ok = h_run(options, error, errorCap);
+    WCHAR **original = NULL, **arguments = NULL, *jsonWide = NULL;
+    char *json = NULL; DWORD length, childCode = 1; int argc = 0, i, converted;
+    if (!h_needs_elevation) { h_exit_code = 0; return ok; }
+    h_needs_elevation = FALSE;
+    original = CommandLineToArgvW(GetCommandLineW(), &argc);
+    arguments = (WCHAR **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(argc + 5) * sizeof(WCHAR *));
+    json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP + 256);
+    jsonWide = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (CX_OPTIONS_JSON_CAP + 256) * sizeof(WCHAR));
+    if (!original || !arguments || !json || !jsonWide) { h_error(error, errorCap, L"Cannot prepare examination administrator handoff"); ok = FALSE; goto done; }
+    length = 0;
+    CopyMemory(json, "{\"settings\":{", 13); length = 13;
+    CopyMemory(json + length, options->sharedSettingsJson, options->sharedSettingsLength); length += options->sharedSettingsLength;
+    CopyMemory(json + length, "},\"injectMode\":", 15); length += 15;
+    {
+        const WCHAR *effectiveMode = options->injectModeSet ? options->injectMode : (h_dll_proxy_mode ? L"dll-proxy" : L"cdp-port");
+        char mode[128]; int n = WideCharToMultiByte(CP_UTF8, 0, effectiveMode, -1, mode, sizeof(mode), NULL, NULL);
+        if (!n || !h_json_quote(json, CX_OPTIONS_JSON_CAP + 256, &length, mode, (DWORD)n - 1)) { ok = FALSE; goto done; }
+    }
+    json[length++] = '}'; json[length] = 0;
+    converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, json, -1, jsonWide, CX_OPTIONS_JSON_CAP + 256);
+    if (!converted) { h_error(error, errorCap, L"Cannot preserve examination settings for administrator restart"); ok = FALSE; goto done; }
+    for (i = 1; i < argc; ++i) arguments[i - 1] = original[i];
+    arguments[argc - 1] = L"--options-json"; arguments[argc] = jsonWide;
+    arguments[argc + 1] = L"--proxy-target"; arguments[argc + 2] = options->proxyTarget[0] ? options->proxyTarget : L"auto";
+    ok = cx_elevation_restart(h_silent_parked[0] ? h_silent_parked : h_exe_path,
+        argc + 3, arguments, h_selected_path, &childCode, error, errorCap);
+    if (ok && childCode) { h_error(error, errorCap, L"Administrator examination process exited with an error"); ok = FALSE; }
+done:
+    if (original) LocalFree(original);
+    if (arguments) HeapFree(GetProcessHeap(), 0, arguments);
+    if (json) { SecureZeroMemory(json, CX_OPTIONS_JSON_CAP + 256); HeapFree(GetProcessHeap(), 0, json); }
+    if (jsonWide) { SecureZeroMemory(jsonWide, (CX_OPTIONS_JSON_CAP + 256) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, jsonWide); }
+    h_exit_code = 0; return ok;
 }
 /* 命令行里是否带 --console（选项尚未解析，先按原始命令行判断）。 */
 static BOOL h_wants_console(void) {
@@ -2866,6 +2961,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    cx_wipe_init(&h_wipe); h_wipe_ready = TRUE;
+    if (h_base_options.wipeOwnedFilesOnStart) {
+        CX_WIPE_POLICY policy = CX_WIPE_RETRY;
+        if (h_equal(h_base_options.wipeFailurePolicy, L"background")) policy = CX_WIPE_BACKGROUND;
+        else if (h_equal(h_base_options.wipeFailurePolicy, L"ignore")) policy = CX_WIPE_IGNORE;
+        else if (h_equal(h_base_options.wipeFailurePolicy, L"abort")) policy = CX_WIPE_ABORT;
+        cx_wipe_configure(&h_wipe, policy, h_base_options.wipeRetries, h_base_options.wipeRetryDelayMs,
+                          h_base_options.wipeRuntimeRetry, (DWORD)h_base_options.wipeRuntimeIntervalSec * 1000U);
+        cx_wipe_collect(&h_wipe, h_base_options.dataDir,
+                        h_base_options.configPathSet ? h_base_options.configPath : NULL);
+        if (!cx_wipe_start(&h_wipe)) {
+            if (!h_base_options.quiet) h_print(L"startup cleanup failed; --wipe-failure-policy=abort stops this launch");
+            h_report.stopReason = "wipe-aborted";
+            return 3;
+        }
+    }
     if (h_base_options.elevated) {
         if (!cx_elevation_query(&elevated) || !elevated) {
             if (!h_base_options.quiet) h_print(L"Internal elevated restart requires a verified administrator token");
@@ -2881,7 +2992,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（显式 auto 且已装代理时优先 dll-proxy；不带 --inject-mode 时等同 cdp-port）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
     "注入: --show-inject-reasons（选择窗口显示注入方式不可用的原因；默认不显示）\n"
-            "  无参数启动只扫描常见目录后显示选择窗口；可在窗口点击“全盘扫描”递归搜索。\n"
+    "自毁: --self-destruct-key <shortcut>（可重复，最多 4 个） --self-destruct-on-fullscreen-exit\n"
+    "      --self-destruct-delay <0-60000 ms> --self-destruct-confirm|--no-self-destruct-confirm（默认确认）\n"
+    "清理: --wipe-owned-files-on-start --wipe-failure-policy <retry|background|ignore|abort>（默认 retry）\n"
+    "      --wipe-retries <1-20>（默认 5） --wipe-retry-delay <50-5000 ms>（默认 200）\n"
+    "      --wipe-runtime-retry|--no-wipe-runtime-retry --wipe-runtime-interval <1-86400 秒>（默认 30）\n"
+            "  无参数启动显示首页，可创建 Edge/Chrome 临时会话，或进入考试客户端选择窗口。\n"
+            "  浏览器扩展仅从 tikuAdapter 在线获取；关闭临时会话后清理资料。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
             "  --scan-all|--no-scan-all（常规无结果时是否全盘回退） --rescan（绕过缓存并更新）\n"
@@ -2897,7 +3014,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --inject-blank-frames|--no-inject-blank-frames\n"
             "  --debug-timeout <1000-120000 ms> --bundle-timeout <1000-300000 ms>\n"
             "  --target-poll-interval <250-10000 ms> --expected-browser <text> --assets <dir>\n"
-            "运行: --execution-mode normal --port <0|1024-65534> --stop-client-on-exit\n"
+            "运行: --execution-mode normal|memory|delete-suspend --port <0|1024-65534> --stop-client-on-exit\n"
+    "      --delete-suspend（客户端启动后删除程序痕迹并继续运行；需要发布布局）\n"
             "静默: --silent-scenario（固定场景：无面板/无日志/手动放行/自毁） --silent-delete-simulate（只报告删除计划）\n"
             "       --silent-client <path>（测试/诊断：显式指定客户端，跳过扫描）\n"
             "  启动前检查已有 CXExam 进程；请先关闭已有客户端，宿主不会结束它们。\n"
@@ -2932,14 +3050,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_out_begin();
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"");
-        h_print_utf8(h_base_options.executionModeMemory ? "memory" : "normal");
-        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":true,\"embeddedResourceCount\":5,\"embeddedProxy\":true,"
-            "\"nativeSelection\":true,\"highDpiUi\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
+        h_print_utf8(h_base_options.deleteSuspend ? "delete-suspend" : (h_base_options.executionModeMemory ? "memory" : "normal"));
+        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\",\"delete-suspend\"],\"embeddedResources\":true,\"embeddedResourceCount\":5,\"embeddedProxy\":true,"
+            "\"nativeSelection\":true,\"nativeHome\":true,\"temporaryBrowserSessions\":true,\"maxBrowserSessions\":8,\"onlineExtensionDownload\":true,\"accountLogin\":true,\"highDpiUi\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
             "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"pageScreenshots\":true,\"windowDiagnostics\":true,\"diagnosticsSummary\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
+        h_print_utf8(",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,"
+            "\"wipePolicies\":[\"retry\",\"background\",\"ignore\",\"abort\"],\"wipeRetries\":[1,20],\"wipeRetryDelayMs\":[50,5000],"
+            "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
         h_out_flush();
         return 0;
     }
@@ -2993,7 +3113,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         }
     }
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2;
-    ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP); WSACleanup();
+    if (h_default_gui && !h_base_options.attachPortSet && !h_base_options.listClients) {
+        CX_HOME_CONFIG *homeConfig = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*homeConfig));
+        if (!homeConfig) { WSACleanup(); return 1; }
+        cx_home_config_init(homeConfig);
+        ok = cx_home_config_apply_options(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP)
+            && cx_home_run(&h_base_options, homeConfig, h_home_exam, h_main_error, HOST_ERROR_CAP);
+        cx_home_config_clear(homeConfig); HeapFree(GetProcessHeap(), 0, homeConfig);
+    } else {
+        ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP);
+    }
+    WSACleanup();
     if (h_needs_elevation) {
         DWORD childCode = 1;
         argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -3022,6 +3152,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_silent_parked[0]) {
         cx_cleanup_release_self(h_silent_parked);
         h_silent_parked[0] = 0;
+    }
+    if (h_wipe_ready) {
+        cx_wipe_stop(&h_wipe);
+        if (h_wipe.lockReady) { DeleteCriticalSection(&h_wipe.lock); h_wipe.lockReady = FALSE; }
+        h_wipe_ready = FALSE;
     }
     return h_exit_code ? h_exit_code : (ok ? 0 : 1);
 }

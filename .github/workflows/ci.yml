@@ -70,6 +70,10 @@ jobs:
             CX_NATIVE_PROCESS_CHECK_EXE = 'process-check-tests.exe'
             CX_NATIVE_PROCESS_FIXTURE_EXE = 'process-fixture.exe'
             CX_NATIVE_DIAGNOSTICS_EXE = 'diagnostics-tests.exe'
+            CX_NATIVE_HOME_EXE = 'home-tests.exe'
+            CX_NATIVE_ADAPTER_EXE = 'adapter-account-tests.exe'
+            CX_NATIVE_ACCOUNT_WINDOW_EXE = 'account-window-tests.exe'
+            CX_NATIVE_BROWSER_SESSION_EXE = 'browser-session-tests.exe'
           }
           foreach ($entry in $executables.GetEnumerator()) {
             $path = Join-Path $bin $entry.Value
