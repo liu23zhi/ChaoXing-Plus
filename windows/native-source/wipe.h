@@ -39,6 +39,8 @@ void cx_wipe_configure(CX_WIPE *wipe, CX_WIPE_POLICY policy, int retries, int de
 int cx_wipe_collect(CX_WIPE *wipe, const WCHAR *dataDir, const WCHAR *externalConfig);
 /** 追加一个已确认属于宿主的文件；返回 1 表示加入计划。 */
 int cx_wipe_add_file(CX_WIPE *wipe, const WCHAR *path, const WCHAR *externalConfig);
+/** 删除文件；被占用时退化为清空内容，返回是否删除或清空成功。 */
+BOOL cx_wipe_clear_file(const WCHAR *path);
 /** 启动阶段执行一次清理；abort 策略失败返回 FALSE。 */
 BOOL cx_wipe_start(CX_WIPE *wipe);
 /** 停止运行期重试线程并等待退出。 */

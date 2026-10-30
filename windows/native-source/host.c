@@ -1823,16 +1823,19 @@ done:
     return ok;
 }
 
-/* CXExam.exe 同目录的 debug.log 属于客户端运行痕迹；仅在清理模式下删除，不删除客户端本身。 */
-static BOOL h_wipe_client_log(CX_OPTIONS *options) {
+/* CXExam.exe 同目录的 debug.log 属于客户端运行痕迹；清理模式下删除，
+   被占用时清空内容，不删除客户端本身。 */
+static BOOL h_clear_client_log(CX_OPTIONS *options, BOOL startup) {
     WCHAR dir[CX_CLEANUP_PATH_CAP], log[CX_CLEANUP_PATH_CAP];
     const WCHAR *client = h_selected_path[0] ? h_selected_path : (options->clientPathSet ? options->clientPath : NULL);
-    if (!h_wipe_ready || !client || !client[0]) return TRUE;
-    if (!options->wipeOwnedFilesOnStart && !options->deleteSuspend && !options->silentScenario) return TRUE;
+    if (!client || !client[0]) return TRUE;
+    if (startup && !options->wipeOwnedFilesOnStart && !options->deleteSuspend && !options->silentScenario) return TRUE;
     if (!h_parent_dir(client, dir, CX_CLEANUP_PATH_CAP)) return TRUE;
     if (!h_copy(log, CX_CLEANUP_PATH_CAP, dir) || !h_cat(log, CX_CLEANUP_PATH_CAP, L"\\debug.log")) return TRUE;
-    if (!cx_wipe_add_file(&h_wipe, log, options->configPathSet ? options->configPath : NULL)) return TRUE;
-    if (!cx_wipe_start(&h_wipe) && options->wipeOwnedFilesOnStart) return FALSE;
+    if (!cx_wipe_clear_file(log))
+        h_audit_event("warn", "cleanup", "Client debug.log could not be removed or truncated");
+    else
+        h_audit_event("info", "cleanup", "Client debug.log removed or truncated");
     return TRUE;
 }
 static void h_silent_cleanup_pass(void) {
@@ -1883,6 +1886,7 @@ static void h_silent_begin_destruct(void) {
         if ((int)(now - deadline) < 0) return;
         deadline = 0;
     }
+    h_clear_client_log(&h_base_options, FALSE);
     reason[0] = 0;
     if (!cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP)) return;
     h_silent_done = TRUE;
@@ -2591,11 +2595,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_proxy_target_auto = !options->proxyTarget[0] || h_same(options->proxyTarget, L"auto");
     if (!h_proxy_target_auto) h_copy(h_proxy_target, 16, options->proxyTarget);
     else if (!options->attachPortSet) h_resolve_proxy_target(h_selected_path);
-    if (!h_wipe_client_log(options)) {
-        h_exit_code = 3;
-        h_report.stopReason = "wipe-aborted";
-        goto done;
-    }
+    h_clear_client_log(options, TRUE);
     h_report.stopReason = "assets-failed";
     if (!h_config_begin(options, error, errorCap)) goto done;
     if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
@@ -2857,6 +2857,7 @@ done:
         cx_diagnostics_close(h_diagnostics);
         h_diagnostics = NULL;
     }
+    h_clear_client_log(options, FALSE);
     h_config_close();
     h_report.success = ok && h_exit_code == 0 && !h_needs_elevation;
     if (!ok) { ++h_report.errors; h_audit_event("error", "stop", h_report.stopReason); }

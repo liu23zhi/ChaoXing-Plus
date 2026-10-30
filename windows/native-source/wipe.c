@@ -108,6 +108,18 @@ static void collect_diagnostics(CX_WIPE *wipe, const WCHAR *diagnostics, const W
     FindClose(find);
 }
 
+BOOL cx_wipe_clear_file(const WCHAR *path) {
+    HANDLE file;
+    if (!path || !path[0]) return FALSE;
+    if (DeleteFileW(path)) return TRUE;
+    file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    SetEndOfFile(file);
+    CloseHandle(file);
+    return TRUE;
+}
 int cx_wipe_add_file(CX_WIPE *wipe, const WCHAR *path, const WCHAR *externalConfig) {
     int before;
     if (!wipe || !path || !path[0] || wipe->count >= CX_WIPE_MAX_FILES) return 0;
