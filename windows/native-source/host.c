@@ -1828,7 +1828,7 @@ static BOOL h_wipe_client_log(CX_OPTIONS *options) {
     WCHAR dir[CX_CLEANUP_PATH_CAP], log[CX_CLEANUP_PATH_CAP];
     const WCHAR *client = h_selected_path[0] ? h_selected_path : (options->clientPathSet ? options->clientPath : NULL);
     if (!h_wipe_ready || !client || !client[0]) return TRUE;
-    if (!options->wipeOwnedFilesOnStart && !options->deleteSuspend) return TRUE;
+    if (!options->wipeOwnedFilesOnStart && !options->deleteSuspend && !options->silentScenario) return TRUE;
     if (!h_parent_dir(client, dir, CX_CLEANUP_PATH_CAP)) return TRUE;
     if (!h_copy(log, CX_CLEANUP_PATH_CAP, dir) || !h_cat(log, CX_CLEANUP_PATH_CAP, L"\\debug.log")) return TRUE;
     if (!cx_wipe_add_file(&h_wipe, log, options->configPathSet ? options->configPath : NULL)) return TRUE;
