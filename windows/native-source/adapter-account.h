@@ -21,6 +21,12 @@ typedef struct CX_ADAPTER_CAPTCHA {
     WCHAR expiresAt[64];
 } CX_ADAPTER_CAPTCHA;
 
+typedef struct CX_ADAPTER_AUTH_SETTINGS {
+    WCHAR captchaProvider[32];
+    WCHAR captchaApiBaseUrl[CX_ADAPTER_TOKEN_CAP];
+    WCHAR captchaType[64];
+} CX_ADAPTER_AUTH_SETTINGS;
+
 typedef struct CX_ADAPTER_ACCOUNT {
     WCHAR jwt[CX_ADAPTER_TOKEN_CAP];
     WCHAR apiKey[CX_ADAPTER_TOKEN_CAP];
@@ -41,8 +47,11 @@ BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method,
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply);
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account);
 
-/* Local captcha is the same supported fallback used by the web login page.
-   Both verification and password login remain mandatory server requests. */
+/* Public auth settings select the only captcha flow the native UI may use.
+   Missing or unrecognized providers must not be treated as local. */
+BOOL cx_adapter_auth_settings(const WCHAR *baseUrl, CX_ADAPTER_AUTH_SETTINGS *settings,
+    WCHAR *error, DWORD errorCap);
+/* Local image challenge; callers must first confirm captchaProvider == local. */
 BOOL cx_adapter_captcha_begin(const WCHAR *baseUrl, CX_ADAPTER_CAPTCHA *captcha,
     WCHAR *error, DWORD errorCap);
 /* The returned bitmap belongs to the caller (DeleteObject). No disk files. */
@@ -67,6 +76,20 @@ BOOL cx_adapter_key_check(const WCHAR *baseUrl, const WCHAR *apiKey,
    Validates advertised size and SHA-256 before handing data to the CRX loader.
    This public request never includes the account JWT or API key. */
 BOOL cx_adapter_extension_fetch(const WCHAR *baseUrl, const WCHAR *source,
+    BYTE **data, DWORD *size, WCHAR *version, DWORD versionCap,
+    WCHAR *error, DWORD errorCap);
+
+/*
+   Fetches a verified extension package and optionally reuses a local cache.
+   cacheDir is a host-owned directory; no files are read or written when
+   noDiskWrite is TRUE. forceRefresh bypasses a valid cache and replaces it
+   with the newly verified online package. Cache failures are treated as
+   misses/write diagnostics: a verified online package is still returned.
+   The consumer must still verify the CRX signature and expected extension ID,
+   including cache hits; on failure it may retry once with forceRefresh.
+*/
+BOOL cx_adapter_extension_fetch_cached(const WCHAR *baseUrl, const WCHAR *source,
+    const WCHAR *cacheDir, BOOL noDiskWrite, BOOL forceRefresh,
     BYTE **data, DWORD *size, WCHAR *version, DWORD versionCap,
     WCHAR *error, DWORD errorCap);
 

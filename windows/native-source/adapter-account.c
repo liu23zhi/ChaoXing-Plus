@@ -225,9 +225,32 @@ void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply) { if (reply && reply->body) 
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account) { if (account) { SecureZeroMemory(account, sizeof(*account)); account->accessTokenId = 0; } }
 
 static BOOL cx_response_string(const CX_ADAPTER_REPLY *reply, const char *key, WCHAR *out, DWORD cap) { JT *tokens; int count, value; BOOL ok = FALSE; if (!reply || !reply->body || !out || cap < 1) return FALSE; out[0] = 0; tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT)); if (!tokens) return FALSE; count = jparse(reply->body, (int)reply->length, tokens, 4096); value = count > 0 ? jkey(reply->body, tokens, 0, key) : -1; if (value >= 0) ok = jwstr(reply->body, tokens, value, out, (int)cap); HeapFree(GetProcessHeap(), 0, tokens); return ok; }
-BOOL cx_adapter_captcha_begin(const WCHAR *baseUrl, CX_ADAPTER_CAPTCHA *captcha, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captcha) return FALSE; ZeroMemory(captcha, sizeof(*captcha)); if (!cx_json_value("scene", L"login_password", &json, &length)) { cx_error(error, errorCap, L"验证码请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/challenge", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300) { cx_adapter_reply_free(&reply); return FALSE; } ok = cx_response_string(&reply, "challengeId", captcha->challengeId, 128); { JT *t = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT)); int n = t ? jparse(reply.body, (int)reply.length, t, 4096) : -1; int v = n > 0 ? jkey(reply.body, t, 0, "imageData") : -1; if (v < 0 || !t || !jstr(reply.body, t, v, captcha->imageData, CX_ADAPTER_CAPTCHA_IMAGE_CAP)) ok = FALSE; if (t) HeapFree(GetProcessHeap(), 0, t); } if (ok) (void)cx_response_string(&reply, "expiresAt", captcha->expiresAt, 64); cx_adapter_reply_free(&reply); if (!ok) cx_error(error, errorCap, L"验证码响应格式无效。"); return ok; }
-BOOL cx_adapter_captcha_verify(const WCHAR *baseUrl, const WCHAR *challengeId, const WCHAR *answer, WCHAR *captchaToken, DWORD tokenCap, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captchaToken || !cx_json_begin3("challengeId", challengeId, "scene", L"login_password", "captchaCode", answer, &json, &length)) { cx_error(error, errorCap, L"验证码校验编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/verify", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "captchaToken", captchaToken, tokenCap)) { cx_adapter_reply_free(&reply); if (error && !error[0]) cx_error(error, errorCap, L"验证码校验失败。"); return FALSE; } cx_adapter_reply_free(&reply); return TRUE; }
-BOOL cx_adapter_account_login(const WCHAR *baseUrl, const WCHAR *username, const WCHAR *password, const WCHAR *captchaToken, CX_ADAPTER_ACCOUNT *account, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!account) { cx_error(error, errorCap, L"账号状态无效。"); return FALSE; } cx_adapter_account_clear(account); if (!cx_json_begin3("username", username, "password", password, "captchaToken", captchaToken, &json, &length)) { cx_error(error, errorCap, L"登录请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/user/login", NULL, json, 15000, 65536, &reply, error, errorCap); SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "jwt", account->jwt, CX_ADAPTER_TOKEN_CAP)) { cx_adapter_reply_free(&reply); if (error && !error[0]) cx_error(error, errorCap, L"账号登录失败。"); cx_adapter_account_clear(account); return FALSE; } lstrcpynW(account->username, username ? username : L"", 256); cx_adapter_reply_free(&reply); return TRUE; }
+static void cx_reply_error(const CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, const WCHAR *fallback) {
+    WCHAR message[512];
+    message[0] = 0;
+    if (reply && reply->status >= 400 && cx_response_string(reply, "message", message, 512) && message[0]) cx_error(error, errorCap, message);
+    else cx_error(error, errorCap, fallback);
+}
+BOOL cx_adapter_auth_settings(const WCHAR *baseUrl, CX_ADAPTER_AUTH_SETTINGS *settings, WCHAR *error, DWORD errorCap) {
+    CX_ADAPTER_REPLY reply; WCHAR provider[32]; BOOL ok;
+    if (!settings) { cx_error(error, errorCap, L"验证码配置状态无效。"); return FALSE; }
+    ZeroMemory(settings, sizeof(*settings));
+    /* The web client defaults to remote. Fail closed if the provider is omitted. */
+    lstrcpyW(settings->captchaProvider, L"remote");
+    ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/public/register-status", NULL, NULL, 10000, 65536, &reply, error, errorCap);
+    if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"读取服务端验证码配置失败。"); cx_adapter_reply_free(&reply); return FALSE; }
+    if (!cx_response_string(&reply, "captchaProvider", provider, 32)) {
+        cx_adapter_reply_free(&reply); cx_error(error, errorCap, L"服务端验证码配置格式无效；为避免使用错误验证码，未显示本地图验证码。"); return FALSE;
+    }
+    lstrcpynW(settings->captchaProvider, provider, 32);
+    (void)cx_response_string(&reply, "captchaApiBaseUrl", settings->captchaApiBaseUrl, CX_ADAPTER_TOKEN_CAP);
+    (void)cx_response_string(&reply, "captchaType", settings->captchaType, 64);
+    cx_adapter_reply_free(&reply);
+    return TRUE;
+}
+BOOL cx_adapter_captcha_begin(const WCHAR *baseUrl, CX_ADAPTER_CAPTCHA *captcha, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captcha) return FALSE; ZeroMemory(captcha, sizeof(*captcha)); if (!cx_json_value("scene", L"login_password", &json, &length)) { cx_error(error, errorCap, L"验证码请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/challenge", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"获取站内图形验证码失败。"); cx_adapter_reply_free(&reply); return FALSE; } ok = cx_response_string(&reply, "challengeId", captcha->challengeId, 128); { JT *t = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT)); int n = t ? jparse(reply.body, (int)reply.length, t, 4096) : -1; int v = n > 0 ? jkey(reply.body, t, 0, "imageData") : -1; if (v < 0 || !t || !jstr(reply.body, t, v, captcha->imageData, CX_ADAPTER_CAPTCHA_IMAGE_CAP)) ok = FALSE; if (t) HeapFree(GetProcessHeap(), 0, t); } if (ok) (void)cx_response_string(&reply, "expiresAt", captcha->expiresAt, 64); cx_adapter_reply_free(&reply); if (!ok) cx_error(error, errorCap, L"验证码响应格式无效。"); return ok; }
+BOOL cx_adapter_captcha_verify(const WCHAR *baseUrl, const WCHAR *challengeId, const WCHAR *answer, WCHAR *captchaToken, DWORD tokenCap, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captchaToken || !cx_json_begin3("challengeId", challengeId, "scene", L"login_password", "captchaCode", answer, &json, &length)) { cx_error(error, errorCap, L"验证码校验编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/verify", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "captchaToken", captchaToken, tokenCap)) { if (ok) cx_reply_error(&reply, error, errorCap, L"验证码校验失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"验证码校验失败。"); cx_adapter_reply_free(&reply); return FALSE; } cx_adapter_reply_free(&reply); return TRUE; }
+BOOL cx_adapter_account_login(const WCHAR *baseUrl, const WCHAR *username, const WCHAR *password, const WCHAR *captchaToken, CX_ADAPTER_ACCOUNT *account, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!account) { cx_error(error, errorCap, L"账号状态无效。"); return FALSE; } cx_adapter_account_clear(account); if (!cx_json_begin3("username", username, "password", password, "captchaToken", captchaToken, &json, &length)) { cx_error(error, errorCap, L"登录请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/user/login", NULL, json, 15000, 65536, &reply, error, errorCap); SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "jwt", account->jwt, CX_ADAPTER_TOKEN_CAP)) { if (ok) cx_reply_error(&reply, error, errorCap, L"账号登录失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"账号登录失败。"); cx_adapter_reply_free(&reply); cx_adapter_account_clear(account); return FALSE; } lstrcpynW(account->username, username ? username : L"", 256); cx_adapter_reply_free(&reply); return TRUE; }
 static BOOL cx_find_token(const CX_ADAPTER_REPLY *reply, CX_ADAPTER_ACCOUNT *account) {
     JT *t; char *token; int count, i, status, value, id; BOOL ok = FALSE;
     if (!reply || !reply->body || !account) return FALSE;
@@ -252,15 +275,16 @@ BOOL cx_adapter_account_token(const WCHAR *baseUrl, BOOL createIfMissing, CX_ADA
     if (!account || !account->jwt[0]) { cx_error(error, errorCap, L"尚未登录适配器账号。"); return FALSE; }
     account->apiKey[0] = 0; account->accessTokenId = 0;
     ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/access-tokens", account->jwt, NULL, 15000, 262144, &reply, error, errorCap);
-    if (!ok || reply.status < 200 || reply.status >= 300) { cx_adapter_reply_free(&reply); return FALSE; }
+    if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"获取账号访问令牌失败。"); cx_adapter_reply_free(&reply); return FALSE; }
     ok = cx_find_token(&reply, account); cx_adapter_reply_free(&reply);
     if (ok) return TRUE;
-    if (!createIfMissing) { cx_error(error, errorCap, L"账号没有可用访问令牌。"); return FALSE; }
+    if (!createIfMissing) { cx_error(error, errorCap, L"账号密码登录已成功，但账号没有可用访问令牌。请勾选“没有访问令牌时创建原生客户端专用令牌”后重试，或先在服务端创建令牌。"); return FALSE; }
     if (!cx_json_token_create(&json, &length)) { cx_error(error, errorCap, L"令牌请求编码失败。"); return FALSE; }
     ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/access-tokens", account->jwt, json, 15000, 65536, &reply, error, errorCap);
     SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json);
     if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "token", account->apiKey, CX_ADAPTER_TOKEN_CAP) || !account->apiKey[0]) {
-        cx_adapter_reply_free(&reply); if (error && !error[0]) cx_error(error, errorCap, L"创建访问令牌失败。"); return FALSE;
+        if (ok) cx_reply_error(&reply, error, errorCap, L"创建访问令牌失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"创建访问令牌失败。");
+        cx_adapter_reply_free(&reply); return FALSE;
     }
     cx_adapter_reply_free(&reply); return TRUE;
 }
@@ -272,6 +296,7 @@ BOOL cx_adapter_key_check(const WCHAR *baseUrl, const WCHAR *apiKey, WCHAR *erro
     lstrcpyW(auth, L"Bearer "); lstrcpyW(auth + 7, apiKey);
     ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/search/health", auth, NULL, 10000, 65536, &reply, error, errorCap);
     SecureZeroMemory(auth, (CX_ADAPTER_TOKEN_CAP + 8) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, auth);
+    if (ok && (reply.status < 200 || reply.status >= 300)) cx_reply_error(&reply, error, errorCap, L"API key 无效或服务不可用。");
     ok = ok && reply.status >= 200 && reply.status < 300; cx_adapter_reply_free(&reply);
     if (!ok && error && !error[0]) cx_error(error, errorCap, L"API key 无效或服务不可用。"); return ok;
 }
@@ -316,7 +341,204 @@ static BOOL cx_extension_version(const WCHAR *value) {
         if (value[i++] != L'.') return FALSE;
     }
 }
-BOOL cx_adapter_extension_fetch(const WCHAR *baseUrl, const WCHAR *source, BYTE **data, DWORD *size, WCHAR *version, DWORD versionCap, WCHAR *error, DWORD errorCap) {
+#define CX_EXTENSION_CACHE_MAGIC 0x43584543UL
+#define CX_EXTENSION_CACHE_FORMAT 2UL
+typedef struct CX_EXTENSION_CACHE_HEADER {
+    DWORD magic;
+    DWORD format;
+    DWORD headerSize;
+    DWORD packageSize;
+    BYTE serviceIdentity[32];
+    WCHAR source[8];
+    WCHAR extensionVersion[128];
+    char extensionId[65];
+    char sha256[65];
+} CX_EXTENSION_CACHE_HEADER;
+
+static BOOL cx_cache_mkdirs(const WCHAR *directory) {
+    WCHAR *path; DWORD length, i; DWORD attributes;
+    if (!directory || !*directory) return FALSE;
+    length = cx_wlen(directory);
+    path = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(length + 2) * sizeof(WCHAR));
+    if (!path) return FALSE;
+    CopyMemory(path, directory, (SIZE_T)(length + 1) * sizeof(WCHAR));
+    for (i = 0; i < length; i++) {
+        if (path[i] != L'\\' && path[i] != L'/') continue;
+        if (i == 0 || (i == 2 && path[1] == L':')) continue;
+        path[i] = 0;
+        if (*path) {
+            attributes = GetFileAttributesW(path);
+            if (attributes == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(path, NULL)
+                && GetLastError() != ERROR_ALREADY_EXISTS) { HeapFree(GetProcessHeap(), 0, path); return FALSE; }
+            if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) { HeapFree(GetProcessHeap(), 0, path); return FALSE; }
+        }
+        path[i] = L'\\';
+    }
+    attributes = GetFileAttributesW(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(path, NULL)
+        && GetLastError() != ERROR_ALREADY_EXISTS) { HeapFree(GetProcessHeap(), 0, path); return FALSE; }
+    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) { HeapFree(GetProcessHeap(), 0, path); return FALSE; }
+    HeapFree(GetProcessHeap(), 0, path); return TRUE;
+}
+
+static BOOL cx_cache_paths(const WCHAR *cacheDir, const WCHAR *source, WCHAR **path, WCHAR **temp) {
+    const WCHAR *name; DWORD directoryLength, needed; WCHAR *result; WCHAR suffix[48];
+    if (path) *path = NULL; if (temp) *temp = NULL;
+    if (!cacheDir || !*cacheDir || !source || !path || !temp) return FALSE;
+    name = cx_ascii_equal(source, L"edge") ? L"edge.crxcache" : L"chrome.crxcache";
+    directoryLength = cx_wlen(cacheDir); needed = directoryLength + 1 + cx_wlen(name) + 48;
+    result = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)needed * sizeof(WCHAR) * 2);
+    if (!result) return FALSE;
+    lstrcpyW(result, cacheDir); if (directoryLength && result[directoryLength - 1] != L'\\') lstrcatW(result, L"\\"); lstrcatW(result, name);
+    *path = result;
+    *temp = result + needed;
+    wsprintfW(suffix, L".tmp.%08lx.%08lx", GetCurrentProcessId(), GetTickCount());
+    lstrcpyW(*temp, result); lstrcatW(*temp, suffix);
+    return TRUE;
+}
+
+static BOOL cx_wide_terminated(const WCHAR *value, DWORD capacity) {
+    DWORD i; if (!value || !capacity) return FALSE;
+    for (i = 0; i < capacity; i++) if (!value[i]) return TRUE;
+    return FALSE;
+}
+static DWORD cx_bounded_alen(const char *value, DWORD capacity) {
+    DWORD i; if (!value) return capacity;
+    for (i = 0; i < capacity; i++) if (!value[i]) return i;
+    return capacity;
+}
+static BOOL cx_identity_append_folded(WCHAR *out, DWORD cap, DWORD *used, const WCHAR *text, DWORD length) {
+    DWORD i;
+    if (!out || !used || !text || length >= cap - *used) return FALSE;
+    for (i = 0; i < length; i++) {
+        WCHAR c = text[i];
+        if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+        out[(*used)++] = c;
+    }
+    out[*used] = 0;
+    return TRUE;
+}
+static BOOL cx_extension_service_identity(const WCHAR *baseUrl, BYTE identity[32]) {
+    enum { SCHEME_CAP = 32, HOST_CAP = 512, PATH_CAP = 8192, EXTRA_CAP = 1024, CREDENTIAL_CAP = 512 };
+    WCHAR *partsBuffer = NULL, *scheme, *host, *path, *extra, *username, *password;
+    WCHAR *canonical = NULL, portText[24]; URL_COMPONENTS parts; char *utf8 = NULL;
+    DWORD urlLength, pathLength, canonicalCap, used = 0, utf8Length = 0, i; BOOL ok = FALSE;
+    if (!baseUrl || !*baseUrl || !identity || !cx_load_http()) return FALSE;
+    urlLength = cx_wlen(baseUrl);
+    if (!urlLength || urlLength >= PATH_CAP) return FALSE;
+    partsBuffer = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+        (SCHEME_CAP + HOST_CAP + PATH_CAP + EXTRA_CAP + CREDENTIAL_CAP * 2) * sizeof(WCHAR));
+    if (!partsBuffer) return FALSE;
+    scheme = partsBuffer;
+    host = scheme + SCHEME_CAP;
+    path = host + HOST_CAP;
+    extra = path + PATH_CAP;
+    username = extra + EXTRA_CAP;
+    password = username + CREDENTIAL_CAP;
+    ZeroMemory(&parts, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.lpszScheme = scheme; parts.dwSchemeLength = SCHEME_CAP;
+    parts.lpszHostName = host; parts.dwHostNameLength = HOST_CAP;
+    parts.lpszUrlPath = path; parts.dwUrlPathLength = PATH_CAP;
+    parts.lpszExtraInfo = extra; parts.dwExtraInfoLength = EXTRA_CAP;
+    parts.lpszUserName = username; parts.dwUserNameLength = CREDENTIAL_CAP;
+    parts.lpszPassword = password; parts.dwPasswordLength = CREDENTIAL_CAP;
+    if (!g_http.crack(baseUrl, 0, 0, &parts)
+        || parts.dwSchemeLength >= SCHEME_CAP || parts.dwHostNameLength >= HOST_CAP
+        || parts.dwUrlPathLength >= PATH_CAP || parts.dwExtraInfoLength >= EXTRA_CAP
+        || parts.dwUserNameLength || parts.dwPasswordLength
+        || (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS)) goto done;
+    scheme[parts.dwSchemeLength] = 0; host[parts.dwHostNameLength] = 0;
+    path[parts.dwUrlPathLength] = 0; extra[parts.dwExtraInfoLength] = 0;
+    if (!parts.dwHostNameLength || parts.dwExtraInfoLength) goto done;
+    pathLength = parts.dwUrlPathLength;
+    while (pathLength && path[pathLength - 1] == L'/') pathLength--;
+    if (pathLength >= 16 && cx_mem_equal(path + pathLength - 16, L"/adapter-service", 16 * sizeof(WCHAR)))
+        pathLength -= 16;
+    if (pathLength == 1 && path[0] == L'/') pathLength = 0;
+    canonicalCap = parts.dwSchemeLength + parts.dwHostNameLength + pathLength + 64;
+    canonical = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)canonicalCap * sizeof(WCHAR));
+    if (!canonical) goto done;
+    if (!cx_append_w(canonical, canonicalCap, &used, parts.nScheme == INTERNET_SCHEME_HTTPS ? L"https://" : L"http://")
+        || !cx_identity_append_folded(canonical, canonicalCap, &used, host, parts.dwHostNameLength)) goto done;
+    if ((parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort != INTERNET_DEFAULT_HTTPS_PORT)
+        || (parts.nScheme == INTERNET_SCHEME_HTTP && parts.nPort != INTERNET_DEFAULT_HTTP_PORT)) {
+        wsprintfW(portText, L":%u", (unsigned)parts.nPort);
+        if (!cx_append_w(canonical, canonicalCap, &used, portText)) goto done;
+    }
+    for (i = 0; i < pathLength; i++) {
+        if (used + 1 >= canonicalCap) goto done;
+        canonical[used++] = path[i];
+    }
+    canonical[used] = 0;
+    if (!cx_wide_utf8(canonical, &utf8, &utf8Length) || !cx_sha256((BYTE *)utf8, utf8Length, identity)) goto done;
+    ok = TRUE;
+done:
+    if (utf8) { SecureZeroMemory(utf8, (SIZE_T)utf8Length + 1); HeapFree(GetProcessHeap(), 0, utf8); }
+    if (canonical) HeapFree(GetProcessHeap(), 0, canonical);
+    if (partsBuffer) HeapFree(GetProcessHeap(), 0, partsBuffer);
+    return ok;
+}
+static BOOL cx_cache_header_valid(const CX_EXTENSION_CACHE_HEADER *header, const WCHAR *source,
+    const BYTE serviceIdentity[32], DWORD fileSize) {
+    DWORD i;
+    if (!header || header->magic != CX_EXTENSION_CACHE_MAGIC || header->format != CX_EXTENSION_CACHE_FORMAT
+        || header->headerSize != sizeof(*header) || header->packageSize == 0 || header->packageSize > 64UL * 1024UL * 1024UL
+        || fileSize != sizeof(*header) + header->packageSize || !serviceIdentity
+        || !cx_mem_equal(header->serviceIdentity, serviceIdentity, sizeof(header->serviceIdentity))
+        || !cx_wide_terminated(header->source, sizeof(header->source) / sizeof(header->source[0]))
+        || !cx_wide_terminated(header->extensionVersion, sizeof(header->extensionVersion) / sizeof(header->extensionVersion[0]))
+        || !cx_ascii_equal(header->source, source) || !cx_extension_version(header->extensionVersion)
+        || cx_bounded_alen(header->extensionId, sizeof(header->extensionId)) != 32
+        || cx_bounded_alen(header->sha256, sizeof(header->sha256)) != 64) return FALSE;
+    for (i = 0; i < 32; i++) if (header->extensionId[i] < 'a' || header->extensionId[i] > 'p') return FALSE;
+    for (i = 0; i < 64; i++) {
+        char c = header->sha256[i];
+        if (c >= 'A' && c <= 'F') c += 'a' - 'A';
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL cx_extension_cache_read(const WCHAR *cacheDir, const WCHAR *source,
+    const BYTE serviceIdentity[32], BYTE **data, DWORD *size, WCHAR *version, DWORD versionCap) {
+    WCHAR *path = NULL, *temp = NULL; HANDLE file = INVALID_HANDLE_VALUE; LARGE_INTEGER length; CX_EXTENSION_CACHE_HEADER header; BYTE *package = NULL; DWORD read = 0; BYTE digest[32]; char actualHash[65]; BOOL ok = FALSE;
+    (void)temp;
+    if (!data || !size || !cx_cache_paths(cacheDir, source, &path, &temp)) return FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx(file, &length) || length.HighPart != 0 || length.LowPart <= sizeof(header)) goto done;
+    if (SetFilePointer(file, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER
+        || !ReadFile(file, &header, sizeof(header), &read, NULL) || read != sizeof(header)
+        || !cx_cache_header_valid(&header, source, serviceIdentity, length.LowPart)) goto done;
+    package = (BYTE *)HeapAlloc(GetProcessHeap(), 0, header.packageSize);
+    if (!package || !ReadFile(file, package, header.packageSize, &read, NULL) || read != header.packageSize
+        || !cx_sha256(package, header.packageSize, digest) || !cx_hex_digest(digest, actualHash) || !cx_hex_equal(actualHash, header.sha256)) goto done;
+    *data = package; *size = header.packageSize; package = NULL; if (version && versionCap) lstrcpynW(version, header.extensionVersion, (int)versionCap); ok = TRUE;
+done: if (file != INVALID_HANDLE_VALUE) CloseHandle(file); if (package) HeapFree(GetProcessHeap(), 0, package); if (path) HeapFree(GetProcessHeap(), 0, path); return ok;
+}
+
+static void cx_extension_cache_write(const WCHAR *cacheDir, const WCHAR *source, const BYTE *data,
+    DWORD size, const WCHAR *version, const char *extensionId, const char *sha256,
+    const BYTE serviceIdentity[32]) {
+    WCHAR *path = NULL, *temp = NULL; HANDLE file = INVALID_HANDLE_VALUE; CX_EXTENSION_CACHE_HEADER header; DWORD written = 0; BOOL ok = FALSE;
+    if (!cacheDir || !*cacheDir || !data || !size || !version || !extensionId || !sha256 || !serviceIdentity || !cx_cache_paths(cacheDir, source, &path, &temp)) return;
+    if (!cx_cache_mkdirs(cacheDir)) goto done;
+    ZeroMemory(&header, sizeof(header)); header.magic = CX_EXTENSION_CACHE_MAGIC; header.format = CX_EXTENSION_CACHE_FORMAT; header.headerSize = sizeof(header); header.packageSize = size;
+    CopyMemory(header.serviceIdentity, serviceIdentity, sizeof(header.serviceIdentity));
+    lstrcpynW(header.source, cx_ascii_equal(source, L"edge") ? L"edge" : L"chrome", sizeof(header.source) / sizeof(header.source[0]));
+    lstrcpynW(header.extensionVersion, version, sizeof(header.extensionVersion) / sizeof(header.extensionVersion[0]));
+    lstrcpynA(header.extensionId, extensionId, sizeof(header.extensionId)); lstrcpynA(header.sha256, sha256, sizeof(header.sha256));
+    file = CreateFileW(temp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (file == INVALID_HANDLE_VALUE || !WriteFile(file, &header, sizeof(header), &written, NULL) || written != sizeof(header)
+        || !WriteFile(file, data, size, &written, NULL) || written != size || !FlushFileBuffers(file)) goto done;
+    CloseHandle(file); file = INVALID_HANDLE_VALUE;
+    ok = MoveFileExW(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!ok && GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+        ok = ReplaceFileW(path, temp, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL);
+done: if (file != INVALID_HANDLE_VALUE) CloseHandle(file); if (!ok && temp) DeleteFileW(temp); if (path) HeapFree(GetProcessHeap(), 0, path);
+}
+
+static BOOL cx_adapter_extension_fetch_online(const WCHAR *baseUrl, const WCHAR *source, BYTE **data, DWORD *size, WCHAR *version, DWORD versionCap, char *extensionIdOut, DWORD extensionIdCap, WCHAR *error, DWORD errorCap) {
     WCHAR *wide = NULL, *latestPath, *downloadPath, *expectedPath, *advertisedVersion, *advertisedSource; const WCHAR *canonicalSource; char advertisedHash[80], downloadUrl[2048], extensionId[128]; CX_ADAPTER_REPLY latest = {0}, package = {0}; JT *tokens = NULL; int count, v, sizeToken; DWORD advertisedSize, pathUsed, i; BYTE digest[32]; char actualHash[65]; BOOL ok = FALSE;
     if (data) *data = NULL; if (size) *size = 0; if (version && versionCap) version[0] = 0;
     if (!data || !size || !baseUrl || !source || (!cx_ascii_equal(source, L"edge") && !cx_ascii_equal(source, L"chrome"))) { cx_error(error, errorCap, L"扩展来源必须是 edge 或 chrome。"); return FALSE; }
@@ -343,8 +565,32 @@ BOOL cx_adapter_extension_fetch(const WCHAR *baseUrl, const WCHAR *source, BYTE 
     pathUsed = 0; expectedPath[0] = 0; cx_append_w(expectedPath, 256, &pathUsed, L"/adapter-service/extensions/"); cx_append_w(expectedPath, 256, &pathUsed, canonicalSource); cx_append_w(expectedPath, 256, &pathUsed, L"/download?sha256="); for (i = 0; i < 64; i++) expectedPath[pathUsed++] = (WCHAR)advertisedHash[i]; expectedPath[pathUsed] = 0;
     if (lstrcmpW(expectedPath, downloadPath)) { cx_error(error, errorCap, L"扩展下载路径不属于当前服务或版本。"); goto done; }
     if (!cx_adapter_request(baseUrl, L"GET", downloadPath, NULL, NULL, 60000, 64UL * 1024UL * 1024UL, &package, error, errorCap) || package.status < 200 || package.status >= 300 || package.length != advertisedSize || !cx_sha256((BYTE *)package.body, package.length, digest) || !cx_hex_digest(digest, actualHash) || !cx_hex_equal(actualHash, advertisedHash)) { cx_error(error, errorCap, L"扩展下载包大小或 SHA-256 校验失败。"); goto done; }
-    *data = (BYTE *)package.body; *size = package.length; package.body = NULL; package.length = 0; if (version && versionCap) lstrcpynW(version, advertisedVersion, (int)versionCap); ok = TRUE;
+    *data = (BYTE *)package.body; *size = package.length; package.body = NULL; package.length = 0; if (version && versionCap) lstrcpynW(version, advertisedVersion, (int)versionCap); if (extensionIdOut && extensionIdCap) lstrcpynA(extensionIdOut, extensionId, extensionIdCap); ok = TRUE;
 done: if (tokens) HeapFree(GetProcessHeap(), 0, tokens); if (wide) HeapFree(GetProcessHeap(), 0, wide); cx_adapter_reply_free(&latest); cx_adapter_reply_free(&package); return ok;
+}
+
+BOOL cx_adapter_extension_fetch(const WCHAR *baseUrl, const WCHAR *source, BYTE **data, DWORD *size,
+    WCHAR *version, DWORD versionCap, WCHAR *error, DWORD errorCap) {
+    return cx_adapter_extension_fetch_online(baseUrl, source, data, size, version, versionCap,
+        NULL, 0, error, errorCap);
+}
+
+BOOL cx_adapter_extension_fetch_cached(const WCHAR *baseUrl, const WCHAR *source,
+    const WCHAR *cacheDir, BOOL noDiskWrite, BOOL forceRefresh, BYTE **data, DWORD *size,
+    WCHAR *version, DWORD versionCap, WCHAR *error, DWORD errorCap) {
+    char extensionId[128], actualHash[65]; BYTE digest[32], serviceIdentity[32]; BOOL ok, cacheIdentityReady = FALSE;
+    if (data) *data = NULL; if (size) *size = 0; if (version && versionCap) version[0] = 0;
+    if (!noDiskWrite && cacheDir && *cacheDir)
+        cacheIdentityReady = cx_extension_service_identity(baseUrl, serviceIdentity);
+    if (cacheIdentityReady && !forceRefresh
+        && cx_extension_cache_read(cacheDir, source, serviceIdentity, data, size, version, versionCap)) return TRUE;
+    ok = cx_adapter_extension_fetch_online(baseUrl, source, data, size, version, versionCap,
+        extensionId, sizeof(extensionId), error, errorCap);
+    if (!ok) return FALSE;
+    if (cacheIdentityReady && *data && *size && cx_sha256(*data, *size, digest)
+        && cx_hex_digest(digest, actualHash)) cx_extension_cache_write(cacheDir, source, *data, *size,
+            version, extensionId, actualHash, serviceIdentity);
+    return TRUE;
 }
 
 HBITMAP cx_adapter_captcha_bitmap(const CX_ADAPTER_CAPTCHA *captcha, WCHAR *error, DWORD errorCap) {

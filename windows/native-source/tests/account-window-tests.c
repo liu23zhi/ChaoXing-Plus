@@ -34,8 +34,54 @@ static DWORD WINAPI inspect_window(LPVOID unused) {
     check(count == 5, "all account editors created");
     for (i = 0; i < count; i++) check((WPARAM)SendMessageW(edits[i], EM_GETLIMITTEXT, 0, 0) == limits[i], "editor limit matches storage capacity");
     check((GetWindowLongPtrW(edits[2], GWL_STYLE) & ES_PASSWORD) && (GetWindowLongPtrW(edits[4], GWL_STYLE) & ES_PASSWORD), "password and API key are masked");
+    check(SendMessageW(GetDlgItem(found, 1606), BM_GETCHECK, 0, 0) == BST_CHECKED, "native-only token creation is enabled by default");
     check(GetObjectW((HFONT)SendMessageW(edits[0], WM_GETFONT, 0, 0), sizeof(font), &font) == sizeof(font) && font.lfHeight == -MulDiv(16, (int)dpi, 96), "account font scales with DPI");
     if (!lstrcmpW(scenario, L"cancel")) SendMessageW(found, WM_CLOSE, 0, 0);
+    else if (!lstrcmpW(scenario, L"invalid-login-url")) {
+        WCHAR statusText[512];
+        SendMessageW(found, WM_COMMAND, 1605, 0);
+        child = FindWindowExW(found, NULL, L"STATIC", NULL);
+        for (; child; child = FindWindowExW(found, child, L"STATIC", NULL)) {
+            GetWindowTextW(child, statusText, 512);
+            if (!lstrcmpW(statusText, L"无法打开服务登录页，请检查上方 tikuAdapter 地址。")) break;
+        }
+        check(child != NULL, "non-http scheme is rejected before ShellExecute");
+        SendMessageW(found, WM_CLOSE, 0, 0);
+    }
+    else if (!lstrcmpW(scenario, L"local-captcha") || !lstrcmpW(scenario, L"remote-captcha")) {
+        DWORD refreshStarted = GetTickCount();
+        SendMessageW(found, WM_COMMAND, 1601, 0);
+        while (!IsWindowEnabled(GetDlgItem(found, 1601)) && GetTickCount() - refreshStarted < 15000) Sleep(10);
+        check(IsWindowEnabled(GetDlgItem(found, 1601)), "captcha provider lookup completed");
+        if (!lstrcmpW(scenario, L"local-captcha")) {
+            WCHAR statusText[512];
+            child = FindWindowExW(found, NULL, L"STATIC", NULL);
+            for (; child; child = FindWindowExW(found, child, L"STATIC", NULL)) {
+                GetWindowTextW(child, statusText, 512);
+                if (!lstrcmpW(statusText, L"服务器已配置站内图形验证码。登录后使用已有访问令牌；如无令牌，请先勾选创建选项。")) break;
+            }
+            check(child != NULL, "local provider status confirms the native image flow");
+            check(IsWindowEnabled(GetDlgItem(found, 1602)), "local provider enables account login");
+            child = FindWindowExW(found, NULL, L"STATIC", NULL);
+            for (; child; child = FindWindowExW(found, child, L"STATIC", NULL))
+                if (SendMessageW(child, STM_GETIMAGE, IMAGE_BITMAP, 0)) break;
+            check(child != NULL, "local provider displays the image challenge");
+        } else {
+            WCHAR statusText[512];
+            child = FindWindowExW(found, NULL, L"STATIC", NULL);
+            for (; child; child = FindWindowExW(found, child, L"STATIC", NULL)) {
+                GetWindowTextW(child, statusText, 512);
+                if (!lstrcmpW(statusText, L"服务端使用远程验证码，原生窗口不支持该交互，因此未显示本地图验证码。请在浏览器登录服务并打开“/access-tokens”创建访问令牌，再粘贴下方 API key 验证。")) break;
+            }
+            check(child != NULL, "remote provider shows actionable native limitation");
+            check(!IsWindowEnabled(GetDlgItem(found, 1602)), "remote provider disables unsupported account login");
+            child = FindWindowExW(found, NULL, L"STATIC", NULL);
+            for (; child; child = FindWindowExW(found, child, L"STATIC", NULL))
+                if (SendMessageW(child, STM_GETIMAGE, IMAGE_BITMAP, 0)) break;
+            check(child == NULL, "remote provider never displays a local image fallback");
+        }
+        SendMessageW(found, WM_CLOSE, 0, 0);
+    }
     else {
         SetWindowTextW(edits[4], L"tk_mock-existing");
         SendMessageW(found, WM_COMMAND, 1603, 0);
@@ -49,6 +95,7 @@ void WinMainCRTStartup(void) {
     static WCHAR dpiText[16]; DWORD i, started; HANDLE inspector; MSG message; BOOL accepted, sawQuit = FALSE;
     GetEnvironmentVariableW(L"CX_ADAPTER_TEST_BASE", config.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP);
     GetEnvironmentVariableW(L"CX_ACCOUNT_TEST_SCENARIO", scenario, 64);
+    if (!lstrcmpW(scenario, L"invalid-login-url")) lstrcpyW(config.adapterBaseUrl, L"javascript:alert(1)");
     if (GetEnvironmentVariableW(L"CXPLUS_NATIVE_UI_DPI", dpiText, 16)) { dpi = 0; for (i = 0; dpiText[i]; i++) dpi = dpi * 10 + (DWORD)(dpiText[i] - L'0'); }
     mainThread = GetCurrentThreadId(); started = GetTickCount();
     inspector = CreateThread(NULL, 0, inspect_window, NULL, 0, NULL); check(inspector != NULL, "UI inspector created");
@@ -56,7 +103,7 @@ void WinMainCRTStartup(void) {
     WaitForSingleObject(inspector, INFINITE); CloseHandle(inspector);
     if (!lstrcmpW(scenario, L"accept")) check(accepted && !lstrcmpW(config.apiKey, L"tk_mock-existing"), "verified API key applies only on success");
     else check(!accepted && !config.apiKey[0], "cancel or quit does not apply credentials");
-    if (lstrcmpW(scenario, L"cancel")) check(GetTickCount() - started >= 200, "modal cleanup joins pending network worker");
+    if (lstrcmpW(scenario, L"cancel") && lstrcmpW(scenario, L"invalid-login-url")) check(GetTickCount() - started >= 200, "modal cleanup joins pending network worker");
     if (!lstrcmpW(scenario, L"quit")) {
         while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) if (message.message == WM_QUIT) { sawQuit = TRUE; break; }
         check(sawQuit, "modal loop reposts WM_QUIT");

@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #include "account-window.h"
 #include "adapter-account.h"
 #include "resource.h"
@@ -9,22 +10,26 @@
 #define ACCOUNT_LOGIN 1602
 #define ACCOUNT_KEY 1603
 #define ACCOUNT_CANCEL 1604
+#define ACCOUNT_OPEN_LOGIN 1605
+#define ACCOUNT_CREATE_TOKEN 1606
 #define ACCOUNT_DONE (WM_APP + 25)
 
 typedef struct ACCOUNT_WINDOW {
     HWND window, parent, base, username, password, answer, image, key, status, create;
+    HWND openLogin;
     HANDLE worker;
     DWORD operation;
     DWORD dpi;
     HFONT font;
     CX_HOME_CONFIG *config;
+    CX_ADAPTER_AUTH_SETTINGS authSettings;
     CX_ADAPTER_CAPTCHA captcha;
     CX_ADAPTER_ACCOUNT account;
     HBITMAP bitmap;
     WCHAR baseText[CX_HOME_ADAPTER_URL_CAP], userText[256], passwordText[256], answerText[128];
     WCHAR keyText[CX_HOME_API_KEY_CAP], error[512];
     WCHAR captchaToken[CX_ADAPTER_TOKEN_CAP], captchaBase[CX_HOME_ADAPTER_URL_CAP];
-    BOOL ok, accepted, createIfMissing, closing;
+    BOOL ok, accepted, createIfMissing, closing, captchaSettingsLoaded;
 } ACCOUNT_WINDOW;
 
 static DWORD aw_ui_dpi(void) {
@@ -50,8 +55,45 @@ static void aw_buttons(ACCOUNT_WINDOW *state, BOOL enabled) {
     EnableWindow(GetDlgItem(state->window, ACCOUNT_REFRESH), enabled);
     EnableWindow(GetDlgItem(state->window, ACCOUNT_LOGIN), enabled);
     EnableWindow(GetDlgItem(state->window, ACCOUNT_KEY), enabled);
+    EnableWindow(GetDlgItem(state->window, ACCOUNT_OPEN_LOGIN), enabled);
     EnableWindow(state->base, enabled); EnableWindow(state->username, enabled); EnableWindow(state->password, enabled);
     EnableWindow(state->answer, enabled); EnableWindow(state->key, enabled); EnableWindow(state->create, enabled);
+    if (enabled) {
+        BOOL localCaptcha = state->captchaSettingsLoaded && !lstrcmpiW(state->authSettings.captchaProvider, L"local");
+        EnableWindow(GetDlgItem(state->window, ACCOUNT_LOGIN), localCaptcha);
+        EnableWindow(state->answer, localCaptcha);
+    }
+}
+static void aw_clear_captcha(ACCOUNT_WINDOW *state) {
+    SendMessageW(state->image, STM_SETIMAGE, IMAGE_BITMAP, 0);
+    if (state->bitmap) DeleteObject(state->bitmap);
+    state->bitmap = NULL;
+    ZeroMemory(&state->captcha, sizeof(state->captcha));
+    state->captchaBase[0] = 0;
+}
+static BOOL aw_starts_with_ci(const WCHAR *text, const WCHAR *prefix) {
+    while (*prefix) {
+        WCHAR left = *text++, right = *prefix++;
+        if (left >= L'A' && left <= L'Z') left += L'a' - L'A';
+        if (right >= L'A' && right <= L'Z') right += L'a' - L'A';
+        if (left != right) return FALSE;
+    }
+    return TRUE;
+}
+static BOOL aw_build_login_url(const WCHAR *base, WCHAR *url, DWORD cap) {
+    DWORD length, suffixLength = (DWORD)lstrlenW(L"/adapter-service");
+    if (!base || !url || cap < 8) return FALSE;
+    lstrcpynW(url, base, (int)cap);
+    length = (DWORD)lstrlenW(url);
+    while (length && (url[length - 1] == L' ' || url[length - 1] == L'\t')) url[--length] = 0;
+    if (!aw_starts_with_ci(url, L"http://") && !aw_starts_with_ci(url, L"https://")) return FALSE;
+    while (length && url[length - 1] == L'/') url[--length] = 0;
+    if (length >= suffixLength && !lstrcmpiW(url + length - suffixLength, L"/adapter-service")) {
+        length -= suffixLength; url[length] = 0;
+        while (length && url[length - 1] == L'/') url[--length] = 0;
+    }
+    if (!length || length + 7 >= cap) return FALSE;
+    lstrcatW(url, L"/login"); return TRUE;
 }
 static HWND aw_control(ACCOUNT_WINDOW *state, const WCHAR *className, const WCHAR *text, DWORD style,
     int x, int y, int width, int height, int id) {
@@ -66,7 +108,14 @@ static DWORD WINAPI aw_work(LPVOID context) {
     ACCOUNT_WINDOW *state = (ACCOUNT_WINDOW *)context;
     state->error[0] = 0; state->ok = FALSE;
     if (state->operation == ACCOUNT_REFRESH) {
-        state->ok = cx_adapter_captcha_begin(state->baseText, &state->captcha, state->error, 512);
+        state->captchaSettingsLoaded = FALSE;
+        ZeroMemory(&state->authSettings, sizeof(state->authSettings));
+        state->ok = cx_adapter_auth_settings(state->baseText, &state->authSettings, state->error, 512);
+        if (state->ok) {
+            state->captchaSettingsLoaded = TRUE;
+            if (!lstrcmpiW(state->authSettings.captchaProvider, L"local"))
+                state->ok = cx_adapter_captcha_begin(state->baseText, &state->captcha, state->error, 512);
+        }
     } else if (state->operation == ACCOUNT_KEY) {
         state->ok = cx_adapter_key_check(state->baseText, state->keyText, state->error, 512);
     } else if (state->operation == ACCOUNT_LOGIN) {
@@ -93,13 +142,24 @@ static void aw_start(ACCOUNT_WINDOW *state, DWORD operation) {
     state->operation = operation;
     state->createIfMissing = SendMessageW(state->create, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!state->baseText[0]) { aw_status(state, L"请填写 tikuAdapter 服务地址。"); return; }
+    if (operation == ACCOUNT_LOGIN && (!state->captchaSettingsLoaded
+        || lstrcmpiW(state->authSettings.captchaProvider, L"local"))) {
+        if (!state->captchaSettingsLoaded)
+            aw_status(state, L"请先检测服务端验证码配置；配置读取失败时不会显示本地图验证码。可使用下方 API key 验证。");
+        else aw_status(state, L"当前服务端使用远程验证码，原生窗口不支持该交互。请在浏览器登录服务并创建访问令牌，再粘贴下方 API key 验证。");
+        return;
+    }
     if (operation == ACCOUNT_LOGIN && lstrcmpW(state->captchaBase, state->baseText)) {
         state->captcha.challengeId[0] = 0; aw_status(state, L"服务地址已改变，请重新获取验证码。"); return;
     }
     if (operation == ACCOUNT_LOGIN && (!state->captcha.challengeId[0] || !state->userText[0] || !state->passwordText[0] || !state->answerText[0])) {
         aw_status(state, L"请先获取验证码，并填写账号、密码与验证码。"); return;
     }
-    if (operation == ACCOUNT_REFRESH) { state->captcha.challengeId[0] = 0; SetWindowTextW(state->answer, L""); }
+    if (operation == ACCOUNT_REFRESH) {
+        state->captchaSettingsLoaded = FALSE;
+        aw_clear_captcha(state);
+        SetWindowTextW(state->answer, L"");
+    }
     aw_buttons(state, FALSE); aw_status(state, L"正在连接 tikuAdapter...");
     state->worker = CreateThread(NULL, 0, aw_work, state, 0, NULL);
     if (!state->worker) { aw_buttons(state, TRUE); aw_status(state, L"无法创建网络工作线程。"); }
@@ -115,6 +175,17 @@ static LRESULT CALLBACK aw_proc(HWND window, UINT message, WPARAM wParam, LPARAM
         DWORD action = LOWORD(wParam);
         if (action == IDOK) action = GetFocus() == state->key ? ACCOUNT_KEY : ACCOUNT_LOGIN;
         if (action == IDCANCEL) action = ACCOUNT_CANCEL;
+        if (action == ACCOUNT_OPEN_LOGIN) {
+            WCHAR *url = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_HOME_ADAPTER_URL_CAP * sizeof(WCHAR));
+            HINSTANCE opened = NULL;
+            GetWindowTextW(state->base, state->baseText, CX_HOME_ADAPTER_URL_CAP);
+            if (url && aw_build_login_url(state->baseText, url, CX_HOME_ADAPTER_URL_CAP))
+                opened = ShellExecuteW(window, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+            if (!url || (INT_PTR)opened <= 32) aw_status(state, L"无法打开服务登录页，请检查上方 tikuAdapter 地址。");
+            else aw_status(state, L"已打开服务登录页；请在浏览器登录后进入 /access-tokens 创建令牌，再粘贴 API key。");
+            if (url) HeapFree(GetProcessHeap(), 0, url);
+            return 0;
+        }
         if (action == ACCOUNT_REFRESH || action == ACCOUNT_LOGIN || action == ACCOUNT_KEY) { aw_start(state, action); return 0; }
         if (action == ACCOUNT_CANCEL) { SendMessageW(window, WM_CLOSE, 0, 0); return 0; }
     }
@@ -125,13 +196,23 @@ static LRESULT CALLBACK aw_proc(HWND window, UINT message, WPARAM wParam, LPARAM
         if (state->operation == ACCOUNT_LOGIN) { SetWindowTextW(state->password, L""); state->captcha.challengeId[0] = 0; }
         if (!state->ok) { aw_status(state, state->error[0] ? state->error : L"请求失败，请重试。账号登录失败后请刷新验证码。"); return 0; }
         if (state->operation == ACCOUNT_REFRESH) {
+            if (lstrcmpiW(state->authSettings.captchaProvider, L"local")) {
+                aw_clear_captcha(state);
+                if (!lstrcmpiW(state->authSettings.captchaProvider, L"remote"))
+                    aw_status(state, L"服务端使用远程验证码，原生窗口不支持该交互，因此未显示本地图验证码。请在浏览器登录服务并打开“/access-tokens”创建访问令牌，再粘贴下方 API key 验证。");
+                else
+                    aw_status(state, L"服务端验证码类型无法由原生窗口处理；未显示本地图验证码。请在浏览器登录服务并创建访问令牌，再粘贴下方 API key 验证。");
+                return 0;
+            }
             HBITMAP bitmap = cx_adapter_captcha_bitmap(&state->captcha, state->error, 512);
             if (!bitmap) { aw_status(state, state->error); return 0; }
             SendMessageW(state->image, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)bitmap);
             if (state->bitmap) DeleteObject(state->bitmap);
             state->bitmap = bitmap;
             lstrcpynW(state->captchaBase, state->baseText, CX_HOME_ADAPTER_URL_CAP);
-            aw_status(state, L"请输入图片中的验证码；登录后使用账号的访问令牌。");
+            EnableWindow(GetDlgItem(state->window, ACCOUNT_LOGIN), TRUE);
+            EnableWindow(state->answer, TRUE);
+            aw_status(state, L"服务器已配置站内图形验证码。登录后使用已有访问令牌；如无令牌，请先勾选创建选项。");
         } else {
             lstrcpynW(state->config->adapterBaseUrl, state->baseText, CX_HOME_ADAPTER_URL_CAP);
             lstrcpynW(state->config->apiKey, state->operation == ACCOUNT_KEY ? state->keyText : state->account.apiKey, CX_HOME_API_KEY_CAP);
@@ -179,17 +260,20 @@ BOOL cx_account_window(HWND parent, CX_HOME_CONFIG *config) {
     state->password = aw_control(state, L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD, 420, 66, 190, 28, 0);
     SendMessageW(state->password, EM_SETLIMITTEXT, 255, 0);
     state->image = aw_control(state, L"STATIC", L"", SS_BITMAP | SS_CENTERIMAGE, 24, 110, 200, 70, 0);
-    aw_control(state, L"BUTTON", L"刷新验证码", 0, 240, 115, 110, 30, ACCOUNT_REFRESH);
+    aw_control(state, L"BUTTON", L"检测 / 刷新验证码", 0, 240, 115, 145, 30, ACCOUNT_REFRESH);
     state->answer = aw_control(state, L"EDIT", L"", ES_AUTOHSCROLL, 370, 115, 100, 28, 0);
     SendMessageW(state->answer, EM_SETLIMITTEXT, 127, 0);
     aw_control(state, L"BUTTON", L"账号登录", 0, 490, 115, 120, 30, ACCOUNT_LOGIN);
-    state->create = aw_control(state, L"BUTTON", L"没有访问令牌时创建原生客户端专用令牌", BS_AUTOCHECKBOX, 240, 157, 370, 28, 0);
+    state->create = aw_control(state, L"BUTTON", L"没有访问令牌时创建原生客户端专用令牌", BS_AUTOCHECKBOX, 240, 157, 370, 28, ACCOUNT_CREATE_TOKEN);
+    SendMessageW(state->create, BM_SETCHECK, BST_CHECKED, 0);
     aw_control(state, L"STATIC", L"或使用 API key", 0, 24, 220, 110, 24, 0);
     state->key = aw_control(state, L"EDIT", config->apiKey, ES_PASSWORD | ES_AUTOHSCROLL, 140, 215, 330, 28, 0);
     SendMessageW(state->key, EM_SETLIMITTEXT, CX_HOME_API_KEY_CAP - 1, 0);
     aw_control(state, L"BUTTON", L"验证并使用", 0, 490, 215, 120, 30, ACCOUNT_KEY);
-    state->status = aw_control(state, L"STATIC", L"凭据仅保存在当前进程内存中；关闭程序后清除。", 0, 24, 275, 585, 65, 0);
+    state->status = aw_control(state, L"STATIC", L"请先检测服务端验证码类型。API key 和账号凭据只保存在当前进程内存中。", 0, 24, 275, 585, 65, 0);
+    state->openLogin = aw_control(state, L"BUTTON", L"打开服务登录页", 0, 24, 350, 170, 30, ACCOUNT_OPEN_LOGIN);
     aw_control(state, L"BUTTON", L"取消", 0, 500, 350, 110, 30, ACCOUNT_CANCEL);
+    aw_buttons(state, TRUE);
     ownerEnabled = parent && IsWindowEnabled(parent);
     if (ownerEnabled) EnableWindow(parent, FALSE);
     ShowWindow(state->window, SW_SHOW); ShowWindow(state->window, SW_SHOW); UpdateWindow(state->window); SetFocus(state->base);
