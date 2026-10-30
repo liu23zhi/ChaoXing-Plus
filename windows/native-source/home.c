@@ -48,6 +48,14 @@
 #define SETTINGS_ANSWER_RETRY 1521
 #define SETTINGS_AUTO_SUBMIT 1522
 #define SETTINGS_LOG_ENABLED 1523
+#define SETTINGS_EXTENSION_ENABLED 1524
+#define SETTINGS_ENABLE_ANSWER 1525
+#define SETTINGS_AI_FALLBACK 1526
+#define SETTINGS_ASYNC_SEARCH 1527
+#define SETTINGS_DEEP_THINKING 1528
+#define SETTINGS_AI_FAILURE 1529
+#define SETTINGS_EXAM_AUTO_SUBMIT 1530
+#define SETTINGS_LOCAL_CACHE 1531
 
 typedef struct HOME_SESSION_SLOT {
     CX_BROWSER_SESSION *session;
@@ -98,6 +106,14 @@ typedef struct SETTINGS_STATE {
     HWND answerRetry;
     HWND autoSubmit;
     HWND logEnabled;
+    HWND extensionEnabled;
+    HWND enableAnswer;
+    HWND aiFallback;
+    HWND asyncSearch;
+    HWND deepThinking;
+    HWND aiFailure;
+    HWND examAutoSubmit;
+    HWND localCache;
     HFONT font;
     CX_HOME_CONFIG value;
     WCHAR browserKind[16];
@@ -583,8 +599,8 @@ static BOOL settings_patch_int(char *patch, DWORD cap, DWORD *at, BOOL *first,
 
 static BOOL settings_make_patch(SETTINGS_STATE *state, char *patch, DWORD cap, DWORD *length) {
     DWORD at = 0; BOOL first = TRUE; WCHAR answerKey[CX_OPTIONS_SHORT_CAP];
-    int top, right, width, threads, countdown, retry, theme, mode;
-    BOOL panel, collapsed, dialog, submit, log;
+    int top, right, width, threads, countdown, retry, theme, mode, asyncMode, failureMode;
+    BOOL panel, collapsed, dialog, submit, log, extension, answer, aiFallback, deepThinking, examSubmit, localCache;
     GetWindowTextW(state->answerKey, answerKey, CX_OPTIONS_SHORT_CAP);
     if (!settings_read_int(state->panelTop, 0, 10000, &top) ||
         !settings_read_int(state->panelRight, 0, 10000, &right) ||
@@ -601,7 +617,9 @@ static BOOL settings_make_patch(SETTINGS_STATE *state, char *patch, DWORD cap, D
     }
     theme = (int)SendMessageW(state->panelTheme, CB_GETCURSEL, 0, 0);
     mode = (int)SendMessageW(state->answerMode, CB_GETCURSEL, 0, 0);
-    if (theme < 0 || theme > 2 || mode < 0 || mode > 1) {
+    asyncMode = (int)SendMessageW(state->asyncSearch, CB_GETCURSEL, 0, 0);
+    failureMode = (int)SendMessageW(state->aiFailure, CB_GETCURSEL, 0, 0);
+    if (theme < 0 || theme > 2 || mode < 0 || mode > 1 || asyncMode < 0 || asyncMode > 1 || failureMode < 0 || failureMode > 1) {
         settings_set_status(state, L"面板主题或答题模式无效。"); return FALSE;
     }
     panel = SendMessageW(state->panelEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -609,8 +627,22 @@ static BOOL settings_make_patch(SETTINGS_STATE *state, char *patch, DWORD cap, D
     dialog = SendMessageW(state->answerDialog, BM_GETCHECK, 0, 0) == BST_CHECKED;
     submit = SendMessageW(state->autoSubmit, BM_GETCHECK, 0, 0) == BST_CHECKED;
     log = !state->home->options->noDiskWrite && SendMessageW(state->logEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    extension = SendMessageW(state->extensionEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    answer = SendMessageW(state->enableAnswer, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    aiFallback = SendMessageW(state->aiFallback, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    deepThinking = SendMessageW(state->deepThinking, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    examSubmit = SendMessageW(state->examAutoSubmit, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    localCache = SendMessageW(state->localCache, BM_GETCHECK, 0, 0) == BST_CHECKED;
     patch[0] = 0;
     if (!home_json_append_char(patch, cap, &at, '{') ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.extension-enabled", extension) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.enableAnswer", answer) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.enableAIFallbackAnswer", aiFallback) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.useAsyncTikuSearch", asyncMode == 0) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.deepThinking", deepThinking) ||
+        !settings_patch_string(patch, cap, &at, &first, L"cx.new.study.aiFallbackFailureAction", failureMode == 0 ? L"pause" : L"skip") ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.enableExamAutoSubmit", examSubmit) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"cx.new.study.enableLocalQuestionCache", localCache) ||
         !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-panel-enabled", panel) ||
         !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-panel-collapsed", collapsed) ||
         !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-panel-top", top) ||
@@ -634,6 +666,9 @@ static BOOL settings_populate(SETTINGS_STATE *state) {
     char *json; JT *tokens; DWORD length = 0; int count, value; WCHAR text[32], wide[CX_OPTIONS_SHORT_CAP];
     CX_OPTIONS *options = state->home->options; BOOL panel = options->panelEnabled, collapsed = options->panelCollapsed;
     BOOL dialog = options->showAnswerDialog, submit = options->autoSubmit, log = options->logFileEnabled && !options->noDiskWrite;
+    BOOL extension = options->extensionEnabled, answer = TRUE, aiFallback = TRUE, asyncSearch = TRUE;
+    BOOL deepThinking = FALSE, examSubmit = FALSE, localCache = TRUE;
+    int failureMode = 0;
     int top = options->panelTop, right = options->panelRight, width = options->panelWidth;
     int threads = options->answerThreads, countdown = options->answerCountdown, retry = options->answerRetry;
     BOOL autoMode = options->answerModeAuto; home_copy(wide, CX_OPTIONS_SHORT_CAP, options->answerKey);
@@ -644,6 +679,13 @@ static BOOL settings_populate(SETTINGS_STATE *state) {
         if (count > 0 && tokens[0].type == '{') {
 #define SETTINGS_READ_BOOL(key, target) do { value = jkey(json, tokens, 0, key); if (value >= 0) (target) = jeq(json, tokens, value, "true"); } while (0)
 #define SETTINGS_READ_INT(key, target) do { value = jkey(json, tokens, 0, key); if (value >= 0) (target) = jint(json, tokens, value, (target)); } while (0)
+            SETTINGS_READ_BOOL("common.settings.extension-enabled", extension);
+            SETTINGS_READ_BOOL("cx.new.study.enableAnswer", answer);
+            SETTINGS_READ_BOOL("cx.new.study.enableAIFallbackAnswer", aiFallback);
+            SETTINGS_READ_BOOL("cx.new.study.useAsyncTikuSearch", asyncSearch);
+            SETTINGS_READ_BOOL("cx.new.study.deepThinking", deepThinking);
+            SETTINGS_READ_BOOL("cx.new.study.enableExamAutoSubmit", examSubmit);
+            SETTINGS_READ_BOOL("cx.new.study.enableLocalQuestionCache", localCache);
             SETTINGS_READ_BOOL("common.settings.windows-panel-enabled", panel);
             SETTINGS_READ_BOOL("common.settings.windows-panel-collapsed", collapsed);
             SETTINGS_READ_BOOL("common.settings.windows-show-answer-dialog", dialog);
@@ -663,6 +705,8 @@ static BOOL settings_populate(SETTINGS_STATE *state) {
             if (value >= 0 && jwstr(json, tokens, value, text, 32)) {
                 SendMessageW(state->panelTheme, CB_SETCURSEL, lstrcmpiW(text, L"blue") == 0 ? 1 : lstrcmpiW(text, L"green") == 0 ? 2 : 0, 0);
             }
+            value = jkey(json, tokens, 0, "cx.new.study.aiFallbackFailureAction");
+            if (value >= 0 && jwstr(json, tokens, value, text, 32)) failureMode = lstrcmpiW(text, L"skip") == 0 ? 1 : 0;
 #undef SETTINGS_READ_BOOL
 #undef SETTINGS_READ_INT
         }
@@ -671,6 +715,14 @@ static BOOL settings_populate(SETTINGS_STATE *state) {
     if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
     SendMessageW(state->panelEnabled, BM_SETCHECK, panel ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(state->panelCollapsed, BM_SETCHECK, collapsed ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->extensionEnabled, BM_SETCHECK, extension ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->enableAnswer, BM_SETCHECK, answer ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->aiFallback, BM_SETCHECK, aiFallback ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->asyncSearch, CB_SETCURSEL, asyncSearch ? 0 : 1, 0);
+    SendMessageW(state->deepThinking, BM_SETCHECK, deepThinking ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->aiFailure, CB_SETCURSEL, failureMode, 0);
+    SendMessageW(state->examAutoSubmit, BM_SETCHECK, examSubmit ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->localCache, BM_SETCHECK, localCache ? BST_CHECKED : BST_UNCHECKED, 0);
     wsprintfW(text, L"%d", top); SetWindowTextW(state->panelTop, text);
     wsprintfW(text, L"%d", right); SetWindowTextW(state->panelRight, text);
     wsprintfW(text, L"%d", width); SetWindowTextW(state->panelWidth, text);
@@ -764,7 +816,7 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     if (!settings_register()) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->window = CreateWindowExW(WS_EX_DLGMODALFRAME, SETTINGS_CLASS, L"超星学习助手 - 注入设置",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-        MulDiv(940, home_dpi, 96), MulDiv(720, home_dpi, 96), parent, NULL, home_instance, state);
+        MulDiv(940, home_dpi, 96), MulDiv(800, home_dpi, 96), parent, NULL, home_instance, state);
     if (!state->window) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->font = home_default_font;
     home_control(0, L"STATIC", L"tikuAdapter 地址", WS_CHILD | WS_VISIBLE, 24, 24, 120, 24, state->window, 0);
@@ -775,38 +827,51 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     state->browser = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 150, 100, 260, 120, state->window, SETTINGS_BROWSER);
     SendMessageW(state->browser, CB_ADDSTRING, 0, (LPARAM)L"Microsoft Edge"); SendMessageW(state->browser, CB_ADDSTRING, 0, (LPARAM)L"Google Chrome");
     SendMessageW(state->browser, CB_SETCURSEL, lstrcmpiW(state->browserKind, L"chrome") == 0 ? 1 : 0, 0);
-    home_control(0, L"STATIC", L"悬浮面板", WS_CHILD | WS_VISIBLE, 24, 140, 120, 24, state->window, 0);
-    state->panelEnabled = home_control(0, L"BUTTON", L"显示面板", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 164, 130, 26, state->window, SETTINGS_PANEL_ENABLED);
-    state->panelCollapsed = home_control(0, L"BUTTON", L"默认折叠", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 170, 164, 130, 26, state->window, SETTINGS_PANEL_COLLAPSED);
-    home_control(0, L"STATIC", L"Top", WS_CHILD | WS_VISIBLE, 325, 166, 40, 22, state->window, 0);
-    state->panelTop = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 365, 162, 70, 27, state->window, SETTINGS_PANEL_TOP);
-    home_control(0, L"STATIC", L"Right", WS_CHILD | WS_VISIBLE, 455, 166, 45, 22, state->window, 0);
-    state->panelRight = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 500, 162, 70, 27, state->window, SETTINGS_PANEL_RIGHT);
-    home_control(0, L"STATIC", L"Width", WS_CHILD | WS_VISIBLE, 590, 166, 45, 22, state->window, 0);
-    state->panelWidth = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 635, 162, 70, 27, state->window, SETTINGS_PANEL_WIDTH);
-    home_control(0, L"STATIC", L"主题", WS_CHILD | WS_VISIBLE, 725, 166, 35, 22, state->window, 0);
-    state->panelTheme = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 765, 162, 145, 90, state->window, SETTINGS_PANEL_THEME);
+    home_control(0, L"STATIC", L"扩展考试设置（与悬浮面板同步）", WS_CHILD | WS_VISIBLE, 24, 140, 360, 24, state->window, 0);
+    state->extensionEnabled = home_control(0, L"BUTTON", L"启用注入/扩展", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 164, 150, 26, state->window, SETTINGS_EXTENSION_ENABLED);
+    state->enableAnswer = home_control(0, L"BUTTON", L"自动答题", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 184, 164, 115, 26, state->window, SETTINGS_ENABLE_ANSWER);
+    state->aiFallback = home_control(0, L"BUTTON", L"AI 兜底搜题", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 309, 164, 135, 26, state->window, SETTINGS_AI_FALLBACK);
+    state->deepThinking = home_control(0, L"BUTTON", L"深度思考", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 454, 164, 105, 26, state->window, SETTINGS_DEEP_THINKING);
+    state->asyncSearch = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 569, 162, 125, 90, state->window, SETTINGS_ASYNC_SEARCH);
+    SendMessageW(state->asyncSearch, CB_ADDSTRING, 0, (LPARAM)L"异步搜题");
+    SendMessageW(state->asyncSearch, CB_ADDSTRING, 0, (LPARAM)L"同步搜题");
+    state->aiFailure = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 704, 162, 206, 90, state->window, SETTINGS_AI_FAILURE);
+    SendMessageW(state->aiFailure, CB_ADDSTRING, 0, (LPARAM)L"AI 失败后停留当前页");
+    SendMessageW(state->aiFailure, CB_ADDSTRING, 0, (LPARAM)L"AI 失败后继续后续流程");
+    state->examAutoSubmit = home_control(0, L"BUTTON", L"考试自动交卷", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 202, 145, 26, state->window, SETTINGS_EXAM_AUTO_SUBMIT);
+    state->localCache = home_control(0, L"BUTTON", L"本地题库缓存", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 184, 202, 135, 26, state->window, SETTINGS_LOCAL_CACHE);
+    home_control(0, L"STATIC", L"悬浮面板", WS_CHILD | WS_VISIBLE, 24, 240, 120, 24, state->window, 0);
+    state->panelEnabled = home_control(0, L"BUTTON", L"显示面板", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 264, 130, 26, state->window, SETTINGS_PANEL_ENABLED);
+    state->panelCollapsed = home_control(0, L"BUTTON", L"默认折叠", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 170, 264, 130, 26, state->window, SETTINGS_PANEL_COLLAPSED);
+    home_control(0, L"STATIC", L"Top", WS_CHILD | WS_VISIBLE, 325, 266, 40, 22, state->window, 0);
+    state->panelTop = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 365, 262, 70, 27, state->window, SETTINGS_PANEL_TOP);
+    home_control(0, L"STATIC", L"Right", WS_CHILD | WS_VISIBLE, 455, 266, 45, 22, state->window, 0);
+    state->panelRight = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 500, 262, 70, 27, state->window, SETTINGS_PANEL_RIGHT);
+    home_control(0, L"STATIC", L"Width", WS_CHILD | WS_VISIBLE, 590, 266, 45, 22, state->window, 0);
+    state->panelWidth = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 635, 262, 70, 27, state->window, SETTINGS_PANEL_WIDTH);
+    home_control(0, L"STATIC", L"主题", WS_CHILD | WS_VISIBLE, 725, 266, 35, 22, state->window, 0);
+    state->panelTheme = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 765, 262, 145, 90, state->window, SETTINGS_PANEL_THEME);
     SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Pink");
     SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Blue");
     SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Green");
-    home_control(0, L"STATIC", L"答题", WS_CHILD | WS_VISIBLE, 24, 204, 120, 24, state->window, 0);
-    state->answerMode = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 24, 228, 110, 90, state->window, SETTINGS_ANSWER_MODE);
+    home_control(0, L"STATIC", L"宿主答题调度", WS_CHILD | WS_VISIBLE, 24, 304, 160, 24, state->window, 0);
+    state->answerMode = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 24, 328, 110, 90, state->window, SETTINGS_ANSWER_MODE);
     SendMessageW(state->answerMode, CB_ADDSTRING, 0, (LPARAM)L"自动答题");
     SendMessageW(state->answerMode, CB_ADDSTRING, 0, (LPARAM)L"快捷键答题");
-    home_control(0, L"STATIC", L"答题快捷键", WS_CHILD | WS_VISIBLE, 155, 232, 90, 22, state->window, 0);
-    state->answerKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 245, 228, 210, 27, state->window, SETTINGS_ANSWER_KEY);
-    home_control(0, L"STATIC", L"线程数", WS_CHILD | WS_VISIBLE, 480, 232, 60, 22, state->window, 0);
-    state->answerThreads = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 540, 228, 54, 27, state->window, SETTINGS_ANSWER_THREADS);
-    state->answerDialog = home_control(0, L"BUTTON", L"显示答题弹窗", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 615, 228, 140, 26, state->window, SETTINGS_ANSWER_DIALOG);
-    state->autoSubmit = home_control(0, L"BUTTON", L"自动提交", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 770, 228, 125, 26, state->window, SETTINGS_AUTO_SUBMIT);
-    home_control(0, L"STATIC", L"倒计时（秒）", WS_CHILD | WS_VISIBLE, 24, 268, 90, 22, state->window, 0);
-    state->answerCountdown = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 115, 264, 65, 27, state->window, SETTINGS_ANSWER_COUNTDOWN);
-    home_control(0, L"STATIC", L"失败重试", WS_CHILD | WS_VISIBLE, 205, 268, 70, 22, state->window, 0);
-    state->answerRetry = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 275, 264, 65, 27, state->window, SETTINGS_ANSWER_RETRY);
-    state->logEnabled = home_control(0, L"BUTTON", L"写入宿主日志", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 380, 264, 150, 26, state->window, SETTINGS_LOG_ENABLED);
-    home_control(0, L"STATIC", L"高级扩展设置 JSON（共享设置键；同名项由上方表单覆盖）", WS_CHILD | WS_VISIBLE, 24, 306, 820, 24, state->window, 0);
+    home_control(0, L"STATIC", L"答题快捷键", WS_CHILD | WS_VISIBLE, 155, 332, 90, 22, state->window, 0);
+    state->answerKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 245, 328, 210, 27, state->window, SETTINGS_ANSWER_KEY);
+    home_control(0, L"STATIC", L"线程数", WS_CHILD | WS_VISIBLE, 480, 332, 60, 22, state->window, 0);
+    state->answerThreads = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 540, 328, 54, 27, state->window, SETTINGS_ANSWER_THREADS);
+    state->answerDialog = home_control(0, L"BUTTON", L"显示答题弹窗", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 615, 328, 140, 26, state->window, SETTINGS_ANSWER_DIALOG);
+    state->autoSubmit = home_control(0, L"BUTTON", L"自动提交", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 770, 328, 125, 26, state->window, SETTINGS_AUTO_SUBMIT);
+    home_control(0, L"STATIC", L"倒计时（秒）", WS_CHILD | WS_VISIBLE, 24, 368, 90, 22, state->window, 0);
+    state->answerCountdown = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 115, 364, 65, 27, state->window, SETTINGS_ANSWER_COUNTDOWN);
+    home_control(0, L"STATIC", L"失败重试", WS_CHILD | WS_VISIBLE, 205, 368, 70, 22, state->window, 0);
+    state->answerRetry = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 275, 364, 65, 27, state->window, SETTINGS_ANSWER_RETRY);
+    state->logEnabled = home_control(0, L"BUTTON", L"写入宿主日志", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 380, 364, 150, 26, state->window, SETTINGS_LOG_ENABLED);
+    home_control(0, L"STATIC", L"高级扩展设置 JSON（共享设置键；同名项由上方表单覆盖）", WS_CHILD | WS_VISIBLE, 24, 406, 820, 24, state->window, 0);
     state->settings = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.settingsJson,
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL, 24, 332, 886, 175, state->window, SETTINGS_JSON);
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL, 24, 432, 886, 175, state->window, SETTINGS_JSON);
     settings_populate(state);
     SendMessageW(state->baseUrl, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
     SendMessageW(state->apiKey, EM_SETLIMITTEXT, CX_HOME_API_KEY_CAP - 1, 0);
@@ -815,9 +880,9 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     SendMessageW(state->panelTop, EM_SETLIMITTEXT, 5, 0); SendMessageW(state->panelRight, EM_SETLIMITTEXT, 5, 0);
     SendMessageW(state->panelWidth, EM_SETLIMITTEXT, 3, 0); SendMessageW(state->answerThreads, EM_SETLIMITTEXT, 1, 0);
     SendMessageW(state->answerCountdown, EM_SETLIMITTEXT, 4, 0); SendMessageW(state->answerRetry, EM_SETLIMITTEXT, 2, 0);
-    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 530, 886, 42, state->window, SETTINGS_STATUS);
-    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 620, 110, 30, state->window, SETTINGS_SAVE);
-    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 620, 110, 30, state->window, SETTINGS_CANCEL);
+    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 625, 886, 42, state->window, SETTINGS_STATUS);
+    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 700, 110, 30, state->window, SETTINGS_SAVE);
+    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 700, 110, 30, state->window, SETTINGS_CANCEL);
     ShowWindow(state->window, SW_SHOW); ShowWindow(state->window, SW_SHOW); UpdateWindow(state->window); EnableWindow(parent, FALSE);
     while (IsWindow(state->window) && (got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(state->window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }

@@ -20,6 +20,14 @@
 #define SETTINGS_ANSWER_RETRY 1521
 #define SETTINGS_AUTO_SUBMIT 1522
 #define SETTINGS_LOG_ENABLED 1523
+#define SETTINGS_EXTENSION_ENABLED 1524
+#define SETTINGS_ENABLE_ANSWER 1525
+#define SETTINGS_AI_FALLBACK 1526
+#define SETTINGS_ASYNC_SEARCH 1527
+#define SETTINGS_DEEP_THINKING 1528
+#define SETTINGS_AI_FAILURE 1529
+#define SETTINGS_EXAM_AUTO_SUBMIT 1530
+#define SETTINGS_LOCAL_CACHE 1531
 
 static DWORD failures, browserStarts, networkCalls, closedSessions, destroyedSessions;
 static HANDLE fetchEntered, fetchRelease;
@@ -222,6 +230,11 @@ static void CALLBACK dialog_tick(HWND window, UINT message, UINT_PTR timer, DWOR
         && GetDlgItem(dialog, SETTINGS_ANSWER_COUNTDOWN) && GetDlgItem(dialog, SETTINGS_ANSWER_RETRY)
         && GetDlgItem(dialog, SETTINGS_AUTO_SUBMIT) && GetDlgItem(dialog, SETTINGS_LOG_ENABLED),
         "settings dialog exposes answer mode, shortcut, threads, dialog, countdown, retry, submit, and log controls");
+    check(GetDlgItem(dialog, SETTINGS_EXTENSION_ENABLED) && GetDlgItem(dialog, SETTINGS_ENABLE_ANSWER)
+        && GetDlgItem(dialog, SETTINGS_AI_FALLBACK) && GetDlgItem(dialog, SETTINGS_ASYNC_SEARCH)
+        && GetDlgItem(dialog, SETTINGS_DEEP_THINKING) && GetDlgItem(dialog, SETTINGS_AI_FAILURE)
+        && GetDlgItem(dialog, SETTINGS_EXAM_AUTO_SUBMIT) && GetDlgItem(dialog, SETTINGS_LOCAL_CACHE),
+        "settings dialog exposes the same exam and AI controls as the extension floating panel");
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_BASE_URL), L"https://adapter.example/");
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_API_KEY), L"tk_separate");
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_JSON), dialogMode == 2 ? L"{" : L"{\"common.settings.session\":true}");
@@ -240,6 +253,14 @@ static void CALLBACK dialog_tick(HWND window, UINT message, UINT_PTR timer, DWOR
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_ANSWER_RETRY), L"5");
     SendMessageW(GetDlgItem(dialog, SETTINGS_AUTO_SUBMIT), BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(dialog, SETTINGS_LOG_ENABLED), BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_EXTENSION_ENABLED), BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_ENABLE_ANSWER), BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_AI_FALLBACK), BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_ASYNC_SEARCH), CB_SETCURSEL, 1, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_DEEP_THINKING), BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_AI_FAILURE), CB_SETCURSEL, 1, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_EXAM_AUTO_SUBMIT), BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(GetDlgItem(dialog, SETTINGS_LOCAL_CACHE), BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(SETTINGS_SAVE, BN_CLICKED), 0);
     if (dialogMode == 2) {
         check(IsWindow(dialog), "invalid JSON keeps the settings dialog open");
@@ -271,6 +292,15 @@ static void dialog_tests(void) {
         && contains(settingsOutput, "\"common.settings.windows-auto-submit\":false")
         && contains(settingsOutput, "\"common.settings.windows-log-enabled\":false"),
         "native form emits answer and logging settings as valid shared settings");
+    check(contains(settingsOutput, "\"common.settings.extension-enabled\":false")
+        && contains(settingsOutput, "\"cx.new.study.enableAnswer\":false")
+        && contains(settingsOutput, "\"cx.new.study.enableAIFallbackAnswer\":true")
+        && contains(settingsOutput, "\"cx.new.study.useAsyncTikuSearch\":false")
+        && contains(settingsOutput, "\"cx.new.study.deepThinking\":true")
+        && contains(settingsOutput, "\"cx.new.study.aiFallbackFailureAction\":\"skip\"")
+        && contains(settingsOutput, "\"cx.new.study.enableExamAutoSubmit\":true")
+        && contains(settingsOutput, "\"cx.new.study.enableLocalQuestionCache\":false"),
+        "native form emits extension floating-panel settings as shared settings");
     check(contains(settingsOutput, "\"common.settings.session\":true"),
         "advanced JSON settings are retained alongside explicit form fields");
     check(!lstrcmpW(shared.apiKey, L"tk_shared") && !lstrcmpW(shared.settingsJson, L"{}"),
