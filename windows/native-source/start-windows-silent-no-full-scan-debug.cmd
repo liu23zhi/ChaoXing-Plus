@@ -13,6 +13,7 @@ rem Node fallback: start-windows-node-silent-no-full-scan-debug.cmd
 if not exist "%CXPLUS_EXE%" (echo [windows] chaoxing_plus.exe is missing next to this launcher.& echo [windows] Build it with: windows\native-source\build-windows.cmd& exit /b 9009)
 start "" /wait "%CXPLUS_EXE%" --console --silent-scenario --stage-boot --silent-delete-simulate --scan-mode common --client-first --execution-mode memory --no-disk-write --no-log --no-panel
 set "EXIT_CODE=%ERRORLEVEL%"
-if not "%EXIT_CODE%"=="0" pause
+rem Keep this window open after the launcher finishes (set CXPLUS_NO_PAUSE=1 to skip).
+if /i not "%CXPLUS_NO_PAUSE%"=="1" pause
 exit /b %EXIT_CODE%
 

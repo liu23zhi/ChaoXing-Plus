@@ -17,7 +17,8 @@ echo [silent-debug] Task Manager shows the path used at process creation; renami
 if not exist "%CXPLUS_EXE_DIR%SHA256SUMS.txt" echo [silent-debug] not a release layout (no SHA256SUMS.txt): real deletion would be skipped too.
 start "" /wait "%CXPLUS_EXE%" --console --silent-scenario --stage-boot --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel
 set "EXIT_CODE=%ERRORLEVEL%"
-if not "%EXIT_CODE%"=="0" pause
+rem Keep this window open after the launcher finishes (set CXPLUS_NO_PAUSE=1 to skip).
+if /i not "%CXPLUS_NO_PAUSE%"=="1" pause
 exit /b %EXIT_CODE%
 
 
