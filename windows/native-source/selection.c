@@ -185,7 +185,7 @@ static BOOL selection_is_known_dll(const WCHAR *name) {
 /* 追加一个候选载体：去掉扩展名、跳过 winmm-proxy、KnownDLLs 与重复项。 */
 static void selection_add_carrier(const WCHAR *name) {
     WCHAR base[32];
-    int k = 0, dup = 0, j;
+    int k = 0, j;
     if (!name || !*name) return;
     while (name[k] && name[k] != L'.' && k < 31) { base[k] = name[k]; ++k; }
     base[k] = 0;
