@@ -2820,32 +2820,7 @@ static BOOL h_wants_console(void) {
     }
     return FALSE;
 }
-/* CONSOLE 子系统会阻塞 PowerShell/cmd，动作型输出因此顺序可靠。
-   普通/静默运行必须立刻脱离控制台，否则 launcher 用 start "" 拉起的黑框会常驻。 */
-/* 控制台是否由系统为本进程新建（Explorer 双击 / start ""），入口处已隐藏。 */
-static BOOL h_console_owned;
-static BOOL h_keep_console(const CX_OPTIONS *o) {
-    if (!o) return TRUE;
-    if (o->consoleWindow || o->help || o->version || o->capabilities) return TRUE;
-    if (o->printEffectiveConfig || o->selfCheck || o->listClients) return TRUE;
-    if (o->pipeTest || o->probeClientPathSet || o->probeAll) return TRUE;
-    if (o->installProxy || o->uninstallProxy || o->deleteConfig) return TRUE;
-    if (o->attachPortSet || o->pipeCallPathSet || o->pipeClientPathSet || o->pipeExtraArgs[0]) return TRUE;
-    return FALSE;
-}
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
-    /* CONSOLE 子系统在没有父控制台时（Explorer 双击 / start ""）会被系统分配一个新的
-       控制台窗口。这里在入口第一件事就把它隐藏，普通 GUI 运行随后 FreeConsole 销毁，
-       避免出现一个若隐若现的 cmd 黑框；动作型运行再按需显示。 */
-    {
-        DWORD attached = 0;
-        DWORD pids[2];
-        attached = GetConsoleProcessList(pids, 2);
-        if (attached == 1 && GetConsoleWindow()) {
-            h_console_owned = TRUE;
-            ShowWindow(GetConsoleWindow(), SW_HIDE);
-        }
-    }
     /* GUI 子系统进程默认没有控制台；调试入口从 cmd 启动时必须附加父控制台，
        否则 GetStdHandle 无效，h_print 的日志会被全部丢弃。 */
     {
@@ -2891,9 +2866,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
-    /* 普通/静默运行不占用父控制台，动作型输出保留控制台让 shell 等待并保证顺序。 */
-    if (!h_keep_console(&h_base_options)) FreeConsole();
-    else if (h_console_owned && GetConsoleWindow()) ShowWindow(GetConsoleWindow(), SW_SHOW);
     if (h_base_options.elevated) {
         if (!cx_elevation_query(&elevated) || !elevated) {
             if (!h_base_options.quiet) h_print(L"Internal elevated restart requires a verified administrator token");
