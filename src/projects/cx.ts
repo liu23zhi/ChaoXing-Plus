@@ -472,6 +472,7 @@ type ChapterTaskResult = {
   finished: boolean;
   finishedRate?: number;
   uploadable?: boolean;
+  expired?: boolean;
 };
 
 type SearchJobResult = {
@@ -493,6 +494,15 @@ function mergeVisibleContentState(current: VisibleContentState, next: VisibleCon
     return 'visible-unmapped';
   }
   return 'empty';
+}
+
+function isChapterTestExpired(root: ParentNode): boolean {
+  const statusText = Array.from(
+    root.querySelectorAll<HTMLElement>('.ceyan_name, .testTit_status, .newTestTitle')
+  )
+    .map((element) => element.innerText || element.textContent || '')
+    .join('\n');
+  return /已截止/u.test(statusText) && /不能作答/u.test(statusText);
 }
 
 function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState): boolean {
@@ -3279,6 +3289,15 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               $message.info(msg);
               $console.log(msg);
               const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              if (chapterResult.expired) {
+                logDebug('info', '章节测试已截止，跳过答题提交', {
+                  frameSrc,
+                  targetJobId,
+                  jobName,
+                  fallback: false
+                }, undefined, { correlationId: jobCorrelationId });
+                return;
+              }
               if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
                 logDebug('warn', '章节测试未完成重试诊断', {
@@ -3306,6 +3325,15 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               $message.info(msg);
               $console.log(msg);
               const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              if (chapterResult.expired) {
+                logDebug('info', '章节测试已截止，跳过答题提交', {
+                  frameSrc,
+                  targetJobId,
+                  jobName,
+                  fallback: true
+                }, undefined, { correlationId: jobCorrelationId });
+                return;
+              }
               if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
                 logDebug('warn', '章节测试未完成重试诊断', {
@@ -3634,6 +3662,18 @@ const JobRunner = {
       const src = item.getAttribute('src') ?? item.getAttribute('_src') ?? '';
       return name === 'frame_content' || id === 'frame_content' || /work/i.test(src);
     });
+    const expired = isChapterTestExpired(frameDocument) || nestedWorkIframes.some((item) => {
+      try {
+        return Boolean(item.contentWindow?.document && isChapterTestExpired(item.contentWindow.document));
+      } catch {
+        return false;
+      }
+    });
+    if (expired) {
+      $console.warn('章节测试已截止，不能作答，已跳过答题和提交。');
+      $message.warn('章节测试已截止，不能作答，已跳过答题和提交。');
+      return { finished: true, expired: true };
+    }
     const chapterFrameDebug = {
       src: frame.getAttribute('src') ?? '',
       _src: frame.getAttribute('_src') ?? '',
@@ -4074,12 +4114,19 @@ const JobRunner = {
         await sleep(stopSecondWhenFinish * 1000);
         await waitForTikuAdapterBalanceRecovery();
 
+        if (isChapterTestExpired(frameDocument)) {
+          $console.warn('章节测试已截止，不能作答，已跳过答题和提交。');
+          $message.warn('章节测试已截止，不能作答，已跳过答题和提交。');
+          return { finished: true, expired: true };
+        }
+
         logDebug('info', '动作节点诊断：准备提交或保存', {
           resultCount: retryableResults.length,
           uploadMode: upload,
           stopSecondWhenFinish
         }, undefined, { correlationId: chapterActionCorrelationId });
         let chapterFinished = false;
+        let chapterExpired = false;
         let latestFinishedRate: number | undefined;
         let latestUploadable: boolean | undefined;
         const autoSubmitEnabled = isWindowsAutoSubmitEnabled();
@@ -4100,6 +4147,12 @@ const JobRunner = {
           await waitForTikuAdapterBalanceRecovery();
 
           if (shouldSubmit) {
+            if (isChapterTestExpired(frameDocument)) {
+              chapterExpired = true;
+              $console.warn('章节测试已截止，不能作答，已跳过提交。');
+              $message.warn('章节测试已截止，不能作答，已跳过提交。');
+              return;
+            }
             logDebug('info', '动作节点诊断：执行提交', {
               finishedRate,
               uploadMode: upload,
@@ -4108,6 +4161,12 @@ const JobRunner = {
             }, undefined, { correlationId: chapterActionCorrelationId });
             (frameWindow as Record<string, any>).btnBlueSubmit?.();
             await sleep(3000);
+            if (isChapterTestExpired(frameDocument)) {
+              chapterExpired = true;
+              $console.warn('章节测试已截止，不能作答，已跳过确认提交。');
+              $message.warn('章节测试已截止，不能作答，已跳过确认提交。');
+              return;
+            }
             (frameWindow as Record<string, any>).submitCheckTimes?.();
             const retakeRequired = detectChapterRetakePrompt();
             if (retakeRequired) {
@@ -4136,8 +4195,20 @@ const JobRunner = {
                   await sleep(3000);
                   await waitForTikuAdapterBalanceRecovery();
                   if (autoSubmitEnabled) {
+                    if (isChapterTestExpired(frameDocument)) {
+                      chapterExpired = true;
+                      $console.warn('章节测试已截止，不能作答，已跳过二次提交。');
+                      $message.warn('章节测试已截止，不能作答，已跳过二次提交。');
+                      return;
+                    }
                     (frameWindow as Record<string, any>).btnBlueSubmit?.();
                     await sleep(3000);
+                    if (isChapterTestExpired(frameDocument)) {
+                      chapterExpired = true;
+                      $console.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
+                      $message.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
+                      return;
+                    }
                     (frameWindow as Record<string, any>).submitCheckTimes?.();
                     (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
                     chapterFinished = true;
@@ -4172,9 +4243,10 @@ const JobRunner = {
 
         worker.emit('done');
         return {
-          finished: chapterFinished,
+          finished: chapterFinished || chapterExpired,
           finishedRate: latestFinishedRate,
-          uploadable: latestUploadable
+          uploadable: latestUploadable,
+          expired: chapterExpired
         };
     } finally {
       taskBusy = false;

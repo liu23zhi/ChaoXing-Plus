@@ -134,6 +134,41 @@ test('popup renders desktop width and mobile natural-height constraints in Chrom
   }
 });
 
+test('popup keeps enough width for controls in the extension minimum viewport', { timeout: 20000 }, async () => {
+  const source = await readFile(popupHtmlPath, 'utf8');
+  const browser = await puppeteer.launch({
+    headless: true,
+    executablePath: process.env.CX_BROWSER_EXECUTABLE
+  });
+
+  try {
+    const page = await browser.newPage();
+    const html = source.replace(/\s*<script type="module" src="\.\/popup\.js"><\/script>/u, '');
+
+    await page.setViewport({ width: 150, height: 800 });
+    await page.setContent(html);
+    const layout = await page.evaluate(() => {
+      const body = document.body.getBoundingClientRect();
+      const copy = document.querySelector('.switch-copy').getBoundingClientRect();
+      const label = document.querySelector('.switch-label').getBoundingClientRect();
+      const state = document.querySelector('.switch-state').getBoundingClientRect();
+      return {
+        bodyWidth: body.width,
+        copyWidth: copy.width,
+        labelHeight: label.height,
+        stateHeight: state.height
+      };
+    });
+
+    assert.ok(layout.bodyWidth >= 320);
+    assert.ok(layout.copyWidth >= 56);
+    assert.ok(layout.labelHeight <= 20);
+    assert.ok(layout.stateHeight <= 20);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('popup switch persists the shared extension-enabled key that gates the content script', async () => {
   const popupSource = await readFile(popupJsPath, 'utf8');
   const entrySource = await readFile(entryScriptPath, 'utf8');
