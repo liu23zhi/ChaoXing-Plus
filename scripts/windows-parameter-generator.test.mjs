@@ -26,12 +26,108 @@ after(async () => {
   await browser?.close();
 });
 
-async function openGenerator() {
+async function openGenerator(hostType = 'node') {
   const page = await browser.newPage();
   page.setDefaultTimeout(6000);
   await page.goto(`file:///${generatorPath.replaceAll('\\', '/')}`);
+  if (hostType) await page.select('#hostType', hostType);
   return page;
 }
+
+test('生成器默认使用原生发布 EXE，首次打开无需填写 Node 路径', async () => {
+  const page = await openGenerator(null);
+  try {
+    const output = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const state = generator.state();
+      return { state, command: generator.commandFor(state), errors: generator.validate(state).errors,
+        nodeHidden: document.getElementById('nodeLauncherField').hidden,
+        nativeHidden: document.getElementById('nativeLauncherField').hidden,
+        hideConsoleHidden: document.getElementById('hideConsoleField').hidden,
+        summary: document.getElementById('summary').textContent };
+    });
+    assert.equal(output.state.hostType, 'native');
+    assert.equal(output.state.nativePath.replaceAll('\\', '/'), `${resolve('.').replaceAll('\\', '/')}/windows/native-build/release/chaoxing_plus.exe`);
+    assert.equal(output.state.dataDir, '.data');
+    assert.equal(output.state.diagnosticsDir, '.data\\chaoxing\\diagnostics');
+    assert.deepEqual(output.errors, []);
+    assert.equal(output.nodeHidden, true);
+    assert.equal(output.nativeHidden, false);
+    assert.equal(output.hideConsoleHidden, true);
+    assert.match(output.command.cmd, /chaoxing_plus\.exe/u);
+    assert.doesNotMatch(output.command.powershell, /node\.exe|main\.mjs|--hide-console/u);
+    assert.match(output.summary, /宿主：原生单文件 EXE/u);
+  } finally { await page.close(); }
+});
+
+test('原生默认路径在预设和重置后保留，Node 兼容入口仍可手动选择', async () => {
+  const page = await openGenerator(null);
+  try {
+    const selectedPath = 'D:\\学习助手\\chaoxing_plus.exe';
+    await page.$eval('#nativePath', (node, value) => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); }, selectedPath);
+    await page.click('[data-preset="friendly"]');
+    await page.click('#reset');
+    assert.equal(await page.$eval('#hostType', (node) => node.value), 'native');
+    assert.equal(await page.$eval('#nativePath', (node) => node.value), selectedPath);
+    await page.select('#hostType', 'node');
+    assert.equal(await page.$eval('#hideConsoleField', (node) => node.hidden), false);
+    assert.equal(await page.$eval('#dataDir', (node) => node.value), 'windows\\data');
+    assert.match(await page.$eval('#hostType option[value="node"]', (node) => node.textContent), /已冻结/u);
+    assert.match(await page.$eval('#cmd', (node) => node.value), /node\.exe/u);
+  } finally { await page.close(); }
+});
+
+test('切换回原生时清除隐藏的 Node 控制台开关，不阻断原生命令', async () => {
+  const page = await openGenerator('node');
+  try {
+    await page.click('[data-preset="silent"]');
+    assert.equal(await page.$eval('#hideConsole', (node) => node.checked), true);
+    await page.select('#hostType', 'native');
+    assert.equal(await page.$eval('#hideConsoleField', (node) => node.hidden), true);
+    assert.equal(await page.$eval('#hideConsole', (node) => node.checked), false);
+    assert.ok(await page.$eval('#powershell', (node) => node.value));
+    assert.doesNotMatch(await page.$eval('#powershell', (node) => node.value), /--hide-console/u);
+  } finally { await page.close(); }
+});
+
+test('原生默认诊断目录跟随数据目录，手动指定诊断路径后保留输入', async () => {
+  const page = await openGenerator(null);
+  try {
+    const enter = (selector, value) => page.$eval(selector, (node, text) => { node.value = text; node.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+    await enter('#dataDir', 'D:\\测试数据');
+    assert.equal(await page.$eval('#diagnosticsDir', (node) => node.value), 'D:\\测试数据\\chaoxing\\diagnostics');
+    assert.doesNotMatch(await page.$eval('#powershell', (node) => node.value), /--diagnostics-dir/u);
+    await enter('#diagnosticsDir', 'D:\\独立诊断');
+    await enter('#dataDir', 'D:\\新的数据');
+    assert.equal(await page.$eval('#diagnosticsDir', (node) => node.value), 'D:\\独立诊断');
+    assert.match(await page.$eval('#powershell', (node) => node.value), /--diagnostics-dir/u);
+    await page.select('#hostType', 'node');
+    assert.equal(await page.$eval('#diagnosticsDir', (node) => node.value), 'D:\\独立诊断');
+  } finally { await page.close(); }
+});
+
+test('原生未完成的注入方式禁用且不能绕过校验生成命令或 JSON', async () => {
+  const page = await openGenerator(null);
+  try {
+    for (const mode of ['cdp-pipe', 'input']) {
+      assert.equal(await page.$eval(`#injectMode option[value="${mode}"]`, (node) => node.disabled), true);
+      const output = await page.evaluate((injectMode) => {
+        const generator = window.__CX_PARAMETER_GENERATOR__;
+        const state = { ...generator.state(), injectMode };
+        return { errors: generator.validate(state).errors, command: generator.commandFor(state), config: generator.configFor(state) };
+      }, mode);
+      assert.match(output.errors.join(' '), /cdp-pipe.*input/u);
+      assert.equal(output.command.powershell, '');
+      assert.equal(output.command.cmd, '');
+      assert.equal(output.config, null);
+    }
+    for (const injectMode of ['auto', 'cdp-pipe', 'input', 'dll-proxy']) {
+      const loaded = await page.evaluate((injectMode) => window.__CX_PARAMETER_GENERATOR__.applyLoadedConfig({ injectMode }), injectMode);
+      assert.deepEqual(loaded.applied, [], injectMode);
+      assert.deepEqual(loaded.ignored, ['injectMode'], injectMode);
+    }
+  } finally { await page.close(); }
+});
 
 test('两种宿主均可选择启动时申请管理员权限，默认按需申请', async () => {
   const page = await openGenerator();
@@ -180,6 +276,7 @@ test('原生预设命令和 JSON 均通过已编译入口只读解析', { skip: 
     await page.$eval('#nativePath', (node, path) => { node.value = path; node.dispatchEvent(new Event('input', { bubbles: true })); }, resolve(process.env.CX_NATIVE_HOST_EXE));
     for (const preset of ['silent', 'friendly', 'lazy', 'manual', 'scan', 'path', 'all']) {
       await page.click(`[data-preset="${preset}"]`);
+      await page.select('#injectMode', 'cdp-port');
       const output = await page.evaluate(() => {
         const generator = window.__CX_PARAMETER_GENERATOR__;
         return { ...generator.commandFor(generator.state()), json: document.getElementById('json').value };
@@ -297,6 +394,7 @@ test('原生宿主切换在桌面与手机宽度保持表单和校验提示可�
   const page = await openGenerator();
   try {
     await page.select('#hostType', 'native');
+    await page.$eval('#nativePath', (node) => { node.value = ''; node.dispatchEvent(new Event('input', { bubbles: true })); });
     for (const width of [1280, 390]) {
       await page.setViewport({ width, height: 900 });
       const layout = await page.evaluate(() => ({
@@ -796,7 +894,7 @@ test('生成器覆盖数据保留、自毁快捷键冲突和启动清理范围�
 
   // 删除挂起与自毁仍标记为当前宿主不可执行。
   await page.click('#reset');
-  assert.match(await page.$eval('.capability', (node) => node.textContent), /删除挂起|自毁/u);
+  assert.match(await page.$eval('#exportCapabilityHint', (node) => node.textContent), /删除挂起|自毁/u);
   await page.close();
 });
 
@@ -1099,7 +1197,7 @@ test('两种宿主可导出 --dpi-aware 与 Node 静默控制台，原生宿主�
     assert.equal(parseHostArgs(outputs.node.args).hideConsole, true);
     const hints = await page.evaluate(() => document.body.textContent);
     assert.equal(hints.includes('原生诊断仅提供页面布局采样'), false, 'stale native diagnostics hint must be gone');
-    assert.match(hints, /页面 PNG 截图/u);
+    assert.match(hints, /页面 PNG/u);
   } finally { await page.close(); }
 });
 test('注入方式只在原生宿主导出，auto 不输出该参数', async () => {
@@ -1114,6 +1212,13 @@ test('注入方式只在原生宿主导出，auto 不输出该参数', async () 
     const portCli = await page.$eval('#powershell', (node) => node.value);
     assert.equal(portCli.includes('--inject-mode'), true, '应导出 --inject-mode');
     assert.equal(portCli.includes('cdp-port'), true, '应导出值 cdp-port');
+    assert.equal(JSON.parse(await page.$eval('#json', (node) => node.value)).injectMode, 'cdp-port', 'JSON 与 CLI 必须保留相同的显式注入方式');
+    const loaded = await page.evaluate(() => window.__CX_PARAMETER_GENERATOR__.applyLoadedConfig({ injectMode: 'cdp-port' }));
+    assert.ok(loaded.applied.includes('injectMode'));
+    assert.equal(await page.$eval('#injectMode', (node) => node.value), 'cdp-port');
+    await page.click('#reset');
+    assert.equal(await page.$eval('#injectMode', (node) => node.value), 'auto', '重置恢复沿用宿主默认');
+    await page.select('#injectMode', 'cdp-port');
     await page.select('#hostType', 'node');
     const nodeCli = await page.$eval('#powershell', (node) => node.value);
     assert.equal(nodeCli.includes('--inject-mode'), false, 'Node 宿主不输出该参数');

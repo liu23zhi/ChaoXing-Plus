@@ -40,7 +40,7 @@
     <section class="card">
       <div class="section"><h2>预设</h2><div class="preset-list">
         <button data-preset="silent">绝对静默型（安全子集）</button><button data-preset="friendly">友好交互型</button><button data-preset="lazy">懒人型（普通启动）</button><button data-preset="manual">手动答题型</button><button data-preset="startupClean">启动清理型（设计）</button><button data-preset="scan">仅扫描型</button><button data-preset="path">直接路径型</button><button data-preset="all">全盘扫描型</button>
-      </div><p class="hint">第一阶段导出普通运行、扫描、面板、答题、日志和诊断参数；绝对静默型会为 Node 宿主附加 --hide-console（原生 EXE 无控制台，不附加），配合发布包 start-windows-silent.cmd 可无黑框启动；启动清理型只展示设计配置，启动清理、删除挂起与自毁不会生成可运行命令；内存执行会生成零落盘（不写日志/配置/诊断/报告）的普通可见启动命令。</p></div>
+      </div><p class="hint">默认生成原生单文件 EXE 的普通运行参数。内存执行表示宿主不写日志、配置、诊断或报告，客户端仍正常可见启动。启动清理型只展示设计，本页不导出通用启动清理、删除挂起或自毁参数；原生已有的固定静默场景与这些通用参数不同。</p></div>
       <div class="section"><h2>加载已有配置</h2><div class="grid">
         <div class="field full"><label for="configFile">选择 chaoxing-plus.json</label><input id="configFile" type="file" accept=".json,application/json"><p class="hint">读取本地配置并填回表单（顶层字段与 settings 共享设置）；不上传、不保存文件。</p></div>
         <div class="field full"><button id="loadConfig" type="button">加载配置</button> <span id="loadStatus" class="hint"></span></div>
@@ -56,25 +56,26 @@
       </div></div>
       <div class="section"><h2>配置与数据</h2><div class="grid">
         <div class="field"><label for="configPath">配置文件</label><input id="configPath" placeholder="可选 JSON 路径"></div>
-        <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value="windows\data"><p class="hint" id="dataDirectoryHint">Node 默认 windows\data，以项目根目录为工作目录；原生 EXE 默认 .data，以 EXE 所在目录为工作目录。</p></div>
+        <div class="field"><label for="dataDir">数据目录</label><input id="dataDir" value=".data"><p class="hint" id="dataDirectoryHint">原生 EXE 默认 .data，以 EXE 所在目录为工作目录；Node 兼容入口默认 windows\data，以项目根目录为工作目录。</p></div>
         <div class="field full"><label for="optionsJson">内联 JSON 或 @JSON 文件</label><textarea id="optionsJson" placeholder='例如 {"panelTop":24,"panelWidth":520} 或 @C:\\Tools\\options.json'></textarea><p class="hint">支持 JSON 对象或 @文件路径；独立命令行参数优先级更高。</p></div>
         <div class="field"><label for="report">运行报告</label><input id="report" placeholder="可选路径"></div>
         <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">两种宿主都支持数据生命周期：--no-retain-data 只删除本次运行创建的日志/报告/诊断，--delete-config 只删除显式 --config 文件且不能与 --no-disk-write 同用。两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
         <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、删除挂起和自毁字段会被拒绝；executionMode 只接受 normal 或 memory。</p></div>
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
-        <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="node" selected>Node 开发宿主（需要 Node.js 22+）</option><option value="native">原生单文件 EXE（无需 Node.js）</option></select><p class="hint">选择宿主后再套用预设。两种宿主的能力分别校验，不会自动切换或降级。</p></div>
-        <div class="field full" id="nodeLauncherField"><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
-        <div class="field full" id="nativeLauncherField" hidden><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">请填写已构建的 chaoxing_plus.exe 路径；生成器无法检查文件是否存在。命令直接启动 EXE，不需要 Node.js，并以 EXE 所在目录作为工作目录；相对配置与数据路径均由此解析。原生诊断提供页面布局采样、页面 PNG 截图与自有启动窗口 DPI/BMP；不采集正文、URL 或窗口标题。</p></div>
+        <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="native" selected>原生单文件 EXE（默认，无需 Node.js）</option><option value="node">Node 兼容入口（已冻结，需要 Node.js 22+）</option></select><p class="hint">默认使用原生客户端。Node 入口仅供历史兼容和排障；切换宿主不会自动降级功能。</p></div>
+        <div class="field full" id="nodeLauncherField" hidden><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
+        <div class="field full" id="nativeLauncherField"><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">仓库内默认定位 windows\native-build\release\chaoxing_plus.exe；复制 EXE 后请改为实际路径，单独复制 HTML 时需手动填写。生成器无法检查文件是否存在。命令直接启动 EXE，无需 Node.js，并以 EXE 所在目录为工作目录；相对配置与数据路径均由此解析。原生诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。</p></div>
+        <div class="field full"><p class="capability" id="nativeCapabilityHint">原生能力：普通运行、宿主零写盘、扫描与选择、共享配置、面板、答题设置、日志与诊断已接入。input 方式尚未实现，cdp-pipe 仍是诊断通道，未完成常驻会话与重连；本页不为这两种方式生成启动命令。真实 CEF75 登录后及旧 Windows 环境仍需人工验收。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
         <div class="field full"><label class="check"><input id="elevateOnStart" type="checkbox">启动宿主时先申请管理员权限（--elevate-on-start）</label><p class="hint">默认不提前申请；只在启动所选 CXExam.exe 确实需要管理员权限时请求 UAC。勾选后在扫描、显示 GUI 前申请；已是管理员时直接继续。帮助、自检、仅扫描和 attach 不申请。</p></div>
-        <div class="field full"><label class="check"><input id="hideConsole" type="checkbox">静默启动：隐藏 Node 控制台窗口（--hide-console，仅 Node 宿主）</label><p class="hint">只影响 Node 宿主控制台显示；原生 EXE 是 GUI 子系统，没有控制台。隐藏窗口不等于关闭日志、报告或系统权限提示。</p></div>
+        <div class="field full" id="hideConsoleField" hidden><label class="check"><input id="hideConsole" type="checkbox">静默启动：隐藏 Node 控制台窗口（--hide-console，仅 Node 宿主）</label><p class="hint">只影响 Node 宿主控制台显示；原生 EXE 是 GUI 子系统，没有控制台。隐藏窗口不等于关闭日志、报告或系统权限提示。</p></div>
       </div></div>
       <div class="section"><h2>CEF 注入兼容性</h2><div class="grid">
         <div class="field full"><label for="expectedBrowser">调试端点 Browser 校验文本</label><input id="expectedBrowser" value="Chrome/" placeholder="例如 Chrome/75"><p class="hint">只连接本次启动客户端的本机 CDP 端点；不匹配时中止，避免误连其它浏览器。</p></div>
         <div class="field"><label for="injectStrategy">注入策略</label><select id="injectStrategy"><option value="hybrid" selected>hybrid（Runtime 优先，script 回退）</option><option value="runtime">runtime（CDP 主世界）</option><option value="script">script（DOM script，Runtime 回退）</option></select></div>
-        <div class="field"><label for="injectMode">注入方式 <small>仅原生宿主</small></label><select id="injectMode"><option value="auto" selected>auto</option><option value="cdp-port">cdp-port</option></select></div>
+        <div class="field"><label for="injectMode">注入方式 <small>仅原生宿主</small></label><select id="injectMode"><option value="auto" selected>沿用宿主默认</option><option value="cdp-port">cdp-port（显式指定）</option><option value="cdp-pipe" disabled>cdp-pipe（仅诊断，未完成常驻会话）</option><option value="input" disabled>input（尚未实现）</option></select><p class="hint">沿用默认时不传 --inject-mode，由宿主与选择窗口判定方式；不保证采用端口方式，也不等同于显式 auto。</p></div>
 <div class="field"><label for="injectRetries">注入重试次数 <small>0-5</small></label><input id="injectRetries" type="number" min="0" max="5" step="1" value="2"></div>
         <div class="field"><label for="debugTimeout">调试端点超时（毫秒）</label><input id="debugTimeout" type="number" min="1000" max="120000" value="30000"></div>
         <div class="field"><label for="targetPollInterval">target 轮询间隔（毫秒）</label><input id="targetPollInterval" type="number" min="250" max="10000" value="1000"></div>
@@ -97,7 +98,7 @@
       </div></div>
       <div class="section"><h2>日志与诊断</h2><div class="grid">
         <div class="field full"><div class="checks"><label class="check"><input id="log" type="checkbox" checked>写日志</label><label class="check"><input id="quiet" type="checkbox">不输出控制台</label><label class="check"><input id="diagnose" type="checkbox">诊断</label></div></div>
-        <div class="field"><label for="diagnosticsDir">诊断目录</label><input id="diagnosticsDir" value="windows\\data\\diagnostics"></div>
+        <div class="field"><label for="diagnosticsDir">诊断目录</label><input id="diagnosticsDir" value=".data\chaoxing\diagnostics"><p class="hint">原生默认位于数据目录的 chaoxing\diagnostics 子目录；修改数据目录时跟随调整，手动填写诊断路径后保留。</p></div>
       </div></div>
       <div class="section"><h2>启动清理</h2><div class="grid">
         <div class="field"><label for="wipeOnStart">启动清理</label><label class="check"><input id="wipeOnStart" type="checkbox" disabled>清理宿主自有文件（设计）</label></div>
@@ -114,7 +115,7 @@
         <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox" disabled>退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox" disabled>静默自毁</label></div></div>
         <div class="field full"><p class="hint">当前宿主不可执行：自毁快捷键与行为不会导出为可运行命令；答题快捷键不得与自毁快捷键相同。</p></div>
       </div></div>
-      <div class="section"><h2>能力说明</h2><div class="capability">第一阶段支持普通可审计运行与内存执行（executionMode=memory：宿主侧零落盘，客户端仍正常可见启动）；启动清理、删除挂起和自毁仍为不可执行能力，不会导出可运行参数。</div></div>
+      <div class="section"><h2>能力说明</h2><div class="capability" id="exportCapabilityHint">本页支持导出普通可审计运行与内存执行（executionMode=memory：宿主侧零落盘，客户端仍正常可见启动）；通用启动清理、删除挂起和自毁参数仍不可执行，不会导出可运行参数。原生固定静默场景不在本页导出范围内。</div></div>
     </section>
     <aside class="out">
       <section class="card"><h2>校验结果</h2><div id="status" class="status">配置有效，可以生成普通宿主参数。</div></section>
@@ -148,13 +149,17 @@
   }
   function workingDirectory(s) { return s.hostType === 'native' ? nativeDirectory(s.nativePath) : launcherProjectRoot(s.launcherPath); }
   function defaultDataDir(s) { return s.hostType === 'native' ? '.data' : 'windows\\data'; }
-  function defaultDiagnosticsDir(s) { return defaultDataDir(s) + '\\diagnostics'; }
+  function defaultDiagnosticsDir(s) { return (s.hostType === 'native' ? (s.dataDir || defaultDataDir(s)) + '\\chaoxing' : defaultDataDir(s)) + '\\diagnostics'; }
   function defaultLauncherPath() {
     var pagePath;
     try { pagePath = decodeURIComponent(window.location.pathname || ''); } catch (error) { return ''; }
     pagePath = pagePath.replace(/^\/([a-z]:)/i, '$1');
     var match = pagePath.match(/^(.*)[\\/]windows[\\/]share-file[\\/]parameter-generator\.html$/i);
     return match ? match[1].replace(/[\\/]+$/u, '') + '\\windows\\node-source\\main.mjs' : '';
+  }
+  function defaultNativePath() {
+    var launcher = defaultLauncherPath();
+    return launcher ? launcher.replace(/[\\/]node-source[\\/]main\.mjs$/i, '\\native-build\\release\\chaoxing_plus.exe') : '';
   }
   function parsedInlineConfig(s) {
     var text = String(s.optionsJson || '').trim();
@@ -210,6 +215,7 @@
     setIfEmitted(config, 'elevateOnStart', Boolean(s.elevateOnStart), emitted);
     setIfEmitted(config, 'expectedBrowser', s.expectedBrowser, emitted);
     setIfEmitted(config, 'injectStrategy', s.injectStrategy, emitted);
+    if (s.hostType === 'native') setIfEmitted(config, 'injectMode', s.injectMode, emitted);
     setIfEmitted(config, 'injectRetries', Number(s.injectRetries), emitted);
     setIfEmitted(config, 'injectBlankFrames', Boolean(s.injectBlankFrames), emitted);
     setIfEmitted(config, 'captureConsole', Boolean(s.captureConsole), emitted);
@@ -286,11 +292,12 @@
   }
   var NATIVE_PATH_CAP = 1024;
   var NATIVE_SHORT_CAP = 128;
-  var NATIVE_JSON_KEYS = ('elevateOnStart clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode memoryExec').split(' ');
+  var NATIVE_JSON_KEYS = ('elevateOnStart clientPath port expectedBrowser stopClientOnExit injectBlankFrames captureConsole injectStrategy injectMode injectRetries debugEndpointTimeoutMs targetPollIntervalMs bundleTimeoutMs dpiAwareness dpiAware dataDir diagnosticsDir reportPath assetsDir noDiskWrite retainData deleteConfig diagnose noDiagnose quiet log logFileEnabled panel panelEnabled panelCollapsed panelTop panelRight panelWidth panelTheme answerMode answerKey showAnswerDialog answerThreads answerCountdown answerRetry autoSubmit clientIndex clientFirst scanClients listClients selectClient scanMode scanAll rescan noScanCache ui settings executionMode memoryExec').split(' ');
   function validateNativeJson(parsed, errors, s) {
     Object.keys(parsed).forEach(function (key) {
       var raw = parsed[key];
       if (NATIVE_JSON_KEYS.indexOf(key) < 0) errors.push('原生宿主不接受内联 JSON 字段：' + key + '。');
+      if (key === 'injectMode' && raw !== 'cdp-port') errors.push('本页内联 JSON 的 injectMode 仅支持显式 cdp-port；其他方式请沿用宿主默认或查看能力说明。');
       if (key === 'deleteConfig' && raw === true && !(s && s.configPath)) errors.push('原生宿主内联 JSON 的 deleteConfig 要求同时使用 --config 指定外部配置。');
       if (key === 'deleteConfig' && raw === true && s && s.noDiskWrite) errors.push('原生宿主 --no-disk-write 不能与内联 JSON 的 deleteConfig 同时使用。');
       if (['panelTop', 'panelRight', 'panelWidth', 'clientIndex', 'port', 'injectRetries', 'debugEndpointTimeoutMs', 'targetPollIntervalMs', 'bundleTimeoutMs', 'answerThreads', 'answerCountdown', 'answerRetry'].indexOf(key) >= 0 && (typeof raw !== 'number' || !Number.isInteger(raw))) errors.push('原生宿主内联 JSON 的 ' + key + ' 必须是整数。');
@@ -385,6 +392,7 @@
     if (s.wipeInterval !== '30') keys.wipeRuntimeIntervalSec = true;
     if (s.expectedBrowser !== 'Chrome/') keys.expectedBrowser = true;
     if (s.injectStrategy !== 'hybrid') keys.injectStrategy = true;
+    if (s.hostType === 'native' && s.injectMode === 'cdp-port') keys.injectMode = true;
     if (s.injectRetries !== '2') keys.injectRetries = true;
     if (!s.injectBlankFrames) keys.injectBlankFrames = true;
     if (!s.captureConsole) keys.captureConsole = true;
@@ -508,6 +516,7 @@
     if (s.noDiskWrite && (s.log || s.diagnose || s.report)) errors.push('--no-disk-write 与日志、诊断或报告冲突。');
     if (s.noDiskWrite && s.deleteConfig) errors.push('--no-disk-write 不能与 --delete-config 同时使用（禁止磁盘写入时不能删除外部配置）。');
     if (s.hostType === 'native' && s.hideConsole) errors.push('原生宿主没有控制台窗口，不支持 --hide-console。');
+    if (s.hostType === 'native' && s.injectMode && ['auto', 'cdp-port'].indexOf(s.injectMode) < 0) errors.push('本页仅导出沿用宿主默认或 cdp-port 方式；cdp-pipe 常驻会话未完成，input 尚未实现。');
     if (s.hostType === 'native' && s.dpiAware && s.noDiskWrite) errors.push('原生宿主 --dpi-aware 不能与 --no-disk-write 同时使用。');
     if (s.optionsJson) {
       var input = s.optionsJson.trim();
@@ -602,25 +611,35 @@
     el('powershell').value = result.errors.length ? '' : command.powershell; el('cmd').value = result.errors.length ? '' : command.cmd; el('json').value = result.errors.length || !jsonConfig ? '' : JSON.stringify(jsonConfig, null, 2);
     el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：' + (String(s.executionMode || 'normal') === 'memory' ? '内存执行（宿主侧零落盘，客户端正常可见）' : '普通可审计运行'), '注入：' + s.injectStrategy + ' / 重试 ' + s.injectRetries + ' / Browser ' + s.expectedBrowser, '注入超时：端点 ' + s.debugTimeout + 'ms / target ' + s.targetPollInterval + 'ms / bundle ' + s.bundleTimeout + 'ms', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理：' + (requestedWipeOptions(s).length ? '设计配置（当前宿主不可执行） / ' + s.wipePolicy + ' / 启动重试 ' + s.wipeRetries : '当前宿主不可执行'), '自毁：当前宿主不可执行'].join('\n');
     var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '启动清理、删除挂起和自毁当前不可执行；启动清理型仅展示设计，不会导出命令或 JSON。内存执行会生成零落盘普通可见启动命令。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
-    el('summary').textContent = '宿主：' + (s.hostType === 'native' ? '原生单文件 EXE' : 'Node 开发宿主') + '\n工作目录：' + (workingDirectory(s) || '请填写有效路径') + '\n' + el('summary').textContent;
-    if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；数据生命周期按 --config/--no-disk-write 规则执行，诊断仅提供页面布局采样。目标 Windows 和真实 CEF75 环境仍需验收。</li>');
+    el('summary').textContent = '宿主：' + (s.hostType === 'native' ? '原生单文件 EXE' : 'Node 兼容入口（已冻结）') + '\n工作目录：' + (workingDirectory(s) || '请填写有效路径') + '\n' + el('summary').textContent;
+    if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。它与 Node 诊断格式不同；真实 CEF75 与旧 Windows 环境仍需验收。</li>');
   }
   function escapeHtml(text) { return String(text).replace(/[&<>"']/g, function (char) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]; }); }
   var defaults = { elevateOnStart: false, scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: 'windows\\data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, expectedBrowser: 'Chrome/', injectStrategy: 'hybrid', injectRetries: '2', debugTimeout: '30000', targetPollInterval: '1000', bundleTimeout: '120000', injectBlankFrames: true, captureConsole: true, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: 'windows\\data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
   var selectedPreset = '';
-  var lastHostType = 'node';
+  defaults.nativePath = defaultNativePath();
+  defaults.injectMode = 'auto';
+  defaults.dataDir = '.data';
+  defaults.diagnosticsDir = '.data\\chaoxing\\diagnostics';
+  var lastHostType = 'native';
+  var lastDataDir = defaults.dataDir;
   function updateHostMode() {
     var next = value('hostType');
+    var previousDiagnosticsDir = defaultDiagnosticsDir({ hostType: lastHostType, dataDir: lastDataDir });
     if (next !== lastHostType) {
       if (value('dataDir') === defaultDataDir({ hostType: lastHostType })) setValue('dataDir', defaultDataDir({ hostType: next }));
-      if (value('diagnosticsDir') === defaultDiagnosticsDir({ hostType: lastHostType })) setValue('diagnosticsDir', defaultDiagnosticsDir({ hostType: next }));
+      if (next === 'native') setValue('hideConsole', false);
       lastHostType = next;
     }
+    if (value('diagnosticsDir') === previousDiagnosticsDir) setValue('diagnosticsDir', defaultDiagnosticsDir({ hostType: next, dataDir: value('dataDir') }));
+    lastDataDir = value('dataDir');
     el('nodeLauncherField').hidden = next === 'native';
     el('nativeLauncherField').hidden = next !== 'native';
+    el('hideConsoleField').hidden = next === 'native';
+    el('nativeCapabilityHint').hidden = next !== 'native';
   }
   function applyDefaults() {
-    Object.keys(defaults).forEach(function (id) { if (id !== 'launcherPath') setValue(id, defaults[id]); });
+    Object.keys(defaults).forEach(function (id) { if (id !== 'launcherPath' && id !== 'nativePath') setValue(id, defaults[id]); });
     var current = state();
     setValue('dataDir', defaultDataDir(current));
     setValue('diagnosticsDir', defaultDiagnosticsDir(current));
@@ -638,7 +657,7 @@
   var CONFIG_FIELD_MAP = {
     clientPath: 'clientPath', clientIndex: 'clientIndex', scanMode: 'scanMode', ui: 'ui',
     rescan: 'rescan', noScanCache: 'noScanCache', dataDir: 'dataDir', expectedBrowser: 'expectedBrowser',
-    injectStrategy: 'injectStrategy', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames',
+    injectStrategy: 'injectStrategy', injectMode: 'injectMode', injectRetries: 'injectRetries', injectBlankFrames: 'injectBlankFrames',
     captureConsole: 'captureConsole', debugEndpointTimeoutMs: 'debugTimeout', targetPollIntervalMs: 'targetPollInterval',
     bundleTimeoutMs: 'bundleTimeout', noDiskWrite: 'noDiskWrite', retainData: 'retainData',
     deleteConfig: 'deleteConfig', quiet: 'quiet', logFileEnabled: 'log', log: 'log', diagnose: 'diagnose',
@@ -667,6 +686,7 @@
     'common.settings.windows-no-disk-write': 'noDiskWrite'
   };
   function configValueToForm(field, value) {
+    if (field === 'injectMode' && value !== 'cdp-port') return undefined;
     if (field === 'panelExpanded' || field === 'autoSubmit' || field === 'showAnswerDialog' || field === 'log' || field === 'noDiskWrite') {
       if (typeof value !== 'boolean') return undefined;
       if (field === 'panelExpanded' || field === 'autoSubmit') return !value;

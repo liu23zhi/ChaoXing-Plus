@@ -20,6 +20,8 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | 图标 | [assets/app-icon.ico](assets/app-icon.ico)：两种 EXE 共用图标；[assets/app-icon.png](assets/app-icon.png)：原始 PNG |
 | 配置工具 | [config.example.json](config.example.json)：两种宿主可只读解析的模板；[parameter-generator.html](parameter-generator.html)：离线参数生成器 |
 
+参数生成器默认使用原生单文件 EXE，在仓库中自动填写 `windows/native-build/release/chaoxing_plus.exe`。复制 EXE 后请填写实际绝对路径；预设与重置会保留已选原生路径。Node 选项仅作冻结的兼容入口，未完成的原生注入方式会明确标为不可用。页面不联网、不执行命令、不保存输入。
+
 ## 构建入口
 
 以下命令从仓库根执行。构建会更新相应产物，自检与版本命令见各宿主目录说明。
