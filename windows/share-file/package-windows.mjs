@@ -282,10 +282,25 @@ async function main() {
     }
   }
   // 可选：把 winmm 代理随包发布，便于 --install-proxy 直接找到源文件。
+  let proxyDir = '';
   {
     const proxySource = path.join(repoRoot, 'windows', 'native-build', 'hook', 'winmm.dll');
     if (includeNative && await pathExists(proxySource)) {
       await fs.copyFile(proxySource, path.join(packageRoot, 'winmm-proxy.dll'));
+    }
+    // 选择窗口按 <host>\hook\<carrier>.dll 判定 dll-proxy 是否可用；
+    // 只放 winmm-proxy.dll 不够（文件名不是载体名），必须整目录随包。
+    const hookSource = path.join(repoRoot, 'windows', 'native-build', 'hook');
+    if (includeNative && await pathExists(hookSource)) {
+      const dlls = (await fs.readdir(hookSource, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && /\.dll$/iu.test(entry.name))
+        .map((entry) => entry.name);
+      if (dlls.length) {
+        const hookTarget = path.join(packageRoot, 'hook');
+        await fs.mkdir(hookTarget, { recursive: true });
+        for (const dll of dlls) await fs.copyFile(path.join(hookSource, dll), path.join(hookTarget, dll));
+        proxyDir = 'hook';
+      }
     }
   }
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
@@ -329,6 +344,7 @@ async function main() {
         : { node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' })
       : { native: 'chaoxing_plus.exe' },
     assetsDir: options.withNode ? 'dist-windows' : '',
+    proxyDir,
     runtime: runtimeRelative,
     payloadFiles: files.length,
     verifier: 'verify-release.mjs'

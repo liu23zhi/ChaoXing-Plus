@@ -2,7 +2,8 @@
 param(
     [string]$OutputDirectory,
     [switch]$SkipAssetCopy,
-    [switch]$BuildTests
+    [switch]$BuildTests,
+    [switch]$SkipProxy
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
@@ -117,6 +118,26 @@ $release = Join-Path $OutputDirectory 'release'
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 $releaseExe = Join-Path $release 'chaoxing_plus.exe'
 Copy-Item -LiteralPath $hostExe -Destination $releaseExe -Force
+# dll-proxy is offered only when <host>\hook\<carrier>.dll exists, so the
+# standalone release must ship the proxy DLLs; otherwise the selection window
+# greys out both cdp-port (packed clients) and dll-proxy.
+$proxyScript = Join-Path $root 'windows\hook-source\build-proxy.ps1'
+$hookDir = Join-Path $root 'windows\native-build\hook'
+$proxyPresent = $false
+if (Test-Path -LiteralPath $hookDir) {
+    $proxyPresent = [bool](Get-ChildItem -LiteralPath $hookDir -Filter '*.dll' -File | Select-Object -First 1)
+}
+if (-not $SkipProxy -and -not $proxyPresent -and (Test-Path -LiteralPath $proxyScript)) {
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $proxyScript | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Proxy DLL build failed. Run windows\hook-source\build-proxy.ps1 or pass -SkipProxy.' }
+}
+if (Test-Path -LiteralPath $hookDir) {
+    $releaseHook = Join-Path $release 'hook'
+    New-Item -ItemType Directory -Path $releaseHook -Force | Out-Null
+    Get-ChildItem -LiteralPath $hookDir -Filter '*.dll' -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $releaseHook $_.Name) -Force
+    }
+}
 Get-Item -LiteralPath $hostExe,$releaseExe | Select-Object FullName,Length
 # Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
 # and build must not depend on PowerShell module auto-loading.

@@ -10,6 +10,13 @@ typedef enum CX_SELECTION_STATUS {
     CX_SELECTION_SCAN_ALL = 2
 } CX_SELECTION_STATUS;
 
+/* 注入方式不可用的原因位：选择窗口用它显示灰化理由，测试也据此断言。 */
+#define CX_SELECTION_REASON_PORT_PACKED 0x1u
+#define CX_SELECTION_REASON_PROXY_ARCH 0x2u
+#define CX_SELECTION_REASON_PROXY_WRITABLE 0x4u
+#define CX_SELECTION_REASON_PROXY_NO_IMPORT 0x8u
+#define CX_SELECTION_REASON_PROXY_NO_DLL 0x10u
+
 typedef struct CX_SELECTION_PROBE {
     DWORD itemCount;
     LONG selectedIndex;
@@ -20,6 +27,8 @@ typedef struct CX_SELECTION_PROBE {
     BOOL classIconsMatch;
     BOOL windowIconsMatch;
     BOOL noticeShown;
+    BOOL statusControlPresent;
+    DWORD statusReasons;
     DWORD layoutScale;
     DWORD injectOptionCount;
     LONG injectSelectedIndex;
@@ -41,6 +50,12 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
 /* 选择窗口里用户挑的注入方式：auto / cdp-port / dll-proxy。 */
 const WCHAR *cx_selection_inject_mode(void);
 const WCHAR *cx_selection_proxy_carrier(void);
+
+/* 按客户端 PE 判定注入方式可用性：injectDisabledMask 位 1=cdp-port、位 2=dll-proxy，
+   carrierDisabledMask 位 0 保留给"自动"，位 i+1 对应第 i 个代理载体。
+   reasons 返回 CX_SELECTION_REASON_* 组合。默认由选择窗口调用，测试也直接调用。 */
+BOOL cx_selection_client_caps(const WCHAR *clientPath, DWORD *injectDisabledMask,
+                              DWORD *carrierDisabledMask, DWORD *reasons);
 
 /* Creates the same controls without showing a window or opening a file dialog. */
 BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates,

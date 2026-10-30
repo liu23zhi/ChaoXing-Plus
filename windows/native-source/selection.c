@@ -33,7 +33,7 @@ typedef struct SELECTION_WINDOW {
     DWORD outCap;
     WCHAR *error;
     DWORD errorCap;
-    HWND window, heading, columns, list, browse, scanAll, choose, cancel, injectLabel, injectCombo, carrierLabel, carrierCombo;
+    HWND window, heading, columns, list, browse, scanAll, choose, cancel, injectLabel, injectCombo, carrierLabel, carrierCombo, status;
     const WCHAR *notice;
     HFONT font;
     BOOL finished;
@@ -42,6 +42,7 @@ typedef struct SELECTION_WINDOW {
     WCHAR proxyCarrier[16];
     DWORD injectDisabledMask;
     DWORD carrierDisabledMask;
+    DWORD statusReasons;
     int lastInjectIndex;
     int lastCarrierIndex;
 } SELECTION_WINDOW;
@@ -150,6 +151,7 @@ static BOOL selection_fill(SELECTION_WINDOW *state) {
 #define SELECTION_MAX_CARRIERS 16
 static WCHAR selection_carrier_names[SELECTION_MAX_CARRIERS][32];
 static int selection_carrier_count;
+static int selection_carriers_loaded;
 
 /* 直接扫描宿主目录里的代理 DLL（<host>\hook\*.dll 与 <host>\*.dll），不再写死载体名单。 */
 
@@ -214,11 +216,19 @@ static void selection_load_carriers(void) {
         } while (FindNextFileW(find, &data));
         FindClose(find);
     }
+    selection_carriers_loaded = 1;
+}
+
+/* 载体列表既要供下拉框使用，也要供能力判定使用；首次用到时扫描一次即可。 */
+static void selection_ensure_carriers(void) {
+    if (selection_carriers_loaded) return;
+    selection_load_carriers();
 }
 
 typedef struct SELECTION_CAPS {
     BOOL portOk;        /* 是否支持命令行开关（未加壳） */
     DWORD carrierMask;  /* 位 0..6 对应 selection_carrier_names */
+    DWORD reasons;      /* 灰化原因：CX_SELECTION_REASON_* 组合 */
 } SELECTION_CAPS;
 
 static BOOL selection_pe_section(const WCHAR *path, const char *sectionName) {
@@ -424,17 +434,77 @@ static BOOL selection_pe_packed(const WCHAR *path, char *reason, int reasonCap) 
 static SELECTION_CAPS selection_client_caps(const WCHAR *path) {
     SELECTION_CAPS caps;
     int i;
-    caps.portOk = path && *path ? !selection_pe_packed(path, NULL, 0) : TRUE;
-    caps.carrierMask = 0;
-    if (!selection_client_is_x86(path) || !selection_dir_writable(path)) return caps;
-    for (i = 0; i < selection_carrier_count; ++i) {
-        WCHAR dll[32];
-        int k = 0;
-        while (selection_carrier_names[i][k] && k < 24) { dll[k] = selection_carrier_names[i][k]; ++k; }
-        dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
-        if (selection_pe_imports(path, dll) && selection_proxy_source(i)) caps.carrierMask |= (1u << i);
+    ZeroMemory(&caps, sizeof(caps));
+    caps.portOk = TRUE;
+    if (!path || !*path) return caps;
+    /* 加壳客户端的 CEF 会忽略宿主追加的调试开关（4.3.0.4 实测），端口通道因此灰化。 */
+    caps.portOk = !selection_pe_packed(path, NULL, 0);
+    if (!caps.portOk) caps.reasons |= CX_SELECTION_REASON_PORT_PACKED;
+    if (!selection_client_is_x86(path)) { caps.reasons |= CX_SELECTION_REASON_PROXY_ARCH; return caps; }
+    if (!selection_dir_writable(path)) { caps.reasons |= CX_SELECTION_REASON_PROXY_WRITABLE; return caps; }
+    {
+        BOOL imported = FALSE, dllForImport = FALSE;
+        for (i = 0; i < selection_carrier_count; ++i) {
+            WCHAR dll[32];
+            int k = 0;
+            while (selection_carrier_names[i][k] && k < 24) { dll[k] = selection_carrier_names[i][k]; ++k; }
+            dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+            if (!selection_pe_imports(path, dll)) continue;
+            imported = TRUE;
+            if (!selection_proxy_source(i)) continue;
+            caps.carrierMask |= (1u << i);
+            dllForImport = TRUE;
+        }
+        if (!imported) caps.reasons |= CX_SELECTION_REASON_PROXY_NO_IMPORT;
+        else if (!dllForImport) caps.reasons |= CX_SELECTION_REASON_PROXY_NO_DLL;
     }
     return caps;
+}
+
+BOOL cx_selection_client_caps(const WCHAR *clientPath, DWORD *injectDisabledMask,
+                              DWORD *carrierDisabledMask, DWORD *reasons) {
+    SELECTION_CAPS caps;
+    DWORD inject = 0, carrier = 0;
+    int ci;
+    selection_ensure_carriers();
+    caps = selection_client_caps(clientPath);
+    if (!caps.portOk) inject |= 0x2u;
+    if (caps.carrierMask == 0) inject |= 0x4u;
+    for (ci = 0; ci < selection_carrier_count; ++ci) {
+        if (!(caps.carrierMask & (1u << ci))) carrier |= (1u << (ci + 1));
+    }
+    if (injectDisabledMask) *injectDisabledMask = inject;
+    if (carrierDisabledMask) *carrierDisabledMask = carrier;
+    if (reasons) *reasons = caps.reasons;
+    return TRUE;
+}
+
+/* 把原因位翻成界面文案；多项用全角分号连接，全部可用时返回空串。 */
+static void selection_reason_text(DWORD reasons, WCHAR *out, DWORD cap) {
+    static const DWORD bits[] = {
+        CX_SELECTION_REASON_PORT_PACKED,
+        CX_SELECTION_REASON_PROXY_ARCH,
+        CX_SELECTION_REASON_PROXY_WRITABLE,
+        CX_SELECTION_REASON_PROXY_NO_IMPORT,
+        CX_SELECTION_REASON_PROXY_NO_DLL
+    };
+    static const WCHAR *const texts[] = {
+        L"端口注入不可用：客户端已加壳，命令行调试开关会被忽略",
+        L"DLL 代理不可用：客户端不是 x86 程序",
+        L"DLL 代理不可用：客户端目录不可写",
+        L"DLL 代理不可用：客户端没有导入可用代理载体",
+        L"DLL 代理不可用：未找到代理 DLL（放到 hook\\winmm.dll 后重开）"
+    };
+    DWORD used = 0;
+    int i, k;
+    if (!out || cap < 2) return;
+    out[0] = 0;
+    for (i = 0; i < (int)(sizeof(bits) / sizeof(bits[0])); ++i) {
+        if (!(reasons & bits[i])) continue;
+        if (used && used + 2 < cap) { out[used++] = L'；'; out[used] = 0; }
+        for (k = 0; texts[i][k] && used + 1 < cap; ++k) out[used++] = texts[i][k];
+        out[used] = 0;
+    }
 }
 static void selection_layout(SELECTION_WINDOW *state) {
     RECT rect;
@@ -449,6 +519,7 @@ static void selection_layout(SELECTION_WINDOW *state) {
     MoveWindow(state->list, margin, listTop, width - selection_scale(36), height - bottomOffset, TRUE);
     {
         int injectTop = buttonTop - selection_scale(44);
+        MoveWindow(state->status, margin, injectTop - selection_scale(24), width - selection_scale(36), selection_scale(20), TRUE);
         MoveWindow(state->injectLabel, margin, injectTop + selection_scale(6), selection_scale(96), selection_scale(24), TRUE);
         MoveWindow(state->injectCombo, margin + selection_scale(110), injectTop, selection_scale(210), selection_scale(200), TRUE);
         SendMessageW(state->injectCombo, CB_SETDROPPEDWIDTH, (WPARAM)selection_scale(300), 0);
@@ -473,19 +544,12 @@ static HWND selection_control(SELECTION_WINDOW *state, DWORD style, const WCHAR 
 /* 依据当前选中的客户端刷新两个下拉框的可选状态（0 位表示"自动"，永远可用）。 */
 static void selection_apply_caps(SELECTION_WINDOW *state) {
     LRESULT index = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
-    SELECTION_CAPS caps;
+    DWORD reasons = 0;
+    WCHAR reasonText[320];
     if (index == LB_ERR || !state->candidates || (DWORD)index >= state->candidates->count) return;
-    caps = selection_client_caps(state->candidates->items[index].path);
-    state->injectDisabledMask = 0;
-    if (!caps.portOk) state->injectDisabledMask |= 0x2u;           /* cdp-port */
-    if (caps.carrierMask == 0) state->injectDisabledMask |= 0x4u;  /* dll-proxy */
-    state->carrierDisabledMask = 0;                                /* bit0（自动）永远可用 */
-    {
-        int ci;
-        for (ci = 0; ci < 7; ++ci) {
-            if (!(caps.carrierMask & (1u << ci))) state->carrierDisabledMask |= (1u << (ci + 1));
-        }
-    }
+    cx_selection_client_caps(state->candidates->items[index].path, &state->injectDisabledMask,
+                             &state->carrierDisabledMask, &reasons);
+    state->statusReasons = reasons;
     /* 当前选择若被禁用，回退到自动 */
     {
         LRESULT inj = SendMessageW(state->injectCombo, CB_GETCURSEL, 0, 0);
@@ -533,6 +597,12 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
     EnableWindow(state->carrierCombo, !(state->injectDisabledMask & 0x2u) || (state->injectDisabledMask & 0x4u) == 0);
     InvalidateRect(state->injectCombo, NULL, TRUE);
     InvalidateRect(state->carrierCombo, NULL, TRUE);
+    /* 灰化必须给出原因：否则用户只看到"两种注入方式都不可用"却无从修复。 */
+    selection_reason_text(reasons, reasonText, 320);
+    if (state->status) {
+        SetWindowTextW(state->status, reasonText);
+        ShowWindow(state->status, reasonText[0] ? SW_SHOW : SW_HIDE);
+    }
 }
 static BOOL selection_accept(SELECTION_WINDOW *state, const WCHAR *path) {
     CX_DISCOVERY_RESULT checked;
@@ -611,6 +681,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         } else { selection_error(state, L"无法创建注入方式选择控件。"); return -1; }
         state->carrierLabel = selection_control(state, SS_LEFT, L"STATIC", L"代理载体：", -1);
         state->carrierCombo = selection_control(state, CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, L"COMBOBOX", L"", SELECTION_CARRIER);
+        state->status = selection_control(state, SS_LEFT | SS_NOPREFIX, L"STATIC", L"", -1);
         if (state->carrierLabel && state->carrierCombo) {
             int ci;
             SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)L"自动（按导入表）");
@@ -624,6 +695,8 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
             lstrcpynW(state->proxyCarrier, L"auto", 16);
             EnableWindow(state->carrierCombo, FALSE);
         } else { selection_error(state, L"无法创建代理载体选择控件。"); return -1; }
+        if (!state->status) { selection_error(state, L"无法创建注入方式提示控件。"); return -1; }
+        ShowWindow(state->status, SW_HIDE);
         selection_apply_caps(state);
         selection_layout(state); return 0;
     }
@@ -708,7 +781,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
 }
 
 static BOOL selection_create(SELECTION_WINDOW *state) {
-    selection_load_carriers();
+    selection_ensure_carriers();
     WNDCLASSEXW windowClass;
     RECT work;
     int width = selection_scale(960), height = selection_scale(510);
@@ -824,6 +897,8 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->injectSelectedIndex = IsWindow(state.injectCombo) ? (LONG)SendMessageW(state.injectCombo, CB_GETCURSEL, 0, 0) : -1;
     probe->carrierOptionCount = IsWindow(state.carrierCombo) ? (DWORD)SendMessageW(state.carrierCombo, CB_GETCOUNT, 0, 0) : 0;
     probe->carrierSelectedIndex = IsWindow(state.carrierCombo) ? (LONG)SendMessageW(state.carrierCombo, CB_GETCURSEL, 0, 0) : -1;
+    probe->statusControlPresent = IsWindow(state.status) != 0;
+    probe->statusReasons = state.statusReasons;
     if (IsWindow(state.carrierCombo)) {
         WCHAR firstCarrier[64];
         LRESULT length = SendMessageW(state.carrierCombo, CB_GETLBTEXTLEN, 0, 0);

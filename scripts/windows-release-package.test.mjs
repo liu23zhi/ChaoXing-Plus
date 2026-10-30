@@ -436,6 +436,15 @@ test('发布包默认只打原生 EXE（不带 Node 闭包/启动器/运行时�
   assert.deepEqual(info.entrypoints, { native: 'chaoxing_plus.exe' });
   assert.equal(info.assetsDir, '');
   assert.equal(info.runtime, '');
+  // 代理 DLL 必须整目录随包：选择窗口按 <宿主>\hook\<carrier>.dll 判定 dll-proxy 可用。
+  const builtHook = path.join(root, 'windows', 'native-build', 'hook', 'winmm.dll');
+  if (await fs.stat(builtHook).catch(() => null)) {
+    assert.equal(files.includes('hook/winmm.dll'), true, '默认包缺少 hook/winmm.dll，dll-proxy 会被误灰化');
+    assert.equal(files.includes('winmm-proxy.dll'), true, '包根仍应保留 --install-proxy 默认源');
+    assert.equal(info.proxyDir, 'hook');
+  } else {
+    assert.equal(info.proxyDir, '');
+  }
   const verify = spawnSync(process.execPath, [path.join(packageRoot, 'verify-release.mjs')], {
     encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: packageRoot
   });

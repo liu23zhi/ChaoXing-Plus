@@ -8,6 +8,7 @@ static DWORD failedChecks;
 static WCHAR errorText[512];
 static WCHAR selectedPath[CX_DISCOVERY_MAX_PATH];
 static WCHAR fixturePath[CX_DISCOVERY_MAX_PATH];
+static WCHAR capsPath[CX_DISCOVERY_MAX_PATH];
 static UINT_PTR chooseTimer;
 static BOOL requestFullScan;
 static DWORD progressReports;
@@ -98,6 +99,7 @@ static void probe_tests(void) {
     check(probe.carrierOptionCount >= 1 && probe.carrierAutoPresent,
           "carrier combo begins with the automatic import-table option");
     check(probe.carrierSelectedIndex == 0, "carrier defaults to auto");
+    check(probe.statusControlPresent, "the injection hint control exists for greyed modes");
     check(probe.injectComboWidth >= 120 && probe.injectComboHeight >= 16, "injection combo has a usable size");
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
     check(probe.classIconsMatch, "selection class icons match the embedded application icon");
@@ -259,10 +261,20 @@ void WINAPI SelectionTestMain(void) {
     BOOL visible = argv && argc == 2 && lstrcmpW(argv[1], L"--show-cancel") == 0;
     BOOL progressMode = argv && argc == 2 && lstrcmpW(argv[1], L"--scan-progress") == 0;
     BOOL choose = argv && argc == 3 && lstrcmpW(argv[1], L"--choose") == 0;
+    BOOL capsMode = argv && argc == 3 && lstrcmpW(argv[1], L"--caps") == 0;
     requestFullScan = argv && argc == 2 && lstrcmpW(argv[1], L"--request-scan-all") == 0;
     if (choose) lstrcpynW(fixturePath, argv[2], CX_DISCOVERY_MAX_PATH);
+    if (capsMode) lstrcpynW(capsPath, argv[2], CX_DISCOVERY_MAX_PATH);
     if (argv) LocalFree(argv);
-    if (requestFullScan) {
+    if (capsMode) {
+        DWORD inject = 0, carrier = 0, reasons = 0;
+        char line[192];
+        BOOL ok = capsPath[0] && cx_selection_client_caps(capsPath, &inject, &carrier, &reasons);
+        wsprintfA(line, "caps: injectMask=0x%lX carrierMask=0x%lX reasons=0x%lX\n",
+                  (unsigned long)inject, (unsigned long)carrier, (unsigned long)reasons);
+        output(line);
+        check(ok, "client capability probe answers for the requested client");
+    } else if (requestFullScan) {
         CX_DISCOVERY_RESULT empty;
         CX_SELECTION_STATUS status;
         ZeroMemory(&empty, sizeof(empty));
