@@ -48,8 +48,6 @@ test('compiled native options honor scan aliases and layered client selection', 
 });
 
 const restrictedConfigurations = [
-  '{"wipeOwnedFilesOnStart":false}',
-  '{"selfDestructKey":"F8"}',
   '{"settings":{"common.settings.windows-execution-mode":"memory"}}',
   '{"settings":{"common.settings.windows-delete_suspend":true}}',
   '{"settings":{"COMMON.SETTINGS.WINDOWS-memory_exec":true}}',
@@ -95,11 +93,11 @@ test('compiled native memory execution mode is supported and forces zero-disk-wr
   assert.equal(capabilities.status, 0, capabilities.stdout + capabilities.stderr);
   const parsed = JSON.parse(capabilities.stdout);
   assert.equal(parsed.executionMode, 'memory');
-  assert.deepEqual(parsed.executionModes, ['normal', 'memory']);
+  assert.deepEqual(parsed.executionModes, ['normal', 'memory', 'delete-suspend']);
   assert.equal(parsed.memory, true);
-  const unsupported = invoke('--execution-mode', 'delete-suspend', '--quiet');
-  assert.equal(unsupported.status, 2);
-  assert.match(unsupported.stdout, /normal or memory|not supported/u);
+  const suspend = invoke('--execution-mode', 'delete-suspend', '--capabilities');
+  assert.equal(suspend.status, 0, suspend.stdout + suspend.stderr);
+  assert.equal(JSON.parse(suspend.stdout).executionMode, 'delete-suspend');
 });
 
 test('compiled native ordinary JSON and disabled optional capability values remain valid', {

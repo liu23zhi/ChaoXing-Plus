@@ -38,8 +38,8 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(host, /WriteFile\(out, utf8/);
   assert.match(options, /cx_valid_mode\(const WCHAR \*value\)[\s\S]{0,160}L"memory"/u);
   assert.match(options, /cx_json_execution_mode\(CX_OPTIONS \*o/u);
-  assert.match(options, /delete-suspend\/wipe\/self-destruct flags are not supported by the native host/);
-  assert.match(host, /executionModeMemory \? "memory" : "normal"/u);
+  assert.match(options, /delete-suspend\/wipe\/self-destruct flags are not supported in shared Windows settings/);
+  assert.match(host, /deleteSuspend \? "delete-suspend"/u);
 
   assert.match(build, /\/NODEFAULTLIB/);
   assert.match(build, /\/MACHINE:X86/);
@@ -177,6 +177,9 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.host, 'native');
   assert.equal(nativeCapabilities.embeddedResources, true);
   assert.equal(nativeCapabilities.embeddedResourceCount, 5);
+  assert.equal(nativeCapabilities.deleteSuspend, true);
+  assert.equal(nativeCapabilities.wipe, true);
+  assert.equal(nativeCapabilities.selfDestruct, true);
   assert.equal(nativeCapabilities.embeddedProxy, true);
   assert.equal(nativeCapabilities.nativeSelection, true);
   assert.equal(nativeCapabilities.highDpiUi, true);
@@ -200,9 +203,15 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(config.status, 0, config.stderr || `config exited with ${config.status}`);
   assert.equal(JSON.parse(config.stdout)['common.settings.windows-no-disk-write'], true);
 
-  const unsupported = run('--wipe-owned-files-on-start');
-  assert.equal(unsupported.status, 2, unsupported.stderr || `unsupported option exited with ${unsupported.status}`);
-  assert.match(unsupported.stdout, /not supported/);
+  const invalidWipe = run('--wipe-owned-files-on-start', '--wipe-retries', '0', '--version');
+  assert.equal(invalidWipe.status, 2, invalidWipe.stdout);
+  assert.match(invalidWipe.stdout, /outside its allowed range|wipe-retries/u);
+  const acceptedWipe = run('--wipe-owned-files-on-start', '--wipe-retries', '3', '--version');
+  assert.equal(acceptedWipe.status, 0, acceptedWipe.stdout);
+  const acceptedSelfDestruct = run('--self-destruct-key', 'Ctrl+Shift+D', '--self-destruct-delay', '100', '--version');
+  assert.equal(acceptedSelfDestruct.status, 0, acceptedSelfDestruct.stdout);
+  const acceptedSuspend = run('--execution-mode', 'delete-suspend', '--version');
+  assert.equal(acceptedSuspend.status, 0, acceptedSuspend.stdout);
 
   // 原生宿主现已支持数据生命周期；delete-config 仍要求显式 --config。
   const retained = run('--print-effective-config', '--no-retain-data');
