@@ -244,7 +244,10 @@ export async function ensureConfigFile(rootDir, filePath, logger = () => {}) {
     const examplePath = path.join(rootDir, 'windows', 'share-file', 'config.example.json');
     let template;
     try {
-      template = JSON.parse(await fs.readFile(examplePath, 'utf8'));
+      const text = typeof globalThis.__CX_EMBEDDED_CONFIG_EXAMPLE__ === 'string'
+        ? globalThis.__CX_EMBEDDED_CONFIG_EXAMPLE__
+        : await fs.readFile(examplePath, 'utf8');
+      template = JSON.parse(text);
     } catch {
       template = {};
     }

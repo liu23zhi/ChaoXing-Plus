@@ -49,11 +49,11 @@ import {
 
 const hostDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(hostDirectory, '..', '..');
-const hostScriptPath = fileURLToPath(import.meta.url);
+const hostScriptPath = globalThis.__CX_NODE_SEA__ ? '' : fileURLToPath(import.meta.url);
 
 function usage() {
   return [
-    '用法：node windows/node-source/main.mjs [选项]',
+    globalThis.__CX_NODE_SEA__ ? '用法：chaoxing_plus_node.exe [选项]' : '用法：node windows/node-source/main.mjs [选项]',
     '',
     '  --config <path>      配置文件路径（默认 windows/data/config.json）',
     '  --options-json <json|@file> 合并 JSON 对象或 JSON 文件；独立 CLI 参数优先',
@@ -80,7 +80,7 @@ function usage() {
     '  --target-poll-interval <ms> CDP target 轮询间隔（250-10000）',
     '  --bundle-timeout <ms> 业务 bundle 执行超时（1000-300000）',
     '  --port <n>           CEF 75 调试端口：0 自动选择，或 1024-65534',
-    '  --assets <dir>       注入资源目录（默认 dist-windows）',
+    globalThis.__CX_NODE_SEA__ ? '  注入资源已内嵌，无需 dist-windows 目录' : '  --assets <dir>       注入资源目录（默认 dist-windows）',
     '  --duration <ms>      运行指定毫秒后自动退出（测试用）',
     '  --attach <port>      测试/调试：连接已存在的调试端点，不启动、不校验归属',
     '  --report <path>      退出时把运行报告写入指定 JSON 文件',
@@ -166,7 +166,7 @@ function createLogger({ quiet = false, logFile = '' } = {}) {
 
 async function loadAssets(assetsDir, logger) {
   if (globalThis.__CX_SILENT_EMBEDDED_ASSETS__) {
-    logger.info('[assets] 使用静默内存启动器中预加载的资源');
+    logger.info('[assets] 使用内存中预加载的资源');
     return { ...globalThis.__CX_SILENT_EMBEDDED_ASSETS__ };
   }
   const bootstrapPath = path.join(assetsDir, 'windows-bootstrap.js');
@@ -260,8 +260,19 @@ async function runSelfCheck(options, logger) {
   add('Windows 平台', process.platform === 'win32', process.platform);
 
   const assetsDir = options.assetsDir || path.join(repositoryRoot, 'dist-windows');
-  for (const name of ['windows-bootstrap.js', 'chaoxing-plus.windows.js', 'trampoline.js']) {
+  const embeddedAssets = globalThis.__CX_SILENT_EMBEDDED_ASSETS__;
+  for (const [name, embeddedKey] of [
+    ['windows-bootstrap.js', 'bootstrap'],
+    ['chaoxing-plus.windows.js', 'bundle'],
+    ['trampoline.js', 'trampoline']
+  ]) {
     const filePath = path.join(assetsDir, name);
+    if (embeddedAssets) {
+      const content = embeddedAssets[embeddedKey];
+      const size = typeof content === 'string' ? Buffer.byteLength(content) : 0;
+      add(`资源存在 ${name}`, size > 0, `内嵌 ${size} 字节`);
+      continue;
+    }
     try {
       const stat = await fs.stat(filePath);
       add(`资源存在 ${name}`, stat.size > 0, `${stat.size} 字节`);
@@ -271,8 +282,11 @@ async function runSelfCheck(options, logger) {
   }
   const stylePath = path.join(assetsDir, 'vendor', 'sweetalert2.min.css');
   try {
-    const stat = await fs.stat(stylePath);
-    checks.push({ name: 'SweetAlert2 样式', ok: true, detail: `${stat.size} 字节` });
+    const size = embeddedAssets
+      ? Buffer.byteLength(embeddedAssets.style || '')
+      : (await fs.stat(stylePath)).size;
+    if (size <= 0) throw new Error('empty-style');
+    checks.push({ name: 'SweetAlert2 样式', ok: true, detail: `${embeddedAssets ? '内嵌 ' : ''}${size} 字节` });
   } catch {
     warnings.push(`缺少 SweetAlert2 样式：${stylePath}`);
   }
@@ -316,6 +330,7 @@ async function runSelfCheck(options, logger) {
       checks.push({
         name: '原生客户端选择窗口（PowerShell + WinForms）',
         ok: probe.ok,
+        iconApplied: probe.iconApplied === true,
         detail: probe.ok ? `已构建窗口控件（候选 ${probe.candidateCount}）` : `不可用：${probe.reason}`
       });
       if (!probe.ok) warnings.push(`原生客户端选择窗口不可用：${probe.reason}`);

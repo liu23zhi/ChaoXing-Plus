@@ -1,11 +1,12 @@
 @echo off
 rem Native Windows build entry: no Git Bash required.
 rem   build-windows.cmd [--skip-tests]
-rem Steps: assets -> native x86 host -> release package -> verify -> in-package self-check.
+rem Steps: assets -> native x86 host + standalone EXE -> full package -> verify.
 setlocal EnableExtensions
 cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
+set "SINGLE_EXE=windows\native-build\release\chaoxing_plus.exe"
 
 :parse
 if "%~1"=="" goto checks
@@ -21,7 +22,7 @@ exit /b 2
 
 :usage
 echo Usage: build-windows.cmd [--skip-tests]
-echo   Builds the native x86 host and the default release package.
+echo   Builds the standalone native x86 EXE and the default full release package.
 exit /b 0
 
 :checks
@@ -59,6 +60,10 @@ if not exist "windows\native-build\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.
   exit /b 1
 )
+if not exist "%SINGLE_EXE%" (
+  echo [build-windows] standalone native EXE was not produced: %SINGLE_EXE%
+  exit /b 1
+)
 
 echo [build-windows] 3/4 generating the release package
 call npm run release:windows
@@ -71,8 +76,10 @@ if not exist "%PACKAGE_DIR%\chaoxing_plus.exe" (
   exit /b 1
 )
 
-echo [build-windows] 4/4 verifying the package and the native entry
+echo [build-windows] 4/4 verifying the package and both native entries
 node "%PACKAGE_DIR%\verify-release.mjs"
+if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%SINGLE_EXE%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%PACKAGE_DIR%\chaoxing_plus.exe' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
@@ -82,5 +89,6 @@ if "%SKIP_TESTS%"=="0" (
   if errorlevel 1 exit /b 1
 )
 
-echo [build-windows] done: %PACKAGE_DIR%
+echo [build-windows] standalone EXE: %SINGLE_EXE%
+echo [build-windows] full package: %PACKAGE_DIR%
 exit /b 0

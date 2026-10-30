@@ -9,8 +9,8 @@ $scriptRoot = $PSScriptRoot
 # The compile script and native sources share the same directory.
 $sourceRoot = $scriptRoot
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
-# Native build output goes to <repo>/windows/native-build (EXE in native-build\bin);
-# an explicit -OutputDirectory still overrides it.
+# Native build output goes to <repo>/windows/native-build: bin keeps debug/test
+# executables, release contains the standalone host. -OutputDirectory overrides it.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path (Split-Path $scriptRoot -Parent) 'native-build' }
 $compiler = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x86\cl.exe' -File |
     Sort-Object FullName -Descending | Select-Object -First 1
@@ -40,6 +40,10 @@ foreach ($entry in $assetSources.GetEnumerator()) {
     $resourcePath = (Resolve-Path -LiteralPath $entry.Value).Path.Replace('\', '\\')
     $resourceSource = $resourceSource.Replace('@' + $entry.Key + '@', $resourcePath)
 }
+$iconSource = Join-Path $root 'windows\share-file\assets\app-icon.ico'
+if (-not (Test-Path -LiteralPath $iconSource -PathType Leaf)) { throw "Missing application icon: $iconSource" }
+$iconResourcePath = (Resolve-Path -LiteralPath $iconSource).Path.Replace('\', '\\')
+$resourceSource = $resourceSource.Replace('@APP_ICON@', $iconResourcePath)
 $resourceFile = Join-Path $build 'assets.rc'
 $resourceObject = Join-Path $build 'assets.res'
 $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
@@ -73,7 +77,7 @@ try {
             @{ Name = 'discovery-cache-host-tests'; Entry = 'DiscoveryCacheHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent'); Resources = @($resourceObject) },
             @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() },
             @{ Name = 'session-tests'; Entry = 'SessionTestMain'; Objects = @('memory','json','session'); Resources = @() },
-            @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @() },
+            @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @($resourceObject) },
             @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'cdp-echo'; Entry = 'CdpEchoMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'env-probe'; Entry = 'EnvProbeMain'; Objects = @('memory'); Resources = @() },
@@ -109,7 +113,11 @@ $dumpbin = Join-Path $compiler.DirectoryName 'dumpbin.exe'
 & $dumpbin /headers /imports (Join-Path $bin 'chaoxing_plus.exe') | Set-Content -LiteralPath (Join-Path $build 'pe-imports.txt') -Encoding UTF8
 if ($LASTEXITCODE -ne 0) { throw 'PE import audit failed.' }
 $hostExe = Join-Path $bin 'chaoxing_plus.exe'
-Get-Item -LiteralPath $hostExe | Select-Object FullName,Length
+$release = Join-Path $OutputDirectory 'release'
+New-Item -ItemType Directory -Path $release -Force | Out-Null
+$releaseExe = Join-Path $release 'chaoxing_plus.exe'
+Copy-Item -LiteralPath $hostExe -Destination $releaseExe -Force
+Get-Item -LiteralPath $hostExe,$releaseExe | Select-Object FullName,Length
 # Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
 # and build must not depend on PowerShell module auto-loading.
 & certutil.exe -hashfile $hostExe SHA256

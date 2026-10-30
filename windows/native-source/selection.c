@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include "selection.h"
+#include "resource.h"
 
 #define SELECTION_LIST 1001
 #define SELECTION_BROWSE 1002
@@ -13,6 +14,17 @@
 static const WCHAR selectionClass[] = L"CXPlusNativeClientSelection";
 static const WCHAR selectionTitle[] = L"超星学习助手 - 选择考试客户端";
 static const WCHAR selectionHeadingDefault[] = L"请选择考试客户端；全盘扫描后将重新打开并刷新列表，也可手动浏览。";
+
+static HICON selection_app_icon(void) {
+    return LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(CX_RESOURCE_APP_ICON));
+}
+
+static void selection_window_icon(HWND window) {
+    HICON icon = selection_app_icon();
+    if (!icon) return;
+    SendMessageW(window, WM_SETICON, ICON_BIG, (LPARAM)icon);
+    SendMessageW(window, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+}
 
 typedef struct SELECTION_WINDOW {
     const CX_DISCOVERY_RESULT *candidates;
@@ -703,6 +715,7 @@ static BOOL selection_create(SELECTION_WINDOW *state) {
     ZeroMemory(&windowClass, sizeof(windowClass));
     windowClass.cbSize = sizeof(windowClass); windowClass.lpfnWndProc = selection_proc;
     windowClass.hInstance = GetModuleHandleW(NULL); windowClass.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    windowClass.hIcon = selection_app_icon(); windowClass.hIconSm = windowClass.hIcon;
     windowClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); windowClass.lpszClassName = selectionClass;
     if (!RegisterClassExW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         selection_error(state, L"无法注册原生客户端选择窗口。"); return FALSE;
@@ -719,6 +732,7 @@ static BOOL selection_create(SELECTION_WINDOW *state) {
         work.left + (work.right - work.left - width) / 2, work.top + (work.bottom - work.top - height) / 2,
         width, height, NULL, NULL, GetModuleHandleW(NULL), state);
     if (!state->window) { selection_error(state, L"无法创建原生客户端选择窗口。"); return FALSE; }
+    selection_window_icon(state->window);
     state->result = CX_SELECTION_CANCELLED;
     return TRUE;
 }
@@ -798,11 +812,24 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->scanAllAvailable = IsWindow(state.scanAll) && IsWindowEnabled(state.scanAll);
     probe->unicodeWindow = IsWindowUnicode(state.window);
     GetWindowTextW(state.window, title, 128); probe->titleMatches = lstrcmpW(title, selectionTitle) == 0;
+    {
+        HICON icon = selection_app_icon();
+        probe->classIconsMatch = icon && (HICON)GetClassLongPtrW(state.window, GCLP_HICON) == icon
+            && (HICON)GetClassLongPtrW(state.window, GCLP_HICONSM) == icon;
+        probe->windowIconsMatch = icon && (HICON)SendMessageW(state.window, WM_GETICON, ICON_BIG, 0) == icon
+            && (HICON)SendMessageW(state.window, WM_GETICON, ICON_SMALL, 0) == icon;
+    }
     probe->layoutScale = selection_ui_dpi();
     probe->injectOptionCount = IsWindow(state.injectCombo) ? (DWORD)SendMessageW(state.injectCombo, CB_GETCOUNT, 0, 0) : 0;
     probe->injectSelectedIndex = IsWindow(state.injectCombo) ? (LONG)SendMessageW(state.injectCombo, CB_GETCURSEL, 0, 0) : -1;
     probe->carrierOptionCount = IsWindow(state.carrierCombo) ? (DWORD)SendMessageW(state.carrierCombo, CB_GETCOUNT, 0, 0) : 0;
     probe->carrierSelectedIndex = IsWindow(state.carrierCombo) ? (LONG)SendMessageW(state.carrierCombo, CB_GETCURSEL, 0, 0) : -1;
+    if (IsWindow(state.carrierCombo)) {
+        WCHAR firstCarrier[64];
+        LRESULT length = SendMessageW(state.carrierCombo, CB_GETLBTEXTLEN, 0, 0);
+        if (length >= 0 && length < 64 && SendMessageW(state.carrierCombo, CB_GETLBTEXT, 0, (LPARAM)firstCarrier) != CB_ERR)
+            probe->carrierAutoPresent = lstrcmpW(firstCarrier, L"自动（按导入表）") == 0;
+    }
     {
         RECT comboRect = {0,0,0,0};
         if (IsWindow(state.injectCombo) && GetWindowRect(state.injectCombo, &comboRect)) {
@@ -950,6 +977,8 @@ static DWORD WINAPI scan_progress_thread(void *parameter) {
         cls.lpfnWndProc = scan_progress_proc;
         cls.hInstance = instance;
         cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        cls.hIcon = selection_app_icon();
+        cls.hIconSm = cls.hIcon;
         cls.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         cls.lpszClassName = CX_SCAN_PROGRESS_CLASS;
         if (!RegisterClassExW(&cls)) { SetEvent(state->ready); return 1; }
@@ -959,11 +988,12 @@ static DWORD WINAPI scan_progress_thread(void *parameter) {
     y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    state->window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, CX_SCAN_PROGRESS_CLASS,
+    state->window = CreateWindowExW(WS_EX_TOPMOST, CX_SCAN_PROGRESS_CLASS,
                                     L"超星学习助手 - 全盘扫描",
                                     WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height,
                                     NULL, NULL, instance, state);
     if (!state->window) { SetEvent(state->ready); return 1; }
+    selection_window_icon(state->window);
     if (!state->hidden) {
         /* The first ShowWindow in a process may be overridden by
            STARTUPINFO.wShowWindow (for example windowsHide:true under spawn);

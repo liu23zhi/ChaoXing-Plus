@@ -9,6 +9,8 @@
 #   - 注入资源（bootstrap/bundle/trampoline/CSS）在原生构建时以 RCDATA 内嵌。
 #
 # 输出：
+#   windows/native-build/release/chaoxing_plus.exe （独立发布的单文件 EXE）
+#   windows/native-build/bin/                    （保留宿主与调试/测试 EXE）
 #   release/chaoxing-plus-<version>-windows/chaoxing_plus.exe  （x86 单文件，无外部依赖）
 #   release/chaoxing-plus-<version>-windows/start-windows*.cmd（原生启动器）
 #   release/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
@@ -66,6 +68,7 @@ fi
 
 VERSION="$(node -p "require('./package.json').version")"
 PACKAGE_DIR="release/chaoxing-plus-${VERSION}-windows"
+SINGLE_EXE="windows/native-build/release/chaoxing_plus.exe"
 
 echo "[build-windows] 1/5 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
@@ -78,6 +81,10 @@ if [ ! -f "windows/native-build/bin/chaoxing_plus.exe" ]; then
   echo "[build-windows] 原生 x86 EXE 没有生成。" >&2
   exit 1
 fi
+if [ ! -f "$SINGLE_EXE" ]; then
+  echo "[build-windows] 独立发布的原生 EXE 没有生成：${SINGLE_EXE}" >&2
+  exit 1
+fi
 
 echo "[build-windows] 3/5 生成发布包（原生 x86 EXE + 原生启动器 + 校验清单）"
 npm run release:windows
@@ -87,8 +94,11 @@ if [ ! -f "${PACKAGE_DIR}/chaoxing_plus.exe" ]; then
   exit 1
 fi
 
-echo "[build-windows] 4/5 校验发布包完整性与入口自检"
+echo "[build-windows] 4/5 校验发布包完整性及独立 EXE/包内入口"
 node "${PACKAGE_DIR}/verify-release.mjs"
+
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -Command "& '${SINGLE_EXE}' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
 
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
   -Command "& '${PACKAGE_DIR}/chaoxing_plus.exe' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
@@ -101,7 +111,9 @@ else
 fi
 
 echo "[build-windows] 完成："
-echo "  原生 x86 单文件：${PACKAGE_DIR}/chaoxing_plus.exe（无外部 DLL/运行库依赖）"
+echo "  独立发布单文件：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
+echo "  调试/测试 EXE： windows/native-build/bin/（全部保留）"
+echo "  完整发布包：    ${PACKAGE_DIR}"
 echo "  原生启动入口：   ${PACKAGE_DIR}/start-windows.cmd"
 echo "  完整性校验：      node ${PACKAGE_DIR}/verify-release.mjs"
 

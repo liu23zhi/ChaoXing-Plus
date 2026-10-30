@@ -5,13 +5,14 @@
 #include <iphlpapi.h>
 #include <tlhelp32.h>
 
-typedef struct { DWORD pid; const WCHAR *name; } TestProcess;
+typedef struct { DWORD pid; const WCHAR *name; const WCHAR *imagePath; } TestProcess;
 
 static TestProcess testRows[16];
 static DWORD testRowCount, testRowAt, testSnapshotError, testFirstError;
 static DWORD testNextError, testNextFailAt, testSnapshotCalls, testFirstCalls;
 static DWORD testNextCalls, testCloseCalls, testBadCalls, testCreateCalls, failures;
-static WCHAR errorText[512], launchPath[32768];
+static DWORD testOpenCalls, testQueryCalls, testQueryCloseCalls;
+static WCHAR errorText[512], launchPath[32768], defaultImagePath[32768];
 static BOOL testTcpEnabled;
 static ULONG testTcpErrorFamily;
 static struct { DWORD count; MIB_TCPROW_OWNER_PID rows[2]; } testTcp4;
@@ -31,6 +32,38 @@ static DWORD WINAPI test_tcp_table(PVOID table, PDWORD size, BOOL ordered, ULONG
 }
 
 static HANDLE test_handle(void) { return (HANDLE)(ULONG_PTR)101; }
+
+static TestProcess *test_query_row(HANDLE handle) {
+    DWORD i;
+    for (i = 0; i < testRowCount; ++i)
+        if (handle == (HANDLE)(ULONG_PTR)(0x10000UL + testRows[i].pid)) return testRows + i;
+    return NULL;
+}
+
+static HANDLE WINAPI test_open_process(DWORD access, BOOL inherit, DWORD pid) {
+    DWORD i;
+    ++testOpenCalls;
+    if (access != PROCESS_QUERY_LIMITED_INFORMATION || inherit) {
+        ++testBadCalls; SetLastError(ERROR_INVALID_PARAMETER); return NULL;
+    }
+    for (i = 0; i < testRowCount; ++i)
+        if (testRows[i].pid == pid) return (HANDLE)(ULONG_PTR)(0x10000UL + pid);
+    ++testBadCalls; SetLastError(ERROR_INVALID_PARAMETER); return NULL;
+}
+
+static BOOL WINAPI test_query_image(HANDLE process, DWORD flags, LPWSTR path, PDWORD size) {
+    TestProcess *row = test_query_row(process);
+    DWORD length;
+    ++testQueryCalls;
+    if (!row || flags || !path || !size || !row->imagePath) {
+        ++testBadCalls; SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
+    }
+    length = (DWORD)lstrlenW(row->imagePath);
+    if (*size <= length) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    CopyMemory(path, row->imagePath, (length + 1) * sizeof(WCHAR));
+    *size = length;
+    return TRUE;
+}
 
 static void test_copy_entry(LPPROCESSENTRY32W entry) {
     DWORD i = 0;
@@ -75,8 +108,9 @@ static BOOL WINAPI test_next(HANDLE snapshot, LPPROCESSENTRY32W entry) {
 }
 
 static BOOL WINAPI test_close(HANDLE handle) {
-    ++testCloseCalls;
-    if (handle != test_handle()) ++testBadCalls;
+    if (handle == test_handle()) ++testCloseCalls;
+    else if (test_query_row(handle)) ++testQueryCloseCalls;
+    else ++testBadCalls;
     /* Closing must not replace the enumeration failure reported to callers. */
     SetLastError(ERROR_INVALID_HANDLE); return TRUE;
 }
@@ -101,6 +135,8 @@ static BOOL WINAPI test_create_process(LPCWSTR application, LPWSTR command,
 #define GetCurrentProcessId test_current_pid
 #define CreateProcessW test_create_process
 #define GetExtendedTcpTable test_tcp_table
+#define OpenProcess test_open_process
+#define QueryFullProcessImageNameW test_query_image
 #include "../process.c"
 #undef CreateToolhelp32Snapshot
 #undef Process32FirstW
@@ -109,6 +145,8 @@ static BOOL WINAPI test_create_process(LPCWSTR application, LPWSTR command,
 #undef GetCurrentProcessId
 #undef CreateProcessW
 #undef GetExtendedTcpTable
+#undef OpenProcess
+#undef QueryFullProcessImageNameW
 
 static void output(const char *text) {
     DWORD written;
@@ -160,12 +198,19 @@ static void reset(void) {
     testNextFailAt = 0xffffffffUL;
     testSnapshotCalls = testFirstCalls = testNextCalls = testCloseCalls = testBadCalls = 0;
     testCreateCalls = 0;
+    testOpenCalls = testQueryCalls = testQueryCloseCalls = 0;
+    if (!GetFullPathNameW(L"CXExam.exe", 32768, defaultImagePath, NULL)) defaultImagePath[0] = 0;
     errorText[0] = 0;
     SetLastError(ERROR_SUCCESS);
 }
 
+static void add_at(DWORD pid, const WCHAR *name, const WCHAR *imagePath) {
+    testRows[testRowCount].pid = pid; testRows[testRowCount].name = name;
+    testRows[testRowCount].imagePath = imagePath; ++testRowCount;
+}
+
 static void add(DWORD pid, const WCHAR *name) {
-    testRows[testRowCount].pid = pid; testRows[testRowCount].name = name; ++testRowCount;
+    add_at(pid, name, defaultImagePath);
 }
 
 static void invalid_path(const WCHAR *path, const char *name) {
@@ -208,16 +253,20 @@ void __stdcall ProcessCheckTestMain(void) {
         "empty enumeration is successful only at ERROR_NO_MORE_FILES");
 
     reset(); add(10, L"other.exe"); add(0, L"CXExam.exe"); add(999, L"CXExam.exe");
-    add(20, L"cxexam.EXE"); add(30, L"CXExam.exe"); add(40, L"CXExam.exe.bak");
+    add_at(20, L"cxexam.EXE", L"c:\\first\\cxexam.EXE");
+    add_at(30, L"CXExam.exe", L"C:\\First\\CXExam.exe"); add(40, L"CXExam.exe.bak");
     count = 123;
     ok = proc_check_instances(L"C:\\First\\CXExam.exe", &count, errorText, 512);
-    check(ok && count == 2 && testNextCalls == 6 && testCloseCalls == 1 && !testBadCalls,
-        "count matches ASCII case-insensitive basename and excludes self and PID zero");
+    check(ok && count == 2 && testNextCalls == 6 && testCloseCalls == 1 && !testBadCalls
+        && testOpenCalls == 2 && testQueryCalls == 2 && testQueryCloseCalls == 2,
+        "count matches ASCII case-insensitive basename and full path while excluding self and PID zero");
 
-    reset(); add(20, L"CXExam.exe"); add(30, L"cxexam.exe"); count = 123;
+    reset(); add_at(20, L"CXExam.exe", L"D:\\Another\\Client\\CXExam.exe");
+    add_at(30, L"cxexam.exe", L"C:\\First\\cxexam.exe"); count = 123;
     ok = proc_check_instances(L"D:/Another/Client/CxExAm.ExE", &count, errorText, 512);
-    check(ok && count == 2 && testCloseCalls == 1 && !testBadCalls,
-        "same basename in another installation path is still a conflict");
+    check(ok && count == 1 && testCloseCalls == 1 && !testBadCalls
+        && testOpenCalls == 2 && testQueryCalls == 2 && testQueryCloseCalls == 2,
+        "only the matching installation path counts as an existing client");
 
     reset(); add(12, L"unrelated.exe"); count = 123;
     ok = proc_check_instances(L"CXExam.exe", &count, NULL, 0);
@@ -258,10 +307,13 @@ void __stdcall ProcessCheckTestMain(void) {
     check(!ok && count == 0 && code == ERROR_ACCESS_DENIED && testCloseCalls == 1,
         "failure remains fail-closed when no error buffer is supplied");
 
-    reset(); add(20, L"CXExam.exe"); add(30, L"cxexam.exe"); add(40, L"CXExam.exe");
+    reset(); add_at(20, L"CXExam.exe", L"D:\\Fixture\\CXExam.exe");
+    add_at(30, L"cxexam.exe", L"d:\\fixture\\cxexam.exe");
+    add_at(40, L"CXExam.exe", L"D:\\Fixture\\CXExam.exe");
     pids[0] = pids[1] = 0;
     oldCount = proc_instances(L"D:\\Fixture\\CXExam.exe", pids, 2);
-    check(oldCount == 3 && pids[0] == 20 && pids[1] == 30 && testCloseCalls == 1 && !testBadCalls,
+    check(oldCount == 3 && pids[0] == 20 && pids[1] == 30 && testCloseCalls == 1 && !testBadCalls
+        && testQueryCloseCalls == 3,
         "legacy helper returns total matches while respecting PID output capacity");
 
     reset(); testSnapshotError = ERROR_ACCESS_DENIED;
@@ -291,7 +343,7 @@ void __stdcall ProcessCheckTestMain(void) {
     for (port = 38100; port < 39100; ++port) if (proc_port_free(port)) break;
     check(port < 39100, "read-only listener inspection finds an available test port");
     if (at && at < 32000 && port < 39100) {
-        reset(); add(20, L"CXExam.exe");
+        reset(); add_at(20, L"CXExam.exe", launchPath);
         launch_rejection(port, ERROR_ALREADY_EXISTS,
             "proc_launch rejects an existing client before CreateProcessW");
 
@@ -313,6 +365,13 @@ void __stdcall ProcessCheckTestMain(void) {
         check(!ok && count == 0 && process == NULL && code == ERROR_FILE_NOT_FOUND
             && testSnapshotCalls == 1 && testCreateCalls == 1 && !testBadCalls,
             "proc_launch with no conflict reaches only the safe CreateProcessW substitute");
+
+        reset(); add_at(20, L"CXExam.exe", L"C:\\Another installation\\CXExam.exe");
+        count = 123; process = (HANDLE)(ULONG_PTR)456;
+        ok = proc_launch(launchPath, port, &count, &process, errorText, 512); code = GetLastError();
+        check(!ok && count == 0 && process == NULL && code == ERROR_FILE_NOT_FOUND
+            && testSnapshotCalls == 1 && testCreateCalls == 1 && !testBadCalls && testQueryCloseCalls == 1,
+            "a same-name client in another installation reaches only the safe CreateProcessW substitute");
     }
 
     output(failures ? "NATIVE PROCESS CHECK TESTS FAIL\n" : "NATIVE PROCESS CHECK TESTS PASS\n");

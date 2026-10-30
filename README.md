@@ -57,7 +57,7 @@ npm run build:windows      # 注入资源（dist-windows）
 npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
 # 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）
 .\windows\native-source\build-windows.cmd
-# 备用（已弃用，仅兼容/对照）：只打 Node 包，不含原生 EXE
+# 备用（封装完成后冻结）：Node 单 EXE 与调试目录包，不含原生 EXE
 .\windows\node-source\build-windows-node.cmd
 # Git Bash 等价入口：bash windows/native-source/build-windows.sh
 # Node 备用包：bash windows/node-source/build-windows-node.sh
@@ -70,7 +70,9 @@ npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
 
 原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-source\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
 
-Windows 发布包（默认使用原生宿主）：
+可独立分发的单文件分别位于 `windows/native-build/release/chaoxing_plus.exe` 和 `windows/node-build/release/chaoxing_plus_node.exe`，两者均使用仓库共享图标；原生 `windows/native-build/bin/` 中的调试 EXE 保留。Node EXE 内嵌 Node 运行时与资源，无需目标机器安装 Node；此次封装完成后 Node 宿主停止更新。
+
+Windows 完整发布包（默认使用原生宿主）：
 
 ```powershell
 npm run build:windows -- --release # dist-windows 注入资源

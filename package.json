@@ -9,6 +9,7 @@
     "build": "node build.mjs",
     "build:windows": "node windows/share-file/build.windows.mjs",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests",
+    "build:node:exe": "node windows/node-source/package-node-exe.mjs",
     "release:windows": "node windows/share-file/package-windows.mjs",
     "windows": "windows\\native-source\\start-windows.cmd",
     "windows:debug": "windows\\native-source\\start-windows-debug.cmd",
@@ -22,7 +23,9 @@
     "@types/md5": "^2.3.5",
     "@types/node": "^26.6.5",
     "@typescript/typescript6": "^6.0.2",
+    "pe-library": "2.0.1",
     "puppeteer": "^25.14.0",
+    "resedit": "3.1.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   },

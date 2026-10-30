@@ -23,7 +23,9 @@ static BOOL readAllowed;
 static DWORD readCalls, failures;
 
 BOOL WINAPI test_console_mode(HANDLE handle, LPDWORD mode) {
-    (void)handle; if (mode) *mode = ENABLE_LINE_INPUT; return TRUE;
+    if (handle != GetStdHandle(STD_INPUT_HANDLE)) return GetConsoleMode(handle, mode);
+    if (mode) *mode = ENABLE_LINE_INPUT;
+    return TRUE;
 }
 
 BOOL WINAPI test_read_console(HANDLE handle, LPVOID buffer, DWORD capacity,

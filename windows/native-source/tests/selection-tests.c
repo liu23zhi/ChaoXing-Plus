@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include "../selection.h"
+#include "../resource.h"
 
 static DWORD failedChecks;
 static WCHAR errorText[512];
@@ -93,10 +94,14 @@ static void probe_tests(void) {
     check(probe.scanAllAvailable, "full disk scan remains available");
     check(probe.injectOptionCount == 3, "injection mode combo offers auto/cdp-port/dll-proxy");
     check(probe.injectSelectedIndex == 0, "injection mode defaults to auto");
-    check(probe.carrierOptionCount == 8, "carrier combo lists auto plus seven carriers");
+    /* Proxy choices depend on installed DLLs; the auto entry is always first. */
+    check(probe.carrierOptionCount >= 1 && probe.carrierAutoPresent,
+          "carrier combo begins with the automatic import-table option");
     check(probe.carrierSelectedIndex == 0, "carrier defaults to auto");
-    { WCHAR msg[128]; wsprintfW(msg, L"injection combo has a usable size (%ldx%ld)", probe.injectComboWidth, probe.injectComboHeight); check(probe.injectComboWidth >= 120 && probe.injectComboHeight >= 16, msg); }
+    check(probe.injectComboWidth >= 120 && probe.injectComboHeight >= 16, "injection combo has a usable size");
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
+    check(probe.classIconsMatch, "selection class icons match the embedded application icon");
+    check(probe.windowIconsMatch, "selection window icons match the embedded application icon");
     {
         DWORD expectedDpi = expected_ui_dpi();
         check(expectedDpi ? probe.layoutScale == expectedDpi : probe.layoutScale >= 96,
@@ -144,6 +149,18 @@ static void progress_scan_test(void) {
     SetEnvironmentVariableW(L"CXPLUS_NATIVE_SCAN_PROGRESS_HIDDEN", L"1");
     SetEnvironmentVariableW(L"CXPLUS_NATIVE_SCAN_PROGRESS_AUTOCANCEL_MS", NULL);
     check(cx_scan_progress_begin(&window, errorText, 512) && window, "hidden full-scan progress window thread starts");
+    {
+        HWND progressWindow = find_progress_window();
+        HICON icon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(CX_RESOURCE_APP_ICON));
+        check(icon && progressWindow && (HICON)GetClassLongPtrW(progressWindow, GCLP_HICON) == icon
+              && (HICON)GetClassLongPtrW(progressWindow, GCLP_HICONSM) == icon,
+              "progress class icons match the embedded application icon");
+        check(icon && progressWindow && (HICON)SendMessageW(progressWindow, WM_GETICON, ICON_BIG, 0) == icon
+              && (HICON)SendMessageW(progressWindow, WM_GETICON, ICON_SMALL, 0) == icon,
+              "progress window icons match the embedded application icon");
+        check(progressWindow && !(GetWindowLongPtrW(progressWindow, GWL_EXSTYLE) & WS_EX_DLGMODALFRAME),
+              "progress title bar permits the small application icon");
+    }
     {
         CX_DISCOVERY_OPTIONS bind;
         ZeroMemory(&bind, sizeof(bind));

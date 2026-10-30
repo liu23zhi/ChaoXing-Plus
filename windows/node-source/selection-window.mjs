@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 
 export const defaultSelectionWindowScript = fileURLToPath(new URL('./selection-window.ps1', import.meta.url));
 export const WINDOW_TIMEOUT_MS = 5 * 60 * 1000;
@@ -110,6 +111,8 @@ async function invokeSelectionWindow({
       scanAllButtonText: labels.scanAllButtonText,
       cancelButtonText: labels.cancelButtonText,
       fontName: labels.fontName,
+      iconPath: globalThis.__CX_NODE_SEA__ ? process.execPath
+        : fileURLToPath(new URL('../share-file/assets/app-icon.ico', import.meta.url)),
       messages: labels.messages,
       preferredIndex,
       candidates: (candidates || []).map((candidate, index) => ({
@@ -123,10 +126,14 @@ async function invokeSelectionWindow({
       '-NonInteractive',
       '-STA',
       '-ExecutionPolicy', 'Bypass',
-      '-File', scriptPath
+      ...buildPowerShellScriptArgs('selection-window.ps1', scriptPath, {
+        defaultScriptPath: defaultSelectionWindowScript,
+        parameters: [
+          ['Probe', probe],
+          ['AutoCloseMs', Number.isInteger(autoCloseMs) && autoCloseMs > 0 ? autoCloseMs : undefined]
+        ]
+      })
     ];
-    if (probe) args.push('-Probe');
-    if (Number.isInteger(autoCloseMs) && autoCloseMs > 0) args.push('-AutoCloseMs', String(autoCloseMs));
     const result = await execFileImpl('powershell.exe', args, {
       input: JSON.stringify(payload), windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024
     });
@@ -166,6 +173,7 @@ export async function probeClientSelectionWindow(options = {}) {
   return {
     ok: raw.probe === true && raw.winformsOk === true,
     reason: raw.winformsOk === true ? '' : 'winforms-probe-failed',
-    candidateCount: Number.isInteger(raw.candidateCount) ? raw.candidateCount : 0
+    candidateCount: Number.isInteger(raw.candidateCount) ? raw.candidateCount : 0,
+    iconApplied: raw.iconApplied === true
   };
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 备用入口（legacy）：只构建 Node 宿主发布包，不构建原生 EXE。
+# 冻结备用入口：构建 Node 单 EXE 与调试目录包，不构建原生 EXE。
 #
 # Node 宿主已弃用（2026-10-29）：文件保留用于兼容/对照与排障，不再开发新能力；
 # 新功能、静默场景与自毁一律只做原生 EXE。原生构建入口见 ../native-source/build-windows.sh。
 #
 # 输出：
+#   windows/node-build/release/chaoxing_plus_node.exe（内嵌 Node、宿主与资源）
 #   windows/node-build/chaoxing-plus-<version>-windows/start-windows-node.cmd / start-windows-node-silent.cmd
 #   windows/node-build/chaoxing-plus-<version>-windows/runtime/node.exe（自带运行时）
 #   windows/node-build/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
@@ -41,10 +42,10 @@ VERSION="$(node -p "require('./package.json').version")"
 NODE_BUILD_DIR="windows/node-build"
 PACKAGE_DIR="${NODE_BUILD_DIR}/chaoxing-plus-${VERSION}-windows"
 
-echo "[build-windows-node] 1/3 构建 Chrome75 注入资源（release）"
+echo "[build-windows-node] 1/4 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
 
-echo "[build-windows-node] 2/3 生成备用 Node 发布包（不含原生 EXE）"
+echo "[build-windows-node] 2/4 生成备用 Node 调试目录包（不含原生 EXE）"
 npm run release:windows -- --skip-native --out "$NODE_BUILD_DIR"
 
 if [ ! -f "${PACKAGE_DIR}/start-windows-node-silent.cmd" ]; then
@@ -52,9 +53,19 @@ if [ ! -f "${PACKAGE_DIR}/start-windows-node-silent.cmd" ]; then
   exit 1
 fi
 
-echo "[build-windows-node] 3/3 校验备用包完整性"
+echo "[build-windows-node] 3/4 构建 Node 单 EXE"
+npm run build:node:exe
+NODE_EXE="${NODE_BUILD_DIR}/release/chaoxing_plus_node.exe"
+if [ ! -f "$NODE_EXE" ]; then
+  echo "[build-windows-node] 缺少 Node 单 EXE：${NODE_EXE}" >&2
+  exit 1
+fi
+
+echo "[build-windows-node] 4/4 校验备用包与单 EXE"
 node "${PACKAGE_DIR}/verify-release.mjs"
 node "${PACKAGE_DIR}/windows/node-source/main.mjs" --self-check --no-disk-write --quiet
+"$NODE_EXE" --self-check --no-disk-write --quiet
 
-echo "[build-windows-node] 备用包完成：${PACKAGE_DIR}"
+echo "[build-windows-node] 单 EXE：${NODE_EXE}"
+echo "[build-windows-node] 调试目录包：${PACKAGE_DIR}"
 echo "  该入口已弃用，仅作兼容/对照；原生入口为 windows/native-source/build-windows.sh。"

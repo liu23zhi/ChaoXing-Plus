@@ -8,7 +8,7 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | [Node 宿主](../node-source/README.md) | 已弃用的 Node 实现、PowerShell/VBS、备用构建与 `start-windows-node*.cmd` |
 | [Windows 共享文件](./) | 页面平台层、Chrome75 闸门、资源构建、打包/校验、配置模板与参数生成器 |
 
-插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出仍为仓库根 `dist-windows/`、`windows/native-build/bin/`、`windows/node-build/` 和 `release/`；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
+插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出为 `dist-windows/`、`windows/native-build/`、`windows/node-build/` 和完整包目录 `release/`；原生与 Node 单 EXE 分别位于各自构建目录的 `release/`。原生 `bin/` 保留调试 EXE；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
 
 ## 共享模块
 
@@ -17,6 +17,7 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | 页面平台层 | [windows-bootstrap.js](windows-bootstrap.js)：配置水合、面板壳与 Chrome75 补丁；[trampoline.js](trampoline.js)：新文档探针 |
 | 构建 | [build.windows.mjs](build.windows.mjs)：生成 Windows 页面 bundle；[chrome75-syntax.mjs](chrome75-syntax.mjs)：语法闸门；[windows-build-features.mjs](windows-build-features.mjs)：本机构建开关 |
 | 发布 | [package-windows.mjs](package-windows.mjs)：打包与清单；[verify-release.mjs](verify-release.mjs)：无 npm 依赖的完整性校验 |
+| 图标 | [assets/app-icon.ico](assets/app-icon.ico)：两种 EXE 共用图标；[assets/app-icon.png](assets/app-icon.png)：原始 PNG |
 | 配置工具 | [config.example.json](config.example.json)：两种宿主可只读解析的模板；[parameter-generator.html](parameter-generator.html)：离线参数生成器 |
 
 ## 构建入口
@@ -26,11 +27,12 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | 入口 | 作用 |
 | --- | --- |
 | [原生 CMD 构建](../native-source/build-windows.cmd) / [Git Bash 构建](../native-source/build-windows.sh) | Windows 资源、原生 x86 EXE、默认发布包与校验 |
-| [Node CMD 构建](../node-source/build-windows-node.cmd) / [Git Bash 构建](../node-source/build-windows-node.sh) | 旧 Node 备用包，使用 `--skip-native` |
+| [Node CMD 构建](../node-source/build-windows-node.cmd) / [Git Bash 构建](../node-source/build-windows-node.sh) | 冻结的 Node 备用目录包及 SEA 单 EXE |
 | [原生编译脚本](../native-source/build.ps1) | 仅编译原生宿主；`-BuildTests` 同时生成 C 测试 |
 | [扩展构建](../../build-browser.sh) | 仅构建插件的 `dist/` |
 | `npm run build:windows` | 调用共享构建入口，生成 `dist-windows/` |
 | `npm run release:windows` | 调用共享打包入口，生成 `release/` |
+| `npm run build:node:exe` | 使用已有 release 注入资源，生成 `windows/node-build/release/chaoxing_plus_node.exe` |
 
 ## 发布包布局
 

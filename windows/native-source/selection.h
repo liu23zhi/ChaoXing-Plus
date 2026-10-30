@@ -17,6 +17,8 @@ typedef struct CX_SELECTION_PROBE {
     BOOL scanAllAvailable;
     BOOL unicodeWindow;
     BOOL titleMatches;
+    BOOL classIconsMatch;
+    BOOL windowIconsMatch;
     BOOL noticeShown;
     DWORD layoutScale;
     DWORD injectOptionCount;
@@ -25,6 +27,7 @@ typedef struct CX_SELECTION_PROBE {
     LONG injectComboHeight;
     DWORD carrierOptionCount;
     LONG carrierSelectedIndex;
+    BOOL carrierAutoPresent;
 } CX_SELECTION_PROBE;
 
 /* `notice` is an optional first-line message (for example "全盘扫描已取消");

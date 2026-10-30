@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -156,14 +157,14 @@ export async function collectSystemProbe({ pid = 0, processName = 'CXExam', scre
     '-NonInteractive',
     '-ExecutionPolicy',
     'Bypass',
-    '-File',
-    scriptPath,
-    '-ClientPid',
-    String(pid || 0),
-    '-ProcessName',
-    processName || 'CXExam'
+    ...buildPowerShellScriptArgs('system-probe.ps1', scriptPath, {
+      parameters: [
+        ['ClientPid', String(pid || 0)],
+        ['ProcessName', processName || 'CXExam'],
+        ['ScreenshotPath', screenshotPath || undefined]
+      ]
+    })
   ];
-  if (screenshotPath) args.push('-ScreenshotPath', screenshotPath);
   try {
     const { stdout } = await execFileAsync('powershell.exe', args, {
       timeout: 25000,

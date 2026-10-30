@@ -41,7 +41,7 @@ try {
 
 # Explicit visibility APIs are required because the PowerShell process is hidden.
 try {
-  Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);'
+  Add-Type -Name DpiAwareness -Namespace Win32Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int command); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);'
 } catch {
   Write-ResultFile @{ error = "native-window-api-unavailable: $($_.Exception.Message)" }
   exit 5
@@ -65,6 +65,20 @@ $filterAll = Get-Text $messages.filterAll 'Executable (*.exe)|*.exe'
 
 function New-SelectionForm {
   $form = New-Object System.Windows.Forms.Form
+  $iconApplied = $false
+  try {
+    $iconPath = Get-Text $payload.iconPath ''
+    if ($iconPath) {
+      $icon = if ([System.IO.Path]::GetExtension($iconPath) -ieq '.ico') {
+        New-Object System.Drawing.Icon($iconPath)
+      } else { [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath) }
+      if ($null -ne $icon) {
+        $form.Icon = $icon
+        $form.ShowIcon = $true
+        $iconApplied = $true
+      }
+    }
+  } catch {}
   $form.Text = $title
   $form.StartPosition = 'CenterScreen'
   $form.MinimizeBox = $false
@@ -145,7 +159,7 @@ function New-SelectionForm {
   $form.AcceptButton = $ok
   $form.CancelButton = $cancel
 
-  return @{ form = $form; list = $list; ok = $ok; browse = $browse; scanAll = $scanAll; cancel = $cancel; buttons = $buttons }
+  return @{ form = $form; list = $list; ok = $ok; browse = $browse; scanAll = $scanAll; cancel = $cancel; buttons = $buttons; iconApplied = $iconApplied }
 }
 
 try {
@@ -157,10 +171,13 @@ try {
 
 if ($Probe) {
   # Automated smoke test: build controls only, do not enter the message loop.
+  $smallIcon = [Win32Dpi.DpiAwareness]::SendMessage($ui.form.Handle, 127, [IntPtr]::Zero, [IntPtr]::Zero)
+  $iconApplied = $ui.iconApplied -and $ui.form.ShowIcon -and ($smallIcon -ne [IntPtr]::Zero)
   $ui.form.Dispose()
   Write-ResultFile @{
     probe = $true
     winformsOk = $true
+    iconApplied = $iconApplied
     candidateCount = $candidates.Count
     hasListView = ($null -ne $ui.list)
     hasBrowseButton = ($null -ne $ui.browse)

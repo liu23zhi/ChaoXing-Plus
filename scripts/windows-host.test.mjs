@@ -775,6 +775,70 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
   }
 });
 
+test('Node SEA 单 EXE 脱离构建目录后完成 mock CDP 注入且 no-disk-write 不落盘', {
+  skip: process.platform !== 'win32',
+  timeout: 120000
+}, async () => {
+  const { buildNodeExe } = await import('../windows/node-source/package-node-exe.mjs');
+  const mock = await startMockCdp();
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-sea-host-'));
+  const assetsDir = path.join(directory, 'assets');
+  const buildDir = path.join(directory, 'build');
+  const stagingDir = path.join(directory, 'staging');
+  const standaloneDir = path.join(directory, 'standalone');
+  const executable = path.join(standaloneDir, 'chaoxing_plus_node.exe');
+  const configPath = path.join(standaloneDir, 'config.json');
+  const dataDirectory = path.join(standaloneDir, 'data');
+  const diagnosticsDir = path.join(standaloneDir, 'diagnostics');
+  const reportPath = path.join(standaloneDir, 'report.json');
+  try {
+    const version = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
+    await writeFixtureAssets(assetsDir, {
+      bootstrap: "window.__CX_SEA_BOOTSTRAP__=true;window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+      bundle: "window.__CX_SEA_BUNDLE__=true;console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'config-sync',detail:{'common.settings.fromSea':42}}));"
+    });
+    await fs.writeFile(path.join(assetsDir, 'package-manifest.json'), JSON.stringify({
+      version, features: { injectionLog: false }
+    }), 'utf8');
+    const build = await buildNodeExe({
+      version,
+      hostDir: path.join(root, 'windows', 'node-source'),
+      distDir: assetsDir,
+      configExample: path.join(root, 'windows', 'share-file', 'config.example.json'),
+      icon: path.join(root, 'windows', 'share-file', 'assets', 'app-icon.ico'),
+      buildDir,
+      out: stagingDir
+    });
+    await fs.mkdir(standaloneDir);
+    await fs.copyFile(build.executable, executable);
+    for (const sourceDirectory of [assetsDir, buildDir, stagingDir]) {
+      await fs.rm(sourceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+    assert.deepEqual(await fs.readdir(directory), ['standalone']);
+
+    const result = await runCommand(executable, [
+      '--attach', String(mock.port),
+      '--config', configPath,
+      '--data-dir', dataDirectory,
+      '--diagnostics-dir', diagnosticsDir,
+      '--report', reportPath,
+      '--log', '--diagnose', '--no-disk-write',
+      '--duration', '2500', '--quiet', '--no-elevate'
+    ], { cwd: standaloneDir });
+    assert.equal(result.code, 0, `SEA 宿主退出码 ${result.code}\n${result.stdout}\n${result.stderr}`);
+    assert.ok(mock.captured.evaluates.some((source) => source.includes('window.__CX_SEA_BOOTSTRAP__=true')));
+    assert.ok(mock.captured.evaluates.some((source) => source.includes('window.__CX_SEA_BUNDLE__=true')));
+    assert.ok(mock.captured.evaluates.some((source) => source.startsWith('try{window.__CX_WIN_ON_CONFIG__')
+      && source.includes('"common.settings.fromSea":42')));
+    assert.ok(mock.captured.methodLog.includes('Page.addScriptToEvaluateOnNewDocument'));
+    assert.ok(String(mock.captured.trampolineSource).includes('__CX_WIN_MSG__'));
+    assert.deepEqual(await fs.readdir(standaloneDir), ['chaoxing_plus_node.exe']);
+  } finally {
+    await mock.close();
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async () => {
   const mock = await startMockCdp({ disconnectOnExpression: '__reconnectBundle' });
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-'));

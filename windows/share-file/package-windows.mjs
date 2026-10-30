@@ -262,6 +262,11 @@ async function main() {
   // Both package variants use the shared configuration template directory.
   await fs.mkdir(path.join(packageRoot, 'windows', 'share-file'), { recursive: true });
   await fs.copyFile(options.configExample, path.join(packageRoot, 'windows', 'share-file', 'config.example.json'));
+  if (options.withNode) {
+    const iconDirectory = path.join(packageRoot, 'windows', 'share-file', 'assets');
+    await fs.mkdir(iconDirectory, { recursive: true });
+    await fs.copyFile(path.join(repoRoot, 'windows', 'share-file', 'assets', 'app-icon.ico'), path.join(iconDirectory, 'app-icon.ico'));
+  }
   if (includeNative) {
     // 原生入口：指向包内 chaoxing_plus.exe，不依赖 Node/PowerShell。
     for (const name of [

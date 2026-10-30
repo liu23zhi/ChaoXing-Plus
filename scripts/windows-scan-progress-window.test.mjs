@@ -44,6 +44,7 @@ test('构建进度窗口 payload 与状态校验拒绝非法值', () => {
   assert.equal(payload.title, '标题');
   assert.equal(payload.detailTemplate, '已检查 {0} 个目录，发现 {1} 个候选。');
   assert.equal(payload.cancelButtonText, SCAN_PROGRESS_LABELS.cancelButtonText);
+  assert.equal(payload.iconPath, path.resolve('windows/share-file/assets/app-icon.ico'));
   assert.deepEqual(parseScanProgressUpdate({ directoriesVisited: 3, candidatesFound: 1, elapsedMs: 20 }),
     { directoriesVisited: 3, candidatesFound: 1, elapsedMs: 20 });
   for (const invalid of [null, undefined, [], {}, { directoriesVisited: -1, candidatesFound: 0, elapsedMs: 0 },
@@ -111,6 +112,31 @@ test('进度窗口控件探针（真实 PowerShell WinForms）', { skip: process
   assert.equal(probe.hasCancelButton, true);
   assert.equal(probe.hasProgressBar, true);
   assert.equal(probe.hasDetailLabel, true);
+  assert.equal(probe.iconApplied, true, '共享图标必须应用到 WinForms 标题栏');
+});
+
+test('内嵌扫描进度脚本仍为标题栏应用共享图标', { skip: process.platform !== 'win32' }, async () => {
+  const previousScripts = globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__;
+  try {
+    globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = {
+      'scan-progress-window.ps1': await fs.readFile(defaultScanProgressScript, 'utf8')
+    };
+    const probe = await probeScanProgressWindow({ timeoutMs: 30000 });
+    assert.equal(probe.ok, true, probe.reason);
+    assert.equal(probe.iconApplied, true, '内嵌脚本必须应用标题栏图标');
+  } finally {
+    globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = previousScripts;
+  }
+});
+
+test('SEA 扫描进度 payload 从当前 EXE 提取图标', () => {
+  const previousSea = globalThis.__CX_NODE_SEA__;
+  try {
+    globalThis.__CX_NODE_SEA__ = true;
+    assert.equal(buildScanProgressPayload().iconPath, process.execPath);
+  } finally {
+    globalThis.__CX_NODE_SEA__ = previousSea;
+  }
 });
 
 test('真实进度窗口对操作系统可见（自动取消，不执行扫描）', {
@@ -121,11 +147,11 @@ test('真实进度窗口对操作系统可见（自动取消，不执行扫描�
     const payloadFile = path.join(directory, 'payload.json');
     const stateFile = path.join(directory, 'state.json');
     const cancelFile = path.join(directory, 'cancel.marker');
-    await fs.writeFile(payloadFile, `${JSON.stringify(SCAN_PROGRESS_LABELS)}\n`, 'utf8');
+    await fs.writeFile(payloadFile, `${JSON.stringify(buildScanProgressPayload())}\n`, 'utf8');
     const source = await fs.readFile(defaultScanProgressScript, 'utf8');
     const instrumented = source.replace('    # VISIBILITY_PROBE_HOOK', [
       "    Add-Type -Name WindowProbe -Namespace ProgressTest -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr handle);'",
-      '    Write-Output (@{ visible = [ProgressTest.WindowProbe]::IsWindowVisible($form.Handle) } | ConvertTo-Json -Compress)',
+      '    [Console]::Out.WriteLine((@{ visible = [ProgressTest.WindowProbe]::IsWindowVisible($form.Handle); iconApplied = ($iconApplied -and $form.ShowIcon -and ([ProgressWindow.WindowIcon]::SendMessage($form.Handle, 127, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)) } | ConvertTo-Json -Compress))',
       '    Stop-ProgressWindow $false'
     ].join('\n'));
     const scriptPath = path.join(directory, 'visibility.ps1');
@@ -136,6 +162,7 @@ test('真实进度窗口对操作系统可见（自动取消，不执行扫描�
     ], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     const raw = JSON.parse(String(result.stdout || '').replace(/^\uFEFF/u, ''));
     assert.equal(raw.visible, true, 'IsWindowVisible returned false for the scan progress window');
+    assert.equal(raw.iconApplied, true, 'WM_GETICON must return the titlebar icon for the visible scan window');
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

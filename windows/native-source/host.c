@@ -16,6 +16,7 @@
 #include "diagnostics.h"
 #include "elevation.h"
 #include "dpi.h"
+#include "resource.h"
 
 /* 前置声明：定义在文件后部，早期调用点需要原型，避免隐式声明（C4013）。 */
 static BOOL h_same(const WCHAR *a, const WCHAR *b);
@@ -2701,7 +2702,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!stdOut || stdOut == INVALID_HANDLE_VALUE) {
             if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
                 /* 没有父控制台：--console 时自己开一个窗口（暂存副本尤其需要）。 */
-                if (h_wants_console()) AllocConsole();
+                if (h_wants_console() && AllocConsole()) {
+                    HWND ownedConsole = GetConsoleWindow();
+                    HICON icon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(CX_RESOURCE_APP_ICON));
+                    if (ownedConsole && icon) {
+                        SendMessageW(ownedConsole, WM_SETICON, ICON_BIG, (LPARAM)icon);
+                        SendMessageW(ownedConsole, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+                    }
+                }
             }
             {
                 HANDLE console = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,

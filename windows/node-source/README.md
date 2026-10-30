@@ -1,6 +1,6 @@
 # Node 宿主导航
 
-本目录保留已弃用的 Node 宿主，用于兼容、对照与排障，不新增宿主能力。Windows 总目录说明见 [共享目录导航](../share-file/README.md)，当前运行边界见 [Windows 使用文档](../../docs/windows.md)。
+本目录的 Node 宿主在本次单 EXE 封装与共享图标接入后冻结，不再更新宿主、启动器或打包能力；现有文件仅用于历史兼容、对照与排障。Windows 总目录说明见 [共享目录导航](../share-file/README.md)，当前运行边界见 [Windows 使用文档](../../docs/windows.md)。
 
 ## 模块分组
 
@@ -25,7 +25,11 @@ node windows/node-source/main.mjs --version
 node windows/node-source/main.mjs --self-check --no-disk-write
 ```
 
-[build-windows-node.cmd](build-windows-node.cmd) 与 [build-windows-node.sh](build-windows-node.sh) 构建纯 Node 备用发布包。共享资源和打包实现位于 [share-file](../share-file/README.md)，测试继续位于根 `scripts/`。
+[build-windows-node.cmd](build-windows-node.cmd) 与 [build-windows-node.sh](build-windows-node.sh) 同时生成备用目录包和 `windows/node-build/release/chaoxing_plus_node.exe`。已有 release 注入资源时，可单独执行 `npm run build:node:exe`。
+
+单 EXE 使用 Node SEA，内嵌当前构建所用 Node 运行时、宿主模块、注入资源、配置模板及 PowerShell 脚本，目标机器无需安装 Node，也无需复制源码或 `dist-windows`。模块与注入资源从内存加载，不解包到磁盘；原有 GUI 全盘扫描仍使用系统临时状态文件。Windows PowerShell 5.1/WinForms 依赖保留，系统与架构要求由构建所用 Node 决定（本机 Node 24 x64），不能据此宣称支持旧版 Windows。EXE 普通运行保留控制台，隐藏可显式传 `--hide-console`。
+
+`windows/node-build/build/` 存放 SEA 中间文件，原备用目录包继续保留在 `windows/node-build/chaoxing-plus-<version>-windows/` 用于调试。两种宿主共用 [app-icon.ico](../share-file/assets/app-icon.ico)，PNG 源图保存在同目录。共享资源和打包实现位于 [share-file](../share-file/README.md)，测试继续位于根 `scripts/`。
 
 ## 启动器区别
 

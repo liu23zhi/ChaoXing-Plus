@@ -25,7 +25,7 @@ npm run build:windows -- --release
 npm run build:native
 ```
 
-[build.ps1](build.ps1) 默认输出 `windows/native-build/bin/chaoxing_plus.exe`，`-BuildTests` 同时生成 C 测试。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
+[build.ps1](build.ps1) 默认输出 `windows/native-build/bin/chaoxing_plus.exe`，`-BuildTests` 同时生成 C 测试；`bin/` 保留全部调试 EXE。每次编译成功后另外生成 `windows/native-build/release/chaoxing_plus.exe`，该目录仅放可独立分发的宿主 EXE，资源和共享 [app-icon.ico](../share-file/assets/app-icon.ico) 均已内嵌。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
 
 ```powershell
 $hostExe = Join-Path (Get-Location) 'windows/native-build/bin/chaoxing_plus.exe'
@@ -35,7 +35,7 @@ $check = Start-Process -FilePath $hostExe -ArgumentList '--self-check','--no-dis
 if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 ```
 
-[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、原生编译、默认发布打包和校验。发布结果位于仓库根 `release/`；共享构建与打包实现见 [share-file](../share-file/README.md)。
+[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、原生编译、默认发布打包和校验。单 EXE 位于 `windows/native-build/release/`；带文档、启动器与清单的完整包仍位于仓库根 `release/`。共享构建与打包实现见 [share-file](../share-file/README.md)。
 
 ## 启动器区别
 

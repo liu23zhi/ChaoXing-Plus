@@ -25,6 +25,7 @@ function Read-JsonFile {
 try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+    Add-Type -Name WindowIcon -Namespace ProgressWindow -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);'
 } catch {
     Write-Output (@{ probe = $false; winformsOk = $false; error = "winforms-unavailable: $($_.Exception.Message)" } | ConvertTo-Json -Compress)
     exit 4
@@ -50,9 +51,23 @@ $fontName = Get-Text $payload.fontName 'Microsoft YaHei UI'
 
 try {
     $form = New-Object System.Windows.Forms.Form
+    $iconApplied = $false
+    try {
+        $iconPath = Get-Text $payload.iconPath ''
+        if ($iconPath) {
+            $icon = if ([System.IO.Path]::GetExtension($iconPath) -ieq '.ico') {
+                New-Object System.Drawing.Icon($iconPath)
+            } else { [System.Drawing.Icon]::ExtractAssociatedIcon($iconPath) }
+            if ($null -ne $icon) {
+                $form.Icon = $icon
+                $form.ShowIcon = $true
+                $iconApplied = $true
+            }
+        }
+    } catch {}
     $form.Text = $title
     $form.ClientSize = New-Object System.Drawing.Size(560, 190)
-    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -112,10 +127,13 @@ try {
 }
 
 if ($Probe) {
+    $smallIcon = [ProgressWindow.WindowIcon]::SendMessage($form.Handle, 127, [IntPtr]::Zero, [IntPtr]::Zero)
+    $iconApplied = $iconApplied -and $form.ShowIcon -and ($smallIcon -ne [IntPtr]::Zero)
     $form.Dispose()
     Write-Output (@{
         probe = $true
         winformsOk = $true
+        iconApplied = $iconApplied
         hasCancelButton = ($null -ne $cancel)
         hasProgressBar = ($null -ne $progress)
         hasDetailLabel = ($null -ne $detailLabel)

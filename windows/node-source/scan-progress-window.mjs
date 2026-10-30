@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 
 // 全盘扫描期间的独立 WinForms 进度窗口。扫描仍由 Node 宿主执行，窗口只做展示与
 // 取消标记，因此不会把递归文件遍历放进 PowerShell 进程；脚本保持纯 ASCII。
@@ -29,7 +30,11 @@ function normalizeLabels(labels = {}) {
 }
 
 export function buildScanProgressPayload(labels = {}) {
-  return normalizeLabels(labels);
+  return {
+    ...normalizeLabels(labels),
+    iconPath: globalThis.__CX_NODE_SEA__ ? process.execPath
+      : fileURLToPath(new URL('../share-file/assets/app-icon.ico', import.meta.url))
+  };
 }
 
 export function parseScanProgressUpdate(raw) {
@@ -105,12 +110,16 @@ export async function openScanProgressWindow({
   }
   const args = [
     '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-    '-File', scriptPath,
-    '-PayloadFile', payloadFile,
-    '-StateFile', stateFile,
-    '-CancelFile', cancelFile
+    ...buildPowerShellScriptArgs('scan-progress-window.ps1', scriptPath, {
+      defaultScriptPath: defaultScanProgressScript,
+      parameters: [
+        ['PayloadFile', payloadFile],
+        ['StateFile', stateFile],
+        ['CancelFile', cancelFile],
+        ['AutoCancelMs', Number.isInteger(autoCancelMs) && autoCancelMs > 0 ? autoCancelMs : undefined]
+      ]
+    })
   ];
-  if (Number.isInteger(autoCancelMs) && autoCancelMs > 0) args.push('-AutoCancelMs', String(autoCancelMs));
 
   let child;
   try {
@@ -217,14 +226,18 @@ export async function probeScanProgressWindow({
   }
   try {
     const payloadFile = path.join(directory, 'payload.json');
-    await fs.writeFile(payloadFile, `${JSON.stringify(SCAN_PROGRESS_LABELS)}\n`, 'utf8');
+    await fs.writeFile(payloadFile, `${JSON.stringify(buildScanProgressPayload())}\n`, 'utf8');
     const result = await execFileImpl('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-      '-File', scriptPath,
-      '-PayloadFile', payloadFile,
-      '-StateFile', path.join(directory, 'state.json'),
-      '-CancelFile', path.join(directory, 'cancel.marker'),
-      '-Probe'
+      ...buildPowerShellScriptArgs('scan-progress-window.ps1', scriptPath, {
+        defaultScriptPath: defaultScanProgressScript,
+        parameters: [
+          ['PayloadFile', payloadFile],
+          ['StateFile', path.join(directory, 'state.json')],
+          ['CancelFile', path.join(directory, 'cancel.marker')],
+          ['Probe', true]
+        ]
+      })
     ], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true });
     const raw = JSON.parse(String(result.stdout || '').replace(/^\uFEFF/u, ''));
     return {
@@ -232,7 +245,8 @@ export async function probeScanProgressWindow({
       reason: raw.winformsOk === true ? '' : (raw.error || 'winforms-probe-failed'),
       hasCancelButton: raw.hasCancelButton === true,
       hasProgressBar: raw.hasProgressBar === true,
-      hasDetailLabel: raw.hasDetailLabel === true
+      hasDetailLabel: raw.hasDetailLabel === true,
+      iconApplied: raw.iconApplied === true
     };
   } catch (error) {
     return { ok: false, reason: error && error.message ? error.message : String(error) };

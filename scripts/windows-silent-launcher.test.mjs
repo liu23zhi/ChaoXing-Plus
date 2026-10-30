@@ -245,13 +245,16 @@ test('hideConsoleWindow 在无控制台或非 Windows 环境下安全返回', as
   if (process.platform !== 'win32') assert.equal(hidden, false);
 });
 
-test('宿主带 --hide-console 运行不报错（self-check 冒烟）', { skip: process.platform !== 'win32' }, () => {
+test('宿主带 --hide-console 运行不报错（self-check 冒烟）', { skip: process.platform !== 'win32' }, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-hidden-self-check-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
   const result = spawnSync(process.execPath, [
     path.join(root, 'windows', 'node-source', 'main.mjs'),
     '--hide-console',
     '--self-check',
     '--quiet',
     '--no-disk-write',
+    '--data-dir', directory,
     '--assets', path.join(root, 'dist-windows')
   ], {
     encoding: 'utf8',

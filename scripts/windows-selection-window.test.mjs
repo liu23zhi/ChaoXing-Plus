@@ -97,6 +97,7 @@ test('showClientSelectionWindow 通过 PowerShell 进程契约解析选中结果
   assert.equal(payload.candidates[0].path, 'D:\\Exam\\CXExam.exe');
   assert.match(payload.candidates[0].display, /^\[ 1 \] D:\\Exam\\CXExam\.exe（x86）$/u);
   assert.equal(payload.title, '超星学习助手 - 选择考试客户端');
+  assert.equal(payload.iconPath, resolve(root, 'windows/share-file/assets/app-icon.ico'));
 });
 
 test('showClientSelectionWindow 返回取消，并在 PowerShell 失败时标记不可用', async () => {
@@ -177,6 +178,33 @@ test('probeClientSelectionWindow 可构建 WinForms 窗口控件（Windows 冒�
   const result = await probeClientSelectionWindow({ timeoutMs: 60000 });
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.candidateCount, 1);
+  assert.equal(result.iconApplied, true, '共享图标必须应用到 WinForms 标题栏');
+});
+
+test('内嵌选择窗口脚本仍为标题栏应用共享图标', { skip: process.platform !== 'win32' }, async () => {
+  const previousScripts = globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__;
+  try {
+    globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = {
+      'selection-window.ps1': await readFile(defaultSelectionWindowScript, 'utf8')
+    };
+    const result = await probeClientSelectionWindow({ timeoutMs: 60000 });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.iconApplied, true, '内嵌脚本必须应用标题栏图标');
+  } finally {
+    globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = previousScripts;
+  }
+});
+
+test('SEA 选择窗口 payload 从当前 EXE 提取图标', { skip: process.platform !== 'win32' }, async () => {
+  const previousSea = globalThis.__CX_NODE_SEA__;
+  const deps = createFakeWindowDependencies({ cancelled: true });
+  try {
+    globalThis.__CX_NODE_SEA__ = true;
+    await showClientSelectionWindow({ candidates: [], ...deps });
+    assert.equal(JSON.parse(deps.calls[0].options.input).iconPath, process.execPath);
+  } finally {
+    globalThis.__CX_NODE_SEA__ = previousSea;
+  }
 });
 
 test('三个候选在默认及最小窗口中完整可见且可分别选择', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
@@ -269,7 +297,7 @@ Add-Type -Name WindowProbe -Namespace SelectionTest -MemberDefinition '[DllImpor
 $script:selection = @{ cancelled = $true }
 `).replace('$script:selection = @{ cancelled = $true; autoClosed = $true }', scanAll
         ? '$ui.scanAll.PerformClick(); return'
-        : '$script:selection = @{ cancelled = $true; autoClosed = $true; visible = [SelectionTest.WindowProbe]::IsWindowVisible($ui.form.Handle) }');
+        : '$script:selection = @{ cancelled = $true; autoClosed = $true; visible = [SelectionTest.WindowProbe]::IsWindowVisible($ui.form.Handle); iconApplied = ($ui.iconApplied -and $ui.form.ShowIcon -and ([Win32Dpi.DpiAwareness]::SendMessage($ui.form.Handle, 127, [IntPtr]::Zero, [IntPtr]::Zero) -ne [IntPtr]::Zero)) }');
     const scriptPath = resolve(directory, 'visibility.ps1');
     await writeFile(scriptPath, instrumented, 'ascii');
     const result = await showClientSelectionWindow({
@@ -285,7 +313,12 @@ $script:selection = @{ cancelled = $true }
           clearTimeout(timer);
           if (code !== 0) { rejectResult(new Error(Buffer.concat(stderr).toString('utf8'))); return; }
           const raw = JSON.parse(Buffer.concat(stdout).toString('utf8'));
-          try { if (!scanAll) assert.equal(raw.visible, true, 'IsWindowVisible returned false for the chooser'); } catch (error) { rejectResult(error); return; }
+          try {
+            if (!scanAll) {
+              assert.equal(raw.visible, true, 'IsWindowVisible returned false for the chooser');
+              assert.equal(raw.iconApplied, true, 'WM_GETICON must return the titlebar icon for the visible chooser');
+            }
+          } catch (error) { rejectResult(error); return; }
           resolveResult({ stdout: JSON.stringify(raw) });
         });
         child.stdin.end(options.input, 'utf8');
@@ -343,7 +376,7 @@ function runHost(args, env = {}) {
 
 test('宿主 --ui gui / --select-client 已接入原生选择窗口（自动关闭冒烟）', { skip: !interactiveWindowTest || process.platform !== 'win32' }, async () => {
   const env = { CXPLUS_SELECTION_AUTO_CLOSE_MS: '900' };
-  for (const args of [['--ui', 'gui', '--no-elevate', '--no-log', '--no-disk-write'], ['--select-client', '--no-elevate', '--no-log', '--no-disk-write']]) {
+  for (const args of [['--ui', 'gui', '--scan-mode', 'common', '--no-elevate', '--no-log', '--no-disk-write'], ['--select-client', '--scan-mode', 'common', '--no-elevate', '--no-log', '--no-disk-write']]) {
     const result = await runHost(args, env);
     const output = `${result.stdout}\n${result.stderr}`;
     assert.equal(result.code, 3, output);

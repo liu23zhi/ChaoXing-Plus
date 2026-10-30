@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { validateLaunchPort } from './options.mjs';
+import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 export { createListenerOwnershipVerifier, getListenerOwnerPid, getProcessParentChain, parseProcessParentChain } from './listener-owner.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -105,7 +106,7 @@ export function buildElevatedRelaunchCommand({
   }
   // Start-Process joins array items without Win32 quoting, losing JSON and paths.
   const quoteArgument = (value) => '"' + String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1') + '"';
-  const argumentList = [scriptPath, ...args, '--elevated'].map(quoteArgument).join(' ');
+  const argumentList = [...(scriptPath ? [scriptPath] : []), ...args, '--elevated'].map(quoteArgument).join(' ');
   return [
     `Start-Process -FilePath ${psQuote(nodeExecutable)}`,
     `-ArgumentList ${psQuote(argumentList)}`,
@@ -230,13 +231,11 @@ export function spawnClient({ exePath, port, logger = () => {}, platform = proce
 }
 
 export function spawnWindowsClient({ exePath, args, spawnImpl = spawn, timeoutMs = 20000 }) {
-  const embeddedLaunchScript = globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__
-    && globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__['launch-client.ps1'];
-  const launchScriptArgs = embeddedLaunchScript
-    ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
-      Buffer.from(String(embeddedLaunchScript), 'utf16le').toString('base64')]
-    : ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      fileURLToPath(new URL('./launch-client.ps1', import.meta.url))];
+  const scriptPath = fileURLToPath(new URL('./launch-client.ps1', import.meta.url));
+  const launchScriptArgs = [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    ...buildPowerShellScriptArgs('launch-client.ps1', scriptPath)
+  ];
   const helper = spawnImpl('powershell.exe', launchScriptArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const child = new EventEmitter();
   child.pid = undefined;
