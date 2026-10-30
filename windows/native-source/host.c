@@ -17,6 +17,12 @@
 #include "elevation.h"
 #include "dpi.h"
 
+/* 前置声明：定义在文件后部，早期调用点需要原型，避免隐式声明（C4013）。 */
+static BOOL h_same(const WCHAR *a, const WCHAR *b);
+static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWORD length);
+static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DWORD styleLength,
+                                char **expression, DWORD *expressionLength, WCHAR *error, DWORD errorCap);
+
 #define HOST_PATH_CAP 32768
 #define HOST_ERROR_CAP 512
 #define HOST_URL_CAP 2048
@@ -123,7 +129,7 @@ static const char *h_inject_mode_name(const WCHAR *mode) {
 static BOOL h_parent_dir(const WCHAR *path, WCHAR *out, DWORD cap) {
     DWORD i = 0, cut = 0;
     if (!path || !out || cap < 4) return FALSE;
-    while (path[i]) { if (path[i] == L'\\\\' || path[i] == L'/') cut = i; ++i; }
+    while (path[i]) { if (path[i] == L'\\' || path[i] == L'/') cut = i; ++i; }
     if (!cut || cut + 1 > cap) return FALSE;
     for (i = 0; i < cut; ++i) out[i] = path[i];
     out[cut] = 0;
@@ -328,6 +334,10 @@ static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static WCHAR h_gui_inject_mode[16];
 static BOOL h_gui_mode_chosen;
+static BOOL h_same(const WCHAR *a, const WCHAR *b);
+static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWORD length);
+static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DWORD styleLength,
+                                char **expression, DWORD *expressionLength, WCHAR *error, DWORD errorCap);
 static BOOL h_proxy_target_auto;
 static const WCHAR *const h_proxy_carriers[] = { L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32" };
 static const int h_proxy_carrier_count = 7;
@@ -424,7 +434,6 @@ static BOOL h_silent_stage(void) {
     int argc = 0;
     int i;
     BOOL ok = FALSE;
-    int attempt = 0;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD got;
@@ -522,7 +531,6 @@ static int h_pipe_client_test(const WCHAR *clientPath) {
     DWORD index = 0;
     int status;
     BOOL ok = FALSE;
-    int attempt = 0;
     int elevationRequired = 0;
     static const char request[] = "{\"id\":1,\"method\":\"Browser.getVersion\"}";
     if (!clientPath || !*clientPath) { h_print(L"pipe-client: missing client path"); return 0; }
@@ -1218,7 +1226,6 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     DWORD paramsCap, at = 0;
     int offset;
     BOOL ok = FALSE;
-    int attempt = 0;
     targetId[0] = 0;
     if (!options->quiet) h_print(L"cdp-pipe: launching client with --remote-debugging-pipe\n");
     if (!h_pipe_open(&state, h_selected_path)) {
@@ -1237,14 +1244,14 @@ static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, D
     h_client_pid = state.pid;
     Sleep(1200);
     {
-        int attempt = 0, status = 0;
-        for (attempt = 0; attempt < 4; ++attempt) {
+        int tryIndex = 0, status = 0;
+        for (tryIndex = 0; tryIndex < 4; ++tryIndex) {
             status = h_pipe_call_nul(&state, "Target.getTargets", NULL, &reply, 6000);
             if (status != 1) status = h_pipe_call(&state, "Target.getTargets", NULL, &reply, 3000);
             if (status == 1) break;
             if (!options->quiet) {
                 WCHAR diag[96];
-                wsprintfW(diag, L"cdp-pipe: Target.getTargets attempt %d status %d\n", attempt + 1, status);
+                wsprintfW(diag, L"cdp-pipe: Target.getTargets attempt %d status %d\n", tryIndex + 1, status);
                 h_print(diag);
             }
             Sleep(1500);
@@ -1612,7 +1619,6 @@ static BOOL h_pipe_test(void) {
     char buffer[256];
     DWORD got = 0, index = 0;
     BOOL ok = FALSE;
-    int attempt = 0;
     static const WCHAR cmdToken[] = L"\"C:\\Windows\\System32\\cmd.exe\" /c echo PIPE-TEST-OK";
     while (cmdToken[index] && index < 500) { command[index] = cmdToken[index]; ++index; }
     command[index] = 0;
@@ -1962,7 +1968,6 @@ static BOOL h_build_page_config(const CX_OPTIONS *options, const char *style, DW
     char *config = NULL, *expression = NULL;
     DWORD configLength = 0, capacity, at = 0;
     BOOL ok = FALSE;
-    int attempt = 0;
     if (outExpression) *outExpression = NULL;
     if (outLength) *outLength = 0;
     config = (char *)HeapAlloc(GetProcessHeap(), 0, CX_OPTIONS_JSON_CAP);
@@ -2853,6 +2858,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
+
+
 
 
 
