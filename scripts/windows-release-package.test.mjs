@@ -8,6 +8,11 @@ import path from 'node:path';
 
 const root = path.resolve('.');
 const packageScript = path.join(root, 'windows', 'share-file', 'package-windows.mjs');
+const multiRuntimeFiles = [
+  'chaoxing_plus.exe', 'chaoxing_plus.com',
+  'assets/windows-bootstrap.js', 'assets/chaoxing-plus.windows.js', 'assets/trampoline.js',
+  'assets/vendor/sweetalert2.min.css', 'winmm-proxy.dll', 'package-to-single/chaoxing_plus.exe'
+];
 
 function runPackager(args) {
   // 夹具默认不内嵌真实 node.exe（约 100MB），避免每个用例都拷一遍；
@@ -63,9 +68,13 @@ async function createFixture() {
   const verifier = path.join(root, 'windows', 'share-file', 'verify-release.mjs');
   const exe = path.join(directory, 'chaoxing_plus.exe');
   await fs.writeFile(exe, Buffer.from('MZ fake native host'));
-  const consoleExe = path.join(directory, 'chaoxing_plus_console.exe');
-  await fs.writeFile(consoleExe, Buffer.from('MZ fake console native host'));
-  return { directory, dist, host, launcher, debugLauncher, silentLauncher, configExample, verifier, exe, consoleExe };
+  const multiDir = path.join(directory, 'multi-build');
+  for (const relative of multiRuntimeFiles) {
+    await writeFixtureFile(path.join(multiDir, relative), `fixture multi runtime ${relative}\n`);
+  }
+  await writeFixtureFile(path.join(multiDir, 'debug-test.exe'), 'not a release runtime\n');
+  await writeFixtureFile(path.join(multiDir, 'package-to-single', 'stale-wrapper.exe'), 'not a release runtime\n');
+  return { directory, dist, host, launcher, debugLauncher, silentLauncher, configExample, verifier, exe, multiDir };
 }
 
 async function sha256(filePath) {
@@ -86,6 +95,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
+    '--multi-dir', fixture.multiDir,
     '--out', out,
     '--name', 'fixture-package',
     '--version', '9.9.9',
@@ -110,6 +120,9 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   await walk(packageRoot, packageRoot);
   for (const expected of [
     'chaoxing_plus.exe', 'start-windows-node.cmd', 'start-windows-node-debug.cmd', 'start-windows-node-silent.cmd',
+    'start-windows-node-silent-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd',
+    'start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd',
+    'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd',
     'dist-windows/windows-bootstrap.js', 'dist-windows/chaoxing-plus.windows.js',
     'dist-windows/trampoline.js', 'dist-windows/vendor/sweetalert2.min.css',
     'dist-windows/package-manifest.json',
@@ -182,7 +195,7 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   }
 });
 
-test('发布包新增 single-file 与 multi-file 子目录并区分 GUI/Console 入口', { skip: process.platform !== 'win32' }, async (t) => {
+test('发布包保留 GUI 主程序、Console 辅助入口和明确列出的多文件运行资源', async (t) => {
   const fixture = await createFixture();
   t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
   const out = path.join(fixture.directory, 'out-variants');
@@ -194,7 +207,7 @@ test('发布包新增 single-file 与 multi-file 子目录并区分 GUI/Console 
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
-    '--console-exe', fixture.consoleExe,
+    '--multi-dir', fixture.multiDir,
     '--out', out,
     '--name', 'variant-package',
     '--version', '9.9.9',
@@ -203,25 +216,102 @@ test('发布包新增 single-file 与 multi-file 子目录并区分 GUI/Console 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const packageRoot = path.join(out, 'variant-package');
   assert.equal(await fs.readFile(path.join(packageRoot, 'single-file', 'chaoxing_plus.exe'), 'utf8'), 'MZ fake native host');
-  assert.equal(await fs.readFile(path.join(packageRoot, 'multi-file', 'chaoxing_plus_console.exe'), 'utf8'), 'MZ fake console native host');
-  for (const name of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd', 'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd']) {
+  for (const relative of multiRuntimeFiles) {
+    assert.equal(await fs.readFile(path.join(packageRoot, 'multi-file', relative), 'utf8'), `fixture multi runtime ${relative}\n`);
+  }
+  await assert.rejects(fs.access(path.join(packageRoot, 'multi-file', 'debug-test.exe')));
+  await assert.rejects(fs.access(path.join(packageRoot, 'multi-file', 'package-to-single', 'stale-wrapper.exe')));
+  for (const name of ['start-windows.cmd', 'start-windows-debug.cmd']) {
     const source = await fs.readFile(path.join(packageRoot, 'multi-file', name), 'utf8');
-    assert.match(source, /chaoxing_plus_console\.exe/u, `${name} 必须指向 Console 子系统入口`);
-    assert.doesNotMatch(source, /chaoxing_plus\.exe(?!_console)/u, `${name} 不得误指向 GUI 入口`);
+    const debug = name.includes('debug');
+    assert.match(source, debug ? /chaoxing_plus\.com/u : /chaoxing_plus\.exe/u,
+      `${name} 必须指向${debug ? ' Console 辅助' : ' GUI'}入口`);
+    assert.doesNotMatch(source, debug ? /chaoxing_plus\.exe/u : /chaoxing_plus\.com/u, `${name} 不得混用入口`);
+  }
+  for (const name of ['start-windows-silent.cmd', 'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd']) {
+    await assert.rejects(fs.access(path.join(packageRoot, 'multi-file', name)), { code: 'ENOENT' },
+      '多文件变体不发布会触发不支持清理行为的静默入口');
   }
   const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
   assert.deepEqual(info.variants, {
     'single-file': { directory: 'single-file', executable: 'single-file/chaoxing_plus.exe', subsystem: 'windows' },
-    'multi-file': { directory: 'multi-file', executable: 'multi-file/chaoxing_plus_console.exe', subsystem: 'console' }
+    'multi-file': {
+      directory: 'multi-file', executable: 'multi-file/chaoxing_plus.exe',
+      consoleHelper: 'multi-file/chaoxing_plus.com', packageToSingle: 'multi-file/package-to-single/chaoxing_plus.exe',
+      assetsDir: 'multi-file/assets', subsystem: 'windows'
+    }
   });
-  assert.equal(
-    (await fs.readFile(path.join(packageRoot, 'multi-file', 'release-info.json'), 'utf8').then((text) => JSON.parse(text).entrypoints.native)),
-    'chaoxing_plus_console.exe'
-  );
+  const multiInfo = JSON.parse(await fs.readFile(path.join(packageRoot, 'multi-file', 'release-info.json'), 'utf8'));
+  assert.deepEqual(multiInfo.entrypoints, {
+    native: 'chaoxing_plus.exe', consoleHelper: 'chaoxing_plus.com', packageToSingle: 'package-to-single/chaoxing_plus.exe'
+  });
+  assert.equal(multiInfo.assetsDir, 'assets');
+  assert.equal(multiInfo.subsystem, 'windows');
   const verify = spawnSync(process.execPath, [path.join(packageRoot, 'multi-file', 'verify-release.mjs')], {
     encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: path.join(packageRoot, 'multi-file')
   });
   assert.equal(verify.status, 0, `${verify.stdout}\n${verify.stderr}`);
+});
+
+test('多文件构建缺少任一运行文件时拒绝打包且保留原输出', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const out = path.join(fixture.directory, 'incomplete-package');
+  const sentinel = path.join(out, 'keep.txt');
+  await writeFixtureFile(sentinel, 'user-owned');
+  for (const relative of multiRuntimeFiles) {
+    const target = path.join(fixture.multiDir, relative);
+    const bytes = await fs.readFile(target);
+    await fs.rm(target);
+    const result = runPackager([
+      '--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
+      '--multi-dir', fixture.multiDir, '--out', out, '--version', '9.9.9', '--skip-zip', '--skip-docs'
+    ]);
+    assert.equal(result.status, 2, `${relative}: ${result.stderr || result.stdout}`);
+    assert.ok(result.stderr.includes(`多文件构建缺少运行文件：${relative}`), result.stderr);
+    assert.equal(await fs.readFile(sentinel, 'utf8'), 'user-owned');
+    await fs.writeFile(target, bytes);
+  }
+});
+
+test('未生成多文件构建时只发布 single-file GUI EXE', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const out = path.join(fixture.directory, 'single-package');
+  const result = runPackager([
+    '--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
+    '--multi-dir', path.join(fixture.directory, 'missing-multi'), '--out', out,
+    '--version', '9.9.9', '--skip-zip', '--skip-docs'
+  ]);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const info = JSON.parse(await fs.readFile(path.join(out, 'release-info.json'), 'utf8'));
+  assert.deepEqual(info.entrypoints, { native: 'single-file/chaoxing_plus.exe' });
+  assert.deepEqual(Object.keys(info.variants), ['single-file']);
+  await assert.rejects(fs.access(path.join(out, 'multi-file')));
+});
+
+test('禁用 multi 后保留的用户文件和嵌套空目录不触发多文件发布', async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  for (const relative of multiRuntimeFiles) await fs.rm(path.join(fixture.multiDir, relative));
+  const extra = path.join(fixture.multiDir, 'user-notes.txt');
+  const empty = path.join(fixture.multiDir, 'user-owned', 'nested-empty');
+  await fs.writeFile(extra, 'user-owned content\n');
+  await fs.mkdir(empty, { recursive: true });
+  const out = path.join(fixture.directory, 'disabled-multi-package');
+  const result = runPackager([
+    '--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
+    '--multi-dir', fixture.multiDir, '--out', out, '--version', '9.9.9', '--skip-zip', '--skip-docs'
+  ]);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const info = JSON.parse(await fs.readFile(path.join(out, 'release-info.json'), 'utf8'));
+  assert.deepEqual(info.entrypoints, { native: 'single-file/chaoxing_plus.exe' });
+  assert.deepEqual(Object.keys(info.variants), ['single-file']);
+  await assert.rejects(fs.access(path.join(out, 'multi-file')));
+  assert.equal(await fs.readFile(extra, 'utf8'), 'user-owned content\n');
+  assert.deepEqual(await fs.readdir(empty), [], 'the retained empty directory is untouched');
+  assert.equal(await fs.readFile(path.join(fixture.multiDir, 'debug-test.exe'), 'utf8'), 'not a release runtime\n');
+  assert.equal(await fs.readFile(path.join(fixture.multiDir, 'package-to-single', 'stale-wrapper.exe'), 'utf8'), 'not a release runtime\n');
 });
 
 test('发布打包拒绝包含本地调试注入日志的构建', async (t) => {
@@ -236,6 +326,7 @@ test('发布打包拒绝包含本地调试注入日志的构建', async (t) => {
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
+    '--multi-dir', fixture.multiDir,
     '--out', path.join(fixture.directory, 'out-debug'),
     '--name', 'debug-package',
     '--version', '9.9.9',
@@ -257,6 +348,7 @@ test('发布打包拒绝与发布版本不一致的 dist 构建', async (t) => {
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
+    '--multi-dir', fixture.multiDir,
     '--out', path.join(fixture.directory, 'out-stale'),
     '--name', 'stale-package',
     '--version', '9.9.9',
@@ -317,6 +409,8 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
   const help = runPackager(['--help']);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /用法: node windows\/share-file\/package-windows\.mjs/u);
+  assert.match(help.stdout, /--multi-dir/u);
+  assert.doesNotMatch(help.stdout, /--console-exe/u);
 
   const unknown = runPackager(['--unknown-flag']);
   assert.equal(unknown.status, 2);
@@ -359,8 +453,10 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /发布包解压入口自检/u);
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');
   assert.match(workflow, /single-file\\chaoxing_plus\.exe/u, 'CI must check the GUI variant');
-  assert.match(workflow, /multi-file\\chaoxing_plus_console\.exe/u, 'CI must check the Console variant');
-  assert.match(workflow, /multi-file\\verify-release\.mjs/u, 'CI must verify the Console variant checksum');
+  assert.match(workflow, /multi-file\\chaoxing_plus\.exe/u, 'CI must check the multi-file GUI host');
+  assert.match(workflow, /multi-file\\chaoxing_plus\.com/u, 'CI must check the Console helper');
+  assert.match(workflow, /multi-file\\package-to-single\\chaoxing_plus\.exe/u, 'CI must check the package launcher');
+  assert.match(workflow, /multi-file\\verify-release\.mjs/u, 'CI must verify the multi-file checksum');
   // 原生包里没有 Node 宿主：CI 不得再运行包内 main.mjs，只保留原生自检与禁入清单。
   assert.doesNotMatch(workflow, /node \(Join-Path \$package 'windows\\node-source\\main\.mjs'\)/u, '原生发布包里没有 Node 宿主，CI 不应再运行它');
   assert.match(workflow, /原生发布包不应包含 Node 产物/u, 'CI 必须拒绝混入 Node 产物的原生包');
@@ -371,7 +467,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     'CX_NATIVE_SESSION_EXE', 'CX_NATIVE_SELECTION_EXE', 'CX_NATIVE_TRANSPORT_EXE', 'CX_NATIVE_AUDIT_EXE',
     'CX_NATIVE_CONFIG_EXE', 'CX_NATIVE_CACHE_EXE', 'CX_NATIVE_CACHE_HOST_EXE', 'CX_NATIVE_CLI_SELECTION_EXE',
     'CX_NATIVE_ELEVATION_EXE', 'CX_NATIVE_ELEVATION_HOST_EXE', 'CX_NATIVE_DPI_EXE', 'CX_NATIVE_DPI_PROCESS_EXE',
-    'CX_NATIVE_DPI_CHILD_EXE', 'CX_NATIVE_PROCESS_CHECK_EXE', 'CX_NATIVE_PROCESS_FIXTURE_EXE', 'CX_NATIVE_DIAGNOSTICS_EXE'
+    'CX_NATIVE_DPI_CHILD_EXE', 'CX_NATIVE_PROCESS_CHECK_EXE', 'CX_NATIVE_PROCESS_FIXTURE_EXE', 'CX_NATIVE_DIAGNOSTICS_EXE',
+    'CX_NATIVE_MULTI_HOST_EXE', 'CX_NATIVE_CONSOLE_HELPER_EXE', 'CX_NATIVE_PACKAGE_LAUNCHER_EXE',
+    'CX_NATIVE_MULTI_ASSETS_EXE', 'CX_NATIVE_CONSOLE_HELPER_FIXTURE_EXE'
   ];
   for (const name of nativeExecutables) {
     assert.match(workflow, new RegExp(name), `CI must export ${name} so native tests and browser suites run`);
@@ -403,11 +501,14 @@ test('原生构建脚本保持 ASCII 且不依赖 PowerShell 模块自动加载'
   assert.match(source, /if \(\$BuildConsole\)/u);
   assert.match(source, /SUBSYSTEM:WINDOWS,6\.01/u);
   assert.match(source, /SUBSYSTEM:CONSOLE,6\.01/u);
-  assert.match(source, /chaoxing_plus_console\.exe/u);
+  assert.match(source, /chaoxing_plus\.com/u);
+  assert.match(source, /console-launcher\.c/u);
+  assert.match(source, /package-launcher\.c/u);
+  assert.match(source, /CX_MULTI_FILE_BUILD/u);
   assert.match(source, /Join-Path \$release 'single-file'/u);
   assert.match(source, /Join-Path \$release 'multi-file'/u);
   assert.match(source, /singleFileExe/u);
-  assert.match(source, /multiFileExe/u);
+  assert.match(source, /package-to-single/u);
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build-windows.ps1 -BuildTests -BuildConsole');
 });
@@ -426,6 +527,7 @@ test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖',
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
+    '--multi-dir', fixture.multiDir,
     '--out', out,
     '--skip-docs',
     '--skip-zip'
@@ -466,7 +568,7 @@ test('原生发布直接生成输出目录内的两种变体，不增加版本�
     '--config-example', fixture.configExample,
     '--verifier', fixture.verifier,
     '--exe', fixture.exe,
-    '--console-exe', fixture.consoleExe,
+    '--multi-dir', fixture.multiDir,
     '--out', out,
     '--name', 'native-only',
     '--version', '9.9.9',
@@ -487,9 +589,12 @@ test('原生发布直接生成输出目录内的两种变体，不增加版本�
     }
   }
   await walk(packageRoot);
-  for (const expected of ['single-file/chaoxing_plus.exe', 'multi-file/chaoxing_plus_console.exe', 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'multi-file/windows/share-file/config.example.json', 'multi-file/start-windows.cmd', 'multi-file/start-windows-silent.cmd', 'multi-file/verify-release.mjs', 'multi-file/SHA256SUMS.txt']) {
+  for (const expected of ['single-file/chaoxing_plus.exe', ...multiRuntimeFiles.map((relative) => `multi-file/${relative}`), 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'multi-file/windows/share-file/config.example.json', 'multi-file/start-windows.cmd', 'multi-file/start-windows-debug.cmd', 'multi-file/verify-release.mjs', 'multi-file/SHA256SUMS.txt']) {
     assert.equal(files.includes(expected), true, `默认包缺少 ${expected}`);
   }
+  assert.deepEqual(files.filter((name) => name.startsWith('multi-file/') && name.endsWith('.cmd')).sort(), [
+    'multi-file/start-windows-debug.cmd', 'multi-file/start-windows.cmd'
+  ], '多文件变体只发布可用的普通与调试两个启动入口');
   assert.deepEqual(await fs.readdir(path.join(packageRoot, 'single-file')), ['chaoxing_plus.exe']);
   assert.equal(files.includes('chaoxing_plus.exe'), false, '原生发布根目录不再放兼容 EXE');
   for (const forbidden of ['start-windows-node.cmd', 'start-windows-node-silent.cmd', 'runtime/node.exe']) {
@@ -499,11 +604,14 @@ test('原生发布直接生成输出目录内的两种变体，不增加版本�
   assert.equal(files.some((name) => name.startsWith('dist-windows/')), false, '默认包不得包含 Node 注入资源');
   const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
   assert.equal(info.nodeHost, false);
-  assert.deepEqual(info.entrypoints, { native: 'single-file/chaoxing_plus.exe', nativeConsole: 'multi-file/chaoxing_plus_console.exe' });
+  assert.deepEqual(info.entrypoints, {
+    native: 'single-file/chaoxing_plus.exe', nativeMulti: 'multi-file/chaoxing_plus.exe',
+    nativeConsole: 'multi-file/chaoxing_plus.com', nativePackage: 'multi-file/package-to-single/chaoxing_plus.exe'
+  });
   assert.equal(info.assetsDir, '');
   assert.equal(info.runtime, '');
-  // 发布包只放单个 EXE：代理 DLL 已内嵌在 EXE 里，不再随包外置。
-  assert.equal(files.includes('winmm-proxy.dll'), false, '代理不应再以独立文件随包');
+  assert.equal(files.includes('winmm-proxy.dll'), false, '根目录不应放置多文件变体的代理');
+  assert.equal(files.includes('multi-file/winmm-proxy.dll'), true, '多文件变体必须携带代理侧文件');
   assert.equal(files.some((name) => name.startsWith('hook/')), false, '不应出现 hook 代理目录');
   assert.equal(info.proxyDir, undefined, 'release-info 不再声明外部代理目录');
   const verify = spawnSync(process.execPath, [path.join(packageRoot, 'verify-release.mjs')], {
@@ -518,7 +626,7 @@ test('原生发布拒绝覆盖源码或带无关文件的输出目录', async (t
   const sentinel = path.join(fixture.directory, 'keep.txt');
   await fs.writeFile(sentinel, 'user-owned');
   const result = runPackager(['--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
-    '--console-exe', fixture.consoleExe, '--out', fixture.directory, '--version', '9.9.9', '--skip-zip']);
+    '--multi-dir', fixture.multiDir, '--out', fixture.directory, '--version', '9.9.9', '--skip-zip']);
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'user-owned');
   assert.equal(await fs.readFile(fixture.exe, 'utf8'), 'MZ fake native host');

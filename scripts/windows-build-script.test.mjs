@@ -18,7 +18,7 @@ function findGitBash() {
   return candidates.find((candidate) => existsSync(candidate)) || '';
 }
 
-test('build-windows.sh 使用 Git Bash 构建 x86 GUI/Console 双变体发布包', async () => {
+test('build-windows.sh 使用 Git Bash 构建 GUI 双变体及 Console 辅助入口', async () => {
   const script = await readFile(path.join(root, 'windows/native-source/build-windows.sh'), 'utf8');
   assert.match(script, /^#!\/usr\/bin\/env bash\n/u);
   assert.doesNotMatch(script, /\r\n/u, 'shell 脚本必须使用 LF 换行');
@@ -29,7 +29,8 @@ test('build-windows.sh 使用 Git Bash 构建 x86 GUI/Console 双变体发布包
     'npm run release:windows',
     'verify-release.mjs',
     'chaoxing_plus.exe',
-    'chaoxing_plus_console.exe',
+    'chaoxing_plus.com',
+    'multi-file/package-to-single/chaoxing_plus.exe',
     '-BuildConsole'
   ]) {
     assert.equal(script.includes(expected), true, `缺少构建步骤：${expected}`);
@@ -52,7 +53,7 @@ test('原生 PowerShell、CMD、Bash 与 npm 构建入口统一使用 build-wind
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   for (const [name, source] of [['CMD', cmd], ['Bash', bash]]) {
     assert.match(source, /native-source[\\/]build-windows\.ps1/u, `${name} 必须调用统一的 PowerShell 构建脚本`);
-    assert.match(source, /BuildConsole/u, `${name} 必须构建 Console 变体`);
+    assert.match(source, /BuildConsole/u, `${name} 必须构建多文件 GUI 和 Console 辅助入口`);
     assert.match(source, /PACKAGE_DIR[="]+windows[\\/]native-build[\\/]release/u, `${name} 必须校验原生发布目录`);
     assert.doesNotMatch(source, /PACKAGE_DIR[="]+release[\\/]/u, `${name} 不得重新向仓库根 release 输出`);
   }
@@ -60,7 +61,9 @@ test('原生 PowerShell、CMD、Bash 与 npm 构建入口统一使用 build-wind
   assert.match(ps, /Join-Path \$release 'single-file'/u);
   assert.match(ps, /Join-Path \$release 'multi-file'/u);
   assert.match(ps, /singleFileExe/u);
-  assert.match(ps, /multiFileExe/u);
+  assert.match(ps, /multiHostExe/u);
+  assert.match(ps, /\/ENTRY:ConsoleLauncherMain \/SUBSYSTEM:CONSOLE/u);
+  assert.match(ps, /package-multi-payload\.mjs/u);
   assert.match(packageJson.scripts['build:native'], /windows\/native-source\/build-windows\.ps1/u);
 
   const launchers = await Promise.all(['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd', 'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd']
@@ -70,8 +73,8 @@ test('原生 PowerShell、CMD、Bash 与 npm 构建入口统一使用 build-wind
 
 test('Windows 打包决策已记录到 AGENTS 与 docs', async () => {
   const agents = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.match(agents, /Windows 打包决策（2026-12-06）/u);
-  assert.match(agents, /无 CRT、无第三方\/外部 DLL 依赖/u);
+  assert.match(agents, /Windows 打包决策（2026-10-30 更新）/u);
+  assert.match(agents, /仅链接 Windows 系统 DLL/u);
   assert.match(agents, /x86 宿主可正常启动并注入 x64 CXExam/u);
   assert.match(agents, /不从 x86 进程内存执行 x64 PE/u);
 
@@ -113,7 +116,7 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
 });
 test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD 入口', async () => {
   const cases = [
-    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build-windows.ps1', 'windows\\native-build', 'native-build\\release\\single-file', 'native-build\\release\\multi-file', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe', 'chaoxing_plus_console.exe', '-BuildConsole', 'multi-file']],
+    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build-windows.ps1', 'windows\\native-build', 'native-build\\release\\single-file', 'native-build\\release\\multi-file', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe', 'chaoxing_plus.com', 'package-to-single\\chaoxing_plus.exe', '-BuildConsole', 'multi-file']],
     ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'windows\\node-build', '--out', 'start-windows-node.cmd', 'verify-release.mjs']]
   ];
   for (const [name, expected] of cases) {

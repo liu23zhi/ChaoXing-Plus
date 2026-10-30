@@ -54,8 +54,8 @@ Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客�
 
 ```powershell
 npm run build:windows      # 注入资源（dist-windows）
-npm run build:native       # 原生 x86 GUI + Console EXE（需要本机 MSVC x86 工具链）
-# 构建 Windows GUI/Console 双变体发布包（CMD 入口，不依赖 Git Bash）
+npm run build:native       # 原生单文件/多文件 GUI、Console helper 与临时释放包（需 MSVC x86）
+# 构建 Windows 原生双变体发布包（CMD 入口，不依赖 Git Bash）
 .\windows\native-source\build-windows.cmd
 # 备用（封装完成后冻结）：Node 单 EXE 与调试目录包，不含原生 EXE
 .\windows\node-source\build-windows-node.cmd
@@ -64,13 +64,11 @@ npm run build:native       # 原生 x86 GUI + Console EXE（需要本机 MSVC x8
 .\windows\native-scripts\start-windows.cmd
 # 需要可见控制台日志时使用调试入口（控制台 + GUI）
 .\windows\native-scripts\start-windows-debug.cmd
-# 静默场景入口（零落盘内存模式、快速扫描失败才全盘、自动首选 x86、无面板/控制台）
-.\windows\native-scripts\start-windows-silent.cmd
 ```
 
 原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-scripts\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
 
-可独立分发的 GUI 原生 EXE 位于 `windows/native-build/release/single-file/chaoxing_plus.exe`；Console EXE 位于 `windows/native-build/release/multi-file/chaoxing_plus_console.exe`，两者均使用仓库共享图标。PowerShell 编译入口 `windows/native-source/build-windows.ps1` 默认生成两种 EXE；显式传 `-BuildConsole:$false` 时只生成 GUI，并清理旧 Console EXE。原生 `windows/native-build/bin/` 中的宿主与调试/测试 EXE 保留。Node 备用 EXE 为 `windows/node-build/release/chaoxing_plus_node.exe`，内嵌 Node 运行时与资源，无需目标机器安装 Node；Node 宿主停止更新。
+可独立分发的原生 GUI 为 `windows/native-build/release/single-file/chaoxing_plus.exe`，内嵌四项页面资源与 winmm 代理。`multi-file/chaoxing_plus.exe` 仍为 GUI 主程序，使用四项 `assets/` 资源和根目录 `winmm-proxy.dll`，不含这些 RCDATA；同级 `chaoxing_plus.com` 是等待 GUI 并保留输出/退出码的 Console helper。PowerShell 显式调用 `.exe` 不保证等待；命令行需要等待时使用省略扩展名的 `chaoxing_plus`、显式 `.com` 或 `Start-Process -Wait`。`BuildConsole` 默认 `true`，包含多文件变体与 `multi-file/package-to-single/chaoxing_plus.exe` 普通临时释放包；`-BuildConsole:$false` 仅生成单文件 GUI。释放包每次释放到自建临时目录，等待 GUI 退出后仅清理该目录，发布原件不删除。原生 `bin/` 中的宿主与调试/测试 EXE 保留。Node 备用 EXE 仍为 `windows/node-build/release/chaoxing_plus_node.exe`，其运行时、资源与冻结行为不变。
 
 Windows 完整发布包（默认使用原生宿主）：
 
@@ -80,7 +78,7 @@ npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
 npm run release:windows # windows/native-build/release/ 与 windows/native-build/chaoxing-plus-6.2.0-windows.zip
 ```
 
-原生最终目录直接使用 `windows/native-build/release/`，不追加版本目录：`single-file/` 只含 GUI EXE；`multi-file/` 包含 Console EXE、五个原生启动器、配置、文档和独立校验清单。原生发布根目录提供 `release-info.json`、`SHA256SUMS.txt` 与 `verify-release.mjs`，不再放兼容 EXE 或启动器。原生模式的 `--out <dir>` 直接指定最终目录。CMD/Bash 入口完成资源构建、编译、打包与校验，PowerShell 入口只编译。解压后分别运行 `node verify-release.mjs` 与 `node multi-file/verify-release.mjs` 校验完整性。
+原生最终目录直接使用 `windows/native-build/release/`，不追加版本目录：`single-file/` 只含内嵌资源 GUI；`multi-file/` 包含外置资源 GUI、`.com` helper、普通临时释放包、配置、文档和独立校验清单。多文件仅发布普通 `start-windows.cmd`（GUI `.exe`）和调试 `start-windows-debug.cmd`（`.com` helper）两个启动器，不发布三个 `start-windows-silent*.cmd`；多文件删除挂起、自毁和 `--stage-boot` 本轮不支持并明确拒绝。原生发布根目录提供 `release-info.json`、`SHA256SUMS.txt` 与 `verify-release.mjs`，不再放兼容 EXE 或启动器。原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定多文件编译输入。CMD/Bash 入口完成资源构建、编译、打包与校验，PowerShell 入口只编译。解压后分别运行 `node verify-release.mjs` 与 `node multi-file/verify-release.mjs` 校验完整性。
 
 显式传 `npm run release:windows -- --with-node` 生成包含 Node 的历史兼容包，`--skip-native` 则生成纯 Node 备用包；两者保留原有 `<out>/<name>/` 布局和默认仓库根 `release/` 输出，不改变冻结的 Node 打包行为。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 

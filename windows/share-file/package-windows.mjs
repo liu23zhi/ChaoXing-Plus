@@ -21,6 +21,16 @@ const DIST_REQUIRED = [
 ];
 // Node 宿主运行时需要的非模块文件；构建期模块不得进入发布包。
 const NODE_SCRIPT_FILES = ['launch-client.ps1', 'scan-progress-window.ps1', 'selection-window.ps1', 'system-probe.ps1', 'silent-launch.vbs', 'silent-memory-launch.vbs'];
+const MULTI_RUNTIME_FILES = [
+  'chaoxing_plus.exe',
+  'chaoxing_plus.com',
+  'assets/windows-bootstrap.js',
+  'assets/chaoxing-plus.windows.js',
+  'assets/trampoline.js',
+  'assets/vendor/sweetalert2.min.css',
+  'winmm-proxy.dll',
+  'package-to-single/chaoxing_plus.exe'
+];
 // wipe.mjs / owned-files.mjs 已升级为启动清理运行时依赖；自毁状态机仍由后续模块按需引入。
 const HOST_FORBIDDEN_MODULES = new Set(['chrome75-syntax.mjs', 'trampoline.js']);
 const EXTERNAL_IMPORT_PATTERN = /\b(?:from|import)\s+'((?!node:|\.\/)[^']+)'/gu;
@@ -101,7 +111,7 @@ function parseArgs(argv) {
     configExample: path.join(repoRoot, 'windows', 'share-file', 'config.example.json'),
     verifier: path.join(repoRoot, 'windows', 'share-file', 'verify-release.mjs'),
     exe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe'),
-    consoleExe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus_console.exe'),
+    multiDir: path.join(repoRoot, 'windows', 'native-build', 'bin', 'multi-file'),
     // 自带 Node 运行时：发布包内的入口优先用 runtime\node.exe，避免依赖目标机器的
     // C:\Program Files\nodejs\node.exe（考试机通常没有 Node.js）。
     runtimeExe: process.platform === 'win32' ? process.execPath : '',
@@ -132,7 +142,7 @@ function parseArgs(argv) {
       case '--config-example': options.configExample = path.resolve(value()); break;
       case '--verifier': options.verifier = path.resolve(value()); break;
       case '--exe': options.exe = path.resolve(value()); break;
-      case '--console-exe': options.consoleExe = path.resolve(value()); break;
+      case '--multi-dir': options.multiDir = path.resolve(value()); break;
       case '--runtime-exe': options.runtimeExe = path.resolve(value()); options.skipRuntime = false; break;
       case '--no-runtime': options.skipRuntime = true; break;
       case '--with-node': options.withNode = true; break;
@@ -154,7 +164,7 @@ function parseArgs(argv) {
           '  --config-example <file>   windows/share-file/config.example.json（首跑配置模板）',
           '  --verifier <file>          windows/share-file/verify-release.mjs（包内完整性校验器）',
           '  --exe <file>       原生 EXE（默认原生构建产物；不存在时仅打 Node 包）',
-          '  --console-exe <file>       Console 子系统原生 EXE（用于 multi-file 变体）',
+          '  --multi-dir <dir>  多文件构建目录（默认 windows/native-build/bin/multi-file）',
           '  --runtime-exe <file> 内嵌到 runtime\\node.exe 的 Node 运行时（默认当前 node.exe）',
           '  --no-runtime       不内嵌 Node 运行时（入口退回 PATH 上的 node.exe）',
           '  --with-node        额外携带 Node 宿主闭包/启动器/自带运行时（Node 已弃用，仅备用）',
@@ -217,19 +227,28 @@ async function main() {
   if (options.withNode && !(await pathExists(options.hostDir))) fail(`缺少 Node 宿主目录：${options.hostDir}`);
 
   const includeNative = !options.skipNative && await pathExists(options.exe);
-  const includeConsole = includeNative && await pathExists(options.consoleExe);
+  const includeMulti = includeNative && (await Promise.all(MULTI_RUNTIME_FILES.map((relative) =>
+    pathExists(path.join(options.multiDir, relative))))).some(Boolean);
   if (!options.withNode && !includeNative) fail(`缺少原生 EXE：${options.exe}；请先运行 npm run build:native`);
   if (!options.skipNative && !includeNative) {
     console.warn(`[release] 未找到原生 EXE（${options.exe}），将生成仅含 Node 宿主的发布包；如需原生单文件请先构建原生宿主。`);
   }
-  if (includeNative && !includeConsole) {
-    console.warn(`[release] 未找到 Console 子系统 EXE（${options.consoleExe}），将跳过 multi-file 变体。`);
+  if (includeNative && !includeMulti) {
+    console.warn(`[release] 未找到多文件运行文件（${options.multiDir}），将跳过 multi-file 变体。`);
+  }
+  if (includeMulti) {
+    for (const relative of MULTI_RUNTIME_FILES) {
+      const source = path.join(options.multiDir, relative);
+      if (!(await pathExists(source)) || !(await fs.lstat(source)).isFile()) {
+        fail(`多文件构建缺少运行文件：${relative}；请重新运行 npm run build:native`);
+      }
+    }
   }
 
   if (!options.withNode) {
     // Native --out is the final directory, so refuse to replace source trees or
     // unrelated files instead of treating an arbitrary parent as staging space.
-    const inputs = [repoRoot, options.distDir, options.exe, options.consoleExe, options.configExample, options.verifier];
+    const inputs = [repoRoot, options.distDir, options.exe, options.multiDir, options.configExample, options.verifier];
     for (const input of inputs) {
       const relative = path.relative(packageRoot, input);
       if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
@@ -299,8 +318,7 @@ async function main() {
       await fs.copyFile(source, path.join(packageRoot, name));
     }
   }
-  // 发布包只放单个 EXE：winmm 代理已作为 RCDATA 内嵌在 EXE 里，
-  // 运行时由 --install-proxy / dll-proxy 从资源释放到客户端目录，不再随包外置。
+  // 兼容 Node 包根目录和 single-file 变体保留内嵌资源的单个 EXE。
   await fs.copyFile(options.verifier, path.join(packageRoot, 'verify-release.mjs'));
   if (options.withNode && !options.skipDocs) {
     for (const doc of ['README.md', path.join('docs', 'windows.md')]) {
@@ -316,14 +334,10 @@ async function main() {
   }
 
   // 原生发布根目录只提供两个明确的发布变体，Node 备用包保留兼容入口：
-  // single-file 使用 GUI 子系统 EXE，multi-file 使用独立构建的 Console 子系统 EXE。
-  // multi-file 复制原生启动器并改写入口文件名，避免把两个子系统混用。
-  const nativeLauncherNames = [
+  // 两种变体均以 GUI EXE 为主入口；multi-file 另带同名 Console .com 辅助入口。
+  const multiLauncherNames = [
     'start-windows.cmd',
-    'start-windows-debug.cmd',
-    'start-windows-silent.cmd',
-    'start-windows-silent-debug.cmd',
-    'start-windows-silent-no-full-scan-debug.cmd'
+    'start-windows-debug.cmd'
   ];
   const variants = {};
   if (includeNative) {
@@ -336,14 +350,20 @@ async function main() {
       subsystem: 'windows'
     };
   }
-  if (includeConsole) {
+  if (includeMulti) {
     const multiDirectory = path.join(packageRoot, 'multi-file');
     await fs.mkdir(multiDirectory, { recursive: true });
-    await fs.copyFile(options.consoleExe, path.join(multiDirectory, 'chaoxing_plus_console.exe'));
-    for (const launcherName of nativeLauncherNames) {
+    for (const relative of MULTI_RUNTIME_FILES) {
+      const target = path.join(multiDirectory, relative);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.copyFile(path.join(options.multiDir, relative), target);
+    }
+    for (const launcherName of multiLauncherNames) {
       const source = path.join(repoRoot, 'windows', 'native-scripts', launcherName);
       const launcher = await fs.readFile(source, 'utf8');
-      const rewritten = launcher.replaceAll('chaoxing_plus.exe', 'chaoxing_plus_console.exe');
+      const rewritten = launcherName.includes('debug')
+        ? launcher.replaceAll('chaoxing_plus.exe', 'chaoxing_plus.com')
+        : launcher;
       await fs.writeFile(path.join(multiDirectory, launcherName), rewritten, 'utf8');
     }
     await fs.mkdir(path.join(multiDirectory, 'windows', 'share-file'), { recursive: true });
@@ -367,12 +387,16 @@ async function main() {
       nativeHost: true,
       nodeHost: false,
       node: '',
-      entrypoints: { native: 'chaoxing_plus_console.exe' },
-      assetsDir: '',
+      entrypoints: {
+        native: 'chaoxing_plus.exe',
+        consoleHelper: 'chaoxing_plus.com',
+        packageToSingle: 'package-to-single/chaoxing_plus.exe'
+      },
+      assetsDir: 'assets',
       runtime: '',
       payloadFiles: multiFiles.length,
       verifier: 'verify-release.mjs',
-      subsystem: 'console'
+      subsystem: 'windows'
     };
     await fs.writeFile(path.join(multiDirectory, 'release-info.json'), `${JSON.stringify(multiInfo, null, 2)}\n`, 'utf8');
     const multiHashTargets = [...multiFiles, 'release-info.json'].sort();
@@ -383,8 +407,11 @@ async function main() {
     await fs.writeFile(path.join(multiDirectory, 'SHA256SUMS.txt'), `${multiSums.join('\n')}\n`, 'utf8');
     variants['multi-file'] = {
       directory: 'multi-file',
-      executable: 'multi-file/chaoxing_plus_console.exe',
-      subsystem: 'console'
+      executable: 'multi-file/chaoxing_plus.exe',
+      consoleHelper: 'multi-file/chaoxing_plus.com',
+      packageToSingle: 'multi-file/package-to-single/chaoxing_plus.exe',
+      assetsDir: 'multi-file/assets',
+      subsystem: 'windows'
     };
   }
 
@@ -413,7 +440,11 @@ async function main() {
       ? (includeNative
         ? { native: 'chaoxing_plus.exe', node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' }
         : { node: 'start-windows-node.cmd', nodeDebug: 'start-windows-node-debug.cmd', nodeSilent: 'start-windows-node-silent.cmd', nodeSilentDebug: 'start-windows-node-silent-debug.cmd', nodeSilentNoFullScanDebug: 'start-windows-node-silent-no-full-scan-debug.cmd' })
-      : { native: 'single-file/chaoxing_plus.exe', ...(includeConsole ? { nativeConsole: 'multi-file/chaoxing_plus_console.exe' } : {}) },
+      : { native: 'single-file/chaoxing_plus.exe', ...(includeMulti ? {
+        nativeMulti: 'multi-file/chaoxing_plus.exe',
+        nativeConsole: 'multi-file/chaoxing_plus.com',
+        nativePackage: 'multi-file/package-to-single/chaoxing_plus.exe'
+      } : {}) },
     assetsDir: options.withNode ? 'dist-windows' : '',
     runtime: runtimeRelative,
     variants,

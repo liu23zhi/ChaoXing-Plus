@@ -70,12 +70,15 @@ static int h_self_check(const CX_OPTIONS *options) {
             elevation.TokenIsElevated ? "elevated" : "standard-user; run as administrator for administrator-required clients");
     } else h_check_add("permissions", "warning", "Unable to determine token elevation");
     if (token) CloseHandle(token);
-    h_check_add("embedded-resources", cx_asset_validate_embedded(error, HOST_ERROR_CAP) ? "passed" : "failed",
-        "Four embedded resources must be readable and nonempty");
+    h_check_add(cx_asset_resources_embedded() ? "embedded-resources" : "external-resources",
+        cx_asset_validate_embedded(error, HOST_ERROR_CAP) ? "passed" : "failed",
+        cx_asset_resources_embedded() ? "Embedded resources must be readable and nonempty"
+            : "Five external sidecar resources must be readable and nonempty");
     for (i = 0; i < 4; ++i) {
         BOOL ok = cx_asset_load(cx_asset_name(i), options->assetsDirSet ? options->assetsDir : NULL,
             &assets[i], &lengths[i], error, HOST_ERROR_CAP);
-        h_check_add(assetIds[i], ok ? "passed" : "failed", options->assetsDirSet ? "Explicit external resource; no embedded fallback" : "Embedded resource");
+        h_check_add(assetIds[i], ok ? "passed" : "failed", options->assetsDirSet ? "Explicit external resource; no embedded fallback"
+            : cx_asset_resources_embedded() ? "Embedded resource" : "External sidecar beside the executable");
         if (!ok) loaded = FALSE;
     }
     if (loaded) {

@@ -30,8 +30,7 @@ if (-not (Test-Path -LiteralPath $resourceCompiler)) { throw 'Windows SDK resour
 $build = Join-Path $OutputDirectory 'build'
 $bin = Join-Path $OutputDirectory 'bin'
 New-Item -ItemType Directory -Path $build,$bin -Force | Out-Null
-# The dll-proxy carrier DLL is embedded as RCDATA so neither host needs a
-# companion proxy DLL. Build it when missing (unless -SkipProxy), then embed it.
+# The single-file host embeds resources; the multi-file GUI reads sidecars.
 $proxyScript = Join-Path $root 'windows\hook-source\build-proxy.ps1'
 $hookDir = Join-Path $root 'windows\native-build\hook'
 $proxyDll = Join-Path $hookDir 'winmm.dll'
@@ -63,6 +62,12 @@ $resourceObject = Join-Path $build 'assets.res'
 $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
 & $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
+$multiResourceFile = Join-Path $build 'multi-assets.rc'
+$multiResourceObject = Join-Path $build 'multi-assets.res'
+$multiResourceSource = (Get-Content -LiteralPath (Join-Path $sourceRoot 'multi-assets.rc.in') -Raw -Encoding UTF8).Replace('@APP_ICON@', $iconResourcePath)
+$multiResourceSource | Set-Content -LiteralPath $multiResourceFile -Encoding Unicode
+& $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $multiResourceObject) $multiResourceFile
+if ($LASTEXITCODE -ne 0) { throw 'Multi-file icon compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $sourceRoot))
 $sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','wipe','browser-extension','browser-session','adapter-account','account-window','home','host')
 foreach ($source in $sources) {
@@ -74,17 +79,55 @@ try {
     $env:Path = (Join-Path $kitRoot ('bin\' + $sdk.Name + '\x64')) + ';' + $originalPath
     $objects = $sources | ForEach-Object { Join-Path $build ($_ + '.obj') }
     $hostExe = Join-Path $bin 'chaoxing_plus.exe'
-    $consoleHostExe = Join-Path $bin 'chaoxing_plus_console.exe'
+    $multiBin = Join-Path $bin 'multi-file'
+    $multiHostExe = Join-Path $multiBin 'chaoxing_plus.exe'
+    $consoleHelper = Join-Path $multiBin 'chaoxing_plus.com'
+    $packageLauncher = Join-Path $multiBin 'package-to-single\chaoxing_plus.exe'
     $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + $hostExe),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
     & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
     if ($BuildConsole) {
-        $consoleLinkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:CONSOLE,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + $consoleHostExe),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
-        & $linker @consoleLinkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
-        if ($LASTEXITCODE -ne 0) { throw 'Native console host link failed.' }
-    } elseif (Test-Path -LiteralPath $consoleHostExe -PathType Leaf) {
-        Remove-Item -LiteralPath $consoleHostExe -Force
+        New-Item -ItemType Directory -Path $multiBin,(Split-Path $packageLauncher -Parent) -Force | Out-Null
+        & $compiler.FullName @common /DCX_MULTI_FILE_BUILD ('/Fo' + (Join-Path $build 'assets-multi.obj')) (Join-Path $sourceRoot 'assets.c')
+        if ($LASTEXITCODE -ne 0) { throw 'Multi-file resource loader compilation failed.' }
+        $multiObjects = $sources | ForEach-Object { if ($_ -eq 'assets') { Join-Path $build 'assets-multi.obj' } else { Join-Path $build ($_ + '.obj') } }
+        $baseLinkArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' }
+        & $linker @baseLinkArgs ('/OUT:' + $multiHostExe) @multiObjects $multiResourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+        if ($LASTEXITCODE -ne 0) { throw 'Multi-file GUI link failed.' }
+        & $compiler.FullName @common ('/Fo' + (Join-Path $build 'console-launcher.obj')) (Join-Path $sourceRoot 'console-launcher.c')
+        if ($LASTEXITCODE -ne 0) { throw 'Console helper compilation failed.' }
+        $helperLinkArgs = $baseLinkArgs | Where-Object { $_ -notlike '/ENTRY:*' -and $_ -notlike '/SUBSYSTEM:*' }
+        & $linker @helperLinkArgs /ENTRY:ConsoleLauncherMain /SUBSYSTEM:CONSOLE,6.01 ('/OUT:' + $consoleHelper) (Join-Path $build 'console-launcher.obj') $multiResourceObject kernel32.lib
+        if ($LASTEXITCODE -ne 0) { throw 'Console helper link failed.' }
+        $sidecars = [ordered]@{
+            BOOTSTRAP = 'assets\windows-bootstrap.js'
+            BUNDLE = 'assets\chaoxing-plus.windows.js'
+            TRAMPOLINE = 'assets\trampoline.js'
+            SWAL_STYLE = 'assets\vendor\sweetalert2.min.css'
+            PROXY_WINMM = 'winmm-proxy.dll'
+        }
+        foreach ($entry in $sidecars.GetEnumerator()) {
+            $destination = Join-Path $multiBin $entry.Value
+            New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+            Copy-Item -LiteralPath $assetSources[$entry.Key] -Destination $destination -Force
+        }
+        $payload = Join-Path $build 'multi-payload.bin'
+        & node (Join-Path $sourceRoot 'package-multi-payload.mjs') $multiBin $payload
+        if ($LASTEXITCODE -ne 0) { throw 'Multi-file payload packaging failed.' }
+        $packageResourceFile = Join-Path $build 'package-payload.rc'
+        $packageResourceObject = Join-Path $build 'package-payload.res'
+        $packageResource = $multiResourceSource + "`r`n201 RCDATA `"" + (Resolve-Path -LiteralPath $payload).Path.Replace('\', '\\') + "`"`r`n"
+        $packageResource | Set-Content -LiteralPath $packageResourceFile -Encoding Unicode
+        & $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $packageResourceObject) $packageResourceFile
+        if ($LASTEXITCODE -ne 0) { throw 'Package resource compilation failed.' }
+        & $compiler.FullName @common ('/Fo' + (Join-Path $build 'package-launcher.obj')) (Join-Path $sourceRoot 'package-launcher.c')
+        if ($LASTEXITCODE -ne 0) { throw 'Package launcher compilation failed.' }
+        $packageLinkArgs = $baseLinkArgs | Where-Object { $_ -notlike '/ENTRY:*' }
+        & $linker @packageLinkArgs /ENTRY:PackageLauncherMain ('/OUT:' + $packageLauncher) (Join-Path $build 'package-launcher.obj') (Join-Path $build 'memory.obj') $packageResourceObject kernel32.lib
+        if ($LASTEXITCODE -ne 0) { throw 'Package launcher link failed.' }
     }
+    $obsoleteConsole = Join-Path $bin 'chaoxing_plus_console.exe'
+    if (Test-Path -LiteralPath $obsoleteConsole -PathType Leaf) { Remove-Item -LiteralPath $obsoleteConsole -Force }
     if ($BuildTests) {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $sourceRoot 'tests\injection-tests.c')
@@ -95,6 +138,7 @@ try {
         & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test link failed.' }
         foreach ($test in @(
+            @{ Name = 'console-helper-fixture'; Entry = 'ConsoleHelperFixtureMain'; Objects = @(); Resources = @() },
             @{ Name = 'browser-session-tests'; Entry = 'BrowserSessionTestMain'; Objects = @('memory','json','browser-extension','browser-session'); Resources = @() },
             @{ Name = 'adapter-account-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account'); Resources = @() },
             @{ Name = 'account-window-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account','account-window'); Resources = @($resourceObject) },
@@ -135,20 +179,32 @@ try {
             & $linker @testArgs @testManifest ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $bin ($test.Name + '.exe')) -PathType Leaf)) { throw "Native test link failed or output is missing: $($test.Name)" }
         }
+        if ($BuildConsole) {
+            $multiTestObject = Join-Path $build 'multi-assets-tests.obj'
+            & $compiler.FullName @common ('/Fo' + $multiTestObject) (Join-Path $sourceRoot 'tests\multi-assets-tests.c')
+            if ($LASTEXITCODE -ne 0) { throw 'Multi-file asset test compilation failed.' }
+            & $linker @testArgs /ENTRY:MultiAssetTestMain ('/OUT:' + (Join-Path $bin 'multi-assets-tests.exe')) (Join-Path $build 'memory.obj') (Join-Path $build 'assets-multi.obj') $multiTestObject kernel32.lib user32.lib
+            if ($LASTEXITCODE -ne 0) { throw 'Multi-file asset test link failed.' }
+        }
     }
 } finally { $env:Path = $originalPath }
-# Kept for existing build callers; resources are always embedded, never copied beside the EXE.
-if ($SkipAssetCopy) { Write-Verbose 'SkipAssetCopy is retained for compatibility; no external assets are produced.' }
+# Kept for existing callers; required multi-file sidecars cannot be skipped.
+if ($SkipAssetCopy) { Write-Verbose 'SkipAssetCopy does not omit required multi-file resources.' }
 $dumpbin = Join-Path $compiler.DirectoryName 'dumpbin.exe'
 & $dumpbin /headers /imports $hostExe | Set-Content -LiteralPath (Join-Path $build 'pe-imports.txt') -Encoding UTF8
 if ($LASTEXITCODE -ne 0) { throw 'PE import audit failed.' }
 if ($BuildConsole) {
-    & $dumpbin /headers /imports $consoleHostExe | Set-Content -LiteralPath (Join-Path $build 'pe-imports-console.txt') -Encoding UTF8
+    & $dumpbin /headers /imports $consoleHelper | Set-Content -LiteralPath (Join-Path $build 'pe-imports-console.txt') -Encoding UTF8
     if ($LASTEXITCODE -ne 0) { throw 'PE console import audit failed.' }
+    & $dumpbin /headers /imports $multiHostExe | Set-Content -LiteralPath (Join-Path $build 'pe-imports-multi.txt') -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw 'PE multi-file import audit failed.' }
+    & $dumpbin /headers /imports $packageLauncher | Set-Content -LiteralPath (Join-Path $build 'pe-imports-package.txt') -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw 'PE package import audit failed.' }
 }
 $release = Join-Path $OutputDirectory 'release'
 $singleFileRelease = Join-Path $release 'single-file'
 $multiFileRelease = Join-Path $release 'multi-file'
+$multiFiles = @('chaoxing_plus.exe','chaoxing_plus.com','assets\windows-bootstrap.js','assets\chaoxing-plus.windows.js','assets\trampoline.js','assets\vendor\sweetalert2.min.css','winmm-proxy.dll','package-to-single\chaoxing_plus.exe')
 New-Item -ItemType Directory -Path $singleFileRelease -Force | Out-Null
 $legacyReleaseExe = Join-Path $release 'chaoxing_plus.exe'
 if (Test-Path -LiteralPath $legacyReleaseExe -PathType Leaf) {
@@ -159,18 +215,23 @@ Copy-Item -LiteralPath $hostExe -Destination $singleFileExe -Force
 $releaseOutputs = @($hostExe, $singleFileExe)
 if ($BuildConsole) {
     New-Item -ItemType Directory -Path $multiFileRelease -Force | Out-Null
-    $multiFileExe = Join-Path $multiFileRelease 'chaoxing_plus_console.exe'
-    Copy-Item -LiteralPath $consoleHostExe -Destination $multiFileExe -Force
-    $releaseOutputs += $multiFileExe
+    foreach ($relative in $multiFiles) {
+        $destination = Join-Path $multiFileRelease $relative
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $multiBin $relative) -Destination $destination -Force
+    }
+    $releaseOutputs += @((Join-Path $multiFileRelease 'chaoxing_plus.exe'), (Join-Path $multiFileRelease 'chaoxing_plus.com'), (Join-Path $multiFileRelease 'package-to-single\chaoxing_plus.exe'))
 } else {
-    $staleConsoleExe = Join-Path $multiFileRelease 'chaoxing_plus_console.exe'
-    if (Test-Path -LiteralPath $staleConsoleExe -PathType Leaf) {
-        Remove-Item -LiteralPath $staleConsoleExe -Force
+    # Remove only known build outputs; leave unrelated files and test EXEs alone.
+    foreach ($directory in @($multiBin, $multiFileRelease)) {
+        foreach ($relative in $multiFiles) {
+            $obsolete = Join-Path $directory $relative
+            if (Test-Path -LiteralPath $obsolete -PathType Leaf) { Remove-Item -LiteralPath $obsolete -Force }
+        }
     }
 }
-# The proxy DLL is embedded as RCDATA and is only written into the client
-# directory at runtime when dll-proxy is used; no sidecar runtime files are
-# copied into either variant directory.
+$staleConsoleExe = Join-Path $multiFileRelease 'chaoxing_plus_console.exe'
+if (Test-Path -LiteralPath $staleConsoleExe -PathType Leaf) { Remove-Item -LiteralPath $staleConsoleExe -Force }
 Get-Item -LiteralPath $releaseOutputs | Select-Object FullName,Length
 # Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
 # and build must not depend on PowerShell module auto-loading.

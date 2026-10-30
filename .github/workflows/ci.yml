@@ -74,6 +74,11 @@ jobs:
             CX_NATIVE_ADAPTER_EXE = 'adapter-account-tests.exe'
             CX_NATIVE_ACCOUNT_WINDOW_EXE = 'account-window-tests.exe'
             CX_NATIVE_BROWSER_SESSION_EXE = 'browser-session-tests.exe'
+            CX_NATIVE_MULTI_HOST_EXE = 'multi-file\chaoxing_plus.exe'
+            CX_NATIVE_CONSOLE_HELPER_EXE = 'multi-file\chaoxing_plus.com'
+            CX_NATIVE_PACKAGE_LAUNCHER_EXE = 'multi-file\package-to-single\chaoxing_plus.exe'
+            CX_NATIVE_MULTI_ASSETS_EXE = 'multi-assets-tests.exe'
+            CX_NATIVE_CONSOLE_HELPER_FIXTURE_EXE = 'console-helper-fixture.exe'
           }
           foreach ($entry in $executables.GetEnumerator()) {
             $path = Join-Path $bin $entry.Value
@@ -111,7 +116,7 @@ jobs:
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
           # 原生发布直接落在 native-build/release，只提供两个变体。
-          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'single-file\chaoxing_plus.exe', 'multi-file\start-windows.cmd', 'multi-file\windows\share-file\config.example.json', 'multi-file\chaoxing_plus_console.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'single-file\chaoxing_plus.exe', 'multi-file\start-windows.cmd', 'multi-file\windows\share-file\config.example.json', 'multi-file\chaoxing_plus.exe', 'multi-file\chaoxing_plus.com', 'multi-file\assets\windows-bootstrap.js', 'multi-file\assets\chaoxing-plus.windows.js', 'multi-file\assets\trampoline.js', 'multi-file\assets\vendor\sweetalert2.min.css', 'multi-file\winmm-proxy.dll', 'multi-file\package-to-single\chaoxing_plus.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
           foreach ($forbidden in @('chaoxing_plus.exe', 'start-windows.cmd', 'windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
@@ -121,8 +126,17 @@ jobs:
           if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
           node (Join-Path $package 'multi-file\verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "multi-file 变体完整性自校验失败: $LASTEXITCODE" }
-          $console = Start-Process -FilePath (Join-Path $package 'multi-file\chaoxing_plus_console.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
-          if ($console.ExitCode -ne 0) { throw "multi-file 原生自检失败: $($console.ExitCode)" }
+          $multi = Start-Process -FilePath (Join-Path $package 'multi-file\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
+          if ($multi.ExitCode -ne 0) { throw "multi-file 原生自检失败: $($multi.ExitCode)" }
+          Push-Location -LiteralPath (Join-Path $package 'multi-file')
+          try {
+            $resolved = @(Get-Command .\chaoxing_plus -CommandType Application)[0].Source
+            if ([IO.Path]::GetExtension($resolved) -ne '.com') { throw "扩展名省略入口未选择 .com: $resolved" }
+            .\chaoxing_plus --self-check --quiet --no-disk-write
+            if ($LASTEXITCODE -ne 0) { throw "Console 辅助入口自检失败: $LASTEXITCODE" }
+          } finally { Pop-Location }
+          $wrapper = Start-Process -FilePath (Join-Path $package 'multi-file\package-to-single\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
+          if ($wrapper.ExitCode -ne 0) { throw "多文件单 EXE 包装器自检失败: $($wrapper.ExitCode)" }
 
       - name: 上传发布包
         uses: actions/upload-artifact@v4

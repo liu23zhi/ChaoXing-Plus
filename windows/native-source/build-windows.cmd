@@ -7,7 +7,9 @@ cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
 set "SINGLE_EXE=windows\native-build\release\single-file\chaoxing_plus.exe"
-set "MULTI_EXE=windows\native-build\release\multi-file\chaoxing_plus_console.exe"
+set "MULTI_EXE=windows\native-build\release\multi-file\chaoxing_plus.exe"
+set "MULTI_CLI=windows\native-build\release\multi-file\chaoxing_plus.com"
+set "PACKED_EXE=windows\native-build\release\multi-file\package-to-single\chaoxing_plus.exe"
 set "PACKAGE_DIR=windows\native-build\release"
 
 :parse
@@ -55,15 +57,15 @@ echo [build-windows] 1/4 building extension and Chrome75 injection assets
 call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
-echo [build-windows] 2/4 building native x86 hosts (GUI + Console, no CRT, embedded assets)
+echo [build-windows] 2/4 building single GUI + multi GUI, Console helper and extraction package
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build-windows.ps1" -OutputDirectory "windows\native-build" -BuildConsole
 if errorlevel 1 exit /b 1
 if not exist "windows\native-build\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.
   exit /b 1
 )
-if not exist "windows\native-build\bin\chaoxing_plus_console.exe" (
-  echo [build-windows] Console subsystem native EXE was not produced.
+if not exist "windows\native-build\bin\multi-file\chaoxing_plus.com" (
+  echo [build-windows] Console helper was not produced.
   exit /b 1
 )
 if not exist "%SINGLE_EXE%" (
@@ -82,17 +84,23 @@ if not exist "%PACKAGE_DIR%\single-file\chaoxing_plus.exe" (
   echo [build-windows] release package is missing single-file\chaoxing_plus.exe: %PACKAGE_DIR%
   exit /b 1
 )
-if not exist "%PACKAGE_DIR%\multi-file\chaoxing_plus_console.exe" (
-  echo [build-windows] release package is missing multi-file\chaoxing_plus_console.exe: %PACKAGE_DIR%
+if not exist "%MULTI_CLI%" (
+  echo [build-windows] release package is missing Console helper: %MULTI_CLI%
+  exit /b 1
+)
+if not exist "%PACKED_EXE%" (
+  echo [build-windows] release package is missing extraction launcher: %PACKED_EXE%
   exit /b 1
 )
 
 echo [build-windows] 4/4 verifying the package and both native entries
 node "%PACKAGE_DIR%\verify-release.mjs"
 if errorlevel 1 exit /b 1
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%SINGLE_EXE%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath '%SINGLE_EXE%' -ArgumentList '--self-check','--quiet','--no-disk-write' -Wait -PassThru; exit $p.ExitCode"
 if errorlevel 1 exit /b 1
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%MULTI_EXE%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%MULTI_CLI%' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath '%PACKED_EXE%' -ArgumentList '--self-check','--quiet','--no-disk-write' -Wait -PassThru; exit $p.ExitCode"
 if errorlevel 1 exit /b 1
 node "%PACKAGE_DIR%\multi-file\verify-release.mjs"
 if errorlevel 1 exit /b 1
@@ -103,6 +111,8 @@ if "%SKIP_TESTS%"=="0" (
 )
 
 echo [build-windows] single-file GUI EXE: %SINGLE_EXE%
-echo [build-windows] multi-file Console EXE: %MULTI_EXE%
+echo [build-windows] multi-file GUI EXE: %MULTI_EXE%
+echo [build-windows] multi-file command entry: %MULTI_CLI%
+echo [build-windows] extraction package: %PACKED_EXE%
 echo [build-windows] full package: %PACKAGE_DIR%
 exit /b 0

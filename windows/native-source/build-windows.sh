@@ -6,11 +6,13 @@
 #   - 注入通过客户端官方 remote debugging + CDP 页面注入完成，x86 宿主可以
 #     正常启动/连接 x64 CXExam，因此不需要内置 x64 可执行注入器；
 #   - 不从 x86 进程内存执行 x64 PE，也不引入进程空洞/远程线程注入；
-#   - 注入资源（bootstrap/bundle/trampoline/CSS）在原生构建时以 RCDATA 内嵌。
+#   - 单文件内嵌资源；多文件 GUI 使用外置资源、Console .com 辅助入口。
 #
 # 输出：
 #   windows/native-build/release/single-file/chaoxing_plus.exe （GUI 单文件变体）
-#   windows/native-build/release/multi-file/chaoxing_plus_console.exe （Console 多文件变体）
+#   windows/native-build/release/multi-file/chaoxing_plus.exe （GUI + 外置资源）
+#   windows/native-build/release/multi-file/chaoxing_plus.com （Console 辅助入口）
+#   windows/native-build/release/multi-file/package-to-single/chaoxing_plus.exe （临时释放包）
 #   windows/native-build/bin/                    （保留宿主与调试/测试 EXE）
 #   windows/native-build/release/multi-file/start-windows*.cmd（原生启动器）
 #   windows/native-build/release/SHA256SUMS.txt / verify-release.mjs
@@ -69,12 +71,14 @@ fi
 
 PACKAGE_DIR="windows/native-build/release"
 SINGLE_EXE="windows/native-build/release/single-file/chaoxing_plus.exe"
-MULTI_EXE="windows/native-build/release/multi-file/chaoxing_plus_console.exe"
+MULTI_EXE="windows/native-build/release/multi-file/chaoxing_plus.exe"
+MULTI_CLI="windows/native-build/release/multi-file/chaoxing_plus.com"
+PACKED_EXE="windows/native-build/release/multi-file/package-to-single/chaoxing_plus.exe"
 
 echo "[build-windows] 1/5 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
 
-echo "[build-windows] 2/5 构建 Windows x86 原生宿主（GUI + Console、无 CRT、资源内嵌、无外部 DLL 依赖）"
+echo "[build-windows] 2/5 构建单文件 GUI、多文件 GUI、Console 辅助入口与临时释放包"
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
   -File "windows/native-source/build-windows.ps1" -OutputDirectory "windows/native-build" -BuildConsole
 
@@ -82,8 +86,8 @@ if [ ! -f "windows/native-build/bin/chaoxing_plus.exe" ]; then
   echo "[build-windows] 原生 x86 EXE 没有生成。" >&2
   exit 1
 fi
-if [ ! -f "windows/native-build/bin/chaoxing_plus_console.exe" ]; then
-  echo "[build-windows] Console 子系统原生 EXE 没有生成。" >&2
+if [ ! -f "windows/native-build/bin/multi-file/chaoxing_plus.com" ]; then
+  echo "[build-windows] Console 辅助入口没有生成。" >&2
   exit 1
 fi
 if [ ! -f "$SINGLE_EXE" ]; then
@@ -102,8 +106,8 @@ if [ ! -f "${PACKAGE_DIR}/single-file/chaoxing_plus.exe" ]; then
   echo "[build-windows] 发布包缺少 single-file/chaoxing_plus.exe：${PACKAGE_DIR}" >&2
   exit 1
 fi
-if [ ! -f "${PACKAGE_DIR}/multi-file/chaoxing_plus_console.exe" ]; then
-  echo "[build-windows] 发布包缺少 multi-file/chaoxing_plus_console.exe：${PACKAGE_DIR}" >&2
+if [ ! -f "$MULTI_CLI" ] || [ ! -f "$PACKED_EXE" ]; then
+  echo "[build-windows] 发布包缺少 Console 辅助入口或临时释放包：${PACKAGE_DIR}" >&2
   exit 1
 fi
 
@@ -111,10 +115,13 @@ echo "[build-windows] 4/5 校验发布包完整性及独立 EXE/包内入口"
 node "${PACKAGE_DIR}/verify-release.mjs"
 
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -Command "& '${SINGLE_EXE}' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
+  -Command "\$p = Start-Process -FilePath '${SINGLE_EXE}' -ArgumentList '--self-check','--quiet','--no-disk-write' -Wait -PassThru; exit \$p.ExitCode"
 
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -Command "& '${MULTI_EXE}' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
+  -Command "& '${MULTI_CLI}' --self-check --quiet --no-disk-write; exit \$LASTEXITCODE"
+
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -Command "\$p = Start-Process -FilePath '${PACKED_EXE}' -ArgumentList '--self-check','--quiet','--no-disk-write' -Wait -PassThru; exit \$p.ExitCode"
 
 node "${PACKAGE_DIR}/multi-file/verify-release.mjs"
 
@@ -127,7 +134,9 @@ fi
 
 echo "[build-windows] 完成："
 echo "  single-file GUI EXE：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
-echo "  multi-file Console EXE：${MULTI_EXE}（无外部 DLL/运行库依赖）"
+echo "  multi-file GUI EXE：${MULTI_EXE}（含外置资源，无额外运行库）"
+echo "  命令入口：${MULTI_CLI}"
+echo "  临时释放包：${PACKED_EXE}"
 echo "  调试/测试 EXE： windows/native-build/bin/（全部保留）"
 echo "  完整发布包：    ${PACKAGE_DIR}"
 echo "  多文件启动入口： ${PACKAGE_DIR}/multi-file/start-windows.cmd"

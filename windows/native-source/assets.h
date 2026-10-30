@@ -10,15 +10,19 @@
 
 DWORD cx_asset_count(void);
 const WCHAR *cx_asset_name(DWORD index);
+BOOL cx_asset_resources_embedded(void);
 
 /* Returned data is NUL-terminated and owned by the caller (HeapFree).
-   A nonempty override directory never falls back to embedded resources. */
+   A nonempty override directory never falls back to default resources.
+   Multi-file defaults are resolved from the executable directory and cached
+   together with the proxy for the process lifetime on their first validation/load. */
 BOOL cx_asset_load(const WCHAR *name, const WCHAR *overrideDir,
                    char **data, DWORD *length, WCHAR *error, DWORD errorCap);
 BOOL cx_asset_validate_embedded(WCHAR *error, DWORD errorCap);
 
-/* 内嵌的 dll-proxy 代理 DLL（发布包只有单个 EXE，代理不再随包外置）。
-   这些资源不进 cx_asset_count()：注入资源仍固定四项，代理按需单独释放。 */
+/* Proxy resources are separate from the four injection assets. The single-file
+   build embeds them; the multi-file build uses the cached winmm-proxy.dll sidecar.
+   Returned proxy buffers are also owned by the caller (HeapFree). */
 DWORD cx_asset_proxy_count(void);
 const WCHAR *cx_asset_proxy_name(DWORD index);
 BOOL cx_asset_proxy_exists(const WCHAR *dllName);

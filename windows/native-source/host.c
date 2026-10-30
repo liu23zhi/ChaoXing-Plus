@@ -2510,6 +2510,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     int attempt = 0;
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
+    if (!cx_asset_resources_embedded() && (options->deleteSuspend || options->silentScenario
+        || options->stageRequest || options->stagedBoot || options->wipeOwnedFilesOnStart
+        || options->selfDestructKeyCount || options->selfDestructFullscreenExit)) {
+        h_error(error, errorCap, L"multi-file builds do not support release-file deletion or self-destruct; use ordinary startup (package launcher cleans only its own temporary files)");
+        if (!options->quiet) h_print(error);
+        h_exit_code = 2;
+        return FALSE;
+    }
     h_zero(&discover, sizeof(discover)); cx_discovery_init(&result);
     h_dll_proxy_mode = FALSE; h_proxy_auto_installed = FALSE;
     h_gui_mode_chosen = FALSE; h_gui_inject_mode[0] = 0; h_gui_proxy_carrier[0] = 0;
@@ -3004,6 +3012,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    /* External-resource builds never enter release-file deletion paths, including
+       startup wipe and staged-boot cleanup outside h_run. */
+    if (!cx_asset_resources_embedded() && (h_base_options.deleteSuspend || h_base_options.silentScenario
+        || h_base_options.stageRequest || h_base_options.stagedBoot || h_base_options.wipeOwnedFilesOnStart
+        || h_base_options.selfDestructKeyCount || h_base_options.selfDestructFullscreenExit)) {
+        if (!h_base_options.quiet) h_print(L"multi-file builds do not support release-file deletion or self-destruct; use ordinary startup (package launcher cleans only its own temporary files)");
+        return 2;
+    }
     cx_wipe_init(&h_wipe); h_wipe_ready = TRUE;
     if (h_base_options.wipeOwnedFilesOnStart) {
         CX_WIPE_POLICY policy = CX_WIPE_RETRY;
@@ -3085,6 +3101,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
             "执行模式: --execution-mode normal|memory；memory 表示宿主侧零落盘（客户端仍正常可见启动）。\n"
             "静默场景（--silent-scenario）已原生支持自毁与程序痕迹清理；删除挂起/启动清理仍拒绝执行。\n");
+        if (!cx_asset_resources_embedded()) h_print_utf8(
+            "多文件版：主程序采用 GUI 子系统；PowerShell/cmd 请使用 chaoxing_plus.com 或省略扩展名，以等待完整输出。\n"
+            "  资源由 EXE 同目录的 assets 与 winmm-proxy.dll 提供，缺失时报错。\n"
+            "  多文件版不支持发布文件删除、自毁或 stage-boot；打包启动器仅清理自己释放的临时文件。\n");
         h_out_flush();
         return 0;
     }
@@ -3094,13 +3114,20 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         h_out_begin();
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"");
         h_print_utf8(h_base_options.deleteSuspend ? "delete-suspend" : (h_base_options.executionModeMemory ? "memory" : "normal"));
-        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\",\"delete-suspend\"],\"embeddedResources\":true,\"embeddedResourceCount\":5,\"embeddedProxy\":true,"
+        if (cx_asset_resources_embedded())
+            h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\",\"delete-suspend\"],\"embeddedResources\":true,\"externalResources\":false,\"embeddedResourceCount\":5,\"embeddedProxy\":true,\"resourceCount\":5,");
+        else
+            h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":false,\"externalResources\":true,\"embeddedResourceCount\":0,\"embeddedProxy\":false,\"resourceCount\":5,");
+        h_print_utf8(
             "\"nativeSelection\":true,\"nativeHome\":true,\"temporaryBrowserSessions\":true,\"maxBrowserSessions\":8,\"onlineExtensionDownload\":true,\"accountLogin\":true,\"highDpiUi\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
             "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"pageScreenshots\":true,\"windowDiagnostics\":true,\"diagnosticsSummary\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
             "\"retainData\":true,\"deleteConfig\":true,"
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
-        h_print_utf8(",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,"
+        h_print_utf8(cx_asset_resources_embedded()
+            ? ",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,"
+            : ",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":false,\"wipe\":false,");
+        h_print_utf8(
             "\"wipePolicies\":[\"retry\",\"background\",\"ignore\",\"abort\"],\"wipeRetries\":[1,20],\"wipeRetryDelayMs\":[50,5000],"
             "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
         h_out_flush();

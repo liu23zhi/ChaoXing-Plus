@@ -1,0 +1,3 @@
+#include "resource.h"
+
+CX_RESOURCE_APP_ICON ICON "@APP_ICON@"
