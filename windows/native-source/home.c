@@ -34,6 +34,20 @@
 #define SETTINGS_CANCEL 1507
 #define SETTINGS_STATUS 1508
 #define SETTINGS_JSON 1509
+#define SETTINGS_PANEL_ENABLED 1510
+#define SETTINGS_PANEL_COLLAPSED 1511
+#define SETTINGS_PANEL_TOP 1512
+#define SETTINGS_PANEL_RIGHT 1513
+#define SETTINGS_PANEL_WIDTH 1514
+#define SETTINGS_PANEL_THEME 1515
+#define SETTINGS_ANSWER_MODE 1516
+#define SETTINGS_ANSWER_KEY 1517
+#define SETTINGS_ANSWER_THREADS 1518
+#define SETTINGS_ANSWER_DIALOG 1519
+#define SETTINGS_ANSWER_COUNTDOWN 1520
+#define SETTINGS_ANSWER_RETRY 1521
+#define SETTINGS_AUTO_SUBMIT 1522
+#define SETTINGS_LOG_ENABLED 1523
 
 typedef struct HOME_SESSION_SLOT {
     CX_BROWSER_SESSION *session;
@@ -70,6 +84,20 @@ typedef struct SETTINGS_STATE {
     HWND browser;
     HWND status;
     HWND settings;
+    HWND panelEnabled;
+    HWND panelCollapsed;
+    HWND panelTop;
+    HWND panelRight;
+    HWND panelWidth;
+    HWND panelTheme;
+    HWND answerMode;
+    HWND answerKey;
+    HWND answerThreads;
+    HWND answerDialog;
+    HWND answerCountdown;
+    HWND answerRetry;
+    HWND autoSubmit;
+    HWND logEnabled;
     HFONT font;
     CX_HOME_CONFIG value;
     WCHAR browserKind[16];
@@ -195,6 +223,14 @@ static BOOL home_find_browser(const WCHAR *browser, WCHAR *out, DWORD cap) {
     HeapFree(GetProcessHeap(), 0, path); return found;
 }
 
+typedef BOOL (*HOME_BROWSER_LOOKUP)(const WCHAR *browser, WCHAR *out, DWORD cap);
+static BOOL home_find_default_browser(HOME_BROWSER_LOOKUP lookup, WCHAR *browserOut, DWORD browserCap,
+    WCHAR *pathOut, DWORD pathCap) {
+    if (lookup(L"edge", pathOut, pathCap)) { home_copy(browserOut, browserCap, L"edge"); return TRUE; }
+    if (lookup(L"chrome", pathOut, pathCap)) { home_copy(browserOut, browserCap, L"chrome"); return TRUE; }
+    return FALSE;
+}
+
 static BOOL home_json_append_char(char *out, DWORD cap, DWORD *at, char c) {
     if (!out || !at || *at + 1 >= cap) return FALSE;
     out[(*at)++] = c; out[*at] = 0; return TRUE;
@@ -258,12 +294,35 @@ done:
     SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 3); HeapFree(GetProcessHeap(), 0, buffers); return ok;
 }
 
+static BOOL home_apply_typed_settings(CX_OPTIONS *options, const char *settings,
+    DWORD settingsLength, WCHAR *error, DWORD errorCap) {
+    char *wrapped; DWORD rawLength, prefixLength, suffixLength; BOOL fullObject, ok = FALSE;
+    if (!options || !settings || settingsLength > CX_OPTIONS_JSON_CAP - 16) return FALSE;
+    rawLength = (DWORD)lstrlenA(settings);
+    if (rawLength != settingsLength) settingsLength = rawLength;
+    fullObject = settingsLength >= 2 && settings[0] == '{' && settings[settingsLength - 1] == '}';
+    prefixLength = fullObject ? 12 : 13;
+    suffixLength = fullObject ? 1 : 2;
+    wrapped = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP + 32);
+    if (!wrapped) goto done;
+    CopyMemory(wrapped, fullObject ? "{\"settings\":" : "{\"settings\":{", prefixLength);
+    CopyMemory(wrapped + prefixLength, settings, settingsLength);
+    if (!fullObject) wrapped[prefixLength + settingsLength] = '}';
+    wrapped[prefixLength + settingsLength + (fullObject ? 0 : 1)] = '}';
+    wrapped[prefixLength + settingsLength + suffixLength] = 0;
+    ok = cx_options_apply_json_utf8(options, wrapped,
+        (int)(prefixLength + settingsLength + suffixLength), error, errorCap);
+done:
+    if (wrapped) { SecureZeroMemory(wrapped, CX_OPTIONS_JSON_CAP + 32); HeapFree(GetProcessHeap(), 0, wrapped); }
+    return ok;
+}
+
 static void home_status(HOME_STATE *state, const WCHAR *text) {
     if (state && state->status) SetWindowTextW(state->status, text ? text : L"");
 }
 
 static void home_refresh_list(HOME_STATE *state) {
-    DWORD i; WCHAR line[512]; LRESULT selected, oldSlot = LB_ERR;
+    DWORD i; WCHAR line[512]; LRESULT selected, oldSlot = LB_ERR; BOOL restored = FALSE;
     if (!state || !state->list) return;
     selected = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
     if (selected != LB_ERR) oldSlot = SendMessageW(state->list, LB_GETITEMDATA, selected, 0);
@@ -284,10 +343,14 @@ static void home_refresh_list(HOME_STATE *state) {
             selected = SendMessageW(state->list, LB_ADDSTRING, 0, (LPARAM)line);
             if (selected != LB_ERR) {
                 SendMessageW(state->list, LB_SETITEMDATA, selected, i);
-                if ((LRESULT)i == oldSlot) SendMessageW(state->list, LB_SETCURSEL, selected, 0);
+                if ((LRESULT)i == oldSlot) {
+                    SendMessageW(state->list, LB_SETCURSEL, selected, 0); restored = TRUE;
+                }
             }
         }
     }
+    if (!restored && SendMessageW(state->list, LB_GETCOUNT, 0, 0) > 0)
+        SendMessageW(state->list, LB_SETCURSEL, 0, 0);
 }
 
 static void home_poll_sessions(HOME_STATE *state) {
@@ -310,10 +373,11 @@ static void home_poll_sessions(HOME_STATE *state) {
 
 static DWORD WINAPI home_work(LPVOID context) {
     HOME_STATE *state = (HOME_STATE *)context;
-    WCHAR *browserPath = NULL;
+    WCHAR *browserPath = NULL, *cacheDir = NULL;
     char *settings = NULL;
     BYTE *data = NULL; DWORD size = 0, settingsLength = 0, i;
     CX_BROWSER_OPTIONS options;
+    BOOL forceRefresh;
     state->operationOK = FALSE; state->error[0] = 0;
     if (state->operation == HOME_CLOSE_SESSION || state->operation == HOME_EXIT) {
         state->operationOK = TRUE;
@@ -326,16 +390,38 @@ static DWORD WINAPI home_work(LPVOID context) {
         }
         goto done;
     }
-    if (!cx_adapter_extension_fetch(state->pendingConfig.adapterBaseUrl, L"edge", &data, &size,
-        state->extensionVersion, 64, state->error, 512)) goto done;
-    if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) goto done;
-    if (state->operation == HOME_UPDATE) { state->operationOK = TRUE; goto done; }
     browserPath = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CX_HOME_EXTENSION_PATH_CAP * sizeof(WCHAR));
+    cacheDir = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_HOME_EXTENSION_PATH_CAP * sizeof(WCHAR));
     settings = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
-    if (!browserPath || !settings) goto done;
-    if (!home_find_browser(state->pendingBrowser, browserPath, CX_HOME_EXTENSION_PATH_CAP)) {
+    if (!browserPath || !cacheDir || !settings) goto done;
+    home_copy(cacheDir, CX_HOME_EXTENSION_PATH_CAP, state->options->dataDir);
+    if (cacheDir[0] && cacheDir[lstrlenW(cacheDir) - 1] != L'\\' && cacheDir[lstrlenW(cacheDir) - 1] != L'/')
+        home_append(cacheDir, CX_HOME_EXTENSION_PATH_CAP, L"\\");
+    home_append(cacheDir, CX_HOME_EXTENSION_PATH_CAP, L"chaoxing\\extension-cache");
+    if (state->operation != HOME_UPDATE && lstrcmpiW(state->pendingBrowser, L"auto") == 0) {
+        if (!home_find_default_browser(home_find_browser, state->pendingBrowser, 16,
+            browserPath, CX_HOME_EXTENSION_PATH_CAP)) {
+            home_copy(state->error, 512, L"未找到 Microsoft Edge 或 Google Chrome，请先安装其中一个浏览器。");
+            goto done;
+        }
+    } else if (state->operation != HOME_UPDATE
+        && !home_find_browser(state->pendingBrowser, browserPath, CX_HOME_EXTENSION_PATH_CAP)) {
         home_copy(state->error, 512, L"未找到所选浏览器，请先安装 Microsoft Edge 或 Google Chrome。"); goto done;
     }
+    forceRefresh = state->operation == HOME_UPDATE;
+    if (!cx_adapter_extension_fetch_cached(state->pendingConfig.adapterBaseUrl, L"edge", cacheDir,
+        state->options->noDiskWrite, forceRefresh, &data, &size, state->extensionVersion, 64,
+        state->error, 512)) goto done;
+    if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) {
+        if (forceRefresh) goto done;
+        if (data) { HeapFree(GetProcessHeap(), 0, data); data = NULL; size = 0; }
+        state->error[0] = 0;
+        if (!cx_adapter_extension_fetch_cached(state->pendingConfig.adapterBaseUrl, L"edge", cacheDir,
+            state->options->noDiskWrite, TRUE, &data, &size, state->extensionVersion, 64,
+            state->error, 512)) goto done;
+        if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) goto done;
+    }
+    if (state->operation == HOME_UPDATE) { state->operationOK = TRUE; goto done; }
     if (!home_build_settings(state, &state->pendingConfig, settings, CX_OPTIONS_JSON_CAP, &settingsLength, state->error, 512)) goto done;
     ZeroMemory(&options, sizeof(options)); options.browserPath = browserPath;
     options.crxData = data; options.crxSize = size; options.initialUrl = L"https://www.chaoxing.com/";
@@ -344,6 +430,7 @@ static DWORD WINAPI home_work(LPVOID context) {
 done:
     if (settings) { SecureZeroMemory(settings, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, settings); }
     if (browserPath) HeapFree(GetProcessHeap(), 0, browserPath);
+    if (cacheDir) HeapFree(GetProcessHeap(), 0, cacheDir);
     if (data) HeapFree(GetProcessHeap(), 0, data);
     if (!state->operationOK && !state->error[0]) home_copy(state->error, 512, L"操作失败，无法准备浏览器会话。");
     PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0); return 0;
@@ -385,20 +472,254 @@ static void settings_set_status(SETTINGS_STATE *state, const WCHAR *text) {
     if (state && state->status) SetWindowTextW(state->status, text ? text : L"");
 }
 
+static BOOL settings_read_int(HWND control, int minimum, int maximum, int *value) {
+    WCHAR text[32]; DWORD i; int parsed = 0;
+    if (!control || !value || !GetWindowTextW(control, text, 32) || !text[0]) return FALSE;
+    for (i = 0; text[i]; ++i) {
+        if (text[i] < L'0' || text[i] > L'9') return FALSE;
+        parsed = parsed * 10 + (int)(text[i] - L'0');
+        if (parsed > maximum) return FALSE;
+    }
+    if (parsed < minimum) return FALSE;
+    *value = parsed; return TRUE;
+}
+
+static BOOL settings_token_eq(const WCHAR *start, int length, const WCHAR *value) {
+    int i = 0; WCHAR current;
+    while (value[i] && i < length) {
+        current = start[i];
+        if (current >= L'a' && current <= L'z') current = (WCHAR)(current - L'a' + L'A');
+        if (current != value[i]) break;
+        ++i;
+    }
+    return i == length && value[i] == 0;
+}
+
+static BOOL settings_shortcut_valid(const WCHAR *value) {
+    int i = 0, begin = 0, bases = 0, modifiers = 0, modifierMask = 0;
+    if (!value || !value[0]) return FALSE;
+    for (;;) {
+        int end = i, k, fnum = 0, base = 0;
+        while (value[end] && value[end] != L'+') ++end;
+        if (end == begin) return FALSE;
+        if (settings_token_eq(value + begin, end - begin, L"CTRL") ||
+            settings_token_eq(value + begin, end - begin, L"ALT") ||
+            settings_token_eq(value + begin, end - begin, L"SHIFT") ||
+            settings_token_eq(value + begin, end - begin, L"WIN")) {
+            int bit = settings_token_eq(value + begin, end - begin, L"CTRL") ? 1 :
+                settings_token_eq(value + begin, end - begin, L"ALT") ? 2 :
+                settings_token_eq(value + begin, end - begin, L"SHIFT") ? 4 : 8;
+            if (modifierMask & bit) return FALSE;
+            modifierMask |= bit; ++modifiers;
+        } else {
+            if (end - begin == 1 && ((value[begin] >= L'A' && value[begin] <= L'Z') ||
+                (value[begin] >= L'a' && value[begin] <= L'z') ||
+                (value[begin] >= L'0' && value[begin] <= L'9'))) base = 1;
+            if (settings_token_eq(value + begin, end - begin, L"SPACE") ||
+                settings_token_eq(value + begin, end - begin, L"ENTER") ||
+                settings_token_eq(value + begin, end - begin, L"ESCAPE") ||
+                settings_token_eq(value + begin, end - begin, L"TAB") ||
+                settings_token_eq(value + begin, end - begin, L"INSERT") ||
+                settings_token_eq(value + begin, end - begin, L"DELETE") ||
+                settings_token_eq(value + begin, end - begin, L"HOME") ||
+                settings_token_eq(value + begin, end - begin, L"END") ||
+                settings_token_eq(value + begin, end - begin, L"PAGEUP") ||
+                settings_token_eq(value + begin, end - begin, L"PAGEDOWN") ||
+                settings_token_eq(value + begin, end - begin, L"ARROWUP") ||
+                settings_token_eq(value + begin, end - begin, L"ARROWDOWN") ||
+                settings_token_eq(value + begin, end - begin, L"ARROWLEFT") ||
+                settings_token_eq(value + begin, end - begin, L"ARROWRIGHT") ||
+                settings_token_eq(value + begin, end - begin, L"UP") ||
+                settings_token_eq(value + begin, end - begin, L"DOWN") ||
+                settings_token_eq(value + begin, end - begin, L"LEFT") ||
+                settings_token_eq(value + begin, end - begin, L"RIGHT")) base = 1;
+            if (end - begin >= 2 && end - begin <= 3 && (value[begin] == L'F' || value[begin] == L'f') &&
+                value[begin + 1] >= L'1' && value[begin + 1] <= L'9') {
+                for (k = begin + 1; k < end; ++k) {
+                    if (value[k] < L'0' || value[k] > L'9') break;
+                    fnum = fnum * 10 + (value[k] - L'0');
+                }
+                if (k == end && fnum >= 1 && fnum <= 24) base = 1;
+            }
+            if (!base) return FALSE;
+            ++bases;
+        }
+        if (!value[end]) break;
+        i = end + 1; begin = i;
+    }
+    return bases == 1 && modifiers <= 4;
+}
+
+static BOOL settings_patch_key(char *patch, DWORD cap, DWORD *at, BOOL *first, const WCHAR *key) {
+    if (!*first && !home_json_append_char(patch, cap, at, ',')) return FALSE;
+    *first = FALSE;
+    return home_json_append_char(patch, cap, at, '"') && home_json_append_utf8(patch, cap, at, key)
+        && home_json_append_char(patch, cap, at, '"') && home_json_append_char(patch, cap, at, ':');
+}
+
+static BOOL settings_patch_string(char *patch, DWORD cap, DWORD *at, BOOL *first,
+    const WCHAR *key, const WCHAR *value) {
+    return settings_patch_key(patch, cap, at, first, key) && home_json_append_char(patch, cap, at, '"')
+        && home_json_append_utf8(patch, cap, at, value) && home_json_append_char(patch, cap, at, '"');
+}
+
+static BOOL settings_patch_bool(char *patch, DWORD cap, DWORD *at, BOOL *first,
+    const WCHAR *key, BOOL value) {
+    const char *text = value ? "true" : "false";
+    DWORD i;
+    if (!settings_patch_key(patch, cap, at, first, key)) return FALSE;
+    for (i = 0; text[i]; ++i) if (!home_json_append_char(patch, cap, at, text[i])) return FALSE;
+    return TRUE;
+}
+
+static BOOL settings_patch_int(char *patch, DWORD cap, DWORD *at, BOOL *first,
+    const WCHAR *key, int value) {
+    char text[16]; int length, i;
+    if (!settings_patch_key(patch, cap, at, first, key)) return FALSE;
+    length = wsprintfA(text, "%d", value);
+    for (i = 0; i < length; ++i) if (!home_json_append_char(patch, cap, at, text[i])) return FALSE;
+    return TRUE;
+}
+
+static BOOL settings_make_patch(SETTINGS_STATE *state, char *patch, DWORD cap, DWORD *length) {
+    DWORD at = 0; BOOL first = TRUE; WCHAR answerKey[CX_OPTIONS_SHORT_CAP];
+    int top, right, width, threads, countdown, retry, theme, mode;
+    BOOL panel, collapsed, dialog, submit, log;
+    GetWindowTextW(state->answerKey, answerKey, CX_OPTIONS_SHORT_CAP);
+    if (!settings_read_int(state->panelTop, 0, 10000, &top) ||
+        !settings_read_int(state->panelRight, 0, 10000, &right) ||
+        !settings_read_int(state->panelWidth, 320, 800, &width) ||
+        !settings_read_int(state->answerThreads, 1, 4, &threads) ||
+        !settings_read_int(state->answerCountdown, 0, 3600, &countdown) ||
+        !settings_read_int(state->answerRetry, 0, 20, &retry)) {
+        settings_set_status(state, L"数值超出范围：位置 0-10000、宽度 320-800、线程 1-4、倒计时 0-3600、重试 0-20。");
+        return FALSE;
+    }
+    if (!settings_shortcut_valid(answerKey)) {
+        settings_set_status(state, L"答题快捷键格式无效，需包含一个基础按键，可组合 Ctrl/Alt/Shift/Win。");
+        return FALSE;
+    }
+    theme = (int)SendMessageW(state->panelTheme, CB_GETCURSEL, 0, 0);
+    mode = (int)SendMessageW(state->answerMode, CB_GETCURSEL, 0, 0);
+    if (theme < 0 || theme > 2 || mode < 0 || mode > 1) {
+        settings_set_status(state, L"面板主题或答题模式无效。"); return FALSE;
+    }
+    panel = SendMessageW(state->panelEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    collapsed = SendMessageW(state->panelCollapsed, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    dialog = SendMessageW(state->answerDialog, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    submit = SendMessageW(state->autoSubmit, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    log = !state->home->options->noDiskWrite && SendMessageW(state->logEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    patch[0] = 0;
+    if (!home_json_append_char(patch, cap, &at, '{') ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-panel-enabled", panel) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-panel-collapsed", collapsed) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-panel-top", top) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-panel-right", right) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-panel-width", width) ||
+        !settings_patch_string(patch, cap, &at, &first, L"common.settings.windows-panel-theme",
+            theme == 1 ? L"blue" : theme == 2 ? L"green" : L"pink") ||
+        !settings_patch_string(patch, cap, &at, &first, L"common.settings.windows-answer-mode", mode == 1 ? L"manual" : L"auto") ||
+        !settings_patch_string(patch, cap, &at, &first, L"common.settings.windows-answer-key", answerKey) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-answer-threads", threads) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-show-answer-dialog", dialog) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-answer-countdown", countdown) ||
+        !settings_patch_int(patch, cap, &at, &first, L"common.settings.windows-answer-retry", retry) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-auto-submit", submit) ||
+        !settings_patch_bool(patch, cap, &at, &first, L"common.settings.windows-log-enabled", log) ||
+        !home_json_append_char(patch, cap, &at, '}')) return FALSE;
+    *length = at; return TRUE;
+}
+
+static BOOL settings_populate(SETTINGS_STATE *state) {
+    char *json; JT *tokens; DWORD length = 0; int count, value; WCHAR text[32], wide[CX_OPTIONS_SHORT_CAP];
+    CX_OPTIONS *options = state->home->options; BOOL panel = options->panelEnabled, collapsed = options->panelCollapsed;
+    BOOL dialog = options->showAnswerDialog, submit = options->autoSubmit, log = options->logFileEnabled && !options->noDiskWrite;
+    int top = options->panelTop, right = options->panelRight, width = options->panelWidth;
+    int threads = options->answerThreads, countdown = options->answerCountdown, retry = options->answerRetry;
+    BOOL autoMode = options->answerModeAuto; home_copy(wide, CX_OPTIONS_SHORT_CAP, options->answerKey);
+    json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
+    tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192 * sizeof(JT));
+    if (json && tokens && home_build_settings(state->home, &state->value, json, CX_OPTIONS_JSON_CAP, &length, NULL, 0)) {
+        count = jparse(json, (int)length, tokens, 8192);
+        if (count > 0 && tokens[0].type == '{') {
+#define SETTINGS_READ_BOOL(key, target) do { value = jkey(json, tokens, 0, key); if (value >= 0) (target) = jeq(json, tokens, value, "true"); } while (0)
+#define SETTINGS_READ_INT(key, target) do { value = jkey(json, tokens, 0, key); if (value >= 0) (target) = jint(json, tokens, value, (target)); } while (0)
+            SETTINGS_READ_BOOL("common.settings.windows-panel-enabled", panel);
+            SETTINGS_READ_BOOL("common.settings.windows-panel-collapsed", collapsed);
+            SETTINGS_READ_BOOL("common.settings.windows-show-answer-dialog", dialog);
+            SETTINGS_READ_BOOL("common.settings.windows-auto-submit", submit);
+            SETTINGS_READ_BOOL("common.settings.windows-log-enabled", log);
+            SETTINGS_READ_INT("common.settings.windows-panel-top", top);
+            SETTINGS_READ_INT("common.settings.windows-panel-right", right);
+            SETTINGS_READ_INT("common.settings.windows-panel-width", width);
+            SETTINGS_READ_INT("common.settings.windows-answer-threads", threads);
+            SETTINGS_READ_INT("common.settings.windows-answer-countdown", countdown);
+            SETTINGS_READ_INT("common.settings.windows-answer-retry", retry);
+            value = jkey(json, tokens, 0, "common.settings.windows-answer-mode");
+            if (value >= 0) { if (jwstr(json, tokens, value, text, 32)) autoMode = lstrcmpiW(text, L"manual") != 0; }
+            value = jkey(json, tokens, 0, "common.settings.windows-answer-key");
+            if (value >= 0) jwstr(json, tokens, value, wide, CX_OPTIONS_SHORT_CAP);
+            value = jkey(json, tokens, 0, "common.settings.windows-panel-theme");
+            if (value >= 0 && jwstr(json, tokens, value, text, 32)) {
+                SendMessageW(state->panelTheme, CB_SETCURSEL, lstrcmpiW(text, L"blue") == 0 ? 1 : lstrcmpiW(text, L"green") == 0 ? 2 : 0, 0);
+            }
+#undef SETTINGS_READ_BOOL
+#undef SETTINGS_READ_INT
+        }
+    }
+    if (json) { SecureZeroMemory(json, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, json); }
+    if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
+    SendMessageW(state->panelEnabled, BM_SETCHECK, panel ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->panelCollapsed, BM_SETCHECK, collapsed ? BST_CHECKED : BST_UNCHECKED, 0);
+    wsprintfW(text, L"%d", top); SetWindowTextW(state->panelTop, text);
+    wsprintfW(text, L"%d", right); SetWindowTextW(state->panelRight, text);
+    wsprintfW(text, L"%d", width); SetWindowTextW(state->panelWidth, text);
+    wsprintfW(text, L"%d", threads); SetWindowTextW(state->answerThreads, text);
+    wsprintfW(text, L"%d", countdown); SetWindowTextW(state->answerCountdown, text);
+    wsprintfW(text, L"%d", retry); SetWindowTextW(state->answerRetry, text);
+    SendMessageW(state->answerMode, CB_SETCURSEL, autoMode ? 0 : 1, 0);
+    SetWindowTextW(state->answerKey, wide);
+    SendMessageW(state->answerDialog, BM_SETCHECK, dialog ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->autoSubmit, BM_SETCHECK, submit ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(state->logEnabled, BM_SETCHECK, log ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(state->logEnabled, !options->noDiskWrite);
+    return TRUE;
+}
+
 static BOOL settings_read(SETTINGS_STATE *state) {
-    char *validation; DWORD length = 0; WCHAR error[256]; BOOL ok;
+    char *buffers, *custom, *patch, *merged, *validation;
+    DWORD patchLength = 0, mergedLength = 0, length = 0; int converted, wideLength;
+    WCHAR error[256]; BOOL ok;
     GetWindowTextW(state->baseUrl, state->value.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP);
     GetWindowTextW(state->apiKey, state->value.apiKey, CX_HOME_API_KEY_CAP);
     GetWindowTextW(state->settings, state->value.settingsJson, CX_HOME_SETTINGS_CAP);
-    validation = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
-    if (!validation) return FALSE;
+    buffers = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP * 4);
+    if (!buffers) return FALSE;
+    custom = buffers; patch = custom + CX_OPTIONS_JSON_CAP; merged = patch + CX_OPTIONS_JSON_CAP;
+    validation = merged + CX_OPTIONS_JSON_CAP;
+    error[0] = 0;
+    if (!settings_make_patch(state, patch, CX_OPTIONS_JSON_CAP, &patchLength)) goto failed;
+    converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, state->value.settingsJson, -1,
+        custom, CX_OPTIONS_JSON_CAP, NULL, NULL);
+    if (!converted || !cx_config_merge_settings(custom, (DWORD)converted - 1, patch, patchLength,
+        merged, CX_OPTIONS_JSON_CAP, &mergedLength, error, 256)) {
+        settings_set_status(state, error[0] ? error : L"设置 JSON 无效"); goto failed;
+    }
+    wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, merged, (int)mergedLength,
+        state->value.settingsJson, CX_HOME_SETTINGS_CAP - 1);
+    if (wideLength <= 0 || wideLength >= CX_HOME_SETTINGS_CAP - 1) {
+        settings_set_status(state, L"合并后的设置过长，无法保存。"); goto failed;
+    }
+    state->value.settingsJson[wideLength] = 0;
     error[0] = 0;
     ok = home_build_settings(state->home, &state->value, validation, CX_OPTIONS_JSON_CAP, &length, error, 256);
-    SecureZeroMemory(validation, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, validation);
-    if (!ok) { settings_set_status(state, error[0] ? error : L"设置 JSON 无效"); return FALSE; }
+    if (!ok) { settings_set_status(state, error[0] ? error : L"设置 JSON 无效"); goto failed; }
     if (SendMessageW(state->browser, CB_GETCURSEL, 0, 0) == 1) home_copy(state->browserKind, 16, L"chrome");
     else home_copy(state->browserKind, 16, L"edge");
+    SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 4); HeapFree(GetProcessHeap(), 0, buffers);
     return TRUE;
+failed:
+    SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 4); HeapFree(GetProcessHeap(), 0, buffers); return FALSE;
 }
 
 static LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -443,26 +764,60 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     if (!settings_register()) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->window = CreateWindowExW(WS_EX_DLGMODALFRAME, SETTINGS_CLASS, L"超星学习助手 - 注入设置",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-        MulDiv(740, home_dpi, 96), MulDiv(530, home_dpi, 96), parent, NULL, home_instance, state);
+        MulDiv(940, home_dpi, 96), MulDiv(720, home_dpi, 96), parent, NULL, home_instance, state);
     if (!state->window) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->font = home_default_font;
     home_control(0, L"STATIC", L"tikuAdapter 地址", WS_CHILD | WS_VISIBLE, 24, 24, 120, 24, state->window, 0);
-    state->baseUrl = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.adapterBaseUrl, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 150, 20, 550, 28, state->window, SETTINGS_BASE_URL);
-    home_control(0, L"STATIC", L"API key（可选）", WS_CHILD | WS_VISIBLE, 24, 70, 120, 24, state->window, 0);
-    state->apiKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.apiKey, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 150, 66, 550, 28, state->window, SETTINGS_API_KEY);
-    home_control(0, L"STATIC", L"单独会话浏览器", WS_CHILD | WS_VISIBLE, 24, 116, 120, 24, state->window, 0);
-    state->browser = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 150, 112, 220, 120, state->window, SETTINGS_BROWSER);
+    state->baseUrl = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.adapterBaseUrl, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 150, 20, 760, 28, state->window, SETTINGS_BASE_URL);
+    home_control(0, L"STATIC", L"API key（可选）", WS_CHILD | WS_VISIBLE, 24, 64, 120, 24, state->window, 0);
+    state->apiKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.apiKey, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 150, 60, 760, 28, state->window, SETTINGS_API_KEY);
+    home_control(0, L"STATIC", L"单独会话浏览器", WS_CHILD | WS_VISIBLE, 24, 104, 120, 24, state->window, 0);
+    state->browser = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 150, 100, 260, 120, state->window, SETTINGS_BROWSER);
     SendMessageW(state->browser, CB_ADDSTRING, 0, (LPARAM)L"Microsoft Edge"); SendMessageW(state->browser, CB_ADDSTRING, 0, (LPARAM)L"Google Chrome");
     SendMessageW(state->browser, CB_SETCURSEL, lstrcmpiW(state->browserKind, L"chrome") == 0 ? 1 : 0, 0);
-    home_control(0, L"STATIC", L"扩展设置 JSON（共享设置键）", WS_CHILD | WS_VISIBLE, 24, 162, 650, 24, state->window, 0);
+    home_control(0, L"STATIC", L"悬浮面板", WS_CHILD | WS_VISIBLE, 24, 140, 120, 24, state->window, 0);
+    state->panelEnabled = home_control(0, L"BUTTON", L"显示面板", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24, 164, 130, 26, state->window, SETTINGS_PANEL_ENABLED);
+    state->panelCollapsed = home_control(0, L"BUTTON", L"默认折叠", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 170, 164, 130, 26, state->window, SETTINGS_PANEL_COLLAPSED);
+    home_control(0, L"STATIC", L"Top", WS_CHILD | WS_VISIBLE, 325, 166, 40, 22, state->window, 0);
+    state->panelTop = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 365, 162, 70, 27, state->window, SETTINGS_PANEL_TOP);
+    home_control(0, L"STATIC", L"Right", WS_CHILD | WS_VISIBLE, 455, 166, 45, 22, state->window, 0);
+    state->panelRight = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 500, 162, 70, 27, state->window, SETTINGS_PANEL_RIGHT);
+    home_control(0, L"STATIC", L"Width", WS_CHILD | WS_VISIBLE, 590, 166, 45, 22, state->window, 0);
+    state->panelWidth = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 635, 162, 70, 27, state->window, SETTINGS_PANEL_WIDTH);
+    home_control(0, L"STATIC", L"主题", WS_CHILD | WS_VISIBLE, 725, 166, 35, 22, state->window, 0);
+    state->panelTheme = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 765, 162, 145, 90, state->window, SETTINGS_PANEL_THEME);
+    SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Pink");
+    SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Blue");
+    SendMessageW(state->panelTheme, CB_ADDSTRING, 0, (LPARAM)L"Green");
+    home_control(0, L"STATIC", L"答题", WS_CHILD | WS_VISIBLE, 24, 204, 120, 24, state->window, 0);
+    state->answerMode = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 24, 228, 110, 90, state->window, SETTINGS_ANSWER_MODE);
+    SendMessageW(state->answerMode, CB_ADDSTRING, 0, (LPARAM)L"自动答题");
+    SendMessageW(state->answerMode, CB_ADDSTRING, 0, (LPARAM)L"快捷键答题");
+    home_control(0, L"STATIC", L"答题快捷键", WS_CHILD | WS_VISIBLE, 155, 232, 90, 22, state->window, 0);
+    state->answerKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 245, 228, 210, 27, state->window, SETTINGS_ANSWER_KEY);
+    home_control(0, L"STATIC", L"线程数", WS_CHILD | WS_VISIBLE, 480, 232, 60, 22, state->window, 0);
+    state->answerThreads = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 540, 228, 54, 27, state->window, SETTINGS_ANSWER_THREADS);
+    state->answerDialog = home_control(0, L"BUTTON", L"显示答题弹窗", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 615, 228, 140, 26, state->window, SETTINGS_ANSWER_DIALOG);
+    state->autoSubmit = home_control(0, L"BUTTON", L"自动提交", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 770, 228, 125, 26, state->window, SETTINGS_AUTO_SUBMIT);
+    home_control(0, L"STATIC", L"倒计时（秒）", WS_CHILD | WS_VISIBLE, 24, 268, 90, 22, state->window, 0);
+    state->answerCountdown = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 115, 264, 65, 27, state->window, SETTINGS_ANSWER_COUNTDOWN);
+    home_control(0, L"STATIC", L"失败重试", WS_CHILD | WS_VISIBLE, 205, 268, 70, 22, state->window, 0);
+    state->answerRetry = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 275, 264, 65, 27, state->window, SETTINGS_ANSWER_RETRY);
+    state->logEnabled = home_control(0, L"BUTTON", L"写入宿主日志", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 380, 264, 150, 26, state->window, SETTINGS_LOG_ENABLED);
+    home_control(0, L"STATIC", L"高级扩展设置 JSON（共享设置键；同名项由上方表单覆盖）", WS_CHILD | WS_VISIBLE, 24, 306, 820, 24, state->window, 0);
     state->settings = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.settingsJson,
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL, 24, 192, 676, 175, state->window, SETTINGS_JSON);
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL, 24, 332, 886, 175, state->window, SETTINGS_JSON);
+    settings_populate(state);
     SendMessageW(state->baseUrl, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
     SendMessageW(state->apiKey, EM_SETLIMITTEXT, CX_HOME_API_KEY_CAP - 1, 0);
     SendMessageW(state->settings, EM_SETLIMITTEXT, CX_HOME_SETTINGS_CAP - 1, 0);
-    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。单独会话不会覆盖公共设置；服务地址和 API key 以上方输入为准。", WS_CHILD | WS_VISIBLE, 24, 382, 676, 42, state->window, SETTINGS_STATUS);
-    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 470, 440, 110, 30, state->window, SETTINGS_SAVE);
-    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 590, 440, 110, 30, state->window, SETTINGS_CANCEL);
+    SendMessageW(state->answerKey, EM_SETLIMITTEXT, CX_OPTIONS_SHORT_CAP - 1, 0);
+    SendMessageW(state->panelTop, EM_SETLIMITTEXT, 5, 0); SendMessageW(state->panelRight, EM_SETLIMITTEXT, 5, 0);
+    SendMessageW(state->panelWidth, EM_SETLIMITTEXT, 3, 0); SendMessageW(state->answerThreads, EM_SETLIMITTEXT, 1, 0);
+    SendMessageW(state->answerCountdown, EM_SETLIMITTEXT, 4, 0); SendMessageW(state->answerRetry, EM_SETLIMITTEXT, 2, 0);
+    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 530, 886, 42, state->window, SETTINGS_STATUS);
+    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 620, 110, 30, state->window, SETTINGS_SAVE);
+    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 620, 110, 30, state->window, SETTINGS_CANCEL);
     ShowWindow(state->window, SW_SHOW); ShowWindow(state->window, SW_SHOW); UpdateWindow(state->window); EnableWindow(parent, FALSE);
     while (IsWindow(state->window) && (got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(state->window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
@@ -492,8 +847,8 @@ static void home_exam(HOME_STATE *state) {
     }
     CopyMemory(options, state->options, sizeof(*options));
     if (length >= 2) {
-        CopyMemory(options->sharedSettingsJson, settings + 1, length - 2);
-        options->sharedSettingsJson[length - 2] = 0; options->sharedSettingsLength = length - 2; options->sharedSettingsSet = TRUE;
+        if (!home_apply_typed_settings(options, settings, length,
+            state->error, 512)) { home_status(state, state->error); goto done; }
     }
     ShowWindow(state->window, SW_HIDE);
     state->examRun(options, state->error, 512);
@@ -539,7 +894,7 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         CX_HOME_CONFIG *separate; WCHAR browser[16];
         if (state->worker && LOWORD(wParam) != HOME_EXIT) return 0;
         switch (LOWORD(wParam)) {
-        case HOME_EDGE: home_begin(state, HOME_EDGE, L"edge", state->config); return 0;
+        case HOME_EDGE: home_begin(state, HOME_EDGE, L"auto", state->config); return 0;
         case HOME_CHROME: home_begin(state, HOME_CHROME, L"chrome", state->config); return 0;
         case HOME_UPDATE: home_begin(state, HOME_UPDATE, NULL, state->config); return 0;
         case HOME_SEPARATE:
@@ -612,13 +967,12 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     home_control(0, L"STATIC", L"创建互相隔离的浏览器临时会话，也可打开考试客户端。", WS_CHILD | WS_VISIBLE, 24, 52, 700, 24, window, 0);
     state->list = home_control(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 24, 88, 780, 230, window, HOME_SESSION_LIST);
     state->status = home_control(0, L"STATIC", L"扩展从 tikuAdapter 在线获取；临时资料在关闭会话后自动清理。", WS_CHILD | WS_VISIBLE, 24, 330, 780, 55, window, HOME_STATUS);
-    home_control(0, L"BUTTON", L"Edge 新会话", WS_CHILD | WS_VISIBLE, 24, 395, 120, 32, window, HOME_EDGE);
-    home_control(0, L"BUTTON", L"Chrome 新会话", WS_CHILD | WS_VISIBLE, 152, 395, 120, 32, window, HOME_CHROME);
-    home_control(0, L"BUTTON", L"单独配置会话", WS_CHILD | WS_VISIBLE, 280, 395, 120, 32, window, HOME_SEPARATE);
-    home_control(0, L"BUTTON", L"关闭选中会话", WS_CHILD | WS_VISIBLE, 408, 395, 120, 32, window, HOME_CLOSE_SESSION);
-    home_control(0, L"BUTTON", L"设置注入", WS_CHILD | WS_VISIBLE, 536, 395, 100, 32, window, HOME_SETTINGS);
-    home_control(0, L"BUTTON", L"考试客户端", WS_CHILD | WS_VISIBLE, 644, 395, 100, 32, window, HOME_EXAM);
-    home_control(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE, 752, 395, 52, 32, window, HOME_EXIT);
+    home_control(0, L"BUTTON", L"新会话（Edge优先）", WS_CHILD | WS_VISIBLE, 24, 395, 150, 32, window, HOME_EDGE);
+    home_control(0, L"BUTTON", L"单独配置会话", WS_CHILD | WS_VISIBLE, 182, 395, 120, 32, window, HOME_SEPARATE);
+    home_control(0, L"BUTTON", L"关闭选中会话", WS_CHILD | WS_VISIBLE, 310, 395, 120, 32, window, HOME_CLOSE_SESSION);
+    home_control(0, L"BUTTON", L"设置注入", WS_CHILD | WS_VISIBLE, 438, 395, 100, 32, window, HOME_SETTINGS);
+    home_control(0, L"BUTTON", L"考试客户端", WS_CHILD | WS_VISIBLE, 544, 395, 100, 32, window, HOME_EXAM);
+    home_control(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE, 650, 395, 52, 32, window, HOME_EXIT);
     home_control(0, L"BUTTON", L"账号 / API key", WS_CHILD | WS_VISIBLE, 24, 435, 150, 30, window, HOME_ACCOUNT);
     home_control(0, L"BUTTON", L"检查扩展更新", WS_CHILD | WS_VISIBLE, 185, 435, 150, 30, window, HOME_UPDATE);
     ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window); SetTimer(window, HOME_TIMER, 500, NULL);
