@@ -237,6 +237,74 @@ static void h_cleanup_run_data(CX_OPTIONS *options, BOOL elevationHandoff) {
     h_created_report_path[0] = 0;
     h_created_diagnostics_path[0] = 0;
 }
+/* GUI 子系统进程不会让 PowerShell/cmd 等待，多段写会把提示符夹进帮助中间。
+   help/version/capabilities/print-effective-config 先累积，最后单次写入。 */
+static WCHAR *h_out_batch;
+static DWORD h_out_batch_length;
+static DWORD h_out_batch_capacity;
+static BOOL h_out_batching;
+static BOOL h_out_reserve(DWORD extra) {
+    DWORD needed = h_out_batch_length + extra + 1;
+    WCHAR *grown;
+    if (needed <= h_out_batch_capacity) return TRUE;
+    if (needed > 1024UL * 1024UL) return FALSE;
+    grown = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)needed * sizeof(WCHAR));
+    if (!grown) return FALSE;
+    if (h_out_batch && h_out_batch_length) CopyMemory(grown, h_out_batch, (SIZE_T)h_out_batch_length * sizeof(WCHAR));
+    if (h_out_batch) HeapFree(GetProcessHeap(), 0, h_out_batch);
+    h_out_batch = grown;
+    h_out_batch_capacity = needed;
+    return TRUE;
+}
+static void h_out_begin(void) { h_out_batching = TRUE; h_out_batch_length = 0; }
+static BOOL h_out_append_wide(const WCHAR *text, DWORD length) {
+    if (!text || !length) return TRUE;
+    if (!h_out_reserve(length)) return FALSE;
+    CopyMemory(h_out_batch + h_out_batch_length, text, (SIZE_T)length * sizeof(WCHAR));
+    h_out_batch_length += length;
+    return TRUE;
+}
+static BOOL h_out_append_utf8(const char *text, DWORD length) {
+    int wideLength;
+    if (!text || !length) return TRUE;
+    wideLength = MultiByteToWideChar(CP_UTF8, 0, text, (int)length, NULL, 0);
+    if (wideLength <= 0 || !h_out_reserve((DWORD)wideLength)) return FALSE;
+    if (MultiByteToWideChar(CP_UTF8, 0, text, (int)length, h_out_batch + h_out_batch_length, wideLength) != wideLength) return FALSE;
+    h_out_batch_length += (DWORD)wideLength;
+    return TRUE;
+}
+static void h_out_flush(void) {
+    HANDLE out;
+    DWORD written = 0, mode;
+    char *utf8;
+    int bytes;
+    if (!h_out_batching) return;
+    h_out_batching = FALSE;
+    if (!h_out_batch_length) return;
+    out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) { h_out_batch_length = 0; return; }
+    if (GetConsoleMode(out, &mode)) {
+        /* 正常 3KB 左右一次写完；控制台拒绝整块时按实际写入量续写，避免丢行。 */
+        DWORD at = 0;
+        while (at < h_out_batch_length
+               && WriteConsoleW(out, h_out_batch + at, h_out_batch_length - at, &written, NULL)
+               && written > 0) {
+            at += written;
+        }
+    } else {
+        bytes = WideCharToMultiByte(CP_UTF8, 0, h_out_batch, (int)h_out_batch_length, NULL, 0, NULL, NULL);
+        if (bytes > 0) {
+            utf8 = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)bytes);
+            if (utf8) {
+                if (WideCharToMultiByte(CP_UTF8, 0, h_out_batch, (int)h_out_batch_length, utf8, bytes, NULL, NULL) == bytes)
+                    WriteFile(out, utf8, (DWORD)bytes, &written, NULL);
+                HeapFree(GetProcessHeap(), 0, utf8);
+            }
+        }
+    }
+    h_out_batch_length = 0;
+    FlushFileBuffers(out);
+}
 static void h_print(const WCHAR *text) {
     HANDLE out;
     DWORD written;
@@ -248,6 +316,7 @@ static void h_print(const WCHAR *text) {
     if (!out || out == INVALID_HANDLE_VALUE) return;
     wideLength = h_wlen(text);
     if (wideLength <= 0) return;
+    if (h_out_batching) { h_out_append_wide(text, (DWORD)wideLength); return; }
     {
         /* 控制台直接用宽字符输出，避免 UTF-8 字节被 GBK 代码页解释成乱码（中文路径显示为"娌冲崡"）。 */
         DWORD consoleMode = 0;
@@ -272,6 +341,7 @@ static void h_print_utf8(const char *text) {
     if (!text) return;
     length = h_len(text);
     if (length <= 0) return;
+    if (h_out_batching) { h_out_append_utf8(text, (DWORD)length); return; }
     out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) return;
     WriteFile(out, text, (DWORD)length, &written, NULL);
@@ -2803,6 +2873,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         }
     }
     if (h_base_options.help) {
+        h_out_begin();
         h_print_utf8("超星学习助手 Windows 宿主 6.2.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
@@ -2853,11 +2924,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  诊断仅采集一次性页面视口/面板几何/样式、页面截图及自有启动窗口 DPI/BMP，不采集正文或 URL。\n"
             "执行模式: --execution-mode normal|memory；memory 表示宿主侧零落盘（客户端仍正常可见启动）。\n"
             "静默场景（--silent-scenario）已原生支持自毁与程序痕迹清理；删除挂起/启动清理仍拒绝执行。\n");
+        h_out_flush();
         return 0;
     }
-    if (h_base_options.version) { h_print_utf8("6.2.0\n"); return 0; }
+    if (h_base_options.version) { h_out_begin(); h_print_utf8("6.2.0\n"); h_out_flush(); return 0; }
     if (h_base_options.capabilities) {
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
+        h_out_begin();
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"");
         h_print_utf8(h_base_options.executionModeMemory ? "memory" : "normal");
         h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":true,\"embeddedResourceCount\":5,\"embeddedProxy\":true,"
@@ -2867,6 +2940,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
         h_print_utf8(",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":true,\"wipe\":false,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
+        h_out_flush();
         return 0;
     }
     if (h_base_options.pipeTest) { return h_pipe_test() ? 0 : 1; }
@@ -2896,7 +2970,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (h_base_options.printEffectiveConfig) {
         DWORD settingsLength = 0;
         if (!cx_options_effective_settings_json_utf8(&h_base_options, h_settings, sizeof(h_settings), &settingsLength)) return 2;
-        h_print_utf8(h_settings); h_print_utf8("\n"); return 0;
+        h_out_begin();
+        h_print_utf8(h_settings); h_print_utf8("\n");
+        h_out_flush();
+        return 0;
     }
     /* 静默场景启动后会把自身改名为 .cxdel；提权重启必须指向仍然存在的镜像。 */
     const WCHAR *h_restart_path = h_silent_parked[0] ? h_silent_parked : h_exe_path;
