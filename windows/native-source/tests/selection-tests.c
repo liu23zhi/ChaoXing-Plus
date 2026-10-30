@@ -100,6 +100,10 @@ static void probe_tests(void) {
     check(probe.carrierOptionCount >= 1 && probe.carrierAutoPresent,
           "carrier combo begins with the automatic import-table option");
     check(probe.carrierSelectedIndex == 0, "carrier defaults to auto");
+    check(probe.carrierOptionCount == 1 && probe.carrierAutoOnly,
+          "auto injection mode keeps only the automatic carrier entry");
+    check(probe.carrierOptionCountForProxy > probe.carrierOptionCount,
+          "dll-proxy mode expands the carrier list");
     check(probe.statusControlPresent, "the injection hint control exists for greyed modes");
     {
         char *payload = NULL;

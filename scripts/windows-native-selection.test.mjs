@@ -88,6 +88,8 @@ test('compiled native client selection builds its real hidden controls', { skip:
     /discovery reports visited directory progress/,
     /the cancel callback reports a cancelled full scan/,
     /the injection hint control exists for greyed modes/,
+    /auto injection mode keeps only the automatic carrier entry/,
+    /dll-proxy mode expands the carrier list/,
     /the winmm proxy DLL is embedded in the executable/,
     /the embedded proxy is a PE image/,
     /selection layout uses the active DPI scale/,
@@ -96,6 +98,22 @@ test('compiled native client selection builds its real hidden controls', { skip:
     assert.match(result.stdout, expected);
   }
   assert.doesNotMatch(result.stdout, /^FAIL /mu);
+});
+
+test('standalone EXE lists the embedded carrier without any hook directory', { skip: !executable }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-standalone-'));
+  try {
+    // 空目录里只有 EXE：载体列表必须来自内嵌资源，否则 dll-proxy 会被误灰化。
+    const copy = path.join(directory, 'selection-tests.exe');
+    await fs.copyFile(executable, copy);
+    const result = spawnSync(copy, [], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /auto injection mode keeps only the automatic carrier entry/u);
+    assert.match(result.stdout, /dll-proxy mode expands the carrier list/u);
+    assert.match(result.stdout, /the winmm proxy DLL is embedded in the executable/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('native full-scan progress window is visible and cancellable', {

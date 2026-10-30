@@ -181,42 +181,52 @@ static BOOL selection_is_known_dll(const WCHAR *name) {
     RegCloseKey(key);
     return FALSE;
 }
+/* 追加一个候选载体：去掉扩展名、跳过 winmm-proxy、KnownDLLs 与重复项。 */
+static void selection_add_carrier(const WCHAR *name) {
+    WCHAR base[32];
+    int k = 0, dup = 0, j;
+    if (!name || !*name) return;
+    while (name[k] && name[k] != L'.' && k < 31) { base[k] = name[k]; ++k; }
+    base[k] = 0;
+    if (k < 2) return;
+    if (!lstrcmpiW(base, L"winmm-proxy")) return;
+    if (selection_is_known_dll(base)) return;  /* KnownDLLs 无法侧加载 */
+    for (j = 0; j < selection_carrier_count; ++j) if (!lstrcmpiW(selection_carrier_names[j], base)) return;
+    if (selection_carrier_count >= SELECTION_MAX_CARRIERS) return;
+    lstrcpynW(selection_carrier_names[selection_carrier_count], base, 32);
+    ++selection_carrier_count;
+}
+
 static void selection_load_carriers(void) {
     WCHAR hostPath[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH];
     DWORD length, cut = 0, i, r;
     static const WCHAR *const rels[4] = { L"\\..\\hook\\", L"\\hook\\", L"\\..\\..\\native-build\\hook\\", L"\\" };
     selection_carrier_count = 0;
-    if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return;
-    length = (DWORD)lstrlenW(hostPath);
-    for (i = 0; i < length; ++i) if (hostPath[i] == L'\\' || hostPath[i] == L'/') cut = i;
-    if (!cut) return;
-    for (r = 0; r < 4; ++r) {
-        WIN32_FIND_DATAW data;
-        HANDLE find;
-        lstrcpynW(dir, hostPath, (int)(cut + 1));
-        dir[cut] = 0;
-        if (lstrlenW(dir) + lstrlenW(rels[r]) + 16 >= MAX_PATH) continue;
-        lstrcpynW(pattern, dir, MAX_PATH);
-        lstrcatW(pattern, rels[r]);
-        lstrcatW(pattern, L"*.dll");
-        find = FindFirstFileW(pattern, &data);
-        if (find == INVALID_HANDLE_VALUE) continue;
-        do {
-            WCHAR base[32];
-            int k = 0, dup = 0, j;
-            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            while (data.cFileName[k] && data.cFileName[k] != L'.' && k < 31) { base[k] = data.cFileName[k]; ++k; }
-            base[k] = 0;
-            if (k < 2) continue;
-            if (!lstrcmpiW(base, L"winmm-proxy")) continue;
-            if (selection_is_known_dll(base)) continue;  /* KnownDLLs 无法侧加载 */
-            for (j = 0; j < selection_carrier_count; ++j) if (!lstrcmpiW(selection_carrier_names[j], base)) { dup = 1; break; }
-            if (dup || selection_carrier_count >= SELECTION_MAX_CARRIERS) continue;
-            lstrcpynW(selection_carrier_names[selection_carrier_count], base, 32);
-            ++selection_carrier_count;
-        } while (FindNextFileW(find, &data));
-        FindClose(find);
+    if (GetModuleFileNameW(NULL, hostPath, MAX_PATH)) {
+        length = (DWORD)lstrlenW(hostPath);
+        for (i = 0; i < length; ++i) if (hostPath[i] == L'\\' || hostPath[i] == L'/') cut = i;
+        if (cut) {
+            for (r = 0; r < 4; ++r) {
+                WIN32_FIND_DATAW data;
+                HANDLE find;
+                lstrcpynW(dir, hostPath, (int)(cut + 1));
+                dir[cut] = 0;
+                if (lstrlenW(dir) + lstrlenW(rels[r]) + 16 >= MAX_PATH) continue;
+                lstrcpynW(pattern, dir, MAX_PATH);
+                lstrcatW(pattern, rels[r]);
+                lstrcatW(pattern, L"*.dll");
+                find = FindFirstFileW(pattern, &data);
+                if (find == INVALID_HANDLE_VALUE) continue;
+                do {
+                    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    selection_add_carrier(data.cFileName);
+                } while (FindNextFileW(find, &data));
+                FindClose(find);
+            }
+        }
     }
+    /* 单 EXE 发布：内嵌代理也要出现在候选里，否则独立目录下 dll-proxy 会被误灰化。 */
+    for (i = 0; i < cx_asset_proxy_count(); ++i) selection_add_carrier(cx_asset_proxy_name(i));
     selection_carriers_loaded = 1;
 }
 
@@ -550,6 +560,27 @@ static HWND selection_control(SELECTION_WINDOW *state, DWORD style, const WCHAR 
     return control;
 }
 
+/* 载体列表只有在显式选择 dll-proxy 时才展开；auto 由宿主按导入表自行解析。
+   includeCarriers 为 FALSE 时下拉只剩"自动（按导入表）"，与自动注入方式的语义一致。 */
+static void selection_fill_carriers(SELECTION_WINDOW *state, BOOL includeCarriers) {
+    int i;
+    SendMessageW(state->carrierCombo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)L"自动（按导入表）");
+    if (includeCarriers) {
+        for (i = 0; i < selection_carrier_count; ++i) {
+            WCHAR text[96];
+            BOOL disabled = (state->carrierDisabledMask & (1u << (i + 1))) != 0;
+            lstrcpynW(text, selection_carrier_names[i], 48);
+            lstrcatW(text, L".dll");
+            if (disabled) lstrcatW(text, L"（不可用）");
+            SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)text);
+        }
+    }
+    state->lastCarrierIndex = 0;
+    lstrcpynW(state->proxyCarrier, L"auto", 16);
+    SendMessageW(state->carrierCombo, CB_SETCURSEL, 0, 0);
+}
+
 /* 依据当前选中的客户端刷新两个下拉框的可选状态（0 位表示"自动"，永远可用）。 */
 static void selection_apply_caps(SELECTION_WINDOW *state) {
     LRESULT index = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
@@ -568,15 +599,6 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
             inj = 0;
         }
         state->lastInjectIndex = (int)(inj >= 0 ? inj : 0);
-        {
-            LRESULT car = SendMessageW(state->carrierCombo, CB_GETCURSEL, 0, 0);
-            if (car >= 0 && (state->carrierDisabledMask & (1u << car))) {
-                SendMessageW(state->carrierCombo, CB_SETCURSEL, 0, 0);
-                lstrcpynW(state->proxyCarrier, L"auto", 16);
-                car = 0;
-            }
-            state->lastCarrierIndex = (int)(car >= 0 ? car : 0);
-        }
     }
     {
         static const WCHAR *const injectLabels[3] = { L"自动（推荐）", L"端口命令行（cdp-port）", L"DLL 代理（dll-proxy）" };
@@ -591,19 +613,9 @@ static void selection_apply_caps(SELECTION_WINDOW *state) {
             SendMessageW(state->injectCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)text);
         }
         SendMessageW(state->injectCombo, CB_SETCURSEL, (WPARAM)state->lastInjectIndex, 0);
-        for (i = 0; i <= selection_carrier_count; ++i) {
-            WCHAR text[96];
-            WCHAR base[48];
-            BOOL disabled = (state->carrierDisabledMask & (1u << i)) != 0;
-            if (i == 0) lstrcpynW(base, L"自动（按导入表）", 48);
-            else { lstrcpynW(base, selection_carrier_names[i - 1], 48); lstrcatW(base, L".dll"); }
-            wsprintfW(text, disabled ? L"%s（不可用）" : L"%s", base);
-            SendMessageW(state->carrierCombo, CB_DELETESTRING, (WPARAM)i, 0);
-            SendMessageW(state->carrierCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)text);
-        }
-        SendMessageW(state->carrierCombo, CB_SETCURSEL, (WPARAM)state->lastCarrierIndex, 0);
     }
-    EnableWindow(state->carrierCombo, !(state->injectDisabledMask & 0x2u) || (state->injectDisabledMask & 0x4u) == 0);
+    selection_fill_carriers(state, state->lastInjectIndex == 2);
+    EnableWindow(state->carrierCombo, state->lastInjectIndex == 2);
     InvalidateRect(state->injectCombo, NULL, TRUE);
     InvalidateRect(state->carrierCombo, NULL, TRUE);
     /* 灰化必须给出原因：否则用户只看到"两种注入方式都不可用"却无从修复。 */
@@ -692,14 +704,7 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         state->carrierCombo = selection_control(state, CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, L"COMBOBOX", L"", SELECTION_CARRIER);
         state->status = selection_control(state, SS_LEFT | SS_NOPREFIX, L"STATIC", L"", -1);
         if (state->carrierLabel && state->carrierCombo) {
-            int ci;
             SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)L"自动（按导入表）");
-            for (ci = 0; ci < selection_carrier_count; ++ci) {
-                WCHAR label[48];
-                lstrcpynW(label, selection_carrier_names[ci], 48);
-                lstrcatW(label, L".dll");
-                SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)label);
-            }
             SendMessageW(state->carrierCombo, CB_SETCURSEL, 0, 0);
             lstrcpynW(state->proxyCarrier, L"auto", 16);
             EnableWindow(state->carrierCombo, FALSE);
@@ -757,7 +762,9 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
             }
             state->lastInjectIndex = (int)(pick >= 0 ? pick : 0);
             lstrcpynW(state->injectMode, pick == 1 ? L"cdp-port" : (pick == 2 ? L"dll-proxy" : L"auto"), 16);
-            EnableWindow(state->carrierCombo, pick != 1); /* cdp-port 时载体无意义 */
+            /* 只有显式 dll-proxy 才展开载体列表；自动/端口模式下拉只保留"自动（按导入表）"。 */
+            selection_fill_carriers(state, pick == 2);
+            EnableWindow(state->carrierCombo, pick == 2);
             return 0;
         }
         if (command == SELECTION_CARRIER && HIWORD(wParam) == CBN_SELCHANGE) {
@@ -908,6 +915,13 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->carrierSelectedIndex = IsWindow(state.carrierCombo) ? (LONG)SendMessageW(state.carrierCombo, CB_GETCURSEL, 0, 0) : -1;
     probe->statusControlPresent = IsWindow(state.status) != 0;
     probe->statusReasons = state.statusReasons;
+    probe->carrierAutoOnly = probe->carrierOptionCount == 1;
+    if (IsWindow(state.carrierCombo)) {
+        /* 显式 dll-proxy 才展开载体；这里直接重建控件内容取计数，不改动用户选择。 */
+        selection_fill_carriers(&state, TRUE);
+        probe->carrierOptionCountForProxy = (DWORD)SendMessageW(state.carrierCombo, CB_GETCOUNT, 0, 0);
+        selection_fill_carriers(&state, FALSE);
+    }
     if (IsWindow(state.carrierCombo)) {
         WCHAR firstCarrier[64];
         LRESULT length = SendMessageW(state.carrierCombo, CB_GETLBTEXTLEN, 0, 0);

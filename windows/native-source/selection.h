@@ -37,6 +37,10 @@ typedef struct CX_SELECTION_PROBE {
     DWORD carrierOptionCount;
     LONG carrierSelectedIndex;
     BOOL carrierAutoPresent;
+    /** 自动注入方式下"代理载体"只剩自动项。 */
+    BOOL carrierAutoOnly;
+    /** 切到显式 dll-proxy 时载体下拉的项数（应大于 carrierOptionCount）。 */
+    DWORD carrierOptionCountForProxy;
 } CX_SELECTION_PROBE;
 
 /* `notice` is an optional first-line message (for example "全盘扫描已取消");
