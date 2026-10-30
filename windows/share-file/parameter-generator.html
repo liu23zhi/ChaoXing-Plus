@@ -66,7 +66,7 @@
         <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="native" selected>原生单文件 EXE（默认，无需 Node.js）</option><option value="node">Node 兼容入口（已冻结，需要 Node.js 22+）</option></select><p class="hint">默认使用原生客户端。Node 入口仅供历史兼容和排障；切换宿主不会自动降级功能。</p></div>
         <div class="field full" id="nodeLauncherField" hidden><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
         <div class="field full" id="nativeLauncherField"><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">仓库内默认定位 windows\native-build\release\chaoxing_plus.exe；复制 EXE 后请改为实际路径，单独复制 HTML 时需手动填写。生成器无法检查文件是否存在。命令直接启动 EXE，无需 Node.js，并以 EXE 所在目录为工作目录；相对配置与数据路径均由此解析。原生诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。</p></div>
-        <div class="field full"><p class="capability" id="nativeCapabilityHint">原生能力：普通运行、宿主零写盘、扫描与选择、共享配置、面板、答题设置、日志与诊断已接入。input 方式尚未实现，cdp-pipe 仍是诊断通道，未完成常驻会话与重连；本页不为这两种方式生成启动命令。真实 CEF75 登录后及旧 Windows 环境仍需人工验收。</p></div>
+        <div class="field full"><p class="capability" id="nativeCapabilityHint">原生能力：普通运行、宿主零写盘、扫描与选择、共享配置、面板、答题设置、日志与诊断已接入。input 方式已放弃开发，不再规划；cdp-pipe 仍是诊断通道，未完成常驻会话与重连；本页不为这两种方式生成启动命令。真实 CEF75 登录后及旧 Windows 环境仍需人工验收。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
         <div class="field full"><label class="check"><input id="elevateOnStart" type="checkbox">启动宿主时先申请管理员权限（--elevate-on-start）</label><p class="hint">默认不提前申请；只在启动所选 CXExam.exe 确实需要管理员权限时请求 UAC。勾选后在扫描、显示 GUI 前申请；已是管理员时直接继续。帮助、自检、仅扫描和 attach 不申请。</p></div>
@@ -75,7 +75,7 @@
       <div class="section"><h2>CEF 注入兼容性</h2><div class="grid">
         <div class="field full"><label for="expectedBrowser">调试端点 Browser 校验文本</label><input id="expectedBrowser" value="Chrome/" placeholder="例如 Chrome/75"><p class="hint">只连接本次启动客户端的本机 CDP 端点；不匹配时中止，避免误连其它浏览器。</p></div>
         <div class="field"><label for="injectStrategy">注入策略</label><select id="injectStrategy"><option value="hybrid" selected>hybrid（Runtime 优先，script 回退）</option><option value="runtime">runtime（CDP 主世界）</option><option value="script">script（DOM script，Runtime 回退）</option></select></div>
-        <div class="field"><label for="injectMode">注入方式 <small>仅原生宿主</small></label><select id="injectMode"><option value="auto" selected>沿用宿主默认</option><option value="cdp-port">cdp-port（显式指定）</option><option value="cdp-pipe" disabled>cdp-pipe（仅诊断，未完成常驻会话）</option><option value="input" disabled>input（尚未实现）</option></select><p class="hint">沿用默认时不传 --inject-mode，由宿主与选择窗口判定方式；不保证采用端口方式，也不等同于显式 auto。</p></div>
+        <div class="field"><label for="injectMode">注入方式 <small>仅原生宿主</small></label><select id="injectMode"><option value="auto" selected>沿用宿主默认</option><option value="cdp-port">cdp-port（显式指定）</option><option value="cdp-pipe" disabled>cdp-pipe（仅诊断，未完成常驻会话）</option><option value="input" disabled>input（已放弃开发）</option></select><p class="hint">沿用默认时不传 --inject-mode，由宿主与选择窗口判定方式；不保证采用端口方式，也不等同于显式 auto。</p></div>
 <div class="field"><label for="injectRetries">注入重试次数 <small>0-5</small></label><input id="injectRetries" type="number" min="0" max="5" step="1" value="2"></div>
         <div class="field"><label for="debugTimeout">调试端点超时（毫秒）</label><input id="debugTimeout" type="number" min="1000" max="120000" value="30000"></div>
         <div class="field"><label for="targetPollInterval">target 轮询间隔（毫秒）</label><input id="targetPollInterval" type="number" min="250" max="10000" value="1000"></div>
@@ -516,7 +516,7 @@
     if (s.noDiskWrite && (s.log || s.diagnose || s.report)) errors.push('--no-disk-write 与日志、诊断或报告冲突。');
     if (s.noDiskWrite && s.deleteConfig) errors.push('--no-disk-write 不能与 --delete-config 同时使用（禁止磁盘写入时不能删除外部配置）。');
     if (s.hostType === 'native' && s.hideConsole) errors.push('原生宿主没有控制台窗口，不支持 --hide-console。');
-    if (s.hostType === 'native' && s.injectMode && ['auto', 'cdp-port'].indexOf(s.injectMode) < 0) errors.push('本页仅导出沿用宿主默认或 cdp-port 方式；cdp-pipe 常驻会话未完成，input 尚未实现。');
+    if (s.hostType === 'native' && s.injectMode && ['auto', 'cdp-port'].indexOf(s.injectMode) < 0) errors.push('本页仅导出沿用宿主默认或 cdp-port 方式；cdp-pipe 常驻会话未完成，input 已放弃开发。');
     if (s.hostType === 'native' && s.dpiAware && s.noDiskWrite) errors.push('原生宿主 --dpi-aware 不能与 --no-disk-write 同时使用。');
     if (s.optionsJson) {
       var input = s.optionsJson.trim();
