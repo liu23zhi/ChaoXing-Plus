@@ -1838,14 +1838,16 @@ static BOOL h_clear_client_log(CX_OPTIONS *options, BOOL startup) {
         h_audit_event("info", "cleanup", "Client debug.log removed or truncated");
     return TRUE;
 }
-static void h_silent_cleanup_pass(void) {
+static void h_silent_cleanup_pass(BOOL finalize) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     int failed = 0;
     if (!h_silent_plan) {
         if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) { h_audit_event("warn", "cleanup", "Program root is unavailable"); return; }
         if (!h_silent_simulate && !cx_cleanup_is_release_layout(root)) {
-            /* 源码/构建目录不做整目录清理，只登记当前 EXE 自身，避免误删 bin 下的测试程序。 */
+            /* 源码/构建目录不做整目录清理，只登记当前 EXE 自身，避免误删 bin 下的测试程序。
+               启动/轮询阶段不能改名自身，否则 UAC 重启会找不到原路径；只在收尾时执行。 */
             h_silent_plan = NULL;
+            if (!finalize) return;
             if (!h_silent_parked[0] && h_exe_path[0]) {
                 if (cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP)) {
                     cx_cleanup_release_self(h_silent_parked);
@@ -1860,7 +1862,7 @@ static void h_silent_cleanup_pass(void) {
         if (!h_silent_plan) { h_audit_event("warn", "cleanup", "Cleanup plan allocation failed"); return; }
         if (!cx_cleanup_collect(root, h_silent_plan)) { h_audit_event("warn", "cleanup", "Program traces could not be collected"); return; }
     }
-    if (!h_silent_simulate && !h_silent_parked[0] && h_exe_path[0]) {
+    if (!h_silent_simulate && finalize && !h_silent_parked[0] && h_exe_path[0]) {
         if (cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP))
             h_audit_event("info", "cleanup", "Running executable renamed; original path removed");
         else
@@ -1899,7 +1901,7 @@ static void h_silent_begin_destruct(void) {
     if (!cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP)) return;
     h_silent_done = TRUE;
     h_audit_event("info", "self-destruct", "Destruction requested; removing program traces");
-    h_silent_cleanup_pass();
+    h_silent_cleanup_pass(TRUE);
     if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
     h_report.stopReason = "self-destruct";
 }
@@ -1912,7 +1914,7 @@ static void h_silent_tick(void) {
     if (h_silent.state == CX_SILENT_DESTRUCT_REQUESTED) { h_silent_begin_destruct(); return; }
     if (h_silent_next_tick && now - h_silent_next_tick < 5000) return;
     h_silent_next_tick = now;
-    h_silent_cleanup_pass();
+    h_silent_cleanup_pass(FALSE);
 }
 
 static void h_silent_widen(const char *src, WCHAR *dst, DWORD cap) {
@@ -2553,6 +2555,35 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_audit_event("info", "start", "Native host started");
     }
     h_client_pid = 0; h_duration = 0; h_bundles_completed = 0;
+    if (options->silentScenario) {
+        cx_silent_init(&h_silent, TRUE);
+        h_silent_active = TRUE;
+        h_silent_simulate = options->silentDeleteSimulate;
+    /* 暂存启动：副本接管后，本进程清空原目录并退出。 */
+    if (options->stageRequest && !options->stagedBoot && h_silent_stage()) {
+        h_silent_cleanup_pass(TRUE);
+        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
+        h_silent_done = TRUE;
+        h_report.stopReason = "staged-handoff";
+        return TRUE;
+    }
+        h_silent_cleanup_pass(FALSE);
+        h_silent_next_tick = GetTickCount();
+        h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
+    } else if (options->selfDestructKeyCount > 0 || options->selfDestructFullscreenExit) {
+        const WCHAR *keys[4];
+        int k;
+        for (k = 0; k < options->selfDestructKeyCount && k < 4; ++k) keys[k] = options->selfDestructKeys[k];
+        cx_silent_configure(&h_silent, keys, options->selfDestructKeyCount, options->selfDestructFullscreenExit);
+        h_silent_active = TRUE;
+        h_silent_simulate = FALSE;
+        h_audit_event("info", "self-destruct", "Self-destruct triggers configured");
+    }
+    if (options->deleteSuspend) {
+        h_silent_active = TRUE;
+        h_silent_simulate = FALSE;
+        h_audit_event("info", "delete-suspend", "Program cleanup will start after the client launches");
+    }
     if (!options->attachPortSet) {
         discover.mode = h_default_gui && !options->elevatedClientSet ? CX_DISCOVERY_SCAN_COMMON
             : (h_equal(options->scanMode, L"common") ? CX_DISCOVERY_SCAN_COMMON : (h_equal(options->scanMode, L"all") ? CX_DISCOVERY_SCAN_ALL : CX_DISCOVERY_SCAN_FALLBACK_ALL));
@@ -2623,35 +2654,6 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         goto done;
     }
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
-    if (options->silentScenario) {
-        cx_silent_init(&h_silent, TRUE);
-        h_silent_active = TRUE;
-        h_silent_simulate = options->silentDeleteSimulate;
-    /* 暂存启动：副本接管后，本进程清空原目录并退出。 */
-    if (options->stageRequest && !options->stagedBoot && h_silent_stage()) {
-        h_silent_cleanup_pass();
-        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
-        h_silent_done = TRUE;
-        h_report.stopReason = "staged-handoff";
-        return TRUE;
-    }
-        h_silent_cleanup_pass();
-        h_silent_next_tick = GetTickCount();
-        h_audit_event("info", "silent", "Silent scenario active: no panel/log/console, program cleanup enabled");
-    } else if (options->selfDestructKeyCount > 0 || options->selfDestructFullscreenExit) {
-        const WCHAR *keys[4];
-        int k;
-        for (k = 0; k < options->selfDestructKeyCount && k < 4; ++k) keys[k] = options->selfDestructKeys[k];
-        cx_silent_configure(&h_silent, keys, options->selfDestructKeyCount, options->selfDestructFullscreenExit);
-        h_silent_active = TRUE;
-        h_silent_simulate = FALSE;
-        h_audit_event("info", "self-destruct", "Self-destruct triggers configured");
-    }
-    if (options->deleteSuspend) {
-        h_silent_active = TRUE;
-        h_silent_simulate = FALSE;
-        h_audit_event("info", "delete-suspend", "Program cleanup will start after the client launches");
-    }
     /* 注入方式分派：auto / cdp-port / dll-proxy 已接入主流程；
    cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
     h_report.injectMode = "auto";
@@ -2836,7 +2838,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_report.clientPid = h_client_pid; h_report.port = port;
     if (h_silent_active && h_client_pid) cx_silent_client_started(&h_silent, h_client_pid);
     if (options->deleteSuspend) {
-        h_silent_cleanup_pass();
+        h_silent_cleanup_pass(TRUE);
         h_silent_next_tick = GetTickCount();
         h_audit_event("info", "delete-suspend", "Client launched; program cleanup started");
     }
@@ -2894,7 +2896,12 @@ done:
         h_proxy_auto_installed = FALSE;
     }
     if (options->deleteSuspend && h_silent_active && !h_silent_done) {
-        h_silent_cleanup_pass();
+        h_silent_cleanup_pass(TRUE);
+        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
+        h_silent_done = TRUE;
+    }
+    if (options->silentScenario && h_silent_active && !h_silent_done) {
+        h_silent_cleanup_pass(TRUE);
         if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
         h_silent_done = TRUE;
     }
