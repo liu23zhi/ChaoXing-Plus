@@ -33,7 +33,7 @@ Windows 端（超星考试客户端 / CEF 75）额外命令：
 ```bash
 npm run build:windows      # 注入资源（dist-windows）
 npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
-npm run windows:self-check # 检查已构建的原生 EXE（build-windows/bin）
+npm run windows:self-check # 检查已构建的原生 EXE（windows/native-build/bin）
 npm run windows            # 启动原生宿主（需要管理员权限时自动申请 UAC）
 npm run windows:silent     # 原生静默场景入口
 # 已弃用的 Node 宿主（仅兼容/对照）：npm run windows:node

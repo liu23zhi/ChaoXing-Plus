@@ -48,7 +48,7 @@ const MUST_BE_IN_DOCS = [
 
 const optionsSource = resolve('windows/native-source/options.c');
 const docsPath = resolve('docs/windows.md');
-const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('build-windows/bin/chaoxing_plus.exe');
+const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('windows/native-build/bin/chaoxing_plus.exe');
 
 async function acceptedFlags() {
   const source = await readFile(optionsSource, 'utf8');

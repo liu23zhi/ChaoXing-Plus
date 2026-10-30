@@ -9,8 +9,8 @@ import path from 'node:path';
 // 原生静默场景端到端：用 process-fixture.exe 冒充 CXExam.exe，验证
 // "删除程序痕迹但永不删除 CXExam" 这条最危险的行为，不接触真实客户端。
 const root = path.resolve('.');
-const hostExe = path.join(root, 'build-windows', 'bin', 'chaoxing_plus.exe');
-const fixtureExe = path.join(root, 'build-windows', 'bin', 'process-fixture.exe');
+const hostExe = path.join(root, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe');
+const fixtureExe = path.join(root, 'windows', 'native-build', 'bin', 'process-fixture.exe');
 
 function killOwnedClients(directory) {
   const script = `$p = Get-CimInstance Win32_Process -Filter "Name='CXExam.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -like '${directory.replace(/\\/gu, '\\\\')}*' }; foreach ($x in $p) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }`;

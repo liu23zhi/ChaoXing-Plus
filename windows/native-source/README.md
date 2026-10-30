@@ -25,10 +25,10 @@ npm run build:windows -- --release
 npm run build:native
 ```
 
-[build.ps1](build.ps1) 默认输出 `build-windows/bin/chaoxing_plus.exe`，`-BuildTests` 同时生成 C 测试。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
+[build.ps1](build.ps1) 默认输出 `windows/native-build/bin/chaoxing_plus.exe`，`-BuildTests` 同时生成 C 测试。以下 PowerShell 命令等待 GUI 子系统进程退出，并检查真实退出码；版本和自检均不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。
 
 ```powershell
-$hostExe = Join-Path (Get-Location) 'build-windows/bin/chaoxing_plus.exe'
+$hostExe = Join-Path (Get-Location) 'windows/native-build/bin/chaoxing_plus.exe'
 $version = Start-Process -FilePath $hostExe -ArgumentList '--version' -NoNewWindow -Wait -PassThru
 if ($version.ExitCode -ne 0) { throw "Version check failed: $($version.ExitCode)" }
 $check = Start-Process -FilePath $hostExe -ArgumentList '--self-check','--no-disk-write' -NoNewWindow -Wait -PassThru

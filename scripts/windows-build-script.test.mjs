@@ -25,6 +25,7 @@ test('build-windows.sh 使用 Git Bash 构建 x86 无依赖单文件发布包', 
   for (const expected of [
     'npm run build:windows -- --release',
     'windows/native-source/build.ps1',
+    'windows/native-build',
     'npm run release:windows',
     'verify-release.mjs',
     'chaoxing_plus.exe'
@@ -57,6 +58,8 @@ test('build-windows-node.sh 只构建备用 Node 包，并声明 Node 已弃用'
   for (const expected of [
     'npm run build:windows -- --release',
     'npm run release:windows -- --skip-native',
+    'windows/node-build',
+    '--out',
     'verify-release.mjs',
     'start-windows-node-silent.cmd'
   ]) {
@@ -80,8 +83,8 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
 });
 test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD 入口', async () => {
   const cases = [
-    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build.ps1', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe']],
-    ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'start-windows-node.cmd', 'verify-release.mjs']]
+    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build.ps1', 'windows\\native-build', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe']],
+    ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'windows\\node-build', '--out', 'start-windows-node.cmd', 'verify-release.mjs']]
   ];
   for (const [name, expected] of cases) {
     const sourceDirectory = name.includes('-node') ? 'node-source' : 'native-source';

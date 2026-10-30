@@ -53,9 +53,9 @@ call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
 echo [build-windows] 2/4 building native x86 host (no CRT, embedded assets)
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "build-windows"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "windows\native-build"
 if errorlevel 1 exit /b 1
-if not exist "build-windows\bin\chaoxing_plus.exe" (
+if not exist "windows\native-build\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.
   exit /b 1
 )

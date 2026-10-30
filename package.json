@@ -13,7 +13,7 @@
     "windows": "windows\\native-source\\start-windows.cmd",
     "windows:debug": "windows\\native-source\\start-windows-debug.cmd",
     "windows:silent": "windows\\native-source\\start-windows-silent.cmd",
-    "windows:self-check": "build-windows\\bin\\chaoxing_plus.exe --self-check",
+    "windows:self-check": "windows\\native-build\\bin\\chaoxing_plus.exe --self-check",
     "windows:node": "node windows/node-source/main.mjs",
     "windows:node:self-check": "node windows/node-source/main.mjs --self-check",
     "typecheck": "tsc --noEmit"

@@ -6,9 +6,9 @@ import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('build-windows/bin/chaoxing_plus.exe');
-const proxyDll = resolve('build-windows/hook/winmm.dll');
-const fixtureExe = resolve('build-windows/bin/process-fixture.exe');
+const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('windows/native-build/bin/chaoxing_plus.exe');
+const proxyDll = resolve('windows/native-build/hook/winmm.dll');
+const fixtureExe = resolve('windows/native-build/bin/process-fixture.exe');
 
 function ready() {
   return existsSync(hostExe) && existsSync(proxyDll) && existsSync(fixtureExe);
@@ -126,7 +126,7 @@ test('auto 模式对加壳客户端自动选择 dll-proxy 并清理临时代理'
   }
 });
 test('--proxy-target version 安装/卸载到 version.dll 且不动 winmm.dll', { skip: process.platform !== 'win32' || !ready() }, async () => {
-  const proxyVersion = resolve('build-windows/hook/version.dll');
+  const proxyVersion = resolve('windows/native-build/hook/version.dll');
   if (!existsSync(proxyVersion)) return; // 未构建 version 目标时跳过（build-proxy.ps1 -Target version）
   const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-version-'));
   try {
@@ -146,7 +146,7 @@ test('--proxy-target version 安装/卸载到 version.dll 且不动 winmm.dll', 
   }
 });
 test('--proxy-target uxtheme 与 auto 解析', { skip: process.platform !== 'win32' || !ready() }, async () => {
-  const proxyUx = resolve('build-windows/hook/uxtheme.dll');
+  const proxyUx = resolve('windows/native-build/hook/uxtheme.dll');
   const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-ux-'));
   try {
     const client = join(dir, 'CXExam.exe');
@@ -170,7 +170,7 @@ test('--proxy-target uxtheme 与 auto 解析', { skip: process.platform !== 'win
   }
 });
 test('载体冲突时 auto 换下一个载体，marker 记录载体名且卸载不动第三方 DLL', { skip: process.platform !== 'win32' || !ready() }, async () => {
-  const proxyVersion = resolve('build-windows/hook/version.dll');
+  const proxyVersion = resolve('windows/native-build/hook/version.dll');
   if (!existsSync(proxyVersion)) return;
   const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-clash-'));
   try {
@@ -217,7 +217,7 @@ test('端口拿不到端点时自动改用 settings-only 代理重试（端口�
 });
 test('小载体 msimg32 / sensapi / oledlg / wtsapi32 可安装并卸载', { skip: process.platform !== 'win32' || !ready() }, async () => {
   for (const carrier of ['msimg32', 'sensapi', 'oledlg', 'wtsapi32']) {
-    const src = resolve(`build-windows/hook/${carrier}.dll`);
+    const src = resolve(`windows/native-build/hook/${carrier}.dll`);
     if (!existsSync(src)) continue;
     const dir = await mkdtemp(join(tmpdir(), `cx-proxy-${carrier}-`));
     try {

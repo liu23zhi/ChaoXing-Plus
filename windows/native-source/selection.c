@@ -169,7 +169,7 @@ static BOOL selection_is_known_dll(const WCHAR *name) {
 static void selection_load_carriers(void) {
     WCHAR hostPath[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH];
     DWORD length, cut = 0, i, r;
-    static const WCHAR *const rels[4] = { L"\\..\\hook\\", L"\\hook\\", L"\\..\\..\\build-windows\\hook\\", L"\\" };
+    static const WCHAR *const rels[4] = { L"\\..\\hook\\", L"\\hook\\", L"\\..\\..\\native-build\\hook\\", L"\\" };
     selection_carrier_count = 0;
     if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return;
     length = (DWORD)lstrlenW(hostPath);
@@ -302,7 +302,7 @@ static BOOL selection_proxy_source(int carrierIndex) {
     WCHAR hostPath[MAX_PATH];
     WCHAR dir[MAX_PATH];
     WCHAR candidate[MAX_PATH];
-    static const WCHAR *const rel[4] = { L"\\hook\\", L"\\..\\hook\\", L"\\..\\..\\build-windows\\hook\\", L"\\" };
+    static const WCHAR *const rel[4] = { L"\\hook\\", L"\\..\\hook\\", L"\\..\\..\\native-build\\hook\\", L"\\" };
     DWORD length, cut = 0, i;
     int r;
     if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return FALSE;

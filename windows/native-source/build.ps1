@@ -9,9 +9,9 @@ $scriptRoot = $PSScriptRoot
 # The compile script and native sources share the same directory.
 $sourceRoot = $scriptRoot
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
-# Native build output goes to <repo>/build-windows (EXE in build-windows\bin),
-# next to dist-windows; an explicit -OutputDirectory still overrides it.
-if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $root 'build-windows' }
+# Native build output goes to <repo>/windows/native-build (EXE in native-build\bin);
+# an explicit -OutputDirectory still overrides it.
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path (Split-Path $scriptRoot -Parent) 'native-build' }
 $compiler = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x86\cl.exe' -File |
     Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $compiler) { throw 'MSVC x86 compiler is required.' }

@@ -4,7 +4,7 @@ param([string]$Target = 'winmm')
 # system export gets a stub that jumps to the real function loaded from System32.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$out = Join-Path $root 'build-windows/hook'
+$out = Join-Path $root 'windows/native-build/hook'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'

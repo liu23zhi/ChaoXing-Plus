@@ -5,9 +5,9 @@
 # 新功能、静默场景与自毁一律只做原生 EXE。原生构建入口见 ../native-source/build-windows.sh。
 #
 # 输出：
-#   release/chaoxing-plus-<version>-windows/start-windows-node.cmd / start-windows-node-silent.cmd
-#   release/chaoxing-plus-<version>-windows/runtime/node.exe（自带运行时）
-#   release/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
+#   windows/node-build/chaoxing-plus-<version>-windows/start-windows-node.cmd / start-windows-node-silent.cmd
+#   windows/node-build/chaoxing-plus-<version>-windows/runtime/node.exe（自带运行时）
+#   windows/node-build/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
 #
 # 用法：
 #   bash windows/node-source/build-windows-node.sh
@@ -38,13 +38,14 @@ if [ "$NODE_MAJOR" -lt 22 ]; then
 fi
 
 VERSION="$(node -p "require('./package.json').version")"
-PACKAGE_DIR="release/chaoxing-plus-${VERSION}-windows"
+NODE_BUILD_DIR="windows/node-build"
+PACKAGE_DIR="${NODE_BUILD_DIR}/chaoxing-plus-${VERSION}-windows"
 
 echo "[build-windows-node] 1/3 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
 
 echo "[build-windows-node] 2/3 生成备用 Node 发布包（不含原生 EXE）"
-npm run release:windows -- --skip-native
+npm run release:windows -- --skip-native --out "$NODE_BUILD_DIR"
 
 if [ ! -f "${PACKAGE_DIR}/start-windows-node-silent.cmd" ]; then
   echo "[build-windows-node] 备用包缺少 Node 静默入口：${PACKAGE_DIR}" >&2

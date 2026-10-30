@@ -105,7 +105,7 @@ function parseArgs(argv) {
     silentLauncher: path.join(repoRoot, 'windows', 'node-source', 'start-windows-node-silent.cmd'),
     configExample: path.join(repoRoot, 'windows', 'share-file', 'config.example.json'),
     verifier: path.join(repoRoot, 'windows', 'share-file', 'verify-release.mjs'),
-    exe: path.join(repoRoot, 'build-windows', 'bin', 'chaoxing_plus.exe'),
+    exe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe'),
     // 自带 Node 运行时：发布包内的入口优先用 runtime\node.exe，避免依赖目标机器的
     // C:\Program Files\nodejs\node.exe（考试机通常没有 Node.js）。
     runtimeExe: process.platform === 'win32' ? process.execPath : '',
@@ -278,7 +278,7 @@ async function main() {
   }
   // 可选：把 winmm 代理随包发布，便于 --install-proxy 直接找到源文件。
   {
-    const proxySource = path.join(repoRoot, 'build-windows', 'hook', 'winmm.dll');
+    const proxySource = path.join(repoRoot, 'windows', 'native-build', 'hook', 'winmm.dll');
     if (includeNative && await pathExists(proxySource)) {
       await fs.copyFile(proxySource, path.join(packageRoot, 'winmm-proxy.dll'));
     }

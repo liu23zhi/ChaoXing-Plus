@@ -1106,7 +1106,7 @@ test('注入方式只在原生宿主导出，auto 不输出该参数', async () 
   const page = await openGenerator();
   try {
     await page.select('#hostType', 'native');
-    await page.$eval('#nativePath', (node, p) => { node.value = p; node.dispatchEvent(new Event('input', { bubbles: true })); }, resolve('build-windows/bin/chaoxing_plus.exe'));
+    await page.$eval('#nativePath', (node, p) => { node.value = p; node.dispatchEvent(new Event('input', { bubbles: true })); }, resolve('windows/native-build/bin/chaoxing_plus.exe'));
     const autoCli = await page.$eval('#powershell', (node) => node.value);
     assert.equal(autoCli.length > 0, true, '原生宿主应生成命令');
     assert.equal(autoCli.includes('--inject-mode'), false, 'auto 为默认值，不应输出');

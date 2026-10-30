@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import net from 'node:net';
 
-const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('build-windows/bin/chaoxing_plus.exe');
-const cdpServer = resolve('build-windows/bin/cdp-server.exe');
+const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('windows/native-build/bin/chaoxing_plus.exe');
+const cdpServer = resolve('windows/native-build/bin/cdp-server.exe');
 
 function ready() {
   return existsSync(hostExe) && existsSync(cdpServer);

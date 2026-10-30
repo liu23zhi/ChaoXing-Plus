@@ -4,7 +4,7 @@ set "CXPLUS_ROOT=%~dp0."
 set "CXPLUS_EXE=%~dp0chaoxing_plus.exe"
 if exist "%~dp0build.ps1" (
   set "CXPLUS_ROOT=%~dp0..\.."
-  set "CXPLUS_EXE=%~dp0..\..\build-windows\bin\chaoxing_plus.exe"
+  set "CXPLUS_EXE=%~dp0..\native-build\bin\chaoxing_plus.exe"
 )
 for %%d in ("%CXPLUS_ROOT%") do set "CXPLUS_ROOT=%%~fd"
 cd /d "%CXPLUS_ROOT%" || exit /b 1

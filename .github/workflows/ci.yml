@@ -48,7 +48,7 @@ jobs:
       - name: 导出原生编译测试路径
         shell: pwsh
         run: |
-          $bin = (Resolve-Path '.\build-windows\bin').Path
+          $bin = (Resolve-Path '.\windows\native-build\bin').Path
           $executables = [ordered]@{
             CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
             CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'

@@ -4,7 +4,8 @@ dist-windows/
 release/
 .tmp-tests/
 .tmp-tests-*/
-build-windows/
+windows/native-build/
+windows/node-build/
 .tmp-native-discovery/
 windows/native-source/build/
 windows/data/

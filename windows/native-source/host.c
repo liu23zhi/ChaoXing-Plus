@@ -790,11 +790,11 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
     } else {
         static const WCHAR *const winmmCandidates[] = {
             L"\\winmm-proxy.dll", L"\\winmm.dll", L"\\hook\\winmm.dll",
-            L"\\..\\hook\\winmm.dll", L"\\build-windows\\hook\\winmm.dll"
+            L"\\..\\hook\\winmm.dll", L"\\..\\..\\native-build\\hook\\winmm.dll"
         };
         static const WCHAR *const versionCandidates[] = {
             L"\\version-proxy.dll", L"\\version.dll", L"\\hook\\version.dll",
-            L"\\..\\hook\\version.dll", L"\\build-windows\\hook\\version.dll"
+            L"\\..\\hook\\version.dll", L"\\..\\..\\native-build\\hook\\version.dll"
         };
         const WCHAR *const *candidates = h_same(h_proxy_target, L"version") ? versionCandidates : winmmCandidates;
         DWORD i = 0;

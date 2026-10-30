@@ -9,7 +9,7 @@ const root = path.resolve('.');
 const engineSource = path.join(root, 'windows', 'native-source', 'silent.c');
 const engineHeader = path.join(root, 'windows', 'native-source', 'silent.h');
 const buildScript = path.join(root, 'windows', 'native-source', 'build.ps1');
-const defaultExe = path.join(root, 'build-windows', 'bin', 'silent-tests.exe');
+const defaultExe = path.join(root, 'windows', 'native-build', 'bin', 'silent-tests.exe');
 
 test('原生静默引擎暴露自毁状态机与程序清理契约', async () => {
   const header = await readFile(engineHeader, 'utf8');
@@ -37,14 +37,15 @@ test('原生静默引擎暴露自毁状态机与程序清理契约', async () =>
   assert.match(script, /'silent-tests'/u);
 });
 
-test('原生构建默认输出到仓库根部 build-windows/bin', async () => {
+test('原生构建默认输出到 windows/native-build/bin', async () => {
   const script = await readFile(buildScript, 'utf8');
-  assert.match(script, /Join-Path \$root 'build-windows'/u);
+  assert.match(script, /Join-Path \(Split-Path \$scriptRoot -Parent\) 'native-build'/u);
   assert.equal((script.match(/[^\x00-\x7F]/gu) || []).length, 0, 'build.ps1 必须保持纯 ASCII');
   const packager = await readFile(path.join(root, 'windows', 'share-file', 'package-windows.mjs'), 'utf8');
-  assert.match(packager, /'build-windows', 'bin', 'chaoxing_plus\.exe'/u);
+  assert.match(packager, /'windows', 'native-build', 'bin', 'chaoxing_plus\.exe'/u);
   const ignore = await readFile(path.join(root, '.gitignore'), 'utf8');
-  assert.match(ignore, /^build-windows\/$/mu);
+  assert.match(ignore, /^windows\/native-build\/$/mu);
+  assert.doesNotMatch(ignore, /^build-windows\/$/mu);
 });
 
 test('原生静默引擎单元测试通过（未构建时跳过）', { skip: process.platform !== 'win32' }, (t) => {
@@ -69,7 +70,7 @@ test('原生静默引擎单元测试通过（未构建时跳过）', { skip: pro
 });
 
 test('原生宿主接受 --silent-scenario 并声明该能力', { skip: process.platform !== 'win32' }, async (t) => {
-  const executable = process.env.CX_NATIVE_HOST_EXE || path.join(root, 'build-windows', 'bin', 'chaoxing_plus.exe');
+  const executable = process.env.CX_NATIVE_HOST_EXE || path.join(root, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe');
   if (!existsSync(executable)) {
     t.skip('未找到 chaoxing_plus.exe，先运行 windows/native-source/build.ps1 -BuildTests');
     return;

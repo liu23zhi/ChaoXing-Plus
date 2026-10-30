@@ -6,6 +6,7 @@ setlocal EnableExtensions
 cd /d "%~dp0..\.." || exit /b 1
 
 set "SKIP_TESTS=0"
+set "NODE_BUILD_DIR=windows\node-build"
 
 :parse
 if "%~1"=="" goto checks
@@ -48,11 +49,11 @@ call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
 echo [build-windows-node] 2/3 packaging the Node-only release
-call npm run release:windows -- --skip-native
+call npm run release:windows -- --skip-native --out "%NODE_BUILD_DIR%"
 if errorlevel 1 exit /b 1
 set "VERSION="
 for /f "delims=" %%v in ('node -p "require('./package.json').version"') do set "VERSION=%%v"
-set "PACKAGE_DIR=release\chaoxing-plus-%VERSION%-windows"
+set "PACKAGE_DIR=%NODE_BUILD_DIR%\chaoxing-plus-%VERSION%-windows"
 if not exist "%PACKAGE_DIR%\start-windows-node.cmd" (
   echo [build-windows-node] release package is missing start-windows-node.cmd: %PACKAGE_DIR%
   exit /b 1

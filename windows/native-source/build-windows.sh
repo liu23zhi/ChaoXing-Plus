@@ -72,9 +72,9 @@ npm run build:windows -- --release
 
 echo "[build-windows] 2/5 构建 Windows x86 原生宿主（无 CRT、资源内嵌、无外部 DLL 依赖）"
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -File "windows/native-source/build.ps1" -OutputDirectory "build-windows"
+  -File "windows/native-source/build.ps1" -OutputDirectory "windows/native-build"
 
-if [ ! -f "build-windows/bin/chaoxing_plus.exe" ]; then
+if [ ! -f "windows/native-build/bin/chaoxing_plus.exe" ]; then
   echo "[build-windows] 原生 x86 EXE 没有生成。" >&2
   exit 1
 fi

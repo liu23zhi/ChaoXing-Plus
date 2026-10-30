@@ -8,7 +8,7 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | [Node 宿主](../node-source/README.md) | 已弃用的 Node 实现、PowerShell/VBS、备用构建与 `start-windows-node*.cmd` |
 | [Windows 共享文件](./) | 页面平台层、Chrome75 闸门、资源构建、打包/校验、配置模板与参数生成器 |
 
-插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出仍为仓库根 `dist-windows/`、`build-windows/bin/` 和 `release/`；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
+插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出仍为仓库根 `dist-windows/`、`windows/native-build/bin/`、`windows/node-build/` 和 `release/`；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
 
 ## 共享模块
 

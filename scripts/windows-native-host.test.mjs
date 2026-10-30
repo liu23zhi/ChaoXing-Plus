@@ -77,7 +77,8 @@ test('compiled native injection honors strategy order, retry limits and unique r
 
 test('native host build output is not treated as a checked-in artifact', async () => {
   const ignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
-  assert.match(ignore, /build-windows/);
+  assert.match(ignore, /windows\/native-build\//);
+  assert.doesNotMatch(ignore, /^build-windows\/$/mu);
 });
 
 test('compiled native common discovery does not crash while reading default environment roots', {
