@@ -69,6 +69,20 @@ static int self_test(void) {
     check(!cx_asset_load(L"../windows-bootstrap.js", NULL, &data, &length, errorText, 512)
           && !data && length == 0, "unknown or traversal resource names are rejected");
     check(!cx_asset_load(NULL, NULL, &data, &length, errorText, 512), "missing asset name is rejected");
+    {
+        char *proxy = NULL;
+        DWORD proxyLength = 0;
+        check(cx_asset_proxy_count() >= 1 && cx_asset_proxy_name(0) != NULL, "embedded proxy carriers are enumerated");
+        check(cx_asset_proxy_exists(L"winmm.dll"), "the winmm proxy is embedded as a resource");
+        check(!cx_asset_proxy_exists(L"version.dll"), "unbuilt carriers report no embedded proxy");
+        check(cx_asset_load_proxy(L"winmm.dll", &proxy, &proxyLength, errorText, 512)
+              && proxy && proxyLength > 64 && proxy[0] == 'M' && proxy[1] == 'Z'
+              && proxy[proxyLength] == 0, "the embedded proxy loads as a NUL-terminated PE image");
+        if (proxy) HeapFree(GetProcessHeap(), 0, proxy);
+        proxy = NULL;
+        check(!cx_asset_load_proxy(L"version.dll", &proxy, &proxyLength, errorText, 512) && !proxy,
+              "unbuilt carriers cannot be loaded from resources");
+    }
     output(failedChecks ? "NATIVE ASSET TESTS FAIL\n" : "NATIVE ASSET TESTS PASS\n");
     return failedChecks ? 1 : 0;
 }

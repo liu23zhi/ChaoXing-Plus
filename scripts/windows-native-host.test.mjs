@@ -128,7 +128,8 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   const nativeCapabilities = JSON.parse(capabilities.stdout);
   assert.equal(nativeCapabilities.host, 'native');
   assert.equal(nativeCapabilities.embeddedResources, true);
-  assert.equal(nativeCapabilities.embeddedResourceCount, 4);
+  assert.equal(nativeCapabilities.embeddedResourceCount, 5);
+  assert.equal(nativeCapabilities.embeddedProxy, true);
   assert.equal(nativeCapabilities.nativeSelection, true);
   assert.equal(nativeCapabilities.highDpiUi, true);
   assert.equal(nativeCapabilities.contextLifecycle, true);

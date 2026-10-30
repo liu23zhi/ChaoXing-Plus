@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include "../selection.h"
+#include "../assets.h"
 #include "../resource.h"
 
 static DWORD failedChecks;
@@ -100,6 +101,18 @@ static void probe_tests(void) {
           "carrier combo begins with the automatic import-table option");
     check(probe.carrierSelectedIndex == 0, "carrier defaults to auto");
     check(probe.statusControlPresent, "the injection hint control exists for greyed modes");
+    {
+        char *payload = NULL;
+        DWORD payloadLength = 0;
+        check(cx_asset_proxy_exists(L"winmm.dll"), "the winmm proxy DLL is embedded in the executable");
+        check(cx_asset_load_proxy(L"winmm.dll", &payload, &payloadLength, errorText, 512)
+              && payload && payloadLength > 64 && payload[0] == 'M' && payload[1] == 'Z',
+              "the embedded proxy is a PE image");
+        if (payload) HeapFree(GetProcessHeap(), 0, payload);
+        payload = NULL;
+        check(!cx_asset_load_proxy(L"not-a-carrier.dll", &payload, &payloadLength, errorText, 512)
+              && !payload, "unknown embedded proxy carriers are rejected");
+    }
     check(probe.injectComboWidth >= 120 && probe.injectComboHeight >= 16, "injection combo has a usable size");
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
     check(probe.classIconsMatch, "selection class icons match the embedded application icon");
@@ -268,12 +281,22 @@ void WINAPI SelectionTestMain(void) {
     if (argv) LocalFree(argv);
     if (capsMode) {
         DWORD inject = 0, carrier = 0, reasons = 0;
-        char line[192];
+        DWORD index, written = 0;
+        char line[256];
         BOOL ok = capsPath[0] && cx_selection_client_caps(capsPath, &inject, &carrier, &reasons);
-        wsprintfA(line, "caps: injectMask=0x%lX carrierMask=0x%lX reasons=0x%lX\n",
-                  (unsigned long)inject, (unsigned long)carrier, (unsigned long)reasons);
+        written = (DWORD)wsprintfA(line, "caps: injectMask=0x%lX carrierMask=0x%lX reasons=0x%lX embedded=",
+                                   (unsigned long)inject, (unsigned long)carrier, (unsigned long)reasons);
+        for (index = 0; index < cx_asset_proxy_count() && written + 2 < (DWORD)sizeof(line); ++index) {
+            const WCHAR *name = cx_asset_proxy_name(index);
+            DWORD k = 0;
+            if (index && written + 1 < (DWORD)sizeof(line)) line[written++] = ',';
+            while (name && name[k] && written + 1 < (DWORD)sizeof(line)) line[written++] = (char)name[k++];
+        }
+        line[written++] = '\n';
+        line[written] = 0;
         output(line);
         check(ok, "client capability probe answers for the requested client");
+        check(cx_asset_proxy_count() > 0, "the executable carries an embedded proxy DLL");
     } else if (requestFullScan) {
         CX_DISCOVERY_RESULT empty;
         CX_SELECTION_STATUS status;

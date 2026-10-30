@@ -29,11 +29,23 @@ if (-not (Test-Path -LiteralPath $resourceCompiler)) { throw 'Windows SDK resour
 $build = Join-Path $OutputDirectory 'build'
 $bin = Join-Path $OutputDirectory 'bin'
 New-Item -ItemType Directory -Path $build,$bin -Force | Out-Null
+# The dll-proxy carrier DLL is embedded as RCDATA so the release stays a single
+# EXE. Build it when missing (unless -SkipProxy), then embed the file.
+$proxyScript = Join-Path $root 'windows\hook-source\build-proxy.ps1'
+$hookDir = Join-Path $root 'windows\native-build\hook'
+$proxyDll = Join-Path $hookDir 'winmm.dll'
+if (-not (Test-Path -LiteralPath $proxyDll -PathType Leaf)) {
+    if ($SkipProxy) { throw "Embedded proxy DLL is missing: $proxyDll (run windows\hook-source\build-proxy.ps1 or drop -SkipProxy)." }
+    if (-not (Test-Path -LiteralPath $proxyScript)) { throw "Proxy build script is missing: $proxyScript" }
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $proxyScript | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $proxyDll -PathType Leaf)) { throw 'Proxy DLL build failed.' }
+}
 $assetSources = [ordered]@{
     BOOTSTRAP = Join-Path $root 'dist-windows\windows-bootstrap.js'
     BUNDLE = Join-Path $root 'dist-windows\chaoxing-plus.windows.js'
     TRAMPOLINE = Join-Path $root 'dist-windows\trampoline.js'
     SWAL_STYLE = Join-Path $root 'dist-windows\vendor\sweetalert2.min.css'
+    PROXY_WINMM = $proxyDll
 }
 $resourceSource = Get-Content -LiteralPath (Join-Path $sourceRoot 'assets.rc.in') -Raw -Encoding UTF8
 foreach ($entry in $assetSources.GetEnumerator()) {
@@ -78,7 +90,7 @@ try {
             @{ Name = 'discovery-cache-host-tests'; Entry = 'DiscoveryCacheHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent'); Resources = @($resourceObject) },
             @{ Name = 'json-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json'); Resources = @() },
             @{ Name = 'session-tests'; Entry = 'SessionTestMain'; Objects = @('memory','json','session'); Resources = @() },
-            @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection'); Resources = @($resourceObject) },
+            @{ Name = 'selection-tests'; Entry = 'SelectionTestMain'; Objects = @('memory','process','discovery','selection','assets'); Resources = @($resourceObject) },
             @{ Name = 'transport-tests'; Entry = 'TransportTestMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'cdp-echo'; Entry = 'CdpEchoMain'; Objects = @('memory'); Resources = @() },
   @{ Name = 'env-probe'; Entry = 'EnvProbeMain'; Objects = @('memory'); Resources = @() },
@@ -118,26 +130,8 @@ $release = Join-Path $OutputDirectory 'release'
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 $releaseExe = Join-Path $release 'chaoxing_plus.exe'
 Copy-Item -LiteralPath $hostExe -Destination $releaseExe -Force
-# dll-proxy is offered only when <host>\hook\<carrier>.dll exists, so the
-# standalone release must ship the proxy DLLs; otherwise the selection window
-# greys out both cdp-port (packed clients) and dll-proxy.
-$proxyScript = Join-Path $root 'windows\hook-source\build-proxy.ps1'
-$hookDir = Join-Path $root 'windows\native-build\hook'
-$proxyPresent = $false
-if (Test-Path -LiteralPath $hookDir) {
-    $proxyPresent = [bool](Get-ChildItem -LiteralPath $hookDir -Filter '*.dll' -File | Select-Object -First 1)
-}
-if (-not $SkipProxy -and -not $proxyPresent -and (Test-Path -LiteralPath $proxyScript)) {
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $proxyScript | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Proxy DLL build failed. Run windows\hook-source\build-proxy.ps1 or pass -SkipProxy.' }
-}
-if (Test-Path -LiteralPath $hookDir) {
-    $releaseHook = Join-Path $release 'hook'
-    New-Item -ItemType Directory -Path $releaseHook -Force | Out-Null
-    Get-ChildItem -LiteralPath $hookDir -Filter '*.dll' -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $releaseHook $_.Name) -Force
-    }
-}
+# Release layout is exactly one EXE: the proxy DLL is embedded as RCDATA and is
+# only written into the client directory at runtime when dll-proxy is used.
 Get-Item -LiteralPath $hostExe,$releaseExe | Select-Object FullName,Length
 # Use the system certutil binary for the hash: this .ps1 must stay ASCII-only
 # and build must not depend on PowerShell module auto-loading.

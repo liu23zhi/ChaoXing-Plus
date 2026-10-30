@@ -37,6 +37,7 @@ test('packed clients keep dll-proxy selectable while cdp-port stays greyed', { s
 
     const plain = spawnSync(probeHost, ['--caps', probe], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
     assert.equal(plain.status, 0, plain.stdout + plain.stderr);
+    assert.match(plain.stdout, /embedded=winmm\.dll/u, 'winmm 代理必须内嵌在 EXE 里');
     const plainCaps = parseCaps(plain.stdout);
     assert.equal(plainCaps.injectMask & 0x2, 0, '未加壳客户端可以选择 cdp-port');
     assert.equal(plainCaps.injectMask & 0x4, 0, '有代理 DLL 时 dll-proxy 可选');
@@ -61,6 +62,7 @@ test('packed clients keep dll-proxy selectable while cdp-port stays greyed', { s
     }
     const packedRun = spawnSync(probeHost, ['--caps', packed], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
     assert.equal(packedRun.status, 0, packedRun.stdout + packedRun.stderr);
+    assert.match(packedRun.stdout, /embedded=winmm\.dll/u);
     const packedCaps = parseCaps(packedRun.stdout);
     assert.equal(packedCaps.injectMask & 0x2, 0x2, '加壳客户端禁用 cdp-port');
     assert.equal(packedCaps.injectMask & 0x4, 0, '加壳客户端的 dll-proxy 必须仍然可选');
@@ -86,6 +88,8 @@ test('compiled native client selection builds its real hidden controls', { skip:
     /discovery reports visited directory progress/,
     /the cancel callback reports a cancelled full scan/,
     /the injection hint control exists for greyed modes/,
+    /the winmm proxy DLL is embedded in the executable/,
+    /the embedded proxy is a PE image/,
     /selection layout uses the active DPI scale/,
     /the high-DPI progress window scales its width from 96 DPI metrics/
   ]) {

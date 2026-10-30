@@ -739,6 +739,61 @@ static BOOL h_proxy_destination_free(const WCHAR *targetDir) {
     return GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options);
+/* 内嵌代理：发布包只有单个 EXE，winmm 代理作为 RCDATA 随 EXE 发布，
+   用到 dll-proxy 时才释放到客户端目录。 */
+static BOOL h_proxy_dll_name(const WCHAR *carrier, WCHAR *dll, DWORD cap) {
+    int k = 0;
+    if (!carrier || !carrier[0] || !dll || cap < 12) return FALSE;
+    while (carrier[k] && k < 24 && (DWORD)(k + 6) < cap) { dll[k] = carrier[k]; ++k; }
+    dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+    return TRUE;
+}
+static BOOL h_embedded_proxy_available(const WCHAR *carrier) {
+    WCHAR dll[32];
+    return h_proxy_dll_name(carrier, dll, 32) && cx_asset_proxy_exists(dll);
+}
+static BOOL h_write_embedded_proxy(const WCHAR *carrier, const WCHAR *target) {
+    WCHAR dll[32];
+    char *data = NULL;
+    DWORD length = 0, written = 0;
+    HANDLE file;
+    BOOL ok;
+    if (!h_proxy_dll_name(carrier, dll, 32)) return FALSE;
+    if (!cx_asset_load_proxy(dll, &data, &length, NULL, 0)) return FALSE;
+    file = CreateFileW(target, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) { HeapFree(GetProcessHeap(), 0, data); return FALSE; }
+    ok = WriteFile(file, data, length, &written, NULL) != 0 && written == length;
+    CloseHandle(file);
+    HeapFree(GetProcessHeap(), 0, data);
+    if (!ok) DeleteFileW(target);
+    return ok;
+}
+/* 开发树/旧布局的外置代理优先；找不到就回退内嵌资源。 */
+static BOOL h_find_external_proxy(const WCHAR *carrier, WCHAR *source, DWORD cap) {
+    static const WCHAR *const forms[] = {
+        L"\\%s-proxy.dll", L"\\%s.dll", L"\\hook\\%s.dll",
+        L"\\..\\hook\\%s.dll", L"\\..\\..\\native-build\\hook\\%s.dll"
+    };
+    WCHAR hostDir[CX_CLEANUP_PATH_CAP];
+    WCHAR name[16];
+    int i, k = 0;
+    if (!carrier || !carrier[0] || !source || cap < 2) return FALSE;
+    while (carrier[k] && k < 15) { name[k] = carrier[k]; ++k; }
+    name[k] = 0;
+    if (!h_parent_dir(h_exe_path, hostDir, CX_CLEANUP_PATH_CAP)) return FALSE;
+    for (i = 0; i < (int)(sizeof(forms) / sizeof(forms[0])); ++i) {
+        WCHAR tail[CX_CLEANUP_PATH_CAP];
+        wsprintfW(tail, forms[i], name);
+        if (!h_copy(source, cap, hostDir) || !h_cat(source, cap, tail)) continue;
+        if (GetFileAttributesW(source) != INVALID_FILE_ATTRIBUTES) return TRUE;
+    }
+    source[0] = 0;
+    return FALSE;
+}
+static BOOL h_proxy_payload_available(const WCHAR *carrier) {
+    static WCHAR probe[CX_CLEANUP_PATH_CAP];
+    return h_find_external_proxy(carrier, probe, CX_CLEANUP_PATH_CAP) || h_embedded_proxy_available(carrier);
+}
 /* 自愈是否有意义：端口被别的进程占用时不要重试（换代理也没用，还可能干扰别人）。 */
 static BOOL h_selfheal_worthwhile(void) {
     if (h_report.endpointProbe.listenerSeen) return FALSE;
@@ -784,34 +839,20 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         return FALSE;
     }
     WCHAR source[CX_CLEANUP_PATH_CAP], targetDir[CX_CLEANUP_PATH_CAP], target[CX_CLEANUP_PATH_CAP];
-    WCHAR hostDir[CX_CLEANUP_PATH_CAP];
+    BOOL useEmbedded = FALSE;
     BOOL ok;
+    source[0] = 0;
     if (options->proxySourceSet) {
         if (!h_copy(source, CX_CLEANUP_PATH_CAP, options->proxySource)) { h_print(L"install-proxy: invalid --proxy-source"); return FALSE; }
+    } else if (h_find_external_proxy(h_proxy_target, source, CX_CLEANUP_PATH_CAP)) {
+        useEmbedded = FALSE;
+    } else if (h_embedded_proxy_available(h_proxy_target)) {
+        useEmbedded = TRUE;
     } else {
-        static const WCHAR *const winmmCandidates[] = {
-            L"\\winmm-proxy.dll", L"\\winmm.dll", L"\\hook\\winmm.dll",
-            L"\\..\\hook\\winmm.dll", L"\\..\\..\\native-build\\hook\\winmm.dll"
-        };
-        static const WCHAR *const versionCandidates[] = {
-            L"\\version-proxy.dll", L"\\version.dll", L"\\hook\\version.dll",
-            L"\\..\\hook\\version.dll", L"\\..\\..\\native-build\\hook\\version.dll"
-        };
-        const WCHAR *const *candidates = h_same(h_proxy_target, L"version") ? versionCandidates : winmmCandidates;
-        DWORD i = 0;
-        BOOL found = FALSE;
-        if (!h_parent_dir(h_exe_path, hostDir, CX_CLEANUP_PATH_CAP)) { h_print(L"install-proxy: cannot locate host directory"); return FALSE; }
-        for (i = 0; i < 5; ++i) {
-            if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, candidates[i])) continue;
-            if (GetFileAttributesW(source) != INVALID_FILE_ATTRIBUTES) { found = TRUE; break; }
-        }
-        if (!found) {
-            if (!h_copy(source, CX_CLEANUP_PATH_CAP, hostDir) || !h_cat(source, CX_CLEANUP_PATH_CAP, L"\\winmm-proxy.dll")) { h_print(L"install-proxy: path too long"); return FALSE; }
-            h_print(L"install-proxy: proxy DLL not found next to the host; build it with windows\\hook-source\\build-proxy.ps1 or pass --proxy-source");
-            return FALSE;
-        }
+        h_print(L"install-proxy: 内嵌代理只提供 winmm；请用 --proxy-target winmm，或通过 --proxy-source 指定其它载体的 DLL\n");
+        return FALSE;
     }
-    if (GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES) {
+    if (!useEmbedded && GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES) {
         h_print(L"install-proxy: proxy DLL not found at ");
         h_print(source);
         h_print(L"; build it with windows\\hook-source\\build-proxy.ps1 or pass --proxy-source");
@@ -826,24 +867,33 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         return FALSE;
     }
     if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) { h_print(L"install-proxy: path too long"); return FALSE; }
-    /* 载体冲突：目标位置已有第三方同名 DLL 时，auto 模式换下一个载体，显式模式直接报错。 */
+    /* 载体冲突：目标位置已有第三方同名 DLL 时，auto 模式换下一个可用载体，显式模式直接报错。 */
     if (!h_proxy_destination_free(targetDir)) {
         BOOL autoTarget = h_proxy_target_auto;
         int i, picked = -1;
+        if (options->proxySourceSet) {
+            h_print(L"install-proxy: 目标位置已有同名第三方 DLL，而 --proxy-source 指定了固定文件，无法换载体；请先清理或换目录\n");
+            return FALSE;
+        }
         if (autoTarget) {
             for (i = 0; i < h_proxy_carrier_count; ++i) {
+                if (!h_proxy_destination_free(targetDir)) continue;
+                if (!h_proxy_payload_available(h_proxy_carriers[i])) continue;
                 h_copy(h_proxy_target, 16, h_proxy_carriers[i]);
-                if (h_proxy_destination_free(targetDir)) { picked = i; break; }
+                picked = i;
+                break;
             }
         }
         if (picked < 0) {
             h_print(L"install-proxy: 目标位置已有同名的第三方 DLL，且没有我们的 marker；请换 --proxy-target 或先手工清理\n");
             return FALSE;
         }
+        if (h_find_external_proxy(h_proxy_target, source, CX_CLEANUP_PATH_CAP)) useEmbedded = FALSE;
+        else useEmbedded = h_embedded_proxy_available(h_proxy_target);
         if (!h_copy(target, CX_CLEANUP_PATH_CAP, targetDir) || !h_cat(target, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix())) { h_print(L"install-proxy: path too long"); return FALSE; }
         if (!options->quiet) { h_print(L"install-proxy: 载体冲突，改用 "); h_print(h_proxy_target); h_print(L"\n"); }
     }
-    ok = CopyFileW(source, target, FALSE) != 0;
+    ok = useEmbedded ? h_write_embedded_proxy(h_proxy_target, target) : (CopyFileW(source, target, FALSE) != 0);
     if (ok && options->proxyPortSet) {
         WCHAR portPath[CX_CLEANUP_PATH_CAP];
         HANDLE portFile;
@@ -885,10 +935,15 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
         }
     }
     if (ok) {
-        h_print(L"install-proxy: copied ");
-        h_print(source);
-        h_print(L" -> ");
-        h_print(target);
+        if (useEmbedded) {
+            h_print(L"install-proxy: 已释放内嵌代理 -> ");
+            h_print(target);
+        } else {
+            h_print(L"install-proxy: copied ");
+            h_print(source);
+            h_print(L" -> ");
+            h_print(target);
+        }
         h_print(L"\n");
     } else {
         DWORD code = GetLastError();
@@ -2802,7 +2857,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_print_utf8("{\"host\":\"native\",\"executionMode\":\"");
         h_print_utf8(h_base_options.executionModeMemory ? "memory" : "normal");
-        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":true,\"embeddedResourceCount\":4,"
+        h_print_utf8("\",\"executionModes\":[\"normal\",\"memory\"],\"embeddedResources\":true,\"embeddedResourceCount\":5,\"embeddedProxy\":true,"
             "\"nativeSelection\":true,\"highDpiUi\":true,\"scanCache\":true,\"contextLifecycle\":true,\"navigation\":true,\"targetReconnect\":true,"
             "\"maxPageSessions\":16,\"configReload\":true,\"configPersistence\":true,\"fileLogging\":true,\"runReport\":true,\"renderDiagnostics\":false,\"pageRenderDiagnostics\":true,\"pageScreenshots\":true,\"windowDiagnostics\":true,\"diagnosticsSummary\":true,\"selfCheck\":true,\"standardUac\":true,\"elevateOnStart\":true,\"temporaryDpiOverride\":true,\"existingClientCheck\":true,"
             "\"retainData\":true,\"deleteConfig\":true,"

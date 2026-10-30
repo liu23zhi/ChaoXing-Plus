@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include "selection.h"
+#include "assets.h"
 #include "resource.h"
 
 #define SELECTION_LIST 1001
@@ -327,6 +328,14 @@ static BOOL selection_proxy_source(int carrierIndex) {
     static const WCHAR *const rel[4] = { L"\\hook\\", L"\\..\\hook\\", L"\\..\\..\\native-build\\hook\\", L"\\" };
     DWORD length, cut = 0, i;
     int r;
+    /* 发布包只有单个 EXE：代理 DLL 内嵌在 EXE 里，运行时才释放到客户端目录。 */
+    {
+        WCHAR dll[32];
+        int k = 0;
+        while (selection_carrier_names[carrierIndex][k] && k < 24) { dll[k] = selection_carrier_names[carrierIndex][k]; ++k; }
+        dll[k++] = L'.'; dll[k++] = L'd'; dll[k++] = L'l'; dll[k++] = L'l'; dll[k] = 0;
+        if (cx_asset_proxy_exists(dll)) return TRUE;
+    }
     if (!GetModuleFileNameW(NULL, hostPath, MAX_PATH)) return FALSE;
     length = (DWORD)lstrlenW(hostPath);
     for (i = 0; i < length; ++i) if (hostPath[i] == L'\\' || hostPath[i] == L'/') cut = i;

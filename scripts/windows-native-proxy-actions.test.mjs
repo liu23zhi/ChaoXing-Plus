@@ -56,6 +56,35 @@ test('代理安装/探测/卸载的完整闭环', { skip: process.platform !== '
   }
 });
 
+test('只带单个 EXE 时从内嵌资源释放 winmm 代理并还原', { skip: process.platform !== 'win32' || !existsSync(hostExe) || !existsSync(fixtureExe) }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-embedded-'));
+  const hostDir = await mkdtemp(join(tmpdir(), 'cx-proxy-embedded-host-'));
+  try {
+    // 把宿主单独复制到空目录：旁边没有 hook\winmm.dll，只能走内嵌资源。
+    const standalone = join(hostDir, 'chaoxing_plus.exe');
+    await copyFile(hostExe, standalone);
+    const client = join(dir, 'CXExam.exe');
+    await copyFile(fixtureExe, client);
+
+    const install = spawnSync(standalone, ['--install-proxy', '--client', client], { encoding: 'utf8', timeout: 60000 });
+    assert.equal(install.status, 0, `${install.stdout ?? ''}${install.stderr ?? ''}`);
+    assert.match(`${install.stdout ?? ''}${install.stderr ?? ''}`, /已释放内嵌代理/u);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), true, '内嵌代理必须被写到客户端目录');
+    const payload = await readFile(join(dir, 'winmm.dll'));
+    assert.equal(payload[0], 0x4d, '释放出来的代理必须是 PE 镜像');
+    assert.equal(payload[1], 0x5a, '释放出来的代理必须是 PE 镜像');
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), true);
+
+    const uninstall = spawnSync(standalone, ['--uninstall-proxy', '--client', client], { encoding: 'utf8', timeout: 60000 });
+    assert.equal(uninstall.status, 0, `${uninstall.stdout ?? ''}${uninstall.stderr ?? ''}`);
+    assert.equal(existsSync(join(dir, 'winmm.dll')), false);
+    assert.equal(existsSync(join(dir, 'cxhook-proxy.marker')), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(hostDir, { recursive: true, force: true });
+  }
+});
+
 test('缺少标记时拒绝卸载未知 winmm.dll', { skip: process.platform !== 'win32' || !ready() }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cx-proxy-actions-'));
   try {

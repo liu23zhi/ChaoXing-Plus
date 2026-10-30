@@ -65,23 +65,17 @@ static BOOL asset_file(const WCHAR *directory, const WCHAR *name,
     return TRUE;
 }
 
-BOOL cx_asset_load(const WCHAR *name, const WCHAR *overrideDir,
-                   char **data, DWORD *length, WCHAR *error, DWORD errorCap) {
-    DWORD index, size;
+static BOOL asset_embedded(WORD id, char **data, DWORD *length, WCHAR *error, DWORD errorCap) {
     HMODULE module;
     HRSRC resource;
     HGLOBAL loaded;
     const void *source;
+    DWORD size;
     char *bytes;
     if (data) *data = NULL;
     if (length) *length = 0;
-    if (!name || !data || !length) { asset_error(error, errorCap, L"invalid native asset request"); return FALSE; }
-    for (index = 0; index < cx_asset_count(); ++index)
-        if (lstrcmpW(name, assetNames[index]) == 0) break;
-    if (index == cx_asset_count()) { asset_error(error, errorCap, L"unknown native asset name"); return FALSE; }
-    if (overrideDir && overrideDir[0]) return asset_file(overrideDir, assetFiles[index], data, length, error, errorCap);
     module = GetModuleHandleW(NULL);
-    resource = FindResourceW(module, MAKEINTRESOURCEW(assetIds[index]), RT_RCDATA);
+    resource = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
     if (!resource) { asset_error(error, errorCap, L"embedded native asset is missing"); return FALSE; }
     size = SizeofResource(module, resource);
     loaded = LoadResource(module, resource);
@@ -90,9 +84,60 @@ BOOL cx_asset_load(const WCHAR *name, const WCHAR *overrideDir,
     bytes = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size + 1);
     if (!bytes) { asset_error(error, errorCap, L"out of memory loading embedded asset"); return FALSE; }
     CopyMemory(bytes, source, size);
-    bytes[size] = 0; *data = bytes; *length = size;
+    bytes[size] = 0;
+    if (data) *data = bytes; else HeapFree(GetProcessHeap(), 0, bytes);
+    if (length) *length = size;
     return TRUE;
 }
+
+BOOL cx_asset_load(const WCHAR *name, const WCHAR *overrideDir,
+                   char **data, DWORD *length, WCHAR *error, DWORD errorCap) {
+    DWORD index;
+    if (data) *data = NULL;
+    if (length) *length = 0;
+    if (!name || !data || !length) { asset_error(error, errorCap, L"invalid native asset request"); return FALSE; }
+    for (index = 0; index < cx_asset_count(); ++index)
+        if (lstrcmpW(name, assetNames[index]) == 0) break;
+    if (index == cx_asset_count()) { asset_error(error, errorCap, L"unknown native asset name"); return FALSE; }
+    if (overrideDir && overrideDir[0]) return asset_file(overrideDir, assetFiles[index], data, length, error, errorCap);
+    return asset_embedded(assetIds[index], data, length, error, errorCap);
+}
+
+/* ---- 内嵌代理 DLL ---- */
+
+static const WCHAR *proxyAssetNames[] = { L"winmm.dll" };
+static const WORD proxyAssetIds[] = { CX_RESOURCE_PROXY_WINMM };
+
+DWORD cx_asset_proxy_count(void) { return sizeof(proxyAssetIds) / sizeof(proxyAssetIds[0]); }
+
+const WCHAR *cx_asset_proxy_name(DWORD index) {
+    return index < cx_asset_proxy_count() ? proxyAssetNames[index] : NULL;
+}
+
+BOOL cx_asset_proxy_exists(const WCHAR *dllName) {
+    DWORD index;
+    if (!dllName || !*dllName) return FALSE;
+    for (index = 0; index < cx_asset_proxy_count(); ++index) {
+        if (lstrcmpiW(dllName, proxyAssetNames[index]) != 0) continue;
+        return FindResourceW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(proxyAssetIds[index]), RT_RCDATA) != NULL;
+    }
+    return FALSE;
+}
+
+BOOL cx_asset_load_proxy(const WCHAR *dllName, char **data, DWORD *length,
+                         WCHAR *error, DWORD errorCap) {
+    DWORD index;
+    if (data) *data = NULL;
+    if (length) *length = 0;
+    if (!dllName || !data || !length) { asset_error(error, errorCap, L"invalid embedded proxy request"); return FALSE; }
+    for (index = 0; index < cx_asset_proxy_count(); ++index) {
+        if (lstrcmpiW(dllName, proxyAssetNames[index]) != 0) continue;
+        return asset_embedded(proxyAssetIds[index], data, length, error, errorCap);
+    }
+    asset_error(error, errorCap, L"no embedded proxy for that carrier");
+    return FALSE;
+}
+
 
 BOOL cx_asset_validate_embedded(WCHAR *error, DWORD errorCap) {
     DWORD index, length;
