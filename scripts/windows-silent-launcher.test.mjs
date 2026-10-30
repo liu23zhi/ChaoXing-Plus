@@ -486,6 +486,24 @@ test('原生入口直接运行 chaoxing_plus.exe，不依赖 Node/PowerShell', a
   assert.doesNotMatch(noFull, /fallback-all/u, '不完整扫描入口不得回退全盘');
 });
 
+test('原生启动脚本只负责启动参数并在启动后保留窗口', async () => {
+  const nativeLaunchers = [
+    'start-windows.cmd',
+    'start-windows-debug.cmd',
+    'start-windows-silent.cmd',
+    'start-windows-silent-debug.cmd',
+    'start-windows-silent-no-full-scan-debug.cmd'
+  ];
+  for (const name of nativeLaunchers) {
+    const source = await readFile(launcherSource(name), 'utf8');
+    assert.match(source, /pause/u, `${name} 启动后必须保留窗口`);
+    assert.doesNotMatch(source, /echo \[(?:windows|silent-debug)\] (?:Silent mode|If the client|simulate mode|Task Manager|not a release layout)/u,
+      `${name} 正常启动路径不应输出额外说明`);
+    assert.match(source, /(?:chaoxing_plus\.exe[^\r\n]*|CXPLUS_EXE[^\r\n]*)%\*/u,
+      `${name} 必须透传调用方追加参数`);
+  }
+});
+
 test('原生入口在缺少 chaoxing_plus.exe 时给出中文提示并以 9009 退出', async () => {
   for (const name of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd']) {
     const source = await readFile(launcherSource(name), 'utf8');
