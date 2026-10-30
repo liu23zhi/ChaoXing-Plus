@@ -43,7 +43,7 @@ nativeTest('--no-retain-data 删除本次创建的日志与报告，但保留运
   try {
     const dataDir = path.join(directory, 'data');
     const reportPath = path.join(directory, 'report.json');
-    const logDir = path.join(dataDir, 'logs');
+    const logDir = path.join(dataDir, 'chaoxing', 'logs');
     await mkdir(logDir, { recursive: true });
     const preExisting = path.join(logDir, 'windows-host-preexisting.log');
     await writeFile(preExisting, 'keep me\n', 'utf8');
@@ -81,7 +81,7 @@ nativeTest('默认保留本次运行的日志与报告', async () => {
     const diagnosticsFiles = await listFiles(path.join(dataDir, 'diagnostics'));
     assert.equal(diagnosticsFiles.some((name) => name.endsWith('render-diagnostics-host.json')), true,
       'default retention must keep the host diagnostics summary');
-    const logs = (await listFiles(path.join(dataDir, 'logs'))).filter((name) => name.endsWith('.log'));
+    const logs = (await listFiles(path.join(dataDir, 'chaoxing', 'logs'))).filter((name) => name.endsWith('.log'));
     assert.equal(logs.length >= 1, true, 'default retention must keep this run log');
     const report = JSON.parse(await readFile(reportPath, 'utf8'));
     assert.equal(typeof report.stopReason, 'string');

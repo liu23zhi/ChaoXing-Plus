@@ -58,9 +58,9 @@ async function probe({ status = 200, body, reason, stopReason, successful = fals
     assert.ok(counts[reason] >= 1);
     assert.equal(Object.values(counts).reduce((sum, value) => sum + value, 0), report.endpointProbe.attempts);
     if (successful) assert.equal(report.endpointProbe.attempts, 1, 'normal target polling must not inflate endpoint attempts');
-    const names = await readdir(path.join(dataDir, 'logs'));
+    const names = await readdir(path.join(dataDir, 'chaoxing', 'logs'));
     assert.equal(names.length, 1);
-    const log = await readFile(path.join(dataDir, 'logs', names[0]), 'utf8');
+    const log = await readFile(path.join(dataDir, 'chaoxing', 'logs', names[0]), 'utf8');
     const summaries = log.split(/\r?\n/u).filter(line => line.includes('[endpoint-probe]'));
     assert.equal(summaries.length, successful ? 0 : 1, 'failed probes emit one final summary, not one per retry');
     if (!successful) assert.ok(summaries[0].endsWith(` ${reason}`));

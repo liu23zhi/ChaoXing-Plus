@@ -110,8 +110,9 @@ BOOL test_discovery_scan(const CX_DISCOVERY_OPTIONS *options, CX_DISCOVERY_RESUL
 }
 static const WCHAR *lastSelectionNotice;
 CX_SELECTION_STATUS test_selection(const CX_DISCOVERY_RESULT *result, BOOL hostIs32Bit,
-                                   const WCHAR *notice, WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
-    (void)result; (void)hostIs32Bit; (void)error; (void)cap; ++selections;
+                                   const WCHAR *notice, BOOL explainReasons,
+                                   WCHAR *out, DWORD outCap, WCHAR *error, DWORD cap) {
+    (void)result; (void)hostIs32Bit; (void)explainReasons; (void)error; (void)cap; ++selections;
     lastSelectionNotice = notice;
     if (requestScanAll && selections == 1) return CX_SELECTION_SCAN_ALL;
     if (selectionCancelled) return CX_SELECTION_CANCELLED;
