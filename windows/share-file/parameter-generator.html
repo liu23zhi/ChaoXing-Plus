@@ -60,14 +60,14 @@
         <div class="field full"><label for="optionsJson">内联 JSON 或 @JSON 文件</label><textarea id="optionsJson" placeholder='例如 {"panelTop":24,"panelWidth":520} 或 @C:\\Tools\\options.json'></textarea><p class="hint">支持 JSON 对象或 @文件路径；独立命令行参数优先级更高。</p></div>
         <div class="field"><label for="report">运行报告</label><input id="report" placeholder="可选路径"></div>
         <div class="field full"><div class="checks"><label class="check"><input id="noDiskWrite" type="checkbox">禁止宿主日志/诊断/报告/配置写入</label><label class="check"><input id="retainData" type="checkbox" checked>退出后保留本次运行数据（默认）</label><label class="check"><input id="deleteConfig" type="checkbox">退出时删除外部配置（需 --config）</label></div><p class="hint">两种宿主都支持数据生命周期：--no-retain-data 只删除本次运行创建的日志/报告/诊断，--delete-config 只删除显式 --config 文件且不能与 --no-disk-write 同用。两者都不影响 CXExam 自身的浏览器存储。启动错误或系统权限提示仍可能输出。</p></div>
-        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，启动清理、删除挂起和自毁字段会被拒绝；executionMode 只接受 normal 或 memory。</p></div>
+        <div class="field full"><p class="hint">支持内联 JSON 对象和 @JSON 文件；内联 JSON 不能改变配置文件路径；未被独立命令行参数覆盖的字段会按宿主规则校验范围/枚举/类型，executionMode 支持 normal、memory 与 delete-suspend，启动清理/自毁字段也会导出。</p></div>
       </div></div>
       <div class="section"><h2>执行模式</h2><div class="grid">
         <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="native" selected>原生单文件 EXE（默认，无需 Node.js）</option><option value="node">Node 兼容入口（已冻结，需要 Node.js 22+）</option></select><p class="hint">默认使用原生客户端。Node 入口仅供历史兼容和排障；切换宿主不会自动降级功能。</p></div>
         <div class="field full" id="nodeLauncherField" hidden><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
         <div class="field full" id="nativeLauncherField"><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">仓库内默认定位 windows\native-build\release\chaoxing_plus.exe；复制 EXE 后请改为实际路径，单独复制 HTML 时需手动填写。生成器无法检查文件是否存在。命令直接启动 EXE，无需 Node.js，并以 EXE 所在目录为工作目录；相对配置与数据路径均由此解析。原生诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。</p></div>
         <div class="field full"><p class="capability" id="nativeCapabilityHint">原生能力：普通运行、宿主零写盘、扫描与选择、共享配置、面板、答题设置、日志与诊断已接入。input 方式已放弃开发，不再规划；cdp-pipe 仍是诊断通道，未完成常驻会话与重连；本页不为这两种方式生成启动命令。真实 CEF75 登录后及旧 Windows 环境仍需人工验收。</p></div>
-        <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend" disabled>删除挂起（未发布）</option></select></div>
+        <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend">删除挂起（客户端启动后删除程序痕迹并继续运行）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
         <div class="field full"><label class="check"><input id="elevateOnStart" type="checkbox">启动宿主时先申请管理员权限（--elevate-on-start）</label><p class="hint">默认不提前申请；只在启动所选 CXExam.exe 确实需要管理员权限时请求 UAC。勾选后在扫描、显示 GUI 前申请；已是管理员时直接继续。帮助、自检、仅扫描和 attach 不申请。</p></div>
         <div class="field full" id="hideConsoleField" hidden><label class="check"><input id="hideConsole" type="checkbox">静默启动：隐藏 Node 控制台窗口（--hide-console，仅 Node 宿主）</label><p class="hint">只影响 Node 宿主控制台显示；原生 EXE 是 GUI 子系统，没有控制台。隐藏窗口不等于关闭日志、报告或系统权限提示。</p></div>
@@ -101,21 +101,21 @@
         <div class="field"><label for="diagnosticsDir">诊断目录</label><input id="diagnosticsDir" value=".data\chaoxing\diagnostics"><p class="hint">原生默认位于数据目录的 chaoxing\diagnostics 子目录；修改数据目录时跟随调整，手动填写诊断路径后保留。</p></div>
       </div></div>
       <div class="section"><h2>启动清理</h2><div class="grid">
-        <div class="field"><label for="wipeOnStart">启动清理</label><label class="check"><input id="wipeOnStart" type="checkbox" disabled>清理宿主自有文件（设计）</label></div>
-        <div class="field"><label for="wipePolicy">删除失败策略</label><select id="wipePolicy" disabled><option value="retry">retry（默认）</option><option value="background">background</option><option value="ignore">ignore</option><option value="abort">abort</option></select></div>
-        <div class="field"><label for="wipeRetries">启动重试次数（1-20）</label><input id="wipeRetries" type="number" min="1" max="20" value="5" disabled></div>
-        <div class="field"><label for="wipeDelay">重试间隔（毫秒，50-5000）</label><input id="wipeDelay" type="number" min="50" max="5000" value="200" disabled></div>
-        <div class="field"><label for="wipeInterval">运行期重试间隔（秒）</label><input id="wipeInterval" type="number" min="1" max="86400" value="30" disabled></div>
-        <div class="field"><label class="check"><input id="wipeRuntimeRetry" type="checkbox" checked disabled>运行期间继续重试</label></div>
-        <div class="field full"><p class="hint">当前宿主不可执行：本区仅展示后续阶段的启动清理设计，清理请求会阻止命令与 JSON 导出，不会自动降级为普通启动。</p></div>
+        <div class="field"><label for="wipeOnStart">启动清理</label><label class="check"><input id="wipeOnStart" type="checkbox">清理宿主自有文件</label></div>
+        <div class="field"><label for="wipePolicy">删除失败策略</label><select id="wipePolicy"><option value="retry">retry（默认）</option><option value="background">background</option><option value="ignore">ignore</option><option value="abort">abort</option></select></div>
+        <div class="field"><label for="wipeRetries">启动重试次数（1-20）</label><input id="wipeRetries" type="number" min="1" max="20" value="5"></div>
+        <div class="field"><label for="wipeDelay">重试间隔（毫秒，50-5000）</label><input id="wipeDelay" type="number" min="50" max="5000" value="200"></div>
+        <div class="field"><label for="wipeInterval">运行期重试间隔（秒）</label><input id="wipeInterval" type="number" min="1" max="86400" value="30"></div>
+        <div class="field"><label class="check"><input id="wipeRuntimeRetry" type="checkbox" checked>运行期间继续重试</label></div>
+        <div class="field full"><p class="hint">只清理数据目录 chaoxing 下登记的扫描缓存、宿主日志与诊断产物；不会删除 CXExam、runtime、外部 --config 或用户报告。</p></div>
       </div></div>
       <div class="section"><h2>自毁</h2><div class="grid">
-        <div class="field"><label for="selfDestructKey">自毁快捷键（可重复）</label><input id="selfDestructKey" disabled placeholder="当前宿主不可执行"></div>
-        <div class="field"><label for="selfDestructDelay">自毁延迟（毫秒）</label><input id="selfDestructDelay" type="number" value="0" disabled></div>
-        <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox" disabled>退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox" disabled>静默自毁</label></div></div>
-        <div class="field full"><p class="hint">当前宿主不可执行：自毁快捷键与行为不会导出为可运行命令；答题快捷键不得与自毁快捷键相同。</p></div>
+        <div class="field"><label for="selfDestructKey">自毁快捷键（可重复）</label><input id="selfDestructKey" placeholder="例如 Ctrl+Alt+Shift+E"></div>
+        <div class="field"><label for="selfDestructDelay">自毁延迟（毫秒）</label><input id="selfDestructDelay" type="number" min="0" max="60000" value="0"></div>
+        <div class="field full"><div class="checks"><label class="check"><input id="selfDestructOnFullscreenExit" type="checkbox">退出全屏/客户端结束时自毁</label><label class="check"><input id="noSelfDestructConfirm" type="checkbox">静默自毁</label></div></div>
+        <div class="field full"><p class="hint">默认弹 MessageBox 确认；--no-self-destruct-confirm 跳过确认。答题快捷键不得与自毁快捷键相同。</p></div>
       </div></div>
-      <div class="section"><h2>能力说明</h2><div class="capability" id="exportCapabilityHint">本页支持导出普通可审计运行与内存执行（executionMode=memory：宿主侧零落盘，客户端仍正常可见启动）；通用启动清理、删除挂起和自毁参数仍不可执行，不会导出可运行参数。原生固定静默场景不在本页导出范围内。</div></div>
+      <div class="section"><h2>能力说明</h2><div class="capability" id="exportCapabilityHint">本页支持导出普通运行、内存执行、删除挂起、启动清理与自毁参数；破坏性操作只在发布布局（EXE 同级 SHA256SUMS.txt）执行。原生固定静默场景不在本页导出范围内。</div></div>
     </section>
     <aside class="out">
       <section class="card"><h2>校验结果</h2><div id="status" class="status">配置有效，可以生成普通宿主参数。</div></section>
@@ -200,7 +200,7 @@
     setIfEmitted(config, 'ui', s.ui, emitted);
     setIfEmitted(config, 'rescan', Boolean(s.rescan), emitted);
     setIfEmitted(config, 'noScanCache', Boolean(s.noScanCache), emitted);
-    setIfEmitted(config, 'noDiskWrite', Boolean(s.noDiskWrite || String(s.executionMode || 'normal') === 'memory'), emitted);
+    setIfEmitted(config, 'noDiskWrite', Boolean(s.noDiskWrite || String(s.executionMode || 'normal') === 'memory' || String(s.executionMode || 'normal') === 'delete-suspend'), emitted);
     setIfEmitted(config, 'executionMode', String(s.executionMode || 'normal'), emitted);
     setIfEmitted(config, 'quiet', Boolean(s.quiet), emitted);
     setIfEmitted(config, 'logFileEnabled', Boolean(s.log && !s.noDiskWrite), emitted);
@@ -239,6 +239,10 @@
     setIfEmitted(config, 'wipeRetryDelayMs', Number(s.wipeDelay), emitted);
     setIfEmitted(config, 'wipeRuntimeRetry', Boolean(s.wipeRuntimeRetry), emitted);
     setIfEmitted(config, 'wipeRuntimeIntervalSec', Number(s.wipeInterval), emitted);
+    if (emitted.selfDestructKeys) config.selfDestructKeys = [s.selfDestructKey];
+    setIfEmitted(config, 'selfDestructOnFullscreenExit', Boolean(s.selfDestructOnFullscreenExit), emitted);
+    setIfEmitted(config, 'selfDestructDelayMs', Number(s.selfDestructDelay), emitted);
+    setIfEmitted(config, 'selfDestructConfirm', !s.noSelfDestructConfirm, emitted);
     setIfEmitted(config, 'showAnswerDialog', Boolean(s.showAnswerDialog), emitted);
     if (emitted.autoSubmit) config.autoSubmit = false;
     if (emitted.panelEnabled) config.settings['common.settings.windows-panel-enabled'] = Boolean(s.panel);
@@ -390,6 +394,10 @@
     if (s.wipeDelay !== '200') keys.wipeRetryDelayMs = true;
     if (!s.wipeRuntimeRetry) keys.wipeRuntimeRetry = true;
     if (s.wipeInterval !== '30') keys.wipeRuntimeIntervalSec = true;
+    if (s.selfDestructKey) keys.selfDestructKeys = true;
+    if (s.selfDestructOnFullscreenExit) keys.selfDestructOnFullscreenExit = true;
+    if (String(s.selfDestructDelay) !== '0') keys.selfDestructDelayMs = true;
+    if (s.noSelfDestructConfirm) keys.selfDestructConfirm = true;
     if (s.expectedBrowser !== 'Chrome/') keys.expectedBrowser = true;
     if (s.injectStrategy !== 'hybrid') keys.injectStrategy = true;
     if (s.hostType === 'native' && s.injectMode === 'cdp-port') keys.injectMode = true;
@@ -491,8 +499,10 @@
     if (!validBoundedInteger(s.targetPollInterval, 250, 10000)) errors.push('target 轮询间隔必须是 250 到 10000 之间的整数。');
     if (!validBoundedInteger(s.bundleTimeout, 1000, 300000)) errors.push('bundle 执行超时必须是 1000 到 300000 之间的整数。');
     var executionMode = String(s.executionMode || 'normal');
-    if (executionMode !== 'normal' && executionMode !== 'memory') errors.push('执行模式只支持 normal 或 memory；删除挂起尚未支持。');
-    if (executionMode === 'memory' && (s.log || s.diagnose || s.report)) errors.push('内存执行会强制宿主侧零落盘，不能同时请求日志、诊断或运行报告。');
+    if (executionMode !== 'normal' && executionMode !== 'memory' && executionMode !== 'delete-suspend') errors.push('执行模式只支持 normal、memory 或 delete-suspend。');
+    if (executionMode === 'delete-suspend' && s.listClients) errors.push('删除挂起不能与 --list-clients 同时使用。');
+    var destructiveMode = executionMode === 'memory' || executionMode === 'delete-suspend';
+    if (destructiveMode && (s.log || s.diagnose || s.report)) errors.push('内存执行/删除挂起会强制宿主侧零落盘，不能同时请求日志、诊断或运行报告。');
     if (s.wipeRetries !== '' && (!/^\d+$/u.test(String(s.wipeRetries)) || Number(s.wipeRetries) < 1 || Number(s.wipeRetries) > 20)) errors.push('启动清理重试次数必须是 1 到 20 之间的整数。');
     if (s.wipeDelay !== '' && (!/^\d+$/u.test(String(s.wipeDelay)) || Number(s.wipeDelay) < 50 || Number(s.wipeDelay) > 5000)) errors.push('启动清理重试间隔必须是 50 到 5000 之间的整数。');
     if (s.wipeInterval !== '' && (!/^\d+$/u.test(String(s.wipeInterval)) || Number(s.wipeInterval) < 1 || Number(s.wipeInterval) > 86400)) errors.push('运行期重试间隔必须是 1 到 86400 之间的整数。');
@@ -506,13 +516,8 @@
     if (s.dataDir !== defaultDataDir(s) && startsWithOptionPrefix(s.dataDir)) errors.push('数据目录不能以 -- 开头（宿主会把它当成缺少参数值）。');
     if (s.report && !s.noDiskWrite && startsWithOptionPrefix(s.report)) errors.push('运行报告路径不能以 -- 开头（宿主会把它当成缺少参数值）。');
     if (s.diagnosticsDir !== defaultDiagnosticsDir(s) && !s.noDiskWrite && startsWithOptionPrefix(s.diagnosticsDir)) errors.push('诊断目录不能以 -- 开头（宿主会把它当成缺少参数值）。');
-    var unsupportedRequests = requestedWipeOptions(s);
-    if (unsupportedRequests.length) errors.push('启动清理当前宿主不可执行，仅保留设计配置，不会导出可运行命令：' + unsupportedRequests.join('、') + '。');
-    unsupportedRequests = [];
-    if (s.selfDestructKey) unsupportedRequests.push('--self-destruct-key');
-    if (s.selfDestructOnFullscreenExit) unsupportedRequests.push('--self-destruct-on-fullscreen-exit');
-    if (s.noSelfDestructConfirm) unsupportedRequests.push('--no-self-destruct-confirm');
-    if (unsupportedRequests.length) errors.push('以下能力当前宿主不可执行，不会导出可运行命令：' + unsupportedRequests.join('、') + '。');
+    if (!s.wipeOnStart && requestedWipeOptions(s).length) errors.push('启动清理调优参数必须同时勾选“清理宿主自有文件”。');
+    if (!s.selfDestructKey && !s.selfDestructOnFullscreenExit && (Number(s.selfDestructDelay) > 0 || s.noSelfDestructConfirm)) errors.push('自毁延迟/跳过确认必须至少启用自毁快捷键或退出全屏触发。');
     if (s.noDiskWrite && (s.log || s.diagnose || s.report)) errors.push('--no-disk-write 与日志、诊断或报告冲突。');
     if (s.noDiskWrite && s.deleteConfig) errors.push('--no-disk-write 不能与 --delete-config 同时使用（禁止磁盘写入时不能删除外部配置）。');
     if (s.hostType === 'native' && s.hideConsole) errors.push('原生宿主没有控制台窗口，不支持 --hide-console。');
@@ -528,6 +533,7 @@
           var parsed = JSON.parse(input);
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) errors.push('内联 JSON 顶层必须是对象。');
           else {
+            validateAdvancedJson(parsed, errors);
             if (hasRestrictedOption(parsed)) errors.push('内联 JSON 含有未发布的启动清理、自毁或执行模式字段；启动清理等能力当前宿主不可执行，不会导出可运行命令。');
             if (s.noDiskWrite && hasDiskWriteOption(parsed)) errors.push('--no-disk-write 与内联 JSON 的磁盘输出配置冲突。');
             if (s.clientPath && ['scanMode', 'scanAll', 'rescan', 'noScanCache'].some(function (key) { return Object.prototype.hasOwnProperty.call(parsed, key); })) errors.push('--client 不能与内联 JSON 的扫描参数同时指定。');
@@ -556,10 +562,14 @@
     if (s.listClients) both('--list-clients', true); if (!s.clientPath) { both('--scan-mode', s.scanMode); if (s.rescan) both('--rescan', true); if (s.noScanCache) both('--no-scan-cache', true); }
     both('--ui', s.ui);
     both('--execution-mode', s.executionMode || 'normal');
-    var memoryMode = String(s.executionMode || 'normal') === 'memory';
+    var memoryMode = String(s.executionMode || 'normal') === 'memory' || String(s.executionMode || 'normal') === 'delete-suspend';
     if (s.elevateOnStart) both('--elevate-on-start', true);
     if (s.expectedBrowser !== 'Chrome/') both('--expected-browser', s.expectedBrowser); if (s.injectStrategy !== 'hybrid') both('--inject-strategy', s.injectStrategy); if (native && s.injectMode && s.injectMode !== 'auto') both('--inject-mode', s.injectMode); if (s.injectRetries !== '2') both('--inject-retries', s.injectRetries); if (!s.injectBlankFrames) both('--no-inject-blank-frames', true); if (!s.captureConsole) both('--no-capture-console', true); if (s.debugTimeout !== '30000') both('--debug-timeout', s.debugTimeout); if (s.targetPollInterval !== '1000') both('--target-poll-interval', s.targetPollInterval); if (s.bundleTimeout !== '120000') both('--bundle-timeout', s.bundleTimeout);
     if (s.configPath) both('--config', s.configPath); if (s.deleteConfig && s.configPath) both('--delete-config', true); if (s.dataDir !== defaultDataDir(s)) both('--data-dir', s.dataDir); if (s.report && !s.noDiskWrite && !memoryMode) both('--report', s.report); if (s.stopClient) both('--stop-client-on-exit', true); if (s.dpiAware) both('--dpi-aware', true); if (s.hideConsole && !native) both('--hide-console', true); if (s.noDiskWrite || memoryMode) both('--no-disk-write', true); if (!s.retainData) both('--no-retain-data', true);
+    if (s.selfDestructKey) both('--self-destruct-key', s.selfDestructKey);
+    if (s.selfDestructOnFullscreenExit) both('--self-destruct-on-fullscreen-exit', true);
+    if (String(s.selfDestructDelay) !== '0') both('--self-destruct-delay', s.selfDestructDelay);
+    if (s.noSelfDestructConfirm) both('--no-self-destruct-confirm', true);
     if (s.optionsJson) both('--options-json', s.optionsJson);
     both('--answer-mode', s.answerMode); both('--answer-key', s.answerKey); both('--answer-threads', s.answerThreads); both('--answer-countdown', s.answerCountdown); if (s.answerRetry !== '') both('--answer-retry', s.answerRetry); both(s.showAnswerDialog ? '--show-answer-dialog' : '--hide-answer-dialog', true); if (s.noAutoSubmit) both('--no-auto-submit', true);
     if (s.panel) both('--panel', true); else both('--no-panel', true); if (s.panelExpanded) both('--panel-expanded', true); else both('--panel-collapsed', true); if (Number(s.panelTop) !== 16) both('--panel-top', s.panelTop); if (Number(s.panelRight) !== 16) both('--panel-right', s.panelRight); if (Number(s.panelWidth) !== 460) both('--panel-width', s.panelWidth); if (s.panelTheme) both('--panel-theme', s.panelTheme);
@@ -576,11 +586,29 @@
     ps.push("  ) -join ' '", '  $cxProcess = $null', '  try {', '    $cxProcess = [System.Diagnostics.Process]::Start($cxStart)', '    $cxProcess.WaitForExit()', '    $global:LASTEXITCODE = $cxProcess.ExitCode', '  } finally {', '    if ($null -ne $cxProcess) { $cxProcess.Dispose() }', '  }', '}');
     return { powershell: ps.join('\n'), cmd: cmdSafe ? 'cd /d ' + quoteCmd(projectRoot) + ' && ' + cmd.join(' ') : '', cmdWarning: cmdSafe ? '' : 'cmd 输出不可安全表示当前参数（含内联 JSON、命令解释符、路径末尾反斜杠、UNC 项目目录、百分号、感叹号、引号或换行）；请使用 PowerShell 或配置文件。', args: args };
   }
+  function validateAdvancedJson(parsed, errors) {
+    if (!parsed || typeof parsed !== 'object') return;
+    if (parsed.wipeRetries !== undefined && (!Number.isInteger(parsed.wipeRetries) || parsed.wipeRetries < 1 || parsed.wipeRetries > 20)) errors.push('内联 JSON 的 wipeRetries 必须是 1 到 20 之间的整数。');
+    if (parsed.wipeRetryDelayMs !== undefined && (!Number.isInteger(parsed.wipeRetryDelayMs) || parsed.wipeRetryDelayMs < 50 || parsed.wipeRetryDelayMs > 5000)) errors.push('内联 JSON 的 wipeRetryDelayMs 必须是 50 到 5000 之间的整数。');
+    if (parsed.wipeRuntimeIntervalSec !== undefined && (!Number.isInteger(parsed.wipeRuntimeIntervalSec) || parsed.wipeRuntimeIntervalSec < 1 || parsed.wipeRuntimeIntervalSec > 86400)) errors.push('内联 JSON 的 wipeRuntimeIntervalSec 必须是 1 到 86400 之间的整数。');
+    if (parsed.wipeFailurePolicy !== undefined && ['retry', 'background', 'ignore', 'abort'].indexOf(parsed.wipeFailurePolicy) < 0) errors.push('内联 JSON 的 wipeFailurePolicy 只支持 retry、background、ignore 或 abort。');
+    if (parsed.selfDestructDelayMs !== undefined && (!Number.isInteger(parsed.selfDestructDelayMs) || parsed.selfDestructDelayMs < 0 || parsed.selfDestructDelayMs > 60000)) errors.push('内联 JSON 的 selfDestructDelayMs 必须是 0 到 60000 之间的整数。');
+  }
   function hasRestrictedOption(value) {
-    var restricted = /^(?:selfdestruct.*|deletesuspend)$/i;
-    function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase(); if (/^wipe/i.test(normalized)) return true; if (restricted.test(normalized) && item[key] !== false) return true; if (normalized === 'executionmode' && item[key] !== 'normal' && item[key] !== 'memory') return true;
-      if (normalized === 'memoryexec' && typeof item[key] !== 'boolean') return true; return visit(item[key]); }); }
-    return visit(value);
+    function visit(item, inSettings) {
+      if (!item || typeof item !== 'object') return false;
+      return Object.keys(item).some(function (key) {
+        var prefixed = /^common\.settings\.windows-/i.test(key);
+        if (!prefixed && !inSettings) return visit(item[key], false);
+        var normalized = key.replace(/^common\.settings\.windows-/i, '').replace(/[-_]/g, '').toLowerCase();
+        if (/^wipe/i.test(normalized)) return true;
+        if (/^(?:selfdestruct.*|deletesuspend)$/i.test(normalized) && item[key] !== false) return true;
+        if (normalized === 'executionmode' && item[key] !== 'normal' && item[key] !== 'memory' && item[key] !== 'delete-suspend') return true;
+        if (normalized === 'memoryexec' && typeof item[key] !== 'boolean') return true;
+        return visit(item[key], true);
+      });
+    }
+    return visit(value, false);
   }
   function requestedWipeOptions(s) {
     var requested = [];
@@ -594,7 +622,7 @@
   }
   function capabilityBlocked(s) {
     s = s || state();
-    return requestedWipeOptions(s).length > 0 || Boolean(s.selfDestructKey || s.selfDestructOnFullscreenExit || s.noSelfDestructConfirm) || hasRestrictedOption(parsedInlineConfig(s));
+    return hasRestrictedOption(parsedInlineConfig(s));
   }
   function hasDiskWriteOption(value) {
     function visit(item) { if (!item || typeof item !== 'object') return false; return Object.keys(item).some(function (key) { if ((key === 'log' || key === 'logFileEnabled' || key === 'diagnose' || key === 'report' || key === 'reportPath') && item[key]) return true; if (key === 'common.settings.windows-log-enabled' && item[key] === true) return true; return visit(item[key]); }); }
