@@ -1844,8 +1844,16 @@ static void h_silent_cleanup_pass(void) {
     if (!h_silent_plan) {
         if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) { h_audit_event("warn", "cleanup", "Program root is unavailable"); return; }
         if (!h_silent_simulate && !cx_cleanup_is_release_layout(root)) {
+            /* 源码/构建目录不做整目录清理，只登记当前 EXE 自身，避免误删 bin 下的测试程序。 */
             h_silent_plan = NULL;
-            h_audit_event("warn", "cleanup", "Not a release layout; program deletion is skipped");
+            if (!h_silent_parked[0] && h_exe_path[0]) {
+                if (cx_cleanup_detach_self(h_exe_path, h_silent_parked, CX_CLEANUP_PATH_CAP)) {
+                    cx_cleanup_release_self(h_silent_parked);
+                    h_audit_event("info", "cleanup", "Build layout: running executable scheduled for deletion");
+                } else {
+                    h_audit_event("warn", "cleanup", "Build layout: running executable could not be detached");
+                }
+            }
             return;
         }
         h_silent_plan = (CX_CLEANUP_PLAN *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLEANUP_PLAN));

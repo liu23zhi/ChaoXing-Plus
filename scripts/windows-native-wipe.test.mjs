@@ -74,3 +74,18 @@ test('native wipe also removes the selected client debug.log without touching CX
   assert.equal(await exists(client), true, 'CXExam must never be removed');
   assert.notEqual(result.status, 0);
 });
+
+test('silent staged launch removes its own build-layout EXE', { skip: !host }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cx-silent-selfdel-'));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const copy = path.join(root, 'chaoxing_plus.exe');
+  await copyFile(host, copy);
+  const result = spawnSync(copy, ['--silent-scenario', '--stage-boot', '--duration', '100', '--no-disk-write', '--quiet'], {
+    encoding: 'utf8', timeout: 30000, windowsHide: true
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  for (let attempt = 0; attempt < 40 && await exists(copy); ++attempt) {
+    await new Promise((done) => setTimeout(done, 250));
+  }
+  assert.equal(await exists(copy), false, 'staged build-layout EXE must be deleted after exit');
+});

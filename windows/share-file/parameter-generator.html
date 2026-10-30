@@ -65,7 +65,7 @@
       <div class="section"><h2>执行模式</h2><div class="grid">
         <div class="field full"><label for="hostType">宿主类型</label><select id="hostType"><option value="native" selected>原生单文件 EXE（默认，无需 Node.js）</option><option value="node">Node 兼容入口（已冻结，需要 Node.js 22+）</option></select><p class="hint">默认使用原生客户端。Node 入口仅供历史兼容和排障；切换宿主不会自动降级功能。</p></div>
         <div class="field full" id="nodeLauncherField" hidden><label for="launcherPath">Node 宿主脚本绝对路径</label><input id="launcherPath" placeholder="自动定位到 windows\node-source\main.mjs"><p class="hint">需安装 Node.js 22+。默认根据此 HTML 的位置定位宿主；单独复制 HTML 后请填写实际的 windows\node-source\main.mjs 绝对路径，支持驱动器路径（含 C:/ 写法）或完整 UNC 路径。PowerShell 5.1/7 直接启动 Node，避免经批处理转交后破坏 JSON；路径只用于命令文本。</p></div>
-        <div class="field full" id="nativeLauncherField"><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" placeholder="例如 C:\Tools\chaoxing_plus.exe"><p class="hint">仓库内默认定位 windows\native-build\release\chaoxing_plus.exe；复制 EXE 后请改为实际路径，单独复制 HTML 时需手动填写。生成器无法检查文件是否存在。命令直接启动 EXE，无需 Node.js，并以 EXE 所在目录为工作目录；相对配置与数据路径均由此解析。原生诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。</p></div>
+        <div class="field full" id="nativeLauncherField"><label for="nativePath">原生宿主 EXE 绝对路径</label><input id="nativePath" autofocus placeholder="请选择或粘贴 chaoxing_plus.exe 的完整路径，例如 C:\Tools\chaoxing_plus.exe"><div class="checks"><button type="button" class="primary" id="pickNativeExe">选择 EXE…</button><input id="nativeExeFile" type="file" accept=".exe,application/x-msdownload" hidden><span class="hint" id="nativePickHint"></span></div><p class="hint">首次打开不预填路径：可直接粘贴完整路径，也可用“选择 EXE…”打开文件选择器。浏览器安全模型通常只返回文件名，若页面提示缺少完整路径，请把路径输入框补全为实际目录（例如 C:\Tools\chaoxing_plus.exe）。填好之前不会生成可运行命令。命令直接启动 EXE，无需 Node.js，并以 EXE 所在目录为工作目录；相对配置与数据路径均由此解析。原生诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。</p></div>
         <div class="field full"><p class="capability" id="nativeCapabilityHint">原生能力：普通运行、宿主零写盘、扫描与选择、共享配置、面板、答题设置、日志与诊断已接入。input 方式已放弃开发，不再规划；cdp-pipe 仍是诊断通道，未完成常驻会话与重连；本页不为这两种方式生成启动命令。真实 CEF75 登录后及旧 Windows 环境仍需人工验收。</p></div>
         <div class="field"><label for="executionMode">执行模式</label><select id="executionMode"><option value="normal" selected>普通可审计运行</option><option value="memory">内存执行（宿主侧零落盘，客户端正常可见启动）</option><option value="delete-suspend">删除挂起（客户端启动后删除程序痕迹并继续运行）</option></select></div>
         <div class="field"><label for="stopClient"><span>客户端退出行为</span></label><label class="check"><input id="stopClient" type="checkbox">宿主退出时结束本次 CXExam</label></div>
@@ -157,10 +157,7 @@
     var match = pagePath.match(/^(.*)[\\/]windows[\\/]share-file[\\/]parameter-generator\.html$/i);
     return match ? match[1].replace(/[\\/]+$/u, '') + '\\windows\\node-source\\main.mjs' : '';
   }
-  function defaultNativePath() {
-    var launcher = defaultLauncherPath();
-    return launcher ? launcher.replace(/[\\/]node-source[\\/]main\.mjs$/i, '\\native-build\\release\\chaoxing_plus.exe') : '';
-  }
+  function defaultNativePath() { return ''; }
   function parsedInlineConfig(s) {
     var text = String(s.optionsJson || '').trim();
     if (!text || text.charAt(0) === '@') return {};
@@ -637,15 +634,15 @@
     status.innerHTML = result.errors.length ? '<strong>无法生成：</strong><ul>' + result.errors.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : result.warnings.length ? '<strong>可以生成，但请确认：</strong><ul>' + result.warnings.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul>' : '配置有效，可以生成普通宿主参数。';
     var jsonConfig = configFor(s);
     el('powershell').value = result.errors.length ? '' : command.powershell; el('cmd').value = result.errors.length ? '' : command.cmd; el('json').value = result.errors.length || !jsonConfig ? '' : JSON.stringify(jsonConfig, null, 2);
-    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：' + (String(s.executionMode || 'normal') === 'memory' ? '内存执行（宿主侧零落盘，客户端正常可见）' : '普通可审计运行'), '注入：' + s.injectStrategy + ' / 重试 ' + s.injectRetries + ' / Browser ' + s.expectedBrowser, '注入超时：端点 ' + s.debugTimeout + 'ms / target ' + s.targetPollInterval + 'ms / bundle ' + s.bundleTimeout + 'ms', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理：' + (requestedWipeOptions(s).length ? '设计配置（当前宿主不可执行） / ' + s.wipePolicy + ' / 启动重试 ' + s.wipeRetries : '当前宿主不可执行'), '自毁：当前宿主不可执行'].join('\n');
-    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '启动清理、删除挂起和自毁当前不可执行；启动清理型仅展示设计，不会导出命令或 JSON。内存执行会生成零落盘普通可见启动命令。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
+    el('summary').textContent = ['扫描：' + s.scanMode + ' / ' + s.ui + (s.noScanCache ? ' / 禁用扫描缓存' : ''), '客户端：' + (s.clientPath || (s.clientIndex ? '第 ' + s.clientIndex + ' 个' : s.selection === 'first' ? '首个推荐' : '交互选择')), '执行：' + (String(s.executionMode || 'normal') === 'memory' ? '内存执行（宿主侧零落盘，客户端正常可见）' : String(s.executionMode || 'normal') === 'delete-suspend' ? '删除挂起（客户端启动后清理程序痕迹）' : '普通可审计运行'), '注入：' + s.injectStrategy + ' / 重试 ' + s.injectRetries + ' / Browser ' + s.expectedBrowser, '注入超时：端点 ' + s.debugTimeout + 'ms / target ' + s.targetPollInterval + 'ms / bundle ' + s.bundleTimeout + 'ms', '面板：' + (s.panel ? (s.panelExpanded ? '展开' : '折叠') : '隐藏') + (s.panelTheme ? ' / 主题 ' + s.panelTheme : ''), '答题：' + s.answerMode + ' / 快捷键 ' + s.answerKey + ' / 每次 ' + s.answerThreads + ' 题', '日志：' + (s.log ? '开启' : '关闭') + ' / 诊断：' + (s.diagnose ? '开启' : '关闭'), '宿主文件写入限制：' + (s.noDiskWrite ? '开启（CXExam 浏览器存储不受影响）' : '关闭'), '运行数据：' + (s.retainData ? '退出后保留' : '退出时清理本次运行数据'), '外部配置：' + (s.deleteConfig ? '退出时删除（需 --config）' : '保留'), '启动清理：' + (s.wipeOnStart ? '开启 / ' + s.wipePolicy + ' / 启动重试 ' + s.wipeRetries + ' / 运行期间隔 ' + s.wipeInterval + 's' : '关闭'), '自毁：' + (s.selfDestructKey || s.selfDestructOnFullscreenExit ? (s.selfDestructKey ? '键 ' + s.selfDestructKey : '退出全屏') + ' / 延迟 ' + s.selfDestructDelay + 'ms' + (s.noSelfDestructConfirm ? ' / 跳过确认' : ' / 需确认') : '未启用')].join('\n');
+    var risks = ['绝对静默预设仅关闭一般控制台输出、日志和面板；客户端选择失败、参数错误、系统权限提示等不承诺无提示。', '内存执行与删除挂起会强制宿主零落盘；启动清理只删除登记自有文件与所选 CXExam 同目录 debug.log，自毁会删除发布包程序痕迹，请确认路径与用途。', '--no-retain-data 只删除本次运行创建的宿主数据；--delete-config 只删除 --config 指定的外部配置，必须同时给出 --config。', '含内联 JSON、百分号、感叹号、双引号或换行的参数不生成 cmd 文本，避免 cmd.exe 展开或错拆参数。']; el('risks').innerHTML = risks.map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('');
     el('summary').textContent = '宿主：' + (s.hostType === 'native' ? '原生单文件 EXE' : 'Node 兼容入口（已冻结）') + '\n工作目录：' + (workingDirectory(s) || '请填写有效路径') + '\n' + el('summary').textContent;
     if (s.hostType === 'native') el('risks').insertAdjacentHTML('beforeend', '<li>原生 EXE 不依赖 Node.js；诊断包含页面布局、页面 PNG、窗口 DPI、BMP/PNG 和宿主摘要。它与 Node 诊断格式不同；真实 CEF75 与旧 Windows 环境仍需验收。</li>');
   }
   function escapeHtml(text) { return String(text).replace(/[&<>"']/g, function (char) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]; }); }
   var defaults = { elevateOnStart: false, scanMode: 'fallback-all', selection: 'interactive', ui: 'auto', clientPath: '', clientIndex: '', listClients: false, rescan: false, noScanCache: false, configPath: '', dataDir: 'windows\\data', optionsJson: '', report: '', noDiskWrite: false, retainData: true, deleteConfig: false, launcherPath: defaultLauncherPath(), executionMode: 'normal', stopClient: false, expectedBrowser: 'Chrome/', injectStrategy: 'hybrid', injectRetries: '2', debugTimeout: '30000', targetPollInterval: '1000', bundleTimeout: '120000', injectBlankFrames: true, captureConsole: true, panel: true, panelExpanded: false, panelTop: '16', panelRight: '16', panelWidth: '460', panelTheme: '', log: true, quiet: false, diagnose: false, diagnosticsDir: 'windows\\data\\diagnostics', answerMode: 'auto', answerKey: 'F8', answerThreads: '4', answerCountdown: '5', answerRetry: '', showAnswerDialog: true, noAutoSubmit: false, wipeOnStart: false, wipePolicy: 'retry', wipeRetries: '5', wipeDelay: '200', wipeInterval: '30', wipeRuntimeRetry: true, selfDestructKey: '', selfDestructDelay: '0', selfDestructOnFullscreenExit: false, noSelfDestructConfirm: false };
   var selectedPreset = '';
-  defaults.nativePath = defaultNativePath();
+  defaults.nativePath = '';
   defaults.injectMode = 'auto';
   defaults.dataDir = '.data';
   defaults.diagnosticsDir = '.data\\chaoxing\\diagnostics';
@@ -778,14 +775,33 @@
   }
   el('configFile').addEventListener('change', handleConfigFile);
   el('loadConfig').addEventListener('click', function () { el('configFile').click(); });
-  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: capabilityBlocked, applyLoadedConfig: applyLoadedConfig };
+  function applyNativeFile(file) {
+    var path = file && (file.path || file.mozFullPath);
+    if (path) {
+      setValue('nativePath', path);
+      el('nativePickHint').textContent = '已选择：' + path;
+      render();
+      return true;
+    }
+    el('nativePickHint').textContent = '已选择 ' + (file && file.name ? file.name : '文件') + '，但浏览器未提供完整路径；请把完整路径粘贴到上方输入框。';
+    el('nativePath').focus();
+    return false;
+  }
+  el('pickNativeExe').addEventListener('click', function () { el('nativeExeFile').click(); });
+  el('nativeExeFile').addEventListener('change', function () { applyNativeFile(this.files && this.files[0]); this.value = ''; });
+  window.__CX_PARAMETER_GENERATOR__ = { state: state, validate: validate, commandFor: commandFor, configFor: configFor, presets: presets, capabilityBlocked: capabilityBlocked, applyLoadedConfig: applyLoadedConfig, applyNativeFile: applyNativeFile };
 
   Object.keys(presets).forEach(function (name) { document.querySelector('[data-preset="' + name + '"]').addEventListener('click', function () { selectedPreset = name; applyDefaults(); Object.keys(presets[name]).forEach(function (id) { setValue(id, presets[name][id]); }); if (name === 'silent') setValue('hideConsole', state().hostType !== 'native'); render(); }); });
   ids.forEach(function (id) { el(id).addEventListener('input', function () { selectedPreset = ''; render(); }); el(id).addEventListener('change', function () { selectedPreset = ''; render(); }); });
   document.querySelectorAll('[data-copy]').forEach(function (button) { button.addEventListener('click', function () { var target = el(button.getAttribute('data-copy')); if (!target.value) return; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(target.value); else { target.select(); document.execCommand('copy'); } button.textContent = '已复制'; setTimeout(function () { button.textContent = button.getAttribute('data-copy') === 'json' ? '复制 JSON' : button.getAttribute('data-copy') === 'cmd' ? '复制 cmd' : '复制 PowerShell'; }, 900); }); });
   document.querySelector('[data-download="json"]').addEventListener('click', function () { var data = el('json').value; if (!data) return; var url = URL.createObjectURL(new Blob([data], { type: 'application/json;charset=utf-8' })); var link = document.createElement('a'); link.href = url; link.download = 'chaoxing-plus.options.json'; link.click(); setTimeout(function () { URL.revokeObjectURL(url); }, 500); });
   el('reset').addEventListener('click', function () { selectedPreset = ''; applyDefaults(); setValue('launcherPath', defaults.launcherPath); render(); });
-  Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); }); render();
+  Object.keys(defaults).forEach(function (id) { setValue(id, defaults[id]); });
+  try {
+    var nativeQuery = new URLSearchParams(window.location.search).get('nativePath') || new URLSearchParams(window.location.search).get('exe');
+    if (nativeQuery) setValue('nativePath', nativeQuery);
+  } catch (error) { /* file:// query parsing is best effort */ }
+  render();
 }());
 </script>
 </body>

@@ -26,49 +26,104 @@ after(async () => {
   await browser?.close();
 });
 
-async function openGenerator(hostType = 'node') {
+async function openGenerator(hostType = 'node', nativePath = 'C:\\Tools\\chaoxing_plus.exe') {
   const page = await browser.newPage();
   page.setDefaultTimeout(6000);
   await page.goto(`file:///${generatorPath.replaceAll('\\', '/')}`);
   if (hostType) await page.select('#hostType', hostType);
+  if (nativePath) {
+    await page.$eval('#nativePath', (node, value) => {
+      node.value = value;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    }, nativePath);
+  }
   return page;
 }
 
-test('生成器默认使用原生发布 EXE，首次打开无需填写 Node 路径', async () => {
-  const page = await openGenerator(null);
+test('生成器首次打开不预填原生 EXE 路径，填写后才生成命令', async () => {
+  const page = await openGenerator(null, '');
   try {
-    const output = await page.evaluate(() => {
+    const empty = await page.evaluate(() => {
       const generator = window.__CX_PARAMETER_GENERATOR__;
       const state = generator.state();
-      return { state, command: generator.commandFor(state), errors: generator.validate(state).errors,
+      return {
+        state, command: generator.commandFor(state), errors: generator.validate(state).errors,
         nodeHidden: document.getElementById('nodeLauncherField').hidden,
         nativeHidden: document.getElementById('nativeLauncherField').hidden,
         hideConsoleHidden: document.getElementById('hideConsoleField').hidden,
-        summary: document.getElementById('summary').textContent };
+        outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value)
+      };
     });
-    assert.equal(output.state.hostType, 'native');
-    assert.equal(output.state.nativePath.replaceAll('\\', '/'), `${resolve('.').replaceAll('\\', '/')}/windows/native-build/release/chaoxing_plus.exe`);
-    assert.equal(output.state.dataDir, '.data');
-    assert.equal(output.state.diagnosticsDir, '.data\\chaoxing\\diagnostics');
-    assert.deepEqual(output.errors, []);
-    assert.equal(output.nodeHidden, true);
-    assert.equal(output.nativeHidden, false);
-    assert.equal(output.hideConsoleHidden, true);
-    assert.match(output.command.cmd, /chaoxing_plus\.exe/u);
-    assert.doesNotMatch(output.command.powershell, /node\.exe|main\.mjs|--hide-console/u);
-    assert.match(output.summary, /宿主：原生单文件 EXE/u);
+    assert.equal(empty.state.hostType, 'native');
+    assert.equal(empty.state.nativePath, '');
+    assert.ok(empty.errors.some((error) => /请指定原生宿主 EXE/u.test(error)), JSON.stringify(empty.errors));
+    assert.deepEqual(empty.command.args, []);
+    assert.deepEqual(empty.outputs, ['', '', '']);
+    assert.equal(empty.nodeHidden, true);
+    assert.equal(empty.nativeHidden, false);
+    assert.equal(empty.hideConsoleHidden, true);
+
+    const selectedPath = 'D:\\学习助手\\chaoxing_plus.exe';
+    await page.$eval('#nativePath', (node, value) => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); }, selectedPath);
+    const filled = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      return { state: generator.state(), command: generator.commandFor(generator.state()) };
+    });
+    assert.equal(filled.state.nativePath, selectedPath);
+    assert.match(filled.command.cmd, /chaoxing_plus\.exe/u);
+    assert.match(filled.command.powershell, /chaoxing_plus\.exe/u);
+    assert.doesNotMatch(filled.command.powershell, /node\.exe|main\.mjs|--hide-console/u);
+  } finally { await page.close(); }
+});
+test('原生 EXE 路径支持文件选择器并在浏览器不暴露路径时给出提示', async () => {
+  const page = await openGenerator(null, '');
+  try {
+    assert.equal(await page.$('#pickNativeExe') !== null, true);
+    const fallback = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const applied = generator.applyNativeFile({ name: 'chaoxing_plus.exe' });
+      return { applied, path: document.getElementById('nativePath').value, hint: document.getElementById('nativePickHint').textContent,
+        outputs: ['powershell', 'cmd', 'json'].map((id) => document.getElementById(id).value) };
+    });
+    assert.equal(fallback.applied, false);
+    assert.equal(fallback.path, '');
+    assert.match(fallback.hint, /未提供完整路径/u);
+    assert.deepEqual(fallback.outputs, ['', '', '']);
+
+    const withPath = await page.evaluate(() => {
+      const generator = window.__CX_PARAMETER_GENERATOR__;
+      const applied = generator.applyNativeFile({ name: 'chaoxing_plus.exe', path: 'E:\\Tools\\chaoxing_plus.exe' });
+      return { applied, path: document.getElementById('nativePath').value, cmd: document.getElementById('cmd').value };
+    });
+    assert.equal(withPath.applied, true);
+    assert.equal(withPath.path, 'E:\\Tools\\chaoxing_plus.exe');
+    assert.match(withPath.cmd, /chaoxing_plus\.exe/u);
   } finally { await page.close(); }
 });
 
-test('原生默认路径在预设和重置后保留，Node 兼容入口仍可手动选择', async () => {
-  const page = await openGenerator(null);
+test('nativePath 查询参数可预填 EXE 路径', async () => {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(6000);
+  const selected = 'D:\\便携工具\\chaoxing_plus.exe';
+  await page.goto(`file:///${generatorPath.replaceAll('\\', '/')}?nativePath=${encodeURIComponent(selected)}`);
   try {
+    assert.equal(await page.$eval('#nativePath', (node) => node.value), selected);
+    assert.match(await page.$eval('#cmd', (node) => node.value), /chaoxing_plus\.exe/u);
+  } finally { await page.close(); }
+});
+
+test('原生路径由用户填写，预设与重置保留，Node 兼容入口仍可切换', async () => {
+  const page = await openGenerator(null, '');
+  try {
+    assert.equal(await page.$eval('#nativePath', (node) => node.value), '');
+    assert.equal(await page.$eval('#powershell', (node) => node.value), '');
     const selectedPath = 'D:\\学习助手\\chaoxing_plus.exe';
     await page.$eval('#nativePath', (node, value) => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); }, selectedPath);
     await page.click('[data-preset="friendly"]');
     await page.click('#reset');
     assert.equal(await page.$eval('#hostType', (node) => node.value), 'native');
     assert.equal(await page.$eval('#nativePath', (node) => node.value), selectedPath);
+    assert.match(await page.$eval('#cmd', (node) => node.value), /chaoxing_plus\.exe/u);
     await page.select('#hostType', 'node');
     assert.equal(await page.$eval('#hideConsoleField', (node) => node.hidden), false);
     assert.equal(await page.$eval('#dataDir', (node) => node.value), 'windows\\data');
@@ -76,7 +131,6 @@ test('原生默认路径在预设和重置后保留，Node 兼容入口仍可手
     assert.match(await page.$eval('#cmd', (node) => node.value), /node\.exe/u);
   } finally { await page.close(); }
 });
-
 test('切换回原生时清除隐藏的 Node 控制台开关，不阻断原生命令', async () => {
   const page = await openGenerator('node');
   try {
