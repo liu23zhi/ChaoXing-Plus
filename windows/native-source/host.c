@@ -2820,6 +2820,17 @@ static BOOL h_wants_console(void) {
     }
     return FALSE;
 }
+/* CONSOLE 子系统会阻塞 PowerShell/cmd，动作型输出因此顺序可靠。
+   普通/静默运行必须立刻脱离控制台，否则 launcher 用 start "" 拉起的黑框会常驻。 */
+static BOOL h_keep_console(const CX_OPTIONS *o) {
+    if (!o) return TRUE;
+    if (o->consoleWindow || o->help || o->version || o->capabilities) return TRUE;
+    if (o->printEffectiveConfig || o->selfCheck || o->listClients) return TRUE;
+    if (o->pipeTest || o->probeClientPathSet || o->probeAll) return TRUE;
+    if (o->installProxy || o->uninstallProxy || o->deleteConfig) return TRUE;
+    if (o->attachPortSet || o->pipeCallPathSet || o->pipeClientPathSet || o->pipeExtraArgs[0]) return TRUE;
+    return FALSE;
+}
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
     /* GUI 子系统进程默认没有控制台；调试入口从 cmd 启动时必须附加父控制台，
        否则 GetStdHandle 无效，h_print 的日志会被全部丢弃。 */
@@ -2866,6 +2877,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    /* 普通/静默运行不占用父控制台，动作型输出保留控制台让 shell 等待并保证顺序。 */
+    if (!h_keep_console(&h_base_options)) FreeConsole();
     if (h_base_options.elevated) {
         if (!cx_elevation_query(&elevated) || !elevated) {
             if (!h_base_options.quiet) h_print(L"Internal elevated restart requires a verified administrator token");
@@ -2916,7 +2929,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "调试: --uninstall-proxy（按 cxhook-proxy.marker 卸载我们装的 winmm.dll，不动第三方同名文件）\n"
     "调试: --proxy-port <1024-65534>（可选：安装代理时写入 cxhook-port.txt，供第三方启动时固定端口注入；不传则不写）\n"
     "调试: --probe-client <CXExam.exe> / --probe-all（只读探测架构/版本/libcef 开关/代理状态，给出建议通道）\n"
-    "启动: --console（GUI 宿主附加或分配控制台）--stage-boot（静默暂存启动）\n"
+    "启动: --console（保持/附加控制台查看日志；普通 GUI 运行默认脱离控制台）--stage-boot（静默暂存启动）\n"
     "调试: --pipe-call <exe> [--pipe-expr <js>] [--pipe-args \"<args>\"]（管道 CDP 全链路诊断）\n"
             "状态: --version（-v/-V/--v/--Version） --help（-h/-H/--h/--H/-help/--Help/--HELP/-?/?） --capabilities --self-check（不自动扫描、不启动、不连接、不写文件）\n"
     "兼容: 参数名不区分大小写；--name、-name、/name、--na_me 等价；值可写成 --name=value。\n"

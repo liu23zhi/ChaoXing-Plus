@@ -153,6 +153,27 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(unknown.status, 2, unknown.stderr || unknown.stdout);
   assert.match(`${unknown.stdout}${unknown.stderr}`, /unknown command line option \(try --help\)/u);
 
+  /* 必须是 CONSOLE 子系统：shell 才会等待动作型输出，提示符不会插进帮助中间。 */
+  {
+    const image = await fs.readFile(executable);
+    const peOffset = image.readUInt32LE(0x3c);
+    const subsystem = image.readUInt16LE(peOffset + 24 + 68);
+    assert.equal(subsystem, 3, 'native host must be a CONSOLE subsystem image');
+  }
+
+  /* 真实 shell 回归：下一行命令必须在完整帮助之后执行（PowerShell 为用户主用 shell）。 */
+  for (const [shell, args, marker] of [
+    ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `& '${executable}' /h; 'AFTER-HELP'`], 'AFTER-HELP']
+  ]) {
+    const result = spawnSync(shell, args, { encoding: 'utf8', timeout: 60000, windowsHide: true });
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    assert.equal(result.status, 0, `${shell}: ${output}`);
+    const markerAt = output.indexOf(marker);
+    const helpTailAt = output.lastIndexOf('静默场景（--silent-scenario）');
+    assert.ok(helpTailAt >= 0, `${shell}: help text is missing`);
+    assert.ok(markerAt > helpTailAt, `${shell}: the next command ran before help finished`);
+  }
+
   const capabilities = run('--capabilities');
   assert.equal(capabilities.status, 0, capabilities.stderr || `capabilities exited with ${capabilities.status}`);
   const nativeCapabilities = JSON.parse(capabilities.stdout);
