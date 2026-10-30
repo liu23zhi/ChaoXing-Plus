@@ -18,7 +18,7 @@ function findGitBash() {
   return candidates.find((candidate) => existsSync(candidate)) || '';
 }
 
-test('build-windows.sh 使用 Git Bash 构建 x86 无依赖单文件发布包', async () => {
+test('build-windows.sh 使用 Git Bash 构建 x86 GUI/Console 双变体发布包', async () => {
   const script = await readFile(path.join(root, 'windows/native-source/build-windows.sh'), 'utf8');
   assert.match(script, /^#!\/usr\/bin\/env bash\n/u);
   assert.doesNotMatch(script, /\r\n/u, 'shell 脚本必须使用 LF 换行');
@@ -28,7 +28,9 @@ test('build-windows.sh 使用 Git Bash 构建 x86 无依赖单文件发布包', 
     'windows/native-build',
     'npm run release:windows',
     'verify-release.mjs',
-    'chaoxing_plus.exe'
+    'chaoxing_plus.exe',
+    'chaoxing_plus_console.exe',
+    '-BuildConsole'
   ]) {
     assert.equal(script.includes(expected), true, `缺少构建步骤：${expected}`);
   }
@@ -41,7 +43,7 @@ test('build-windows.sh 使用 Git Bash 构建 x86 无依赖单文件发布包', 
 test('Windows 打包决策已记录到 AGENTS 与 docs', async () => {
   const agents = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /Windows 打包决策（2026-12-06）/u);
-  assert.match(agents, /单份 x86、无 CRT、无第三方\/外部 DLL 依赖/u);
+  assert.match(agents, /无 CRT、无第三方\/外部 DLL 依赖/u);
   assert.match(agents, /x86 宿主可正常启动并注入 x64 CXExam/u);
   assert.match(agents, /不从 x86 进程内存执行 x64 PE/u);
 
@@ -83,7 +85,7 @@ test('Node 宿主弃用只保留文件，已记录到 AGENTS/docs/README', async
 });
 test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD 入口', async () => {
   const cases = [
-    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build.ps1', 'windows\\native-build', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe']],
+    ['build-windows.cmd', ['npm run build:windows -- --release', 'windows\\native-source\\build.ps1', 'windows\\native-build', 'npm run release:windows', 'verify-release.mjs', 'chaoxing_plus.exe', 'chaoxing_plus_console.exe', '-BuildConsole', 'multi-file']],
     ['build-windows-node.cmd', ['npm run build:windows -- --release', '--skip-native', 'windows\\node-build', '--out', 'start-windows-node.cmd', 'verify-release.mjs']]
   ];
   for (const [name, expected] of cases) {

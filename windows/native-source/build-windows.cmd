@@ -53,11 +53,15 @@ echo [build-windows] 1/4 building extension and Chrome75 injection assets
 call npm run build:windows -- --release
 if errorlevel 1 exit /b 1
 
-echo [build-windows] 2/4 building native x86 host (no CRT, embedded assets)
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "windows\native-build"
+echo [build-windows] 2/4 building native x86 hosts (GUI + Console, no CRT, embedded assets)
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "windows\native-source\build.ps1" -OutputDirectory "windows\native-build" -BuildConsole
 if errorlevel 1 exit /b 1
 if not exist "windows\native-build\bin\chaoxing_plus.exe" (
   echo [build-windows] native EXE was not produced.
+  exit /b 1
+)
+if not exist "windows\native-build\bin\chaoxing_plus_console.exe" (
+  echo [build-windows] Console subsystem native EXE was not produced.
   exit /b 1
 )
 if not exist "%SINGLE_EXE%" (
@@ -75,6 +79,10 @@ if not exist "%PACKAGE_DIR%\chaoxing_plus.exe" (
   echo [build-windows] release package is missing chaoxing_plus.exe: %PACKAGE_DIR%
   exit /b 1
 )
+if not exist "%PACKAGE_DIR%\multi-file\chaoxing_plus_console.exe" (
+  echo [build-windows] release package is missing multi-file\chaoxing_plus_console.exe: %PACKAGE_DIR%
+  exit /b 1
+)
 
 echo [build-windows] 4/4 verifying the package and both native entries
 node "%PACKAGE_DIR%\verify-release.mjs"
@@ -83,12 +91,15 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%
 if errorlevel 1 exit /b 1
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%PACKAGE_DIR%\chaoxing_plus.exe' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
 if errorlevel 1 exit /b 1
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '%PACKAGE_DIR%\multi-file\chaoxing_plus_console.exe' --self-check --quiet --no-disk-write; exit $LASTEXITCODE"
+if errorlevel 1 exit /b 1
 if "%SKIP_TESTS%"=="0" (
   echo [build-windows] running release regression
   node --test --test-concurrency=4 --test-timeout=300000 scripts/windows-release-package.test.mjs
   if errorlevel 1 exit /b 1
 )
 
-echo [build-windows] standalone EXE: %SINGLE_EXE%
+echo [build-windows] standalone GUI EXE: %SINGLE_EXE%
+echo [build-windows] Console EXE: windows\native-build\bin\chaoxing_plus_console.exe
 echo [build-windows] full package: %PACKAGE_DIR%
 exit /b 0

@@ -9,9 +9,11 @@
 #   - 注入资源（bootstrap/bundle/trampoline/CSS）在原生构建时以 RCDATA 内嵌。
 #
 # 输出：
-#   windows/native-build/release/chaoxing_plus.exe （独立发布的单文件 EXE）
+#   windows/native-build/release/chaoxing_plus.exe （独立 GUI EXE）
+#   windows/native-build/bin/chaoxing_plus_console.exe （独立 Console EXE）
 #   windows/native-build/bin/                    （保留宿主与调试/测试 EXE）
-#   release/chaoxing-plus-<version>-windows/chaoxing_plus.exe  （x86 单文件，无外部依赖）
+#   release/chaoxing-plus-<version>-windows/single-file/ （GUI 单文件变体）
+#   release/chaoxing-plus-<version>-windows/multi-file/  （Console 多文件变体）
 #   release/chaoxing-plus-<version>-windows/start-windows*.cmd（原生启动器）
 #   release/chaoxing-plus-<version>-windows/SHA256SUMS.txt / verify-release.mjs
 #
@@ -73,12 +75,16 @@ SINGLE_EXE="windows/native-build/release/chaoxing_plus.exe"
 echo "[build-windows] 1/5 构建 Chrome75 注入资源（release）"
 npm run build:windows -- --release
 
-echo "[build-windows] 2/5 构建 Windows x86 原生宿主（无 CRT、资源内嵌、无外部 DLL 依赖）"
+echo "[build-windows] 2/5 构建 Windows x86 原生宿主（GUI + Console、无 CRT、资源内嵌、无外部 DLL 依赖）"
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-  -File "windows/native-source/build.ps1" -OutputDirectory "windows/native-build"
+  -File "windows/native-source/build.ps1" -OutputDirectory "windows/native-build" -BuildConsole
 
 if [ ! -f "windows/native-build/bin/chaoxing_plus.exe" ]; then
   echo "[build-windows] 原生 x86 EXE 没有生成。" >&2
+  exit 1
+fi
+if [ ! -f "windows/native-build/bin/chaoxing_plus_console.exe" ]; then
+  echo "[build-windows] Console 子系统原生 EXE 没有生成。" >&2
   exit 1
 fi
 if [ ! -f "$SINGLE_EXE" ]; then
@@ -93,6 +99,10 @@ if [ ! -f "${PACKAGE_DIR}/chaoxing_plus.exe" ]; then
   echo "[build-windows] 发布包缺少 chaoxing_plus.exe：${PACKAGE_DIR}" >&2
   exit 1
 fi
+if [ ! -f "${PACKAGE_DIR}/multi-file/chaoxing_plus_console.exe" ]; then
+  echo "[build-windows] 发布包缺少 multi-file/chaoxing_plus_console.exe：${PACKAGE_DIR}" >&2
+  exit 1
+fi
 
 echo "[build-windows] 4/5 校验发布包完整性及独立 EXE/包内入口"
 node "${PACKAGE_DIR}/verify-release.mjs"
@@ -103,6 +113,9 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
   -Command "& '${PACKAGE_DIR}/chaoxing_plus.exe' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
 
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -Command "& '${PACKAGE_DIR}/multi-file/chaoxing_plus_console.exe' --self-check --quiet --no-disk-write; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }"
+
 if [ "$SKIP_TESTS" -eq 0 ]; then
   echo "[build-windows] 5/5 运行发布相关回归"
   node --test --test-concurrency=4 --test-timeout=300000 scripts/windows-release-package.test.mjs
@@ -111,7 +124,8 @@ else
 fi
 
 echo "[build-windows] 完成："
-echo "  独立发布单文件：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
+echo "  独立发布 GUI EXE：${SINGLE_EXE}（无外部 DLL/运行库依赖）"
+echo "  Console 构建产物：windows/native-build/bin/chaoxing_plus_console.exe"
 echo "  调试/测试 EXE： windows/native-build/bin/（全部保留）"
 echo "  完整发布包：    ${PACKAGE_DIR}"
 echo "  原生启动入口：   ${PACKAGE_DIR}/start-windows.cmd"

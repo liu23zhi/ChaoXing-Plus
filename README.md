@@ -54,8 +54,8 @@ Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客�
 
 ```powershell
 npm run build:windows      # 注入资源（dist-windows）
-npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
-# 构建 Windows 单文件 x86 发布包（CMD 入口，不依赖 Git Bash）
+npm run build:native       # 原生 x86 GUI + Console EXE（需要本机 MSVC x86 工具链）
+# 构建 Windows GUI/Console 双变体发布包（CMD 入口，不依赖 Git Bash）
 .\windows\native-source\build-windows.cmd
 # 备用（封装完成后冻结）：Node 单 EXE 与调试目录包，不含原生 EXE
 .\windows\node-source\build-windows-node.cmd
@@ -70,7 +70,7 @@ npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
 
 原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-scripts\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
 
-可独立分发的单文件分别位于 `windows/native-build/release/chaoxing_plus.exe` 和 `windows/node-build/release/chaoxing_plus_node.exe`，两者均使用仓库共享图标；原生 `windows/native-build/bin/` 中的调试 EXE 保留。Node EXE 内嵌 Node 运行时与资源，无需目标机器安装 Node；此次封装完成后 Node 宿主停止更新。
+可独立分发的 GUI 原生 EXE 位于 `windows/native-build/release/chaoxing_plus.exe`；Console 子系统构建产物位于 `windows/native-build/bin/chaoxing_plus_console.exe`，两者均使用仓库共享图标。原生 `windows/native-build/bin/` 中的调试 EXE 保留。Node 备用 EXE 为 `windows/node-build/release/chaoxing_plus_node.exe`，内嵌 Node 运行时与资源，无需目标机器安装 Node；Node 宿主停止更新。
 
 Windows 完整发布包（默认使用原生宿主）：
 
@@ -80,7 +80,7 @@ npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
 npm run release:windows # release/chaoxing-plus-6.2.0-windows.zip
 ```
 
-默认包提供资源内嵌的 `chaoxing_plus.exe`、五个原生 `start-windows*.cmd` 启动器、文档、`windows/share-file/config.example.json`、`release-info.json`、`SHA256SUMS.txt` 与包根 `verify-release.mjs`。显式传 `npm run release:windows -- --with-node` 才增加 Node 运行闭包、运行时和 `start-windows-node*.cmd` 启动器，`--skip-native` 则生成纯 Node 备用包。发布包启动器仍位于包根；解压后运行 `node verify-release.mjs` 校验完整性。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+默认包根目录保留兼容入口，并提供 `single-file/`（GUI EXE）和 `multi-file/`（Console EXE、配套原生启动器与独立校验清单）两个变体；根目录也保留原生启动器、文档、配置、`release-info.json`、`SHA256SUMS.txt` 与 `verify-release.mjs`。显式传 `npm run release:windows -- --with-node` 才增加 Node 运行闭包、运行时和 `start-windows-node*.cmd` 启动器，`--skip-native` 则生成纯 Node 备用包。解压后分别运行 `node verify-release.mjs` 与 `node multi-file/verify-release.mjs` 校验完整性。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ---
 

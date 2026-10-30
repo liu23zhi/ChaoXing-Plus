@@ -63,7 +63,9 @@ async function createFixture() {
   const verifier = path.join(root, 'windows', 'share-file', 'verify-release.mjs');
   const exe = path.join(directory, 'chaoxing_plus.exe');
   await fs.writeFile(exe, Buffer.from('MZ fake native host'));
-  return { directory, dist, host, launcher, debugLauncher, silentLauncher, configExample, verifier, exe };
+  const consoleExe = path.join(directory, 'chaoxing_plus_console.exe');
+  await fs.writeFile(consoleExe, Buffer.from('MZ fake console native host'));
+  return { directory, dist, host, launcher, debugLauncher, silentLauncher, configExample, verifier, exe, consoleExe };
 }
 
 async function sha256(filePath) {
@@ -178,6 +180,48 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
   for (const relative of files) {
     assert.equal(entries.includes(`fixture-package/${relative}`), true, relative);
   }
+});
+
+test('发布包新增 single-file 与 multi-file 子目录并区分 GUI/Console 入口', { skip: process.platform !== 'win32' }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
+  const out = path.join(fixture.directory, 'out-variants');
+  const result = runPackager([
+    '--dist-dir', fixture.dist,
+    '--host-dir', fixture.host,
+    '--launcher', fixture.launcher,
+    '--silent-launcher', fixture.silentLauncher, '--debug-launcher', fixture.debugLauncher,
+    '--config-example', fixture.configExample,
+    '--verifier', fixture.verifier,
+    '--exe', fixture.exe,
+    '--console-exe', fixture.consoleExe,
+    '--out', out,
+    '--name', 'variant-package',
+    '--version', '9.9.9',
+    '--skip-docs', '--skip-zip'
+  ]);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const packageRoot = path.join(out, 'variant-package');
+  assert.equal(await fs.readFile(path.join(packageRoot, 'single-file', 'chaoxing_plus.exe'), 'utf8'), 'MZ fake native host');
+  assert.equal(await fs.readFile(path.join(packageRoot, 'multi-file', 'chaoxing_plus_console.exe'), 'utf8'), 'MZ fake console native host');
+  for (const name of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd', 'start-windows-silent-debug.cmd', 'start-windows-silent-no-full-scan-debug.cmd']) {
+    const source = await fs.readFile(path.join(packageRoot, 'multi-file', name), 'utf8');
+    assert.match(source, /chaoxing_plus_console\.exe/u, `${name} 必须指向 Console 子系统入口`);
+    assert.doesNotMatch(source, /chaoxing_plus\.exe(?!_console)/u, `${name} 不得误指向 GUI 入口`);
+  }
+  const info = JSON.parse(await fs.readFile(path.join(packageRoot, 'release-info.json'), 'utf8'));
+  assert.deepEqual(info.variants, {
+    'single-file': { directory: 'single-file', executable: 'single-file/chaoxing_plus.exe', subsystem: 'windows' },
+    'multi-file': { directory: 'multi-file', executable: 'multi-file/chaoxing_plus_console.exe', subsystem: 'console' }
+  });
+  assert.equal(
+    (await fs.readFile(path.join(packageRoot, 'multi-file', 'release-info.json'), 'utf8').then((text) => JSON.parse(text).entrypoints.native)),
+    'chaoxing_plus_console.exe'
+  );
+  const verify = spawnSync(process.execPath, [path.join(packageRoot, 'multi-file', 'verify-release.mjs')], {
+    encoding: 'utf8', timeout: 60000, windowsHide: true, cwd: path.join(packageRoot, 'multi-file')
+  });
+  assert.equal(verify.status, 0, `${verify.stdout}\n${verify.stderr}`);
 });
 
 test('发布打包拒绝包含本地调试注入日志的构建', async (t) => {
@@ -312,6 +356,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
   assert.match(workflow, /发布包解压入口自检/u);
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');
+  assert.match(workflow, /single-file\\chaoxing_plus\.exe/u, 'CI must check the GUI variant');
+  assert.match(workflow, /multi-file\\chaoxing_plus_console\.exe/u, 'CI must check the Console variant');
+  assert.match(workflow, /multi-file\\verify-release\.mjs/u, 'CI must verify the Console variant checksum');
   // 原生包里没有 Node 宿主：CI 不得再运行包内 main.mjs，只保留原生自检与禁入清单。
   assert.doesNotMatch(workflow, /node \(Join-Path \$package 'windows\\node-source\\main\.mjs'\)/u, '原生发布包里没有 Node 宿主，CI 不应再运行它');
   assert.match(workflow, /原生发布包不应包含 Node 产物/u, 'CI 必须拒绝混入 Node 产物的原生包');
@@ -332,6 +379,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['release:windows'], 'node windows/share-file/package-windows.mjs');
   assert.equal(packageJson.scripts['build:native'].includes('windows/native-source/build.ps1'), true);
+  assert.equal(packageJson.scripts['build:native'].includes('-BuildConsole'), true);
 
   const gitignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
   assert.match(gitignore, /^release\/$/mu);
@@ -349,8 +397,13 @@ test('原生构建脚本保持 ASCII 且不依赖 PowerShell 模块自动加载'
   assert.match(source, /certutil\.exe -hashfile \$hostExe SHA256/u);
   assert.doesNotMatch(source, /Get-FileHash/u);
   assert.match(source, /if \(\$BuildTests\)/u);
+  assert.match(source, /\[switch\]\$BuildConsole/u);
+  assert.match(source, /if \(\$BuildConsole\)/u);
+  assert.match(source, /SUBSYSTEM:WINDOWS,6\.01/u);
+  assert.match(source, /SUBSYSTEM:CONSOLE,6\.01/u);
+  assert.match(source, /chaoxing_plus_console\.exe/u);
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
-  assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests');
+  assert.equal(packageJson.scripts['build:native'], 'powershell -NoProfile -ExecutionPolicy Bypass -File windows/native-source/build.ps1 -BuildTests -BuildConsole');
 });
 
 test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖', { skip: process.platform !== 'win32' }, async (t) => {

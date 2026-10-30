@@ -3,7 +3,8 @@ param(
     [string]$OutputDirectory,
     [switch]$SkipAssetCopy,
     [switch]$BuildTests,
-    [switch]$SkipProxy
+    [switch]$SkipProxy,
+    [switch]$BuildConsole
 )
 $ErrorActionPreference = 'Stop'
 $scriptRoot = $PSScriptRoot
@@ -29,8 +30,8 @@ if (-not (Test-Path -LiteralPath $resourceCompiler)) { throw 'Windows SDK resour
 $build = Join-Path $OutputDirectory 'build'
 $bin = Join-Path $OutputDirectory 'bin'
 New-Item -ItemType Directory -Path $build,$bin -Force | Out-Null
-# The dll-proxy carrier DLL is embedded as RCDATA so the release stays a single
-# EXE. Build it when missing (unless -SkipProxy), then embed the file.
+# The dll-proxy carrier DLL is embedded as RCDATA so neither host needs a
+# companion proxy DLL. Build it when missing (unless -SkipProxy), then embed it.
 $proxyScript = Join-Path $root 'windows\hook-source\build-proxy.ps1'
 $hookDir = Join-Path $root 'windows\native-build\hook'
 $proxyDll = Join-Path $hookDir 'winmm.dll'
@@ -72,9 +73,16 @@ $originalPath = $env:Path
 try {
     $env:Path = (Join-Path $kitRoot ('bin\' + $sdk.Name + '\x64')) + ';' + $originalPath
     $objects = $sources | ForEach-Object { Join-Path $build ($_ + '.obj') }
-    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + (Join-Path $bin 'chaoxing_plus.exe')),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
+    $hostExe = Join-Path $bin 'chaoxing_plus.exe'
+    $consoleHostExe = Join-Path $bin 'chaoxing_plus_console.exe'
+    $linkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:WINDOWS,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + $hostExe),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
     & $linker @linkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native host link failed.' }
+    if ($BuildConsole) {
+        $consoleLinkArgs = @('/NOLOGO','/NODEFAULTLIB','/ENTRY:WinMainCRTStartup','/SUBSYSTEM:CONSOLE,6.01','/OSVERSION:6.1','/MACHINE:X86','/DYNAMICBASE','/NXCOMPAT','/SAFESEH','/MANIFEST:EMBED',('/MANIFESTINPUT:' + (Join-Path $sourceRoot 'host.manifest')),('/OUT:' + $consoleHostExe),('/LIBPATH:' + (Join-Path $sdk.FullName 'um\x86')))
+        & $linker @consoleLinkArgs @objects $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+        if ($LASTEXITCODE -ne 0) { throw 'Native console host link failed.' }
+    }
     if ($BuildTests) {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $sourceRoot 'tests\injection-tests.c')
@@ -130,9 +138,12 @@ try {
 # Kept for existing build callers; resources are always embedded, never copied beside the EXE.
 if ($SkipAssetCopy) { Write-Verbose 'SkipAssetCopy is retained for compatibility; no external assets are produced.' }
 $dumpbin = Join-Path $compiler.DirectoryName 'dumpbin.exe'
-& $dumpbin /headers /imports (Join-Path $bin 'chaoxing_plus.exe') | Set-Content -LiteralPath (Join-Path $build 'pe-imports.txt') -Encoding UTF8
+& $dumpbin /headers /imports $hostExe | Set-Content -LiteralPath (Join-Path $build 'pe-imports.txt') -Encoding UTF8
 if ($LASTEXITCODE -ne 0) { throw 'PE import audit failed.' }
-$hostExe = Join-Path $bin 'chaoxing_plus.exe'
+if ($BuildConsole) {
+    & $dumpbin /headers /imports $consoleHostExe | Set-Content -LiteralPath (Join-Path $build 'pe-imports-console.txt') -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw 'PE console import audit failed.' }
+}
 $release = Join-Path $OutputDirectory 'release'
 New-Item -ItemType Directory -Path $release -Force | Out-Null
 $releaseExe = Join-Path $release 'chaoxing_plus.exe'

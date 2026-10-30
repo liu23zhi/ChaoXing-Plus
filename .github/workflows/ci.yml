@@ -106,8 +106,8 @@ jobs:
           $package = Join-Path (Resolve-Path 'release-ci').Path 'chaoxing-plus-6.2.0-windows'
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
-          # 发布包默认只含原生 EXE（Node 宿主已弃用）；这里同时确认没有混入 Node 产物。
-          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\share-file\config.example.json')) {
+          # 发布包默认只含原生 EXE（Node 宿主已弃用）；这里同时确认 GUI/Console 两个变体和根兼容入口。
+          foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\share-file\config.example.json', 'single-file\chaoxing_plus.exe', 'multi-file\chaoxing_plus_console.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
           foreach ($forbidden in @('windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
@@ -115,6 +115,10 @@ jobs:
           }
           $native = Start-Process -FilePath (Join-Path $package 'chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
+          node (Join-Path $package 'multi-file\verify-release.mjs')
+          if ($LASTEXITCODE -ne 0) { throw "multi-file 变体完整性自校验失败: $LASTEXITCODE" }
+          $console = Start-Process -FilePath (Join-Path $package 'multi-file\chaoxing_plus_console.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
+          if ($console.ExitCode -ne 0) { throw "multi-file 原生自检失败: $($console.ExitCode)" }
 
       - name: 上传发布包
         uses: actions/upload-artifact@v4

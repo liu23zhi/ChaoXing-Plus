@@ -101,6 +101,7 @@ function parseArgs(argv) {
     configExample: path.join(repoRoot, 'windows', 'share-file', 'config.example.json'),
     verifier: path.join(repoRoot, 'windows', 'share-file', 'verify-release.mjs'),
     exe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe'),
+    consoleExe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus_console.exe'),
     // 自带 Node 运行时：发布包内的入口优先用 runtime\node.exe，避免依赖目标机器的
     // C:\Program Files\nodejs\node.exe（考试机通常没有 Node.js）。
     runtimeExe: process.platform === 'win32' ? process.execPath : '',
@@ -131,6 +132,7 @@ function parseArgs(argv) {
       case '--config-example': options.configExample = path.resolve(value()); break;
       case '--verifier': options.verifier = path.resolve(value()); break;
       case '--exe': options.exe = path.resolve(value()); break;
+      case '--console-exe': options.consoleExe = path.resolve(value()); break;
       case '--runtime-exe': options.runtimeExe = path.resolve(value()); options.skipRuntime = false; break;
       case '--no-runtime': options.skipRuntime = true; break;
       case '--with-node': options.withNode = true; break;
@@ -152,6 +154,7 @@ function parseArgs(argv) {
           '  --config-example <file>   windows/share-file/config.example.json（首跑配置模板）',
           '  --verifier <file>          windows/share-file/verify-release.mjs（包内完整性校验器）',
           '  --exe <file>       原生 EXE（默认原生构建产物；不存在时仅打 Node 包）',
+          '  --console-exe <file>       Console 子系统原生 EXE（用于 multi-file 变体）',
           '  --runtime-exe <file> 内嵌到 runtime\\node.exe 的 Node 运行时（默认当前 node.exe）',
           '  --no-runtime       不内嵌 Node 运行时（入口退回 PATH 上的 node.exe）',
           '  --with-node        额外携带 Node 宿主闭包/启动器/自带运行时（Node 已弃用，仅备用）',
@@ -213,8 +216,12 @@ async function main() {
   if (options.withNode && !(await pathExists(options.hostDir))) fail(`缺少 Node 宿主目录：${options.hostDir}`);
 
   const includeNative = !options.skipNative && await pathExists(options.exe);
+  const includeConsole = includeNative && await pathExists(options.consoleExe);
   if (!options.skipNative && !includeNative) {
     console.warn(`[release] 未找到原生 EXE（${options.exe}），将生成仅含 Node 宿主的发布包；如需原生单文件请先构建原生宿主。`);
+  }
+  if (includeNative && !includeConsole) {
+    console.warn(`[release] 未找到 Console 子系统 EXE（${options.consoleExe}），将跳过 multi-file 变体。`);
   }
 
   await fs.rm(packageRoot, { recursive: true, force: true });
@@ -290,6 +297,79 @@ async function main() {
     await fs.copyFile(options.exe, path.join(packageRoot, 'chaoxing_plus.exe'));
   }
 
+  // 保留包根目录的兼容入口，同时提供两个明确的发布变体：
+  // single-file 使用 GUI 子系统 EXE，multi-file 使用独立构建的 Console 子系统 EXE。
+  // multi-file 复制原生启动器并改写入口文件名，避免把两个子系统混用。
+  const nativeLauncherNames = [
+    'start-windows.cmd',
+    'start-windows-debug.cmd',
+    'start-windows-silent.cmd',
+    'start-windows-silent-debug.cmd',
+    'start-windows-silent-no-full-scan-debug.cmd'
+  ];
+  const variants = {};
+  if (includeNative) {
+    const singleDirectory = path.join(packageRoot, 'single-file');
+    await fs.mkdir(singleDirectory, { recursive: true });
+    await fs.copyFile(options.exe, path.join(singleDirectory, 'chaoxing_plus.exe'));
+    variants['single-file'] = {
+      directory: 'single-file',
+      executable: 'single-file/chaoxing_plus.exe',
+      subsystem: 'windows'
+    };
+  }
+  if (includeConsole) {
+    const multiDirectory = path.join(packageRoot, 'multi-file');
+    await fs.mkdir(multiDirectory, { recursive: true });
+    await fs.copyFile(options.consoleExe, path.join(multiDirectory, 'chaoxing_plus_console.exe'));
+    for (const launcherName of nativeLauncherNames) {
+      const source = path.join(repoRoot, 'windows', 'native-scripts', launcherName);
+      const launcher = await fs.readFile(source, 'utf8');
+      const rewritten = launcher.replaceAll('chaoxing_plus.exe', 'chaoxing_plus_console.exe');
+      await fs.writeFile(path.join(multiDirectory, launcherName), rewritten, 'utf8');
+    }
+    await fs.mkdir(path.join(multiDirectory, 'windows', 'share-file'), { recursive: true });
+    await fs.copyFile(options.configExample, path.join(multiDirectory, 'windows', 'share-file', 'config.example.json'));
+    await fs.copyFile(options.verifier, path.join(multiDirectory, 'verify-release.mjs'));
+    if (!options.skipDocs) {
+      for (const doc of ['README.md', path.join('docs', 'windows.md')]) {
+        const source = path.join(repoRoot, doc);
+        if (!(await pathExists(source))) continue;
+        const target = path.join(multiDirectory, doc);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.copyFile(source, target);
+      }
+    }
+    const multiFiles = await walkFiles(multiDirectory);
+    const multiInfo = {
+      name: `${name}-multi-file`,
+      version,
+      host: 'windows',
+      createdAt: new Date().toISOString(),
+      nativeHost: true,
+      nodeHost: false,
+      node: '',
+      entrypoints: { native: 'chaoxing_plus_console.exe' },
+      assetsDir: '',
+      runtime: '',
+      payloadFiles: multiFiles.length,
+      verifier: 'verify-release.mjs',
+      subsystem: 'console'
+    };
+    await fs.writeFile(path.join(multiDirectory, 'release-info.json'), `${JSON.stringify(multiInfo, null, 2)}\n`, 'utf8');
+    const multiHashTargets = [...multiFiles, 'release-info.json'].sort();
+    const multiSums = [];
+    for (const relative of multiHashTargets) {
+      multiSums.push(`${await hashFile(path.join(multiDirectory, relative))} *${relative}`);
+    }
+    await fs.writeFile(path.join(multiDirectory, 'SHA256SUMS.txt'), `${multiSums.join('\n')}\n`, 'utf8');
+    variants['multi-file'] = {
+      directory: 'multi-file',
+      executable: 'multi-file/chaoxing_plus_console.exe',
+      subsystem: 'console'
+    };
+  }
+
   // 自带运行时：包内入口优先使用它，目标机器不需要安装 Node.js。
   let runtimeRelative = '';
   if (options.withNode && !options.skipRuntime && options.runtimeExe) {
@@ -318,6 +398,7 @@ async function main() {
       : { native: 'chaoxing_plus.exe' },
     assetsDir: options.withNode ? 'dist-windows' : '',
     runtime: runtimeRelative,
+    variants,
     payloadFiles: files.length,
     verifier: 'verify-release.mjs'
   };
@@ -356,6 +437,7 @@ async function main() {
     packageRoot,
     archive: archive || null,
     nativeHost: includeNative,
+    variants,
     files: hashTargets.length,
     verifier: 'verify-release.mjs',
     sizeBytes: (await fs.stat(path.join(packageRoot, includeNative ? 'chaoxing_plus.exe' : 'start-windows-node.cmd'))).size
