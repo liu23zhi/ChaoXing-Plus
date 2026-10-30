@@ -63,7 +63,7 @@ $resourceSource | Set-Content -LiteralPath $resourceFile -Encoding Unicode
 & $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $resourceObject) $resourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Native resource compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $sourceRoot))
-$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','wipe','wipe','browser-extension','browser-session','adapter-account','account-window','home','host')
+$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','wipe','browser-extension','browser-session','adapter-account','account-window','home','host')
 foreach ($source in $sources) {
     & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $sourceRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
