@@ -8,7 +8,7 @@ import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 
 // 全盘扫描期间的独立 WinForms 进度窗口。扫描仍由 Node 宿主执行，窗口只做展示与
 // 取消标记，因此不会把递归文件遍历放进 PowerShell 进程；脚本保持纯 ASCII。
-export const defaultScanProgressScript = fileURLToPath(new URL('./scan-progress-window.ps1', import.meta.url));
+export const defaultScanProgressScript = fileURLToPath(new URL('../node-scripts/scan-progress-window.ps1', import.meta.url));
 export const SCAN_PROGRESS_LABELS = {
   title: '超星学习助手 - 全盘扫描',
   message: '正在全盘扫描固定磁盘根目录以查找 CXExam.exe，请稍候…',

@@ -803,6 +803,7 @@ test('Node SEA 单 EXE 脱离构建目录后完成 mock CDP 注入且 no-disk-wr
     const build = await buildNodeExe({
       version,
       hostDir: path.join(root, 'windows', 'node-source'),
+      scriptsDir: path.join(root, 'windows', 'node-scripts'),
       distDir: assetsDir,
       configExample: path.join(root, 'windows', 'share-file', 'config.example.json'),
       icon: path.join(root, 'windows', 'share-file', 'assets', 'app-icon.ico'),

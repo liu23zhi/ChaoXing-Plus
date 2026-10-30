@@ -998,7 +998,7 @@ async function main() {
       // 静默场景：先把运行期还要用到的 PowerShell 脚本并入内存副本，再删除程序文件；
       // 引导阶段已经把四个脚本读进 __CX_SILENT_EMBEDDED_SCRIPTS__，这里只补齐
       // 缺失项（合并而不是覆盖），否则删除后 system-probe/选择窗口脚本会丢失。
-      const launchScriptPath = path.join(hostDirectory, 'launch-client.ps1');
+      const launchScriptPath = path.join(hostDirectory, '..', 'node-scripts', 'launch-client.ps1');
       const embeddedScripts = { ...(globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ || {}) };
       if (!embeddedScripts['launch-client.ps1']) {
         try {

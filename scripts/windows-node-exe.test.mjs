@@ -23,7 +23,7 @@ async function fixture(t) {
     await fs.writeFile(path.join(distDir, name), `/* ${name} */`);
   }
   await fs.writeFile(path.join(distDir, 'package-manifest.json'), JSON.stringify({ version }));
-  return { directory, version, hostDir: path.join(root, 'windows/node-source'), distDir,
+  return { directory, version, hostDir: path.join(root, 'windows/node-source'), scriptsDir: path.join(root, 'windows/node-scripts'), distDir,
     configExample: path.join(root, 'windows/share-file/config.example.json'), icon,
     buildDir: path.join(directory, 'build'), out: path.join(directory, 'release') };
 }

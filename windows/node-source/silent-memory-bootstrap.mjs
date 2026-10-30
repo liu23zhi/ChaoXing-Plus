@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { register } from 'node:module';
 
 const hostDirectory = path.join(process.cwd(), 'windows', 'node-source');
+const scriptsDirectory = path.join(process.cwd(), 'windows', 'node-scripts');
 const mainPath = path.join(hostDirectory, 'main.mjs');
 const argumentsList = process.argv.slice(2);
 globalThis.__CX_SILENT_MEMORY_BOOTSTRAP__ = true;
@@ -19,12 +20,12 @@ try {
     const absolute = path.join(hostDirectory, entry.name);
     files.set(pathToFileURL(absolute).href, await fs.readFile(absolute, 'utf8'));
   }
-  const launchScript = await fs.readFile(path.join(hostDirectory, 'launch-client.ps1'), 'utf8');
+  const launchScript = await fs.readFile(path.join(scriptsDirectory, 'launch-client.ps1'), 'utf8');
   globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = Object.freeze({ 'launch-client.ps1': launchScript });
   const scriptNames = ['launch-client.ps1', 'selection-window.ps1', 'scan-progress-window.ps1', 'system-probe.ps1'];
   const embeddedScripts = { 'launch-client.ps1': launchScript };
   for (const name of scriptNames) {
-    try { embeddedScripts[name] = await fs.readFile(path.join(hostDirectory, name), 'utf8'); } catch {}
+    try { embeddedScripts[name] = await fs.readFile(path.join(scriptsDirectory, name), 'utf8'); } catch {}
   }
   globalThis.__CX_SILENT_EMBEDDED_SCRIPTS__ = Object.freeze(embeddedScripts);
   const assetsDirectory = path.join(process.cwd(), 'dist-windows');

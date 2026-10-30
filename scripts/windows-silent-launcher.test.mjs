@@ -9,9 +9,9 @@ import { buildElevatedRelaunchCommand, hideConsoleWindow } from '../windows/node
 import { parseHostArgs } from '../windows/node-source/options.mjs';
 
 const root = path.resolve('.');
-const launcherSource = (name) => path.join(root, 'windows', name.startsWith('start-windows-node') ? 'node-source' : 'native-source', name);
+const launcherSource = (name) => path.join(root, 'windows', name.startsWith('start-windows-node') ? 'node-scripts' : 'native-scripts', name);
 const silentCmdPath = launcherSource('start-windows-node-silent.cmd');
-const silentVbsPath = path.join(root, 'windows', 'node-source', 'silent-memory-launch.vbs');
+const silentVbsPath = path.join(root, 'windows', 'node-scripts', 'silent-memory-launch.vbs');
 const nodeLaunchers = ['start-windows-node.cmd', 'start-windows-node-debug.cmd', 'start-windows-node-silent.cmd', 'start-windows-node-silent-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd'];
 async function symlinkDirectory(target, linkPath) {
   await symlink(target, linkPath, 'junction');
@@ -29,7 +29,7 @@ function readLauncherArgs(source) {
 test('静默启动脚本通过 wscript 隐藏初始 Node 控制台窗口', async () => {
   const cmd = await readFile(silentCmdPath, 'utf8');
   const vbs = await readFile(silentVbsPath, 'utf8');
-  assert.match(cmd, /wscript\.exe\s+\/\/nologo\s+"%CXPLUS_ROOT%\\windows\\node-source\\silent-memory-launch\.vbs"/u);
+  assert.match(cmd, /wscript\.exe\s+\/\/nologo\s+"%CXPLUS_ROOT%\\windows\\node-scripts\\silent-memory-launch\.vbs"/u);
   // 不能在前台直接运行 node.exe，否则 cmd/Node 控制台窗口会一直可见。
   assert.doesNotMatch(cmd, /^\s*node(?:\.exe)?\s/mu);
   // cmd 不识别反斜杠转义，内联 JSON 会被原样传递成非法参数。
@@ -142,8 +142,8 @@ test('静默入口启动前检查必需产物，缺失时询问是否构建', as
   for (const required of [
     'windows\\node-source\\main.mjs',
     'windows\\node-source\\silent-memory-bootstrap.mjs',
-    'windows\\node-source\\silent-memory-launch.vbs',
-    'windows\\node-source\\launch-client.ps1',
+    'windows\\node-scripts\\silent-memory-launch.vbs',
+    'windows\\node-scripts\\launch-client.ps1',
     'dist-windows\\windows-bootstrap.js',
     'dist-windows\\chaoxing-plus.windows.js',
     'dist-windows\\trampoline.js'
@@ -204,7 +204,7 @@ test('Node 备用入口都先检查 Node.js 22+ 主版本', async () => {
     assert.match(source, /LSS 22/u, launcher);
   }
   const normal = await readFile(launcherSource('start-windows-node.cmd'), 'utf8');
-  assert.match(normal, /wscript\.exe \/\/nologo "%CXPLUS_ROOT%\\windows\\node-source\\silent-launch\.vbs"/u);
+  assert.match(normal, /wscript\.exe \/\/nologo "%CXPLUS_ROOT%\\windows\\node-scripts\\silent-launch\.vbs"/u);
   assert.doesNotMatch(normal, /^\s*node(?:\.exe)?\s/mu, '常规入口不得显示控制台');
   const debug = await readFile(launcherSource('start-windows-node-debug.cmd'), 'utf8');
   assert.match(debug, /node windows\\node-source\\main\.mjs %\*/u, '调试入口必须保留可见控制台');
@@ -307,7 +307,7 @@ test('静默入口产物齐全时直接隐藏启动，并把固定参数交给 l
     for (const relative of [
       'windows\\node-source\\main.mjs',
       'windows\\node-source\\silent-memory-bootstrap.mjs',
-      'windows\\node-source\\launch-client.ps1',
+      'windows\\node-scripts\\launch-client.ps1',
       'dist-windows\\windows-bootstrap.js',
       'dist-windows\\chaoxing-plus.windows.js',
       'dist-windows\\trampoline.js'
@@ -318,7 +318,7 @@ test('静默入口产物齐全时直接隐藏启动，并把固定参数交给 l
     }
     const marker = path.join(directory, 'launch-args.txt');
     await writeFile(
-      path.join(directory, 'windows\\node-source\\silent-memory-launch.vbs'),
+      path.join(directory, 'windows\\node-scripts\\silent-memory-launch.vbs'),
       [
         'Option Explicit',
         'Dim args, index, text',
@@ -394,7 +394,7 @@ test('包内运行时存在时静默入口先挂载它，并且版本检查用�
     for (const relative of [
       'windows\\node-source\\main.mjs',
       'windows\\node-source\\silent-memory-bootstrap.mjs',
-      'windows\\node-source\\launch-client.ps1',
+      'windows\\node-scripts\\launch-client.ps1',
       'dist-windows\\windows-bootstrap.js',
       'dist-windows\\chaoxing-plus.windows.js',
       'dist-windows\\trampoline.js'
@@ -410,7 +410,7 @@ test('包内运行时存在时静默入口先挂载它，并且版本检查用�
     await copyFile(process.execPath, path.join(runtimeDirectory, 'node.exe'));
     const marker = path.join(directory, 'launch-env.json');
     await writeFile(
-      path.join(directory, 'windows\\node-source\\silent-memory-launch.vbs'),
+      path.join(directory, 'windows\\node-scripts\\silent-memory-launch.vbs'),
       [
         'Option Explicit',
         'Dim shell, processEnvironment, text',

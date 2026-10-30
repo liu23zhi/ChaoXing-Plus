@@ -46,7 +46,7 @@ test('ordinary launcher transports arguments as UTF-8 JSON without temporary fil
   assert.deepEqual(await exited, [7, null]);
   assert.equal(launch.child.exitCode, 7);
   helper.emit('close', 0);
-  const source = await readFile(new URL('../windows/node-source/launch-client.ps1', import.meta.url));
+  const source = await readFile(new URL('../windows/node-scripts/launch-client.ps1', import.meta.url));
   assert.ok(source.every((byte) => byte < 128), 'PowerShell 5.1 helper must remain ASCII');
 });
 

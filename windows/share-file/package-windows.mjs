@@ -20,7 +20,7 @@ const DIST_REQUIRED = [
   'package-manifest.json'
 ];
 // Node 宿主运行时需要的非模块文件；构建期模块不得进入发布包。
-const HOST_RUNTIME_SCRIPTS = ['launch-client.ps1', 'scan-progress-window.ps1', 'selection-window.ps1', 'system-probe.ps1', 'silent-launch.vbs'];
+const NODE_SCRIPT_FILES = ['launch-client.ps1', 'scan-progress-window.ps1', 'selection-window.ps1', 'system-probe.ps1', 'silent-launch.vbs', 'silent-memory-launch.vbs'];
 // wipe.mjs / owned-files.mjs 已升级为启动清理运行时依赖；自毁状态机仍由后续模块按需引入。
 const HOST_FORBIDDEN_MODULES = new Set(['chrome75-syntax.mjs', 'trampoline.js']);
 const EXTERNAL_IMPORT_PATTERN = /\b(?:from|import)\s+'((?!node:|\.\/)[^']+)'/gu;
@@ -87,11 +87,6 @@ async function collectHostRuntime(hostDir) {
       pending.push(path.join(hostDir, match[1]));
     }
   }
-  for (const script of HOST_RUNTIME_SCRIPTS) {
-    const absolute = path.join(hostDir, script);
-    if (!(await pathExists(absolute))) fail(`Node 宿主缺少运行脚本：${script}`);
-    runtime.set(script, (await fs.stat(absolute)).size);
-  }
   return runtime;
 }
 
@@ -100,9 +95,9 @@ function parseArgs(argv) {
     out: path.join(repoRoot, 'release'),
     distDir: path.join(repoRoot, 'dist-windows'),
     hostDir: path.join(repoRoot, 'windows', 'node-source'),
-    launcher: path.join(repoRoot, 'windows', 'node-source', 'start-windows-node.cmd'),
-    debugLauncher: path.join(repoRoot, 'windows', 'node-source', 'start-windows-node-debug.cmd'),
-    silentLauncher: path.join(repoRoot, 'windows', 'node-source', 'start-windows-node-silent.cmd'),
+    launcher: path.join(repoRoot, 'windows', 'node-scripts', 'start-windows-node.cmd'),
+    debugLauncher: path.join(repoRoot, 'windows', 'node-scripts', 'start-windows-node-debug.cmd'),
+    silentLauncher: path.join(repoRoot, 'windows', 'node-scripts', 'start-windows-node-silent.cmd'),
     configExample: path.join(repoRoot, 'windows', 'share-file', 'config.example.json'),
     verifier: path.join(repoRoot, 'windows', 'share-file', 'verify-release.mjs'),
     exe: path.join(repoRoot, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe'),
@@ -240,22 +235,20 @@ async function main() {
     await fs.copyFile(options.launcher, path.join(packageRoot, 'start-windows-node.cmd'));
     await fs.copyFile(options.debugLauncher, path.join(packageRoot, 'start-windows-node-debug.cmd'));
     await fs.copyFile(options.silentLauncher, path.join(packageRoot, 'start-windows-node-silent.cmd'));
-    for (const [sourceName, targetName] of [
-      [path.join('windows','node-source','silent-memory-bootstrap.mjs'), 'windows/node-source/silent-memory-bootstrap.mjs'],
-      [path.join('windows','node-source','silent-memory-launch.vbs'), 'windows/node-source/silent-memory-launch.vbs']
-    ]) {
-      const source = path.join(repoRoot, sourceName);
-      if (await pathExists(source)) {
-        const target = path.join(packageRoot, targetName);
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.copyFile(source, target);
-      }
+    // Node 运行时脚本统一放在包内 windows/node-scripts（node-source 只保留 .mjs 闭包）。
+    const scriptsSource = path.join(repoRoot, 'windows', 'node-scripts');
+    const scriptsTarget = path.join(packageRoot, 'windows', 'node-scripts');
+    await fs.mkdir(scriptsTarget, { recursive: true });
+    for (const name of NODE_SCRIPT_FILES) {
+      const source = path.join(scriptsSource, name);
+      if (!(await pathExists(source))) fail(`缺少 Node 运行脚本：${name}`);
+      await fs.copyFile(source, path.join(scriptsTarget, name));
     }
     for (const [sourceName, targetName] of [
       ['start-windows-node-silent-debug.cmd', 'start-windows-node-silent-debug.cmd'],
       ['start-windows-node-silent-no-full-scan-debug.cmd', 'start-windows-node-silent-no-full-scan-debug.cmd']
     ]) {
-      const source = path.join(repoRoot, 'windows', 'node-source', sourceName);
+      const source = path.join(scriptsSource, sourceName);
       if (await pathExists(source)) await fs.copyFile(source, path.join(packageRoot, targetName));
     }
   }
@@ -276,7 +269,7 @@ async function main() {
       'start-windows-silent-debug.cmd',
       'start-windows-silent-no-full-scan-debug.cmd'
     ]) {
-      const source = path.join(repoRoot, 'windows', 'native-source', name);
+      const source = path.join(repoRoot, 'windows', 'native-scripts', name);
       if (!(await pathExists(source))) fail(`缺少原生启动脚本：${name}`);
       await fs.copyFile(source, path.join(packageRoot, name));
     }

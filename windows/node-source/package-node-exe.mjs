@@ -14,7 +14,7 @@ const assetNames = {
   trampoline: 'trampoline.js', style: 'vendor/sweetalert2.min.css'
 };
 
-export async function collectPayload({ hostDir, distDir, configExample, version }) {
+export async function collectPayload({ hostDir, scriptsDir, distDir, configExample, version }) {
   const manifest = JSON.parse(await fs.readFile(path.join(distDir, 'package-manifest.json'), 'utf8'));
   if (manifest.version !== version || manifest.features?.injectionLog === true) {
     throw new Error('Injection assets must match the version and disable injectionLog; run npm run build:windows -- --release');
@@ -36,7 +36,7 @@ export async function collectPayload({ hostDir, distDir, configExample, version 
     modules[name] = source;
   }
   const scripts = {};
-  for (const name of scriptNames) scripts[name] = await fs.readFile(path.join(hostDir, name), 'utf8');
+  for (const name of scriptNames) scripts[name] = await fs.readFile(path.join(scriptsDir, name), 'utf8');
   const assets = { version };
   for (const [key, name] of Object.entries(assetNames)) {
     assets[key] = await fs.readFile(path.join(distDir, name), 'utf8');
@@ -101,7 +101,7 @@ export async function buildNodeExe(options) {
 async function main() {
   const version = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
   const options = {
-    version, hostDir: path.join(root, 'windows', 'node-source'), distDir: path.join(root, 'dist-windows'),
+    version, hostDir: path.join(root, 'windows', 'node-source'), scriptsDir: path.join(root, 'windows', 'node-scripts'), distDir: path.join(root, 'dist-windows'),
     configExample: path.join(root, 'windows', 'share-file', 'config.example.json'),
     icon: path.join(root, 'windows', 'share-file', 'assets', 'app-icon.ico'),
     buildDir: path.join(root, 'windows', 'node-build', 'build'),

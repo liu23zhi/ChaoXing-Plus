@@ -112,9 +112,9 @@ test('发布打包脚本生成原生 + Node 双入口包、校验和与 zip', { 
     'dist-windows/trampoline.js', 'dist-windows/vendor/sweetalert2.min.css',
     'dist-windows/package-manifest.json',
     'windows/node-source/main.mjs', 'windows/node-source/launch.mjs',
-    'windows/node-source/launch-client.ps1', 'windows/node-source/selection-window.ps1',
-    'windows/node-source/scan-progress-window.ps1',
-    'windows/node-source/system-probe.ps1', 'windows/node-source/silent-launch.vbs',
+    'windows/node-scripts/launch-client.ps1', 'windows/node-scripts/selection-window.ps1',
+    'windows/node-scripts/scan-progress-window.ps1',
+    'windows/node-scripts/system-probe.ps1', 'windows/node-scripts/silent-launch.vbs',
     'windows/share-file/config.example.json', 'verify-release.mjs',
     'release-info.json', 'SHA256SUMS.txt'
   ]) {
@@ -252,7 +252,7 @@ test('--skip-native 生成仅 Node 宿主发布包', async (t) => {
   assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-debug.cmd'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-silent-debug.cmd'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'start-windows-node-silent-no-full-scan-debug.cmd'))).isFile(), true);
-  assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'node-source', 'silent-launch.vbs'))).isFile(), true);
+  assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'node-scripts', 'silent-launch.vbs'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'windows', 'share-file', 'config.example.json'))).isFile(), true);
   assert.equal((await fs.stat(path.join(packageRoot, 'verify-release.mjs'))).isFile(), true);
   assert.equal(await fs.access(path.join(packageRoot, 'chaoxing_plus.exe')).then(() => true, () => false), false);

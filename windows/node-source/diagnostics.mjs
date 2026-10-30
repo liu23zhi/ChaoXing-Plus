@@ -151,7 +151,7 @@ export function summarizeRenderDiagnostics(sample, { includePanel = true } = {})
 }
 
 export async function collectSystemProbe({ pid = 0, processName = 'CXExam', screenshotPath = '', logger = () => {} } = {}) {
-  const scriptPath = path.join(hostDirectory, 'system-probe.ps1');
+  const scriptPath = path.join(hostDirectory, '..', 'node-scripts', 'system-probe.ps1');
   const args = [
     '-NoProfile',
     '-NonInteractive',

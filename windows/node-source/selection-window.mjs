@@ -3,7 +3,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { buildPowerShellScriptArgs } from './embedded-scripts.mjs';
 
-export const defaultSelectionWindowScript = fileURLToPath(new URL('./selection-window.ps1', import.meta.url));
+export const defaultSelectionWindowScript = fileURLToPath(new URL('../node-scripts/selection-window.ps1', import.meta.url));
 export const WINDOW_TIMEOUT_MS = 5 * 60 * 1000;
 
 function runPowerShell(command, args, { input, timeout, maxBuffer, windowsHide }) {

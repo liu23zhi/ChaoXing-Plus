@@ -2,7 +2,7 @@
 setlocal
 set "CXPLUS_ROOT=%~dp0."
 set "CXPLUS_EXE=%~dp0chaoxing_plus.exe"
-if exist "%~dp0build.ps1" (
+if exist "%~dp0..\native-source\build.ps1" (
   set "CXPLUS_ROOT=%~dp0..\.."
   set "CXPLUS_EXE=%~dp0..\native-build\bin\chaoxing_plus.exe"
 )

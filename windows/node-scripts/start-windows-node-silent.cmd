@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 set "CXPLUS_ROOT=%~dp0."
-if exist "%~dp0build-windows-node.cmd" set "CXPLUS_ROOT=%~dp0..\.."
+if exist "%~dp0..\node-source\build-windows-node.cmd" set "CXPLUS_ROOT=%~dp0..\.."
 for %%d in ("%CXPLUS_ROOT%") do set "CXPLUS_ROOT=%%~fd"
 cd /d "%CXPLUS_ROOT%" || exit /b 1
 if not exist "%CXPLUS_ROOT%\windows\node-source\main.mjs" exit /b 9009
@@ -29,15 +29,15 @@ if errorlevel 1 exit /b 9044
 call :check_build_output
 if defined MISSING (echo [windows] build finished but these files are still missing:!MISSING!& exit /b 9045)
 :launch
-wscript.exe //nologo "%CXPLUS_ROOT%\windows\node-source\silent-memory-launch.vbs" "%CXPLUS_ROOT%\." "%CXPLUS_ROOT%\windows\node-source\silent-memory-bootstrap.mjs" --hide-console --silent-scenario --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --quiet --no-panel --answer-mode manual --answer-key Ctrl+Alt+Shift+S --answer-threads 1 --hide-answer-dialog
+wscript.exe //nologo "%CXPLUS_ROOT%\windows\node-scripts\silent-memory-launch.vbs" "%CXPLUS_ROOT%\." "%CXPLUS_ROOT%\windows\node-source\silent-memory-bootstrap.mjs" --hide-console --silent-scenario --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --quiet --no-panel --answer-mode manual --answer-key Ctrl+Alt+Shift+S --answer-threads 1 --hide-answer-dialog
 exit /b %ERRORLEVEL%
 :check_build_output
 set "MISSING="
 for %%f in (
   "windows\node-source\main.mjs"
   "windows\node-source\silent-memory-bootstrap.mjs"
-  "windows\node-source\silent-memory-launch.vbs"
-  "windows\node-source\launch-client.ps1"
+  "windows\node-scripts\silent-memory-launch.vbs"
+  "windows\node-scripts\launch-client.ps1"
   "dist-windows\windows-bootstrap.js"
   "dist-windows\chaoxing-plus.windows.js"
   "dist-windows\trampoline.js"

@@ -231,7 +231,7 @@ export function spawnClient({ exePath, port, logger = () => {}, platform = proce
 }
 
 export function spawnWindowsClient({ exePath, args, spawnImpl = spawn, timeoutMs = 20000 }) {
-  const scriptPath = fileURLToPath(new URL('./launch-client.ps1', import.meta.url));
+  const scriptPath = fileURLToPath(new URL('../node-scripts/launch-client.ps1', import.meta.url));
   const launchScriptArgs = [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     ...buildPowerShellScriptArgs('launch-client.ps1', scriptPath)

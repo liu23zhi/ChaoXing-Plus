@@ -61,14 +61,14 @@ npm run build:native       # 原生 x86 EXE（需要本机 MSVC x86 工具链）
 .\windows\node-source\build-windows-node.cmd
 # Git Bash 等价入口：bash windows/native-source/build-windows.sh
 # Node 备用包：bash windows/node-source/build-windows-node.sh
-.\windows\native-source\start-windows.cmd
+.\windows\native-scripts\start-windows.cmd
 # 需要可见控制台日志时使用调试入口（控制台 + GUI）
-.\windows\native-source\start-windows-debug.cmd
+.\windows\native-scripts\start-windows-debug.cmd
 # 静默场景入口（零落盘内存模式、快速扫描失败才全盘、自动首选 x86、无面板/控制台）
-.\windows\native-source\start-windows-silent.cmd
+.\windows\native-scripts\start-windows-silent.cmd
 ```
 
-原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-source\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
+原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-scripts\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
 
 可独立分发的单文件分别位于 `windows/native-build/release/chaoxing_plus.exe` 和 `windows/node-build/release/chaoxing_plus_node.exe`，两者均使用仓库共享图标；原生 `windows/native-build/bin/` 中的调试 EXE 保留。Node EXE 内嵌 Node 运行时与资源，无需目标机器安装 Node；此次封装完成后 Node 宿主停止更新。
 

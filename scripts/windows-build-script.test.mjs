@@ -140,8 +140,8 @@ test('缺失宿主的发布入口不会回退调用仓库开发文件', { skip: 
   const directory = await mkdtemp(path.join(releaseDirectory, 'launcher-missing-host-'));
   t.after(() => rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   for (const [sourceDirectory, name] of [
-    ['node-source', 'start-windows-node-debug.cmd'],
-    ['native-source', 'start-windows-debug.cmd']
+    ['node-scripts', 'start-windows-node-debug.cmd'],
+    ['native-scripts', 'start-windows-debug.cmd']
   ]) {
     const launcher = path.join(directory, name);
     await copyFile(path.join(root, 'windows', sourceDirectory, name), launcher);
@@ -181,7 +181,7 @@ test('Windows 专用文件归入三目录，插件构建继续使用原位共享
   const windowsEntries = await readdir(path.join(root, 'windows'));
   assert.equal(windowsEntries.includes('host'), false);
   assert.equal(windowsEntries.includes('native'), false);
-  for (const directory of ['node-source', 'native-source', 'share-file']) {
+  for (const directory of ['node-source', 'native-source', 'native-scripts', 'node-scripts', 'share-file']) {
     assert.equal(windowsEntries.includes(directory), true, `缺少 ${directory}`);
   }
   const browserBuild = await readFile(path.join(root, 'build.mjs'), 'utf8');
@@ -193,7 +193,7 @@ test('Windows 专用文件归入三目录，插件构建继续使用原位共享
   assert.equal(packageJson.scripts.build, 'node build.mjs');
 });
 test('windows 脚本保持纯 ASCII，避免控制台/PS 5.1 解码乱码', async () => {
-  const directories = ['windows/native-source', 'windows/node-source', 'windows/share-file'];
+  const directories = ['windows/native-source', 'windows/native-scripts', 'windows/node-source', 'windows/node-scripts', 'windows/share-file'];
   const extensions = ['.cmd', '.ps1', '.vbs'];
   for (const directory of directories) {
     let entries;
