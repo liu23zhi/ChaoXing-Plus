@@ -37,7 +37,7 @@ $check = Start-Process -FilePath $hostExe -ArgumentList '--self-check','--no-dis
 if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 ```
 
-[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、双变体编译、完整发布打包和校验。原生最终目录直接为 `windows/native-build/release/`，不追加版本目录：`single-file/` 只含内嵌资源 GUI，`multi-file/` 包含外置资源 GUI、`.com` helper、临时释放包、普通与调试两个原生启动器、配置、文档及独立清单/校验器；发布根目录另有清单与校验器，不放兼容 EXE 或启动器。ZIP 位于 `windows/native-build/chaoxing-plus-6.2.0-windows.zip`。单独编译后可运行 `npm run release:windows` 补齐发布内容，原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定完整多文件编译输入。共享构建与打包实现见 [share-file](../share-file/README.md)。
+[build-windows.cmd](build-windows.cmd) 与 [build-windows.sh](build-windows.sh) 执行资源构建、双变体编译、完整发布打包和校验。原生最终目录直接为 `windows/native-build/release/`，不追加版本目录，不生成 ZIP，也不复制 README 或 docs：`single-file/` 只含内嵌资源 GUI，`multi-file/` 包含外置资源 GUI、`.com` helper、临时释放包、普通与调试两个原生启动器、配置及独立清单/校验器；发布根目录另有清单与校验器，不放兼容 EXE 或启动器。单独编译后可运行 `npm run release:windows` 补齐发布内容，原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定完整多文件编译输入。CI 上传原生发布目录；Node 历史兼容包的 ZIP 和文档行为保持不变。共享构建与打包实现见 [share-file](../share-file/README.md)。
 
 ## 启动器区别
 

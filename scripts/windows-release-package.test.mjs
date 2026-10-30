@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -446,11 +447,12 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /node --test --test-concurrency=4 --test-timeout=300000 @testFiles/u);
   assert.match(workflow, /node --test --test-concurrency=4 --test-timeout=600000 @browserFiles/u);
   assert.match(workflow, /npm run release:windows/u);
-  assert.match(workflow, /Expand-Archive -LiteralPath/u, 'CI 必须验证 ZIP 解压后的实际产物');
-  assert.match(workflow, /windows\/native-build\/\*\.zip/u, 'CI 只能上传原生构建目录内的发布包');
+  assert.match(workflow, /Copy-Item -LiteralPath .*'release'/u, 'CI 必须在独立目录验证发布产物');
+  assert.match(workflow, /path: windows\/native-build\/release\//u, 'CI 必须直接上传原生发布目录');
+  assert.doesNotMatch(workflow, /Expand-Archive|native-build\/\*\.zip/u, '原生 CI 不再依赖 ZIP');
   assert.match(workflow, /actions\/upload-artifact@v4/u);
   assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
-  assert.match(workflow, /发布包解压入口自检/u);
+  assert.match(workflow, /发布目录复制后入口自检/u);
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');
   assert.match(workflow, /single-file\\chaoxing_plus\.exe/u, 'CI must check the GUI variant');
   assert.match(workflow, /multi-file\\chaoxing_plus\.exe/u, 'CI must check the multi-file GUI host');
@@ -555,12 +557,23 @@ test('发布包内嵌 Node 运行时到 runtime/node.exe 并被校验和覆盖',
   assert.equal(plainInfo.runtime, '', '--no-runtime 时不得声明自带运行时');
 });
 
-test('原生发布直接生成输出目录内的两种变体，不增加版本目录或根兼容 EXE', { skip: process.platform !== 'win32' }, async (t) => {
+test('原生发布只生成运行目录并清理旧文档和 ZIP，保留其他文件', async (t) => {
   const fixture = await createFixture();
   t.after(() => fs.rm(fixture.directory, { recursive: true, force: true }));
   const out = path.join(fixture.directory, 'native-only');
+  await writeFixtureFile(path.join(out, 'multi-file', 'README.md'), 'legacy generated readme');
+  await writeFixtureFile(path.join(out, 'multi-file', 'docs', 'windows.md'), 'legacy generated docs');
+  const archive = path.join(fixture.directory, 'native-only.zip');
+  await writeFixtureFile(archive, 'legacy generated archive');
+  const unrelatedArchive = path.join(fixture.directory, 'user-backup.zip');
+  await writeFixtureFile(unrelatedArchive, 'preserve unrelated archive');
+  const holder = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {
+    cwd: path.join(out, 'multi-file'), windowsHide: true, stdio: ['pipe', 'ignore', 'ignore']
+  });
+  await once(holder, 'spawn');
   // 直接调用打包脚本：不附加 --with-node，验证默认行为。
-  const result = spawnSync(process.execPath, [packageScript,
+  let result;
+  try { result = spawnSync(process.execPath, [packageScript,
     '--dist-dir', fixture.dist,
     '--host-dir', fixture.host,
     '--launcher', fixture.launcher,
@@ -571,15 +584,21 @@ test('原生发布直接生成输出目录内的两种变体，不增加版本�
     '--multi-dir', fixture.multiDir,
     '--out', out,
     '--name', 'native-only',
-    '--version', '9.9.9',
-    '--skip-docs'
+    '--version', '9.9.9'
   ], { encoding: 'utf8', timeout: 300000, windowsHide: true });
+  } finally {
+    const closed = once(holder, 'close');
+    holder.stdin.end();
+    await closed;
+  }
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const packageRoot = out;
   assert.equal(JSON.parse(result.stdout).packageRoot, out);
-  const archive = path.join(fixture.directory, 'native-only.zip');
-  assert.equal(JSON.parse(result.stdout).archive, archive);
-  assert.ok((await fs.stat(archive)).size > 0);
+  assert.equal(JSON.parse(result.stdout).archive, null);
+  await assert.rejects(fs.access(archive), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(out, 'multi-file', 'docs')), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(out, 'multi-file', 'README.md')), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(unrelatedArchive, 'utf8'), 'preserve unrelated archive');
   const files = [];
   async function walk(directory) {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -589,6 +608,7 @@ test('原生发布直接生成输出目录内的两种变体，不增加版本�
     }
   }
   await walk(packageRoot);
+  assert.equal(files.some((name) => name.endsWith('.md') || name.endsWith('.zip') || name.includes('/docs/')), false);
   for (const expected of ['single-file/chaoxing_plus.exe', ...multiRuntimeFiles.map((relative) => `multi-file/${relative}`), 'verify-release.mjs', 'release-info.json', 'SHA256SUMS.txt', 'multi-file/windows/share-file/config.example.json', 'multi-file/start-windows.cmd', 'multi-file/start-windows-debug.cmd', 'multi-file/verify-release.mjs', 'multi-file/SHA256SUMS.txt']) {
     assert.equal(files.includes(expected), true, `默认包缺少 ${expected}`);
   }
@@ -630,6 +650,13 @@ test('原生发布拒绝覆盖源码或带无关文件的输出目录', async (t
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'user-owned');
   assert.equal(await fs.readFile(fixture.exe, 'utf8'), 'MZ fake native host');
+  for (const name of ['../user-backup', '..\\user-backup', 'C:backup']) {
+    const unsafeName = runPackager(['--no-node', '--dist-dir', fixture.dist, '--exe', fixture.exe,
+      '--multi-dir', fixture.multiDir, '--out', path.join(fixture.directory, 'safe-output'), '--version', '9.9.9', '--name', name]);
+    assert.equal(unsafeName.status, 2, unsafeName.stderr || unsafeName.stdout);
+    assert.match(unsafeName.stderr, /原生发布名称不能包含路径/u);
+    assert.equal(await fs.readFile(sentinel, 'utf8'), 'user-owned');
+  }
 });
 
 

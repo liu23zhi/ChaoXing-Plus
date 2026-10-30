@@ -13,6 +13,7 @@ $sourceRoot = $scriptRoot
 $root = Split-Path (Split-Path $scriptRoot -Parent) -Parent
 # Native build output goes to <repo>/windows/native-build: bin keeps debug/test
 # executables, release contains the two distributable native variants. -OutputDirectory overrides it.
+# Native release packaging adds runtime files and checksums, never docs or ZIP.
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path (Split-Path $scriptRoot -Parent) 'native-build' }
 $compiler = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x86\cl.exe' -File |
     Sort-Object FullName -Descending | Select-Object -First 1

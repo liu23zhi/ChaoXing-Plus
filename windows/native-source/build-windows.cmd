@@ -1,7 +1,8 @@
 @echo off
 rem Native Windows build entry: no Git Bash required.
 rem   build-windows.cmd [--skip-tests]
-rem Steps: assets -> native x86 host + standalone EXE -> full package -> verify.
+rem Steps: assets -> native x86 hosts -> runtime-only release directory -> verify.
+rem Native release excludes documentation and ZIP archives.
 setlocal EnableExtensions
 cd /d "%~dp0..\.." || exit /b 1
 
@@ -26,7 +27,7 @@ exit /b 2
 
 :usage
 echo Usage: build-windows.cmd [--skip-tests]
-echo   Builds the standalone native x86 EXE and the default full release package.
+echo   Builds native x86 variants and the runtime-only release directory.
 exit /b 0
 
 :checks
@@ -77,7 +78,7 @@ if not exist "%MULTI_EXE%" (
   exit /b 1
 )
 
-echo [build-windows] 3/4 generating the release package
+echo [build-windows] 3/4 generating the release directory (no docs or ZIP)
 call npm run release:windows
 if errorlevel 1 exit /b 1
 if not exist "%PACKAGE_DIR%\single-file\chaoxing_plus.exe" (

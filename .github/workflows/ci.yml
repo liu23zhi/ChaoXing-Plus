@@ -105,21 +105,23 @@ jobs:
         shell: pwsh
         run: npm run release:windows
 
-      - name: 发布包解压入口自检
+      - name: 发布目录复制后入口自检
         shell: pwsh
         run: |
           $build = (Resolve-Path 'windows/native-build').Path
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $unpacked = Join-Path $build 'release-ci'
-          Expand-Archive -LiteralPath (Join-Path $build "chaoxing-plus-$version-windows.zip") -DestinationPath $unpacked -Force
-          $package = Join-Path $unpacked 'release'
+          if (Test-Path -LiteralPath (Join-Path $build "chaoxing-plus-$version-windows.zip")) { throw '原生发布不应生成 ZIP' }
+          $copied = Join-Path $build ('release-ci\' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $copied -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $build 'release') -Destination $copied -Recurse
+          $package = Join-Path $copied 'release'
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
           # 原生发布直接落在 native-build/release，只提供两个变体。
           foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'single-file\chaoxing_plus.exe', 'multi-file\start-windows.cmd', 'multi-file\windows\share-file\config.example.json', 'multi-file\chaoxing_plus.exe', 'multi-file\chaoxing_plus.com', 'multi-file\assets\windows-bootstrap.js', 'multi-file\assets\chaoxing-plus.windows.js', 'multi-file\assets\trampoline.js', 'multi-file\assets\vendor\sweetalert2.min.css', 'multi-file\winmm-proxy.dll', 'multi-file\package-to-single\chaoxing_plus.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
-          foreach ($forbidden in @('chaoxing_plus.exe', 'start-windows.cmd', 'windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
+          foreach ($forbidden in @('multi-file\README.md', 'multi-file\docs', 'chaoxing_plus.exe', 'start-windows.cmd', 'windows\node-source\main.mjs', 'start-windows-node.cmd', 'runtime\node.exe')) {
             if (Test-Path -LiteralPath (Join-Path $package $forbidden)) { throw "原生发布包不应包含 Node 产物: $forbidden" }
           }
           $native = Start-Process -FilePath (Join-Path $package 'single-file\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
@@ -142,6 +144,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: windows/native-build/*.zip
+          path: windows/native-build/release/
           if-no-files-found: error
 

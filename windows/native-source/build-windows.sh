@@ -16,7 +16,7 @@
 #   windows/native-build/bin/                    （保留宿主与调试/测试 EXE）
 #   windows/native-build/release/multi-file/start-windows*.cmd（原生启动器）
 #   windows/native-build/release/SHA256SUMS.txt / verify-release.mjs
-#   windows/native-build/chaoxing-plus-<version>-windows.zip
+#   原生发布仅保留运行目录与校验清单，不复制文档、不生成 ZIP。
 #
 # 用法：
 #   bash windows/native-source/build-windows.sh

@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 // 生成可直接分发的 Windows 发布包：
 //   1. 优先包含原生单文件 EXE（资源已内嵌，可独立运行）；
-//   2. 同时包含 Node 宿主目录 + dist-windows 资源 + start-windows.cmd；
-//   3. 生成 release-info.json 与 SHA256SUMS.txt，并用系统 Compress-Archive 打 zip。
+//   2. 原生发布只生成运行目录，不复制文档、不生成 ZIP；
+//   3. Node 备用包沿用历史文档与 ZIP 行为，双方均生成完整性清单。
 // 原生输出直接写入 windows/native-build/release；显式 Node 备用包保持历史布局。
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -170,8 +170,8 @@ function parseArgs(argv) {
           '  --with-node        额外携带 Node 宿主闭包/启动器/自带运行时（Node 已弃用，仅备用）',
           '  --no-node          只打原生 EXE（默认）',
           '  --skip-native      不包含原生 EXE',
-          '  --skip-zip         只生成暂存目录，不创建 zip',
-          '  --skip-docs        不包含 README.md / docs/windows.md',
+          '  --skip-zip         Node 兼容包不创建 zip；原生发布始终不生成 zip',
+          '  --skip-docs        Node 兼容包不包含文档；原生发布始终不复制文档',
           '  --name <name>      包目录名（默认 chaoxing-plus-<version>-windows）',
           '  --version <ver>    覆盖 package.json 的版本号',
           '  --help             显示帮助'
@@ -180,6 +180,10 @@ function parseArgs(argv) {
         break;
       default: fail(`未知参数：${argument}`);
     }
+  }
+  if (!options.withNode) {
+    options.skipZip = true;
+    options.skipDocs = true;
   }
   return options;
 }
@@ -193,6 +197,7 @@ async function main() {
   const packageRoot = options.withNode ? path.join(outputRoot, name) : outputRoot;
 
   if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(String(version))) fail(`版本号不合法：${version}`);
+  if (!options.withNode && (!name || name === '.' || name === '..' || /[\\/:]/u.test(name))) fail('原生发布名称不能包含路径');
   if (!(await pathExists(options.distDir))) fail(`缺少 dist-windows 目录：${options.distDir}（先运行 npm run build:windows）`);
   for (const required of DIST_REQUIRED) {
     if (!(await pathExists(path.join(options.distDir, required)))) fail(`dist-windows 缺少资源：${required}`);
@@ -262,7 +267,22 @@ async function main() {
       }
     }
   }
-  await fs.rm(packageRoot, { recursive: true, force: true });
+  if (!options.withNode) {
+    // Remove only the archive formerly generated for this exact release name.
+    await fs.rm(path.join(path.dirname(packageRoot), `${name}.zip`), { force: true });
+    // Preserve variant directories: an open Windows terminal can hold its cwd
+    // even when all files inside that directory can be safely replaced.
+    if (await pathExists(packageRoot)) {
+      for (const entry of await fs.readdir(packageRoot, { withFileTypes: true })) {
+        const target = path.join(packageRoot, entry.name);
+        if (['single-file', 'multi-file'].includes(entry.name) && entry.isDirectory()) {
+          for (const child of await fs.readdir(target)) await fs.rm(path.join(target, child), { recursive: true, force: true });
+        } else await fs.rm(target, { recursive: true, force: true });
+      }
+    }
+  } else {
+    await fs.rm(packageRoot, { recursive: true, force: true });
+  }
   await fs.mkdir(packageRoot, { recursive: true });
 
   // Node 宿主已弃用：默认只打原生 EXE；--with-node（或 --skip-native）才携带下面的内容。

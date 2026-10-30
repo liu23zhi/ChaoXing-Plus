@@ -75,12 +75,12 @@ Windows 完整发布包（默认使用原生宿主）：
 ```powershell
 npm run build:windows -- --release # dist-windows 注入资源
 npm run build:native    # 原生 EXE（需要本机 MSVC x86 工具链）
-npm run release:windows # windows/native-build/release/ 与 windows/native-build/chaoxing-plus-6.2.0-windows.zip
+npm run release:windows # windows/native-build/release/，不生成 ZIP 或复制文档
 ```
 
-原生最终目录直接使用 `windows/native-build/release/`，不追加版本目录：`single-file/` 只含内嵌资源 GUI；`multi-file/` 包含外置资源 GUI、`.com` helper、普通临时释放包、配置、文档和独立校验清单。多文件仅发布普通 `start-windows.cmd`（GUI `.exe`）和调试 `start-windows-debug.cmd`（`.com` helper）两个启动器，不发布三个 `start-windows-silent*.cmd`；多文件删除挂起、自毁和 `--stage-boot` 本轮不支持并明确拒绝。原生发布根目录提供 `release-info.json`、`SHA256SUMS.txt` 与 `verify-release.mjs`，不再放兼容 EXE 或启动器。原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定多文件编译输入。CMD/Bash 入口完成资源构建、编译、打包与校验，PowerShell 入口只编译。解压后分别运行 `node verify-release.mjs` 与 `node multi-file/verify-release.mjs` 校验完整性。
+原生最终目录直接使用 `windows/native-build/release/`，不追加版本目录，不生成 ZIP，也不复制 README 或 docs：`single-file/` 只含内嵌资源 GUI；`multi-file/` 包含外置资源 GUI、`.com` helper、普通临时释放包、配置和独立校验清单。多文件仅发布普通 `start-windows.cmd`（GUI `.exe`）和调试 `start-windows-debug.cmd`（`.com` helper）两个启动器，不发布三个 `start-windows-silent*.cmd`；多文件删除挂起、自毁和 `--stage-boot` 本轮不支持并明确拒绝。原生发布根目录提供 `release-info.json`、`SHA256SUMS.txt` 与 `verify-release.mjs`，不再放兼容 EXE 或启动器。原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定多文件编译输入。CMD/Bash 入口完成资源构建、编译、打包与校验，PowerShell 入口只编译。在发布目录分别运行 `node verify-release.mjs` 与 `node multi-file/verify-release.mjs` 校验完整性。
 
-显式传 `npm run release:windows -- --with-node` 生成包含 Node 的历史兼容包，`--skip-native` 则生成纯 Node 备用包；两者保留原有 `<out>/<name>/` 布局和默认仓库根 `release/` 输出，不改变冻结的 Node 打包行为。CI 工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+显式传 `npm run release:windows -- --with-node` 生成包含 Node 的历史兼容包，`--skip-native` 则生成纯 Node 备用包；两者保留原有 `<out>/<name>/` 布局、默认仓库根 `release/` 输出及 ZIP/文档行为，不改变冻结的 Node 打包行为。CI 上传原生 `windows/native-build/release/` 目录，工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 ---
 

@@ -8,7 +8,7 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | [Node 宿主](../node-source/README.md) | 已弃用的 Node 实现、PowerShell/VBS、备用构建与 `start-windows-node*.cmd` |
 | [Windows 共享文件](./) | 页面平台层、Chrome75 闸门、资源构建、打包/校验、配置模板与参数生成器 |
 
-插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出为 `dist-windows/`、`windows/native-build/` 与 `windows/node-build/`；原生完整包直接位于 `windows/native-build/release/`，`single-file/` 为内嵌资源 GUI，`multi-file/` 为外置资源 GUI、`.com` Console helper 与普通临时释放包，ZIP 位于 `windows/native-build/chaoxing-plus-6.2.0-windows.zip`。Node 备用 EXE 位于其构建目录的 `release/`，Node 兼容目录包保留历史输出规则。原生 `bin/` 保留宿主与调试/测试 EXE；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
+插件共用的 `src/`、`public/`、`build.mjs`、`build-browser.sh`、`package.json` 与插件输出 `dist/` 保留原位。Windows 输出为 `dist-windows/`、`windows/native-build/` 与 `windows/node-build/`；原生完整包直接位于 `windows/native-build/release/`，`single-file/` 为内嵌资源 GUI，`multi-file/` 为外置资源 GUI、`.com` Console helper 与普通临时释放包，不生成 ZIP，也不复制 README 或 docs。Node 备用 EXE 位于其构建目录的 `release/`，Node 兼容目录包保留历史输出规则。原生 `bin/` 保留宿主与调试/测试 EXE；回归测试仍在根 `scripts/`。本机 `windows/data/` 与 `windows/local-features.json` 均已忽略，继续留在原位，不作为源码清理对象。
 
 ## 共享模块
 
@@ -33,14 +33,14 @@ Windows 考试客户端代码保持三类目录；本页是总入口。各目录
 | [原生编译脚本](../native-source/build-windows.ps1) | 只编译；`BuildConsole` 默认 `true`，生成单文件 GUI、多文件 GUI/helper/临时释放包；`-BuildConsole:$false` 仅单文件 GUI，`-BuildTests` 同时生成 C 测试 |
 | [扩展构建](../../build-browser.sh) | 仅构建插件的 `dist/` |
 | `npm run build:windows` | 调用共享构建入口，生成 `dist-windows/` |
-| `npm run release:windows` | 原生完整包直接生成到 `windows/native-build/release/`，ZIP 位于 `windows/native-build/` |
+| `npm run release:windows` | 原生运行目录直接生成到 `windows/native-build/release/`，不生成 ZIP 或复制文档 |
 | `npm run build:node:exe` | 使用已有 release 注入资源，生成 `windows/node-build/release/chaoxing_plus_node.exe` |
 
 ## 发布包布局
 
-默认原生最终目录直接为 `windows/native-build/release/`，不追加版本目录；原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定多文件编译输入。`single-file/chaoxing_plus.exe` 为内嵌五项资源的 GUI；`multi-file/chaoxing_plus.exe` 为外置资源 GUI，四项页面资源位于 `assets/`，代理为根目录 `winmm-proxy.dll`，不含这些 RCDATA。同级 `chaoxing_plus.com` 是 Console helper，`package-to-single/chaoxing_plus.exe` 是每次释放到自建临时目录、等待 GUI 后仅清理该目录的普通释放包，发布原件不删除。多文件仅发布普通与调试两个原生启动器，另带配置、文档和独立校验清单。根与 `multi-file/` 各自包含 `verify-release.mjs`、`release-info.json` 和 `SHA256SUMS.txt`，根不放兼容 EXE 或启动器；配置模板位于 `multi-file/windows/share-file/config.example.json`。
+默认原生最终目录直接为 `windows/native-build/release/`，不追加版本目录，不生成 ZIP，也不复制 README 或 docs；原生模式 `--out <dir>` 指定最终目录，`--multi-dir <dir>` 指定多文件编译输入。`single-file/chaoxing_plus.exe` 为内嵌五项资源的 GUI；`multi-file/chaoxing_plus.exe` 为外置资源 GUI，四项页面资源位于 `assets/`，代理为根目录 `winmm-proxy.dll`，不含这些 RCDATA。同级 `chaoxing_plus.com` 是 Console helper，`package-to-single/chaoxing_plus.exe` 是每次释放到自建临时目录、等待 GUI 后仅清理该目录的普通释放包，发布原件不删除。多文件仅发布普通与调试两个原生启动器，另带配置和独立校验清单。根与 `multi-file/` 各自包含 `verify-release.mjs`、`release-info.json` 和 `SHA256SUMS.txt`，根不放兼容 EXE 或启动器；配置模板位于 `multi-file/windows/share-file/config.example.json`。CI 上传该原生发布目录。
 
-显式 `--with-node` 生成包含 Node 运行闭包、启动器和运行时的历史兼容包，`--skip-native` 生成纯 Node 备用包；两者保留原有 `<out>/<name>/` 布局和默认仓库根 `release/` 输出。Node 闭包放在包内 `windows/node-source/`，配置模板放在 `windows/share-file/config.example.json`，不改变冻结的 Node 打包行为。
+显式 `--with-node` 生成包含 Node 运行闭包、启动器和运行时的历史兼容包，`--skip-native` 生成纯 Node 备用包；两者保留原有 `<out>/<name>/` 布局、默认仓库根 `release/` 输出及 ZIP/文档行为。Node 闭包放在包内 `windows/node-source/`，配置模板放在 `windows/share-file/config.example.json`，不改变冻结的 Node 打包行为。
 
 原生多文件包中，普通 `start-windows.cmd` 启动同级 GUI `.exe`，调试 `start-windows-debug.cmd` 使用同级 `.com` helper；不发布三个 `start-windows-silent*.cmd`，多文件清除、自毁与 `--stage-boot` 请求明确拒绝。直接在 PowerShell 调用 GUI `.exe` 不保证等待，需要等待时使用扩展省略的 `chaoxing_plus`、显式 `.com` 或 `Start-Process -Wait`。Node 历史兼容包的原生和 Node 启动器保持原样：`start-windows-node.cmd` 隐藏 Node 控制台并保留客户端选择 GUI，`start-windows-node-silent.cmd` 保留固定静默内存场景与独立 VBS/bootstrap。源码启动器定位仓库根或构建产物，复制后的原生启动器定位 `multi-file/`，Node 启动器定位历史发布包根。
 
