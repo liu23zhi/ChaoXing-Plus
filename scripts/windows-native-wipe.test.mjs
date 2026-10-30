@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile, access } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -58,4 +58,19 @@ test('delete-suspend requires the trusted release layout', { skip: !host }, () =
   });
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stdout, /delete-suspend requires the release layout/u);
+});
+
+test('native wipe also removes the selected client debug.log without touching CXExam', { skip: !host }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cx-client-debuglog-'));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const client = path.join(root, 'CXExam.exe');
+  await copyFile(host, client);
+  await writeFile(path.join(root, 'debug.log'), 'log');
+  const result = spawnSync(host, [
+    '--client', client, '--wipe-owned-files-on-start', '--attach', '1',
+    '--debug-timeout', '1000', '--no-disk-write', '--quiet'
+  ], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  assert.equal(await exists(path.join(root, 'debug.log')), false, 'client debug.log must be removed');
+  assert.equal(await exists(client), true, 'CXExam must never be removed');
+  assert.notEqual(result.status, 0);
 });

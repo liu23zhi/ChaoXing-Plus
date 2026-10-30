@@ -108,6 +108,13 @@ static void collect_diagnostics(CX_WIPE *wipe, const WCHAR *diagnostics, const W
     FindClose(find);
 }
 
+int cx_wipe_add_file(CX_WIPE *wipe, const WCHAR *path, const WCHAR *externalConfig) {
+    int before;
+    if (!wipe || !path || !path[0] || wipe->count >= CX_WIPE_MAX_FILES) return 0;
+    before = wipe->count;
+    add_file(wipe, path, externalConfig);
+    return wipe->count > before ? 1 : 0;
+}
 void cx_wipe_init(CX_WIPE *wipe) {
     if (!wipe) return;
     ZeroMemory(wipe, sizeof(*wipe));
@@ -188,6 +195,7 @@ static DWORD WINAPI wipe_thread(LPVOID parameter) {
 BOOL cx_wipe_start(CX_WIPE *wipe) {
     int i, attempts, remaining = 0;
     if (!wipe) return TRUE;
+    if (wipe->thread) return TRUE;
     attempts = wipe->policy == CX_WIPE_IGNORE ? 1 : (wipe->policy == CX_WIPE_BACKGROUND ? 1 : wipe->retries);
     for (i = 0; i < wipe->count; ++i) {
         if (!wipe->pending[i]) continue;

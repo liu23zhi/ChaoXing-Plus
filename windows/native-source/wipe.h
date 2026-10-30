@@ -37,6 +37,8 @@ void cx_wipe_configure(CX_WIPE *wipe, CX_WIPE_POLICY policy, int retries, int de
                        BOOL runtimeRetry, DWORD runtimeIntervalMs);
 /** 收集 <dataDir>\chaoxing 下登记的宿主数据文件；externalConfig 命中的文件跳过。 */
 int cx_wipe_collect(CX_WIPE *wipe, const WCHAR *dataDir, const WCHAR *externalConfig);
+/** 追加一个已确认属于宿主的文件；返回 1 表示加入计划。 */
+int cx_wipe_add_file(CX_WIPE *wipe, const WCHAR *path, const WCHAR *externalConfig);
 /** 启动阶段执行一次清理；abort 策略失败返回 FALSE。 */
 BOOL cx_wipe_start(CX_WIPE *wipe);
 /** 停止运行期重试线程并等待退出。 */

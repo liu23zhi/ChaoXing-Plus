@@ -1823,6 +1823,18 @@ done:
     return ok;
 }
 
+/* CXExam.exe 同目录的 debug.log 属于客户端运行痕迹；仅在清理模式下删除，不删除客户端本身。 */
+static BOOL h_wipe_client_log(CX_OPTIONS *options) {
+    WCHAR dir[CX_CLEANUP_PATH_CAP], log[CX_CLEANUP_PATH_CAP];
+    const WCHAR *client = h_selected_path[0] ? h_selected_path : (options->clientPathSet ? options->clientPath : NULL);
+    if (!h_wipe_ready || !client || !client[0]) return TRUE;
+    if (!options->wipeOwnedFilesOnStart && !options->deleteSuspend) return TRUE;
+    if (!h_parent_dir(client, dir, CX_CLEANUP_PATH_CAP)) return TRUE;
+    if (!h_copy(log, CX_CLEANUP_PATH_CAP, dir) || !h_cat(log, CX_CLEANUP_PATH_CAP, L"\\debug.log")) return TRUE;
+    if (!cx_wipe_add_file(&h_wipe, log, options->configPathSet ? options->configPath : NULL)) return TRUE;
+    if (!cx_wipe_start(&h_wipe) && options->wipeOwnedFilesOnStart) return FALSE;
+    return TRUE;
+}
 static void h_silent_cleanup_pass(void) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     int failed = 0;
@@ -2579,6 +2591,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_proxy_target_auto = !options->proxyTarget[0] || h_same(options->proxyTarget, L"auto");
     if (!h_proxy_target_auto) h_copy(h_proxy_target, 16, options->proxyTarget);
     else if (!options->attachPortSet) h_resolve_proxy_target(h_selected_path);
+    if (!h_wipe_client_log(options)) {
+        h_exit_code = 3;
+        h_report.stopReason = "wipe-aborted";
+        goto done;
+    }
     h_report.stopReason = "assets-failed";
     if (!h_config_begin(options, error, errorCap)) goto done;
     if (!cx_asset_load(L"windows-bootstrap.js", options->assetsDirSet ? options->assetsDir : NULL, &bootstrap, &bootstrapLength, error, errorCap)
