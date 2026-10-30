@@ -2505,6 +2505,15 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_report.executionMode = options->deleteSuspend ? "delete-suspend" : (options->executionModeMemory ? "memory" : "normal");
     h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
     h_report.stopReason = "discovery-failed";
+    if (options->deleteSuspend) {
+        WCHAR layoutRoot[CX_CLEANUP_PATH_CAP];
+        if (!h_silent_root(layoutRoot, CX_CLEANUP_PATH_CAP) || !cx_cleanup_is_release_layout(layoutRoot)) {
+            h_error(error, errorCap, L"delete-suspend requires the release layout (SHA256SUMS.txt next to the EXE)");
+            if (!options->quiet) h_print(error);
+            h_exit_code = 2;
+            return FALSE;
+        }
+    }
     if (!options->listClients || options->reportPath[0]) {
         const CX_OPTIONS *auditOptions = options;
         if (options->listClients) {

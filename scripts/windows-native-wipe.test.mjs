@@ -51,3 +51,11 @@ test('native wipe tuning without the main switch exits 2', { skip: !host }, () =
   assert.equal(result.status, 2, result.stdout);
   assert.match(result.stdout, /wipe-\* tuning requires --wipe-owned-files-on-start/u);
 });
+
+test('delete-suspend requires the trusted release layout', { skip: !host }, () => {
+  const result = spawnSync(host, ['--delete-suspend', '--client-index', '1', '--no-disk-write'], {
+    encoding: 'utf8', timeout: 20000, windowsHide: true
+  });
+  assert.equal(result.status, 2, result.stdout);
+  assert.match(result.stdout, /delete-suspend requires the release layout/u);
+});
