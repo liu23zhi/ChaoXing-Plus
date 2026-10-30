@@ -93,6 +93,9 @@ static void probe_tests(void) {
     check(probe.scanAllAvailable, "full disk scan remains available");
     check(probe.injectOptionCount == 3, "injection mode combo offers auto/cdp-port/dll-proxy");
     check(probe.injectSelectedIndex == 0, "injection mode defaults to auto");
+    check(probe.carrierOptionCount == 8, "carrier combo lists auto plus seven carriers");
+    check(probe.carrierSelectedIndex == 0, "carrier defaults to auto");
+    { WCHAR msg[128]; wsprintfW(msg, L"injection combo has a usable size (%ldx%ld)", probe.injectComboWidth, probe.injectComboHeight); check(probe.injectComboWidth >= 120 && probe.injectComboHeight >= 16, msg); }
     check(probe.unicodeWindow && probe.titleMatches, "the native window has the Chinese product title");
     {
         DWORD expectedDpi = expected_ui_dpi();
@@ -300,4 +303,6 @@ void WINAPI SelectionTestMain(void) {
     output(failedChecks ? "NATIVE SELECTION TESTS FAIL\n" : "NATIVE SELECTION TESTS PASS\n");
     ExitProcess(failedChecks ? 1 : 0);
 }
+
+
 

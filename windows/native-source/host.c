@@ -333,6 +333,7 @@ static BOOL h_dll_proxy_mode = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static WCHAR h_gui_inject_mode[16];
+static WCHAR h_gui_proxy_carrier[16];
 static BOOL h_gui_mode_chosen;
 static BOOL h_same(const WCHAR *a, const WCHAR *b);
 static BOOL h_json_quote(char *out, DWORD cap, DWORD *at, const char *text, DWORD length);
@@ -749,6 +750,7 @@ static BOOL h_selfheal_retry(const CX_OPTIONS *options, HANDLE clientProcess) {
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
+    else if (h_gui_proxy_carrier[0] && !h_same(h_gui_proxy_carrier, L"auto")) h_copy(h_proxy_target, 16, h_gui_proxy_carrier);
     h_proxy_target_auto = (options->proxyTarget[0] == 0) || h_same(h_proxy_target, L"auto");
     if (h_proxy_target_auto) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     else if (h_carrier_is_known_dll(h_proxy_target)) {
@@ -877,6 +879,7 @@ static BOOL h_install_proxy(const CX_OPTIONS *options) {
 /* 卸载代理：只有当目录里有安装标记时才删除，避免误删第三方的 winmm.dll。 */
 static BOOL h_uninstall_proxy(const CX_OPTIONS *options) {
     if (options->proxyTarget[0]) h_copy(h_proxy_target, 16, options->proxyTarget);
+    else if (h_gui_proxy_carrier[0] && !h_same(h_gui_proxy_carrier, L"auto")) h_copy(h_proxy_target, 16, h_gui_proxy_carrier);
     h_proxy_target_auto = (options->proxyTarget[0] == 0) || h_same(h_proxy_target, L"auto");
     if (h_proxy_target_auto) h_resolve_proxy_target(options->clientPath[0] ? options->clientPath : h_selected_path);
     WCHAR targetDir[CX_CLEANUP_PATH_CAP], dll[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
@@ -2858,6 +2861,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 void __stdcall WinMainCRTStartup(void) {
     ExitProcess((UINT)WinMain(GetModuleHandleW(NULL), NULL, NULL, SW_HIDE));
 }
+
 
 
 

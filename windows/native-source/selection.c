@@ -8,6 +8,7 @@
 #define SELECTION_TIMER 1003
 #define SELECTION_SCAN_ALL 1004
 #define SELECTION_INJECT 1005
+#define SELECTION_CARRIER 1006
 
 static const WCHAR selectionClass[] = L"CXPlusNativeClientSelection";
 static const WCHAR selectionTitle[] = L"超星学习助手 - 选择考试客户端";
@@ -20,15 +21,18 @@ typedef struct SELECTION_WINDOW {
     DWORD outCap;
     WCHAR *error;
     DWORD errorCap;
-    HWND window, heading, columns, list, browse, scanAll, choose, cancel, injectLabel, injectCombo;
+    HWND window, heading, columns, list, browse, scanAll, choose, cancel, injectLabel, injectCombo, carrierLabel, carrierCombo;
     const WCHAR *notice;
     HFONT font;
     BOOL finished;
     CX_SELECTION_STATUS result;
     WCHAR injectMode[16];
+    WCHAR proxyCarrier[16];
 } SELECTION_WINDOW;
 
 static WCHAR selection_last_inject_mode[16] = L"auto";
+static WCHAR selection_last_carrier[16] = L"auto";
+const WCHAR *cx_selection_proxy_carrier(void) { return selection_last_carrier; }
 const WCHAR *cx_selection_inject_mode(void) { return selection_last_inject_mode; }
 
 static void selection_error(SELECTION_WINDOW *state, const WCHAR *message) {
@@ -131,15 +135,19 @@ static void selection_layout(SELECTION_WINDOW *state) {
     GetClientRect(state->window, &rect); width = rect.right; height = rect.bottom;
     int margin = selection_scale(18), gap = selection_scale(20), top = selection_scale(16);
     int headingHeight = selection_scale(26), columnsTop = selection_scale(52), columnsHeight = selection_scale(22);
-    int listTop = selection_scale(78), bottomOffset = selection_scale(146), buttonTop = height - selection_scale(52);
+    int listTop = selection_scale(78), bottomOffset = selection_scale(200), buttonTop = height - selection_scale(52);
     int buttonHeight = selection_scale(32), buttonWidth = selection_scale(138), chooseWidth = selection_scale(102);
     MoveWindow(state->heading, margin, top, width - selection_scale(36), headingHeight, TRUE);
     MoveWindow(state->columns, gap, columnsTop, width - selection_scale(40), columnsHeight, TRUE);
     MoveWindow(state->list, margin, listTop, width - selection_scale(36), height - bottomOffset, TRUE);
     {
-        int injectTop = buttonTop - selection_scale(46);
+        int injectTop = buttonTop - selection_scale(44);
         MoveWindow(state->injectLabel, margin, injectTop + selection_scale(6), selection_scale(96), selection_scale(24), TRUE);
-        MoveWindow(state->injectCombo, margin + selection_scale(100), injectTop, selection_scale(220), selection_scale(220), TRUE);
+        MoveWindow(state->injectCombo, margin + selection_scale(110), injectTop, selection_scale(210), selection_scale(200), TRUE);
+        SendMessageW(state->injectCombo, CB_SETDROPPEDWIDTH, (WPARAM)selection_scale(210), 0);
+        MoveWindow(state->carrierLabel, margin + selection_scale(340), injectTop + selection_scale(6), selection_scale(96), selection_scale(24), TRUE);
+        MoveWindow(state->carrierCombo, margin + selection_scale(440), injectTop, selection_scale(210), selection_scale(200), TRUE);
+        SendMessageW(state->carrierCombo, CB_SETDROPPEDWIDTH, (WPARAM)selection_scale(210), 0);
     }
     MoveWindow(state->browse, margin, buttonTop, buttonWidth, buttonHeight, TRUE);
     MoveWindow(state->scanAll, selection_scale(168), buttonTop, buttonWidth, buttonHeight, TRUE);
@@ -175,6 +183,7 @@ static BOOL selection_accept(SELECTION_WINDOW *state, const WCHAR *path) {
         return FALSE;
     }
     lstrcpynW(selection_last_inject_mode, state->injectMode[0] ? state->injectMode : L"auto", 16);
+    lstrcpynW(selection_last_carrier, state->proxyCarrier[0] ? state->proxyCarrier : L"auto", 16);
     state->result = CX_SELECTION_SELECTED;
     if (state->error && state->errorCap) state->error[0] = 0;
     DestroyWindow(state->window);
@@ -229,12 +238,23 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
             SendMessageW(state->injectCombo, CB_SETCURSEL, 0, 0);
             lstrcpynW(state->injectMode, L"auto", 16);
         } else { selection_error(state, L"无法创建注入方式选择控件。"); return -1; }
+        state->carrierLabel = selection_control(state, SS_LEFT, L"STATIC", L"代理载体：", -1);
+        state->carrierCombo = selection_control(state, CBS_DROPDOWNLIST | WS_VSCROLL, L"COMBOBOX", L"", SELECTION_CARRIER);
+        if (state->carrierLabel && state->carrierCombo) {
+            static const WCHAR *const carriers[] = { L"自动（按导入表）", L"winmm.dll", L"version.dll", L"uxtheme.dll",
+                                                     L"msimg32.dll", L"sensapi.dll", L"oledlg.dll", L"wtsapi32.dll" };
+            int ci;
+            for (ci = 0; ci < 8; ++ci) SendMessageW(state->carrierCombo, CB_ADDSTRING, 0, (LPARAM)carriers[ci]);
+            SendMessageW(state->carrierCombo, CB_SETCURSEL, 0, 0);
+            lstrcpynW(state->proxyCarrier, L"auto", 16);
+            EnableWindow(state->carrierCombo, FALSE);
+        } else { selection_error(state, L"无法创建代理载体选择控件。"); return -1; }
         selection_layout(state); return 0;
     }
     if (message == WM_SIZE) { selection_layout(state); return 0; }
     if (message == WM_GETMINMAXINFO) {
         MINMAXINFO *info = (MINMAXINFO *)lParam;
-        info->ptMinTrackSize.x = selection_scale(640); info->ptMinTrackSize.y = selection_scale(360); return 0;
+        info->ptMinTrackSize.x = selection_scale(640); info->ptMinTrackSize.y = selection_scale(420); return 0;
     }
     if (message == WM_COMMAND) {
         int command = LOWORD(wParam);
@@ -243,6 +263,14 @@ static LRESULT CALLBACK selection_proc(HWND window, UINT message, WPARAM wParam,
         if (command == SELECTION_INJECT && HIWORD(wParam) == CBN_SELCHANGE) {
             LRESULT pick = SendMessageW(state->injectCombo, CB_GETCURSEL, 0, 0);
             lstrcpynW(state->injectMode, pick == 1 ? L"cdp-port" : (pick == 2 ? L"dll-proxy" : L"auto"), 16);
+            EnableWindow(state->carrierCombo, pick != 1); /* cdp-port 时载体无意义 */
+            return 0;
+        }
+        if (command == SELECTION_CARRIER && HIWORD(wParam) == CBN_SELCHANGE) {
+            static const WCHAR *const names[] = { L"auto", L"winmm", L"version", L"uxtheme", L"msimg32", L"sensapi", L"oledlg", L"wtsapi32" };
+            LRESULT pick = SendMessageW(state->carrierCombo, CB_GETCURSEL, 0, 0);
+            if (pick < 0 || pick > 7) pick = 0;
+            lstrcpynW(state->proxyCarrier, names[pick], 16);
             return 0;
         }
         if (command == SELECTION_SCAN_ALL) {
@@ -366,6 +394,15 @@ BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates, BOOL hostIs32Bit,
     probe->layoutScale = selection_ui_dpi();
     probe->injectOptionCount = IsWindow(state.injectCombo) ? (DWORD)SendMessageW(state.injectCombo, CB_GETCOUNT, 0, 0) : 0;
     probe->injectSelectedIndex = IsWindow(state.injectCombo) ? (LONG)SendMessageW(state.injectCombo, CB_GETCURSEL, 0, 0) : -1;
+    probe->carrierOptionCount = IsWindow(state.carrierCombo) ? (DWORD)SendMessageW(state.carrierCombo, CB_GETCOUNT, 0, 0) : 0;
+    probe->carrierSelectedIndex = IsWindow(state.carrierCombo) ? (LONG)SendMessageW(state.carrierCombo, CB_GETCURSEL, 0, 0) : -1;
+    {
+        RECT comboRect = {0,0,0,0};
+        if (IsWindow(state.injectCombo) && GetWindowRect(state.injectCombo, &comboRect)) {
+            probe->injectComboWidth = comboRect.right - comboRect.left;
+            probe->injectComboHeight = comboRect.bottom - comboRect.top;
+        }
+    }
     GetWindowTextW(state.heading, heading, 512);
     probe->noticeShown = notice && notice[0]
         ? lstrcmpW(heading, notice) == 0
@@ -618,4 +655,9 @@ BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *state, WCHAR *error, DWORD errorCap)
     HeapFree(GetProcessHeap(), 0, state);
     return cancelled;
 }
+
+
+
+
+
 

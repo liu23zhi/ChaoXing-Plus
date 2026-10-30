@@ -21,6 +21,10 @@ typedef struct CX_SELECTION_PROBE {
     DWORD layoutScale;
     DWORD injectOptionCount;
     LONG injectSelectedIndex;
+    LONG injectComboWidth;
+    LONG injectComboHeight;
+    DWORD carrierOptionCount;
+    LONG carrierSelectedIndex;
 } CX_SELECTION_PROBE;
 
 /* `notice` is an optional first-line message (for example "全盘扫描已取消");
@@ -33,6 +37,7 @@ CX_SELECTION_STATUS cx_select_client(const CX_DISCOVERY_RESULT *candidates,
 
 /* 选择窗口里用户挑的注入方式：auto / cdp-port / dll-proxy。 */
 const WCHAR *cx_selection_inject_mode(void);
+const WCHAR *cx_selection_proxy_carrier(void);
 
 /* Creates the same controls without showing a window or opening a file dialog. */
 BOOL cx_selection_probe(const CX_DISCOVERY_RESULT *candidates,
@@ -56,5 +61,8 @@ void cx_scan_progress_bind(CX_DISCOVERY_OPTIONS *scan, CX_SCAN_PROGRESS *progres
 BOOL cx_scan_progress_end(CX_SCAN_PROGRESS *progress, WCHAR *error, DWORD errorCap);
 
 #endif
+
+
+
 
 
