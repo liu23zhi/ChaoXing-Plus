@@ -51,10 +51,11 @@ test('native debug launcher keeps the homepage unless an explicit workflow is su
     fs.readFile(path.join(native, 'host.c'), 'utf8'),
     fs.readFile(path.join(root, 'windows', 'native-scripts', 'start-windows-debug.cmd'), 'utf8')
   ]);
-  assert.doesNotMatch(launcher, /--console\s+--ui\s+gui/u, 'debug launcher must not force client selection');
-  assert.match(launcher, /--console\s+--show-inject-reasons/u);
+  assert.match(launcher, /--console\s+--ui\s+gui\s+--show-inject-reasons/u);
   assert.match(host, /h_equal\(argv\[argument\], L"--console"\)/u);
   assert.match(host, /h_equal\(argv\[argument\], L"--show-inject-reasons"\)/u);
+  assert.match(host, /h_equal\(argv\[argument\], L"--ui"\)/u);
+  assert.match(host, /h_equal\(argv\[argument\], L"gui"\)/u);
 });
 
 test('compiled native injection honors strategy order, retry limits and unique request IDs', {

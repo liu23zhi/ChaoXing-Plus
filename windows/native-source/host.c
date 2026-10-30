@@ -3009,7 +3009,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!h_equal(argv[argument], L"--elevate-on-start")
             && !h_equal(argv[argument], L"--elevated")
             && !h_equal(argv[argument], L"--console")
-            && !h_equal(argv[argument], L"--show-inject-reasons")) {
+            && !h_equal(argv[argument], L"--show-inject-reasons")
+            && !h_equal(argv[argument], L"--ui")
+            && !h_equal(argv[argument], L"gui")) {
             h_default_gui = FALSE; break;
         }
     }

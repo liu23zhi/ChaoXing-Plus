@@ -44,7 +44,7 @@ if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 | 入口 | 行为 |
 | --- | --- |
 | [start-windows.cmd](../native-scripts/start-windows.cmd) | 普通入口；多文件发布包启动同级 GUI `.exe` |
-| [start-windows-debug.cmd](../native-scripts/start-windows-debug.cmd) | 调试入口；默认进入原生首页并使用同级 `.com` helper，附加客户端参数后进入对应流程 |
+| [start-windows-debug.cmd](../native-scripts/start-windows-debug.cmd) | 调试入口；使用 GUI 界面先进入原生首页，再由首页进入客户端选择；使用同级 `.com` helper |
 | [start-windows-silent.cmd](../native-scripts/start-windows-silent.cmd) | 既有单文件静默入口，不随新的原生多文件包发布 |
 | [start-windows-silent-debug.cmd](../native-scripts/start-windows-silent-debug.cmd) | 既有单文件静默调试入口，不随新的原生多文件包发布 |
 | [start-windows-silent-no-full-scan-debug.cmd](../native-scripts/start-windows-silent-no-full-scan-debug.cmd) | 既有单文件静默常规扫描入口，不随新的原生多文件包发布 |
