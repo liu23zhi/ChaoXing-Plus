@@ -3003,7 +3003,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     /* A double-click must allow choosing a client even when defaults name one. */
     h_default_gui = TRUE;
     for (argument = 1; argument < argc; ++argument) {
-        if (!h_equal(argv[argument], L"--elevate-on-start") && !h_equal(argv[argument], L"--elevated")) {
+        /* Console/debug presentation flags must not turn the homepage into a
+           direct client-selection launch. Other arguments still opt into the
+           explicit client workflow. */
+        if (!h_equal(argv[argument], L"--elevate-on-start")
+            && !h_equal(argv[argument], L"--elevated")
+            && !h_equal(argv[argument], L"--console")
+            && !h_equal(argv[argument], L"--show-inject-reasons")) {
             h_default_gui = FALSE; break;
         }
     }
