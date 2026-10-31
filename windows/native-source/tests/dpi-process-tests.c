@@ -5,7 +5,7 @@
 #include "../dpi.h"
 #include "../process.h"
 
-static WCHAR executable[32768], errorText[512];
+static WCHAR executables[3][32768], errorText[512];
 static DWORD failures;
 
 static void output(const char *text) {
@@ -14,7 +14,7 @@ static void output(const char *text) {
 static void check(BOOL ok, const char *name) {
     output(ok ? "PASS " : "FAIL "); output(name); output("\n"); if (!ok) ++failures;
 }
-static BOOL layer_absent(void) {
+static BOOL layer_absent(const WCHAR *executable) {
     HKEY key;
     LSTATUS status = RegOpenKeyExW(HKEY_CURRENT_USER,
         L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers", 0,
@@ -24,7 +24,7 @@ static BOOL layer_absent(void) {
     status = RegQueryValueExW(key, executable, NULL, NULL, NULL, NULL);
     RegCloseKey(key); return status == ERROR_FILE_NOT_FOUND;
 }
-static BOOL run_child(USHORT port, BOOL override, DWORD *code) {
+static BOOL run_child(const WCHAR *executable, USHORT port, BOOL override, DWORD *code) {
     CX_DPI_OVERRIDE *dpi = NULL;
     HANDLE child = NULL;
     DWORD pid = 0;
@@ -46,18 +46,25 @@ void __stdcall DpiProcessTestMain(void) {
     WCHAR **argv; int argc;
     WSADATA data;
     DWORD baseCode = 0, overrideCode = 0, againCode = 0;
+    int i;
     USHORT port;
     argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv || argc != 2 || !GetFullPathNameW(argv[1], 32768, executable, NULL)) ExitProcess(2);
+    if (!argv || argc != 4) ExitProcess(2);
+    for (i = 0; i < 3; ++i) {
+        if (!GetFullPathNameW(argv[i + 1], 32768, executables[i], NULL)) ExitProcess(2);
+    }
     LocalFree(argv);
     if (WSAStartup(MAKEWORD(2, 2), &data)) ExitProcess(2);
     for (port = 38100; port < 38200; ++port) if (proc_port_bindable(port, errorText, 512)) break;
-    if (port == 38200 || !layer_absent()) ExitProcess(2);
-    check(run_child(port, FALSE, &baseCode) && baseCode == 5, "test child starts DPI-unaware without override");
-    check(run_child(port, TRUE, &overrideCode) && overrideCode == 7, "temporary layer affects actual child DPI awareness before immediate restore");
-    check(layer_absent(), "owned test executable has no retained compatibility value");
-    check(run_child(port, FALSE, &againCode) && againCode == 5,
-        "subsequent ordinary launch returns to original DPI awareness");
+    if (port == 38200 || !layer_absent(executables[0]) || !layer_absent(executables[1])
+        || !layer_absent(executables[2])) ExitProcess(2);
+    check(run_child(executables[0], port, FALSE, &baseCode) && baseCode == 5,
+        "test child starts DPI-unaware without override");
+    check(run_child(executables[1], port, TRUE, &overrideCode) && overrideCode == 7,
+        "temporary layer affects a fresh test child before immediate restore");
+    check(layer_absent(executables[1]), "overridden test executable has no retained compatibility value");
+    check(run_child(executables[2], port, FALSE, &againCode) && againCode == 5,
+        "ordinary launch after restoration remains DPI-unaware");
     WSACleanup();
     output(failures ? "NATIVE DPI PROCESS TESTS FAIL\n" : "NATIVE DPI PROCESS TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);

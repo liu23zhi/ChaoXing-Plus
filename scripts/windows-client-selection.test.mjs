@@ -307,7 +307,7 @@ test('扫描进度窗口取消会中止全盘扫描并保留原候选', async ()
       const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
       if (options.signal.aborted) { abort(); return; }
       options.signal.addEventListener('abort', abort, { once: true });
-      setTimeout(() => resolveCancelled(true), 20).unref?.();
+      setTimeout(() => resolveCancelled(true), 20);
     });
   };
   await assert.rejects(

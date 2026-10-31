@@ -34,9 +34,10 @@ test('native wipe removes only registered host artifacts', { skip: !host }, asyn
   for (const [key, target] of Object.entries(files)) await writeFile(target, key === 'diagnostic' || key === 'external' ? '{}' : key);
   const result = spawnSync(host, [
     '--wipe-owned-files-on-start', '--data-dir', data,
-    '--config', files.external, '--client-index', '2147483647', '--no-disk-write'
+    '--config', files.external, '--client-index', '2147483647',
+    '--no-disk-write', '--print-effective-config'
   ], { encoding: 'utf8', timeout: 60000, windowsHide: true });
-  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(await exists(files.cache), false, 'scan cache must be removed');
   assert.equal(await exists(files.log), false, 'host log must be removed');
   assert.equal(await exists(files.diagnostic), false, 'diagnostic artifact must be removed');

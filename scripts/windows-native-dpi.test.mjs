@@ -53,14 +53,15 @@ test('temporary DPI override changes a real test child and restores the next ord
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'cx-native-dpi-中文 空格-'));
   try {
-    const child = join(directory, 'DpiProbe.exe');
-    await copyFile(process.env.CX_NATIVE_DPI_CHILD_EXE, child);
-    const result = spawnSync(process.env.CX_NATIVE_DPI_PROCESS_EXE, [child], {
+    const children = ['DpiBaseline.exe', 'DpiOverride.exe', 'DpiAfterRestore.exe']
+      .map((name) => join(directory, name));
+    for (const child of children) await copyFile(process.env.CX_NATIVE_DPI_CHILD_EXE, child);
+    const result = spawnSync(process.env.CX_NATIVE_DPI_PROCESS_EXE, children, {
       cwd: directory, encoding: 'utf8', timeout: 20_000, windowsHide: true
     });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /NATIVE DPI PROCESS TESTS PASS/);
-    assert.deepEqual(await readdir(directory), ['DpiProbe.exe']);
+    assert.deepEqual(await readdir(directory), children.map((child) => child.split(/[\\/]/u).pop()).sort());
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

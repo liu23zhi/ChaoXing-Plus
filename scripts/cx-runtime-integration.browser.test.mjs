@@ -148,12 +148,19 @@ async function openPage(t, { withTask = false, existingPage } = {}) {
 
 async function pauseButton(page) {
   const button = await page.evaluateHandle(() => Array.from(document.querySelectorAll('#panel-common-work-results button'))
-    .find((element) => ['暂停答题', '继续答题'].includes(element.textContent)));
+    .filter((element) => ['暂停答题', '继续答题'].includes(element.textContent))
+    .sort((left, right) => Number(right.getClientRects().length > 0) - Number(left.getClientRects().length > 0))[0]);
   assert.ok(button.asElement(), 'the real panel must contain a pause/continue button');
   return button.asElement();
 }
 
 async function expectButton(page, text) {
+  await page.waitForFunction((expectedText) => Array.from(document.querySelectorAll('#panel-common-work-results button'))
+    .some((element) => element.textContent === expectedText
+      && !element.disabled
+      && element.getClientRects().length > 0
+      && getComputedStyle(element).display !== 'none'
+      && getComputedStyle(element).visibility !== 'hidden'), undefined, text);
   const button = await pauseButton(page);
   const state = await button.evaluate((element) => ({ text: element.textContent, disabled: element.disabled,
     visible: element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' }));

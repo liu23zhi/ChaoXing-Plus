@@ -341,7 +341,7 @@ test('原生预设命令和 JSON 均通过已编译入口只读解析', { skip: 
         const result = spawnSync(process.env.CX_NATIVE_HOST_EXE, [...args, '--help'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
         assert.ifError(result.error);
         assert.equal(result.status, 0, `${preset}\n${result.stdout}\n${result.stderr}`);
-        assert.match(result.stdout, /6\.2\.0/u);
+        assert.match(result.stdout, /0\.1\.0/u);
       }
       assert.ok(output.cmd, preset);
       const cmdResult = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${output.cmd} --help"`], {

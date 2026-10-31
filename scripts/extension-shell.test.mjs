@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
@@ -12,6 +12,20 @@ const popupJsPath = resolve(process.cwd(), 'src', 'popup.js');
 const entryScriptPath = resolve(process.cwd(), 'src', 'extension-entry.js');
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
+let browser;
+
+before(async () => {
+  // Keep the two Chromium layout checks from launching competing browser
+  // processes when the whole test suite is running with limited concurrency.
+  browser = await puppeteer.launch({
+    headless: true,
+    executablePath: process.env.CX_BROWSER_EXECUTABLE
+  });
+});
+
+after(async () => {
+  await browser?.close();
+});
 
 const expectedDescription = '给超星网站使用的自动学习与自动搜题扩展。';
 const expectedHomepage = 'https://www.chaoxing.com/';
@@ -77,13 +91,9 @@ test('popup uses a responsive safe-area-aware layout on narrow screens', async (
 
 test('popup renders desktop width and mobile natural-height constraints in Chromium', { timeout: 20000 }, async () => {
   const source = await readFile(popupHtmlPath, 'utf8');
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: process.env.CX_BROWSER_EXECUTABLE
-  });
+  const page = await browser.newPage();
 
   try {
-    const page = await browser.newPage();
     page.setDefaultTimeout(6000);
     const html = source.replace(/\s*<script type="module" src="\.\/popup\.js"><\/script>/u, '');
 
@@ -130,19 +140,15 @@ test('popup renders desktop width and mobile natural-height constraints in Chrom
     assert.equal(tallMobileLayout.scrollHeight, tallMobileLayout.clientHeight);
     assert.equal(tallMobileLayout.maxHeight, '1020px');
   } finally {
-    await browser.close();
+    await page.close();
   }
 });
 
 test('popup keeps enough width for controls in the extension minimum viewport', { timeout: 20000 }, async () => {
   const source = await readFile(popupHtmlPath, 'utf8');
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: process.env.CX_BROWSER_EXECUTABLE
-  });
+  const page = await browser.newPage();
 
   try {
-    const page = await browser.newPage();
     const html = source.replace(/\s*<script type="module" src="\.\/popup\.js"><\/script>/u, '');
 
     await page.setViewport({ width: 150, height: 800 });
@@ -165,7 +171,7 @@ test('popup keeps enough width for controls in the extension minimum viewport', 
     assert.ok(layout.labelHeight <= 20);
     assert.ok(layout.stateHeight <= 20);
   } finally {
-    await browser.close();
+    await page.close();
   }
 });
 
