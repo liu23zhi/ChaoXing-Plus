@@ -43,7 +43,7 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { observeChapterSubmission } from './cx-chapter-submission.js';
-import { dismissChapterSubmissionDialog } from './cx-chapter-dialog.js';
+import { dismissChapterSubmissionDialog, hasChapterSubmissionConfirmation } from './cx-chapter-dialog.js';
 import { initializeCourseSession, type CourseSession } from './cx-course-session.js';
 import { getTabAnswerPauseController } from './tab-answer-pause.js';
 import {
@@ -640,13 +640,28 @@ async function invokeChapterActionWithExpiryCapture(
   _frameDocument: Document,
   action: () => unknown,
   waitMs = 0,
-  options: { phase?: 'open-confirmation' | 'submit'; jobId?: string; identity?: { courseId?: string; classId?: string; chapterId?: string; tabKey?: string; jobId: string; attemptId: string }; timeoutMs?: number; isCompleted?: () => boolean } = {}
+  options: {
+    phase?: 'open-confirmation' | 'submit';
+    jobId?: string;
+    identity?: { courseId?: string; classId?: string; chapterId?: string; tabKey?: string; jobId: string; attemptId: string };
+    timeoutMs?: number;
+    isCompleted?: () => boolean;
+    isConfirmationReady?: () => boolean;
+    confirmationDocument?: Document;
+    onSubmitted?: () => void;
+  } = {}
 ) {
   let nativeExpired = false;
+  let parameterFailure: Error | undefined;
   let executing = false;
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? 30000;
   const captureMessage = (message: unknown) => {
+    const text = String(message ?? '').replace(/[\s\u3000]+/gu, '');
+    if (/^无效的参数[:：]code-1[!！。.]?$/iu.test(text)) {
+      parameterFailure = new Error('提交参数校验失败（code-1），已取消本次提交，将按正常次数重试。');
+      return false;
+    }
     if (!isExpiredChapterMessage(message)) return undefined;
     nativeExpired = true;
     return false;
@@ -728,7 +743,16 @@ async function invokeChapterActionWithExpiryCapture(
         const current = registry;
         const subscriber: NativeSubscriber = {
           capture: captureMessage,
-          owns: () => !(options.jobId || options.identity?.jobId) || executing || observer.isHandlingResponse?.(actionWindow)
+          owns: () => {
+            if (observer.isHandlingOtherResponse?.(actionWindow)) return false;
+            if (!(options.jobId || options.identity?.jobId) || executing || observer.isHandlingResponse?.(actionWindow)) return true;
+            if (options.phase !== 'open-confirmation') return false;
+            try {
+              const jobId = options.identity?.jobId ?? options.jobId;
+              const currentJobId = actionWindow.document.querySelector<HTMLInputElement>('form #jobid,form input[name="jobid"]')?.value;
+              return currentJobId === jobId && (actionWindow !== frameWindow || actionWindow.document === _frameDocument);
+            } catch { return false; }
+          }
         };
         current.subscribers.add(subscriber);
         releaseHandlers.push(() => {
@@ -741,6 +765,13 @@ async function invokeChapterActionWithExpiryCapture(
       } catch { /* A cross-origin WindowProxy cannot host hooks. */ }
     }
     let actionResult: unknown;
+    if (options.phase === 'open-confirmation' && options.isConfirmationReady?.()) {
+      dismissChapterSubmissionDialog(actionWindows, {
+        jobId: options.identity?.jobId ?? options.jobId,
+        ownerDocument: options.confirmationDocument ?? _frameDocument
+      });
+      if (options.isConfirmationReady()) throw new Error('上次提交确认尚未关闭，已取消本次提交，请先关闭旧确认窗口。');
+    }
     executing = true;
     try { actionResult = observer.runAction ? observer.runAction(action) : action(); } finally { executing = false; }
     if (actionResult && typeof (actionResult as PromiseLike<unknown>).then === 'function') {
@@ -765,24 +796,37 @@ async function invokeChapterActionWithExpiryCapture(
     } else {
       captureResponse(actionResult);
     }
-    if (waitMs > 0) await sleep(Math.min(waitMs, Math.max(0, timeoutMs - (Date.now() - startedAt))));
+    if (options.phase === 'open-confirmation' && actionResult === false && !nativeExpired && !parameterFailure) {
+      throw new Error('页面拒绝本次提交预检查，将按正常次数重试。');
+    }
+    if (options.phase === 'open-confirmation' && options.isConfirmationReady) {
+      while (!nativeExpired && !parameterFailure && !submissionFailed && !submissionSucceeded
+        && !options.isCompleted?.() && !options.isConfirmationReady()) {
+        const remaining = timeoutMs - (Date.now() - startedAt);
+        if (remaining <= 0) throw new Error('提交确认尚未就绪，已取消本次提交，将按正常次数重试。');
+        await sleep(Math.min(50, remaining));
+      }
+    } else if (waitMs > 0) await sleep(Math.min(waitMs, Math.max(0, timeoutMs - (Date.now() - startedAt))));
+    if (parameterFailure) throw parameterFailure;
     try {
       const requireSubmission = options.phase === 'submit' && !nativeExpired && !options.isCompleted?.();
       await observer.wait(requireSubmission);
     } catch (error) {
       if (!nativeExpired) throw error;
     }
+    if (parameterFailure) throw parameterFailure;
     if (submissionFailed && !nativeExpired) throw new Error('章节测试提交失败，将按正常次数重试。');
     if (options.phase === 'submit' && !nativeExpired && !submissionSucceeded && !options.isCompleted?.()) {
       throw new Error('尚未确认章节测试已成功提交，将按正常次数重试。');
     }
+    if (submissionSucceeded && !nativeExpired) options.onSubmitted?.();
   } catch (error) {
     if (!nativeExpired && !isExpiredChapterResponse(error)) throw error;
     nativeExpired = true;
   } finally {
     observer.restore();
     releaseHandlers.forEach((release) => { try { release(); } catch { /* Navigated frame. */ } });
-    if (nativeExpired) dismissChapterSubmissionDialog(actionWindows, { jobId: options.identity?.jobId ?? options.jobId });
+    if (nativeExpired || parameterFailure) dismissChapterSubmissionDialog(actionWindows, { jobId: options.identity?.jobId ?? options.jobId });
   }
 
   return nativeExpired;
@@ -5167,7 +5211,8 @@ const JobRunner = {
           tabKey: submissionContext.tabKey, jobId: submissionJobId,
           attemptId: `${Date.now()}-${Math.random().toString(36).slice(2)}`
         };
-        const isSubmissionComplete = () => frameDocument.querySelector('.testTit_status_complete') !== null;
+        let confirmedSubmission = false;
+        const isSubmissionComplete = () => confirmedSubmission || frameDocument.querySelector('.testTit_status_complete') !== null;
         const checkChapterTask = () => {
           const currentJobId = formValue('form #jobid,form input[name="jobid"]')
             || frame.getAttribute('jobid') || (() => {
@@ -5186,7 +5231,7 @@ const JobRunner = {
             try {
               const ownerJobId = owner.document.querySelector<HTMLInputElement>('form #jobid,form input[name="jobid"]')?.value;
               if (typeof owner[name] === 'function' && (!ownerJobId || !submissionJobId || ownerJobId === submissionJobId)) {
-                return () => owner[name]();
+                return Object.assign(() => owner[name](), { ownerWindow: owner });
               }
               if (owner.parent === owner) break;
               owner = owner.parent as Window & Record<string, any>;
@@ -5195,6 +5240,7 @@ const JobRunner = {
           throw new Error(`章节测试${name === 'noSubmit' ? '保存' : '提交'}入口尚未就绪。`);
         };
         const performChapterAction = async (phase: 'open-confirmation' | 'submit', deadline: { expiresAt: number }) => {
+          if (phase === 'open-confirmation') confirmedSubmission = false;
           const pausedAt = Date.now();
           if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue(frameDocument);
           deadline.expiresAt += Date.now() - pausedAt;
@@ -5204,7 +5250,23 @@ const JobRunner = {
           return invokeChapterActionWithExpiryCapture(frameWindow as Window & Record<string, any>, frameDocument,
             action, phase === 'open-confirmation' ? 3000 : 0, {
               phase, jobId: submissionJobId, identity: submissionIdentity,
-              timeoutMs: Math.max(1, deadline.expiresAt - Date.now()), isCompleted: isSubmissionComplete
+              timeoutMs: Math.max(1, deadline.expiresAt - Date.now()), isCompleted: isSubmissionComplete,
+              onSubmitted: () => { confirmedSubmission = true; },
+              confirmationDocument: action.ownerWindow.document,
+              isConfirmationReady: phase === 'open-confirmation' ? () => {
+                checkChapterTask();
+                let owner = action.ownerWindow;
+                for (let depth = 0; depth < 10; depth++) {
+                  try {
+                    const ownerJobId = owner.document.querySelector<HTMLInputElement>('form #jobid,form input[name="jobid"]')?.value;
+                    if ((owner === action.ownerWindow || (submissionJobId && ownerJobId === submissionJobId))
+                      && hasChapterSubmissionConfirmation(owner.document)) return true;
+                    if (owner.parent === owner) break;
+                    owner = owner.parent as Window & Record<string, any>;
+                  } catch { break; }
+                }
+                return false;
+              } : undefined
             });
         };
         const saveChapter = async () => {
@@ -5702,7 +5764,7 @@ function workOrExam(
   };
 
   function clickWorkOrExamElement(element: HTMLElement, source: string): WorkOrExamClickResult {
-    triggerSyntheticClick(element);
+    element.click();
     return {
       clicked: true,
       target: describeWorkOrExamClickTarget(element, source)
@@ -5815,31 +5877,63 @@ function workOrExam(
     let fallbackConfirmClicked = false;
     let firstFallbackSubmitTarget: WorkOrExamClickResult['target'];
     let confirmationFallbackTarget: WorkOrExamClickResult['target'];
+    let confirmedSubmission = false;
+    const isCompleted = () => runtimeWindow.document.querySelector('.testTit_status_complete') !== null;
+    const isConfirmationReady = () => getWorkOrExamActionDocuments().some((doc) => {
+      const popOk = doc.querySelector<HTMLElement>('#popok');
+      if (popOk && isWorkOrExamClickableElement(popOk) && !isWorkOrExamConfirmRejectElement(popOk)) return true;
+      const roots = doc.querySelectorAll<HTMLElement>('#submitConfirmPop,#workpop,#confirmSubWin,.layui-layer,.ui-dialog,.el-dialog,.ant-modal,[role="dialog"],[role="alertdialog"]');
+      return Array.from(roots).some((root) => isElementVisible(root)
+        && Array.from(root.querySelectorAll<HTMLElement>(workOrExamClickableSelector)).some((element) => {
+          const text = `${element.innerText || ''} ${(element as HTMLInputElement).value || ''}`.trim();
+          return isWorkOrExamClickableElement(element) && !isWorkOrExamConfirmRejectElement(element)
+            && (/(确定|确认|提交|交卷)/.test(text) || /submitCheckTimes|finalSubmit|submit/i.test(element.getAttribute('onclick') || ''));
+        }));
+    });
 
     if (hasBtnBlueSubmit) {
-      runtimeWindow.btnBlueSubmit();
+      const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document,
+        () => runtimeWindow.btnBlueSubmit(), 3000, {
+          phase: 'open-confirmation', isConfirmationReady, isCompleted,
+          onSubmitted: () => { confirmedSubmission = true; }
+        });
+      if (expired) return;
       directSubmitInvoked = true;
       invoked = true;
     } else {
-      const firstFallbackSubmit = clickWorkOrExamActionButton('submit');
-      fallbackSubmitClicked = firstFallbackSubmit.clicked;
-      firstFallbackSubmitTarget = firstFallbackSubmit.target;
-      invoked = fallbackSubmitClicked;
+      const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document, () => {
+        const firstFallbackSubmit = clickWorkOrExamActionButton('submit');
+        fallbackSubmitClicked = firstFallbackSubmit.clicked;
+        firstFallbackSubmitTarget = firstFallbackSubmit.target;
+        invoked = fallbackSubmitClicked;
+        return firstFallbackSubmit.clicked ? undefined : false;
+      }, 3000, {
+        phase: 'open-confirmation', isConfirmationReady, isCompleted,
+        onSubmitted: () => { confirmedSubmission = true; }
+      });
+      if (expired) return;
     }
 
-    await sleep(3000);
-
-    if (hasSubmitCheckTimes) {
-      runtimeWindow.submitCheckTimes();
-      confirmSubmitInvoked = true;
-      invoked = true;
-    } else {
-      const confirmationFallback = clickWorkOrExamSubmitConfirmButton();
-      const confirmationFallbackSubmit = confirmationFallback.clicked ? confirmationFallback : clickWorkOrExamActionButton('submit');
-      fallbackConfirmClicked = confirmationFallbackSubmit.clicked;
-      confirmationFallbackTarget = confirmationFallbackSubmit.target;
-      fallbackSubmitClicked = confirmationFallbackSubmit.clicked || fallbackSubmitClicked;
-      invoked = confirmationFallbackSubmit.clicked || invoked;
+    if (!confirmedSubmission && !isCompleted()) {
+      if (hasSubmitCheckTimes) {
+        if (!isConfirmationReady()) throw new Error('作业/考试提交确认入口尚未就绪，已取消本次提交。');
+        const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document,
+          () => runtimeWindow.submitCheckTimes(), 3000);
+        if (expired) return;
+        confirmSubmitInvoked = true;
+        invoked = true;
+      } else {
+        const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document, () => {
+          const confirmationFallback = clickWorkOrExamSubmitConfirmButton();
+          const confirmationFallbackSubmit = confirmationFallback;
+          fallbackConfirmClicked = confirmationFallbackSubmit.clicked;
+          confirmationFallbackTarget = confirmationFallbackSubmit.target;
+          fallbackSubmitClicked = confirmationFallbackSubmit.clicked || fallbackSubmitClicked;
+          invoked = confirmationFallbackSubmit.clicked || invoked;
+          if (!confirmationFallbackSubmit.clicked) throw new Error('作业/考试提交确认入口尚未就绪，已取消本次提交。');
+        }, 3000);
+        if (expired) return;
+      }
     }
 
     (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();

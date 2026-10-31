@@ -393,7 +393,7 @@ test('workOrExam submits through the window that owns chaoxing submit functions'
   assert.equal(source.includes('candidateWindowHasFunction(candidate.window, name)'), true);
 });
 
-test('workOrExam fallback submit confirms chaoxing popup before retrying generic submit buttons', async () => {
+test('workOrExam fallback submit confirms the popup without clicking the initial submit again', async () => {
   const source = await readCxSource();
 
   assert.equal(source.includes('function clickWorkOrExamSubmitConfirmButton('), true);
@@ -403,7 +403,8 @@ test('workOrExam fallback submit confirms chaoxing popup before retrying generic
   assert.equal(source.includes('function isWorkOrExamConfirmRejectElement('), true);
   assert.equal(source.includes('!isWorkOrExamConfirmRejectElement(element)'), true);
   assert.equal(source.includes('const confirmationFallback = clickWorkOrExamSubmitConfirmButton();'), true);
-  assert.equal(source.includes("confirmationFallback.clicked ? confirmationFallback : clickWorkOrExamActionButton('submit')"), true);
+  assert.equal(source.includes('const confirmationFallbackSubmit = confirmationFallback;'), true);
+  assert.equal(source.includes("confirmationFallback.clicked ? confirmationFallback : clickWorkOrExamActionButton('submit')"), false);
   assert.equal(source.includes('fallbackConfirmClicked'), true);
 });
 

@@ -21,15 +21,16 @@ const confirmation = `<div id="workpop" style="display:none;position:fixed;inset
     <a id="popno" href="javascript:;" onclick="closeConfirmation()">取消</a></div></div>`;
 
 before(async () => {
-  const moduleCode = async (path, exportName) => {
+  const moduleCode = async (path, exportNames) => {
     const source = await readFile(path, 'utf8');
     const compiled = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
     }).outputText;
-    return `(() => { const exports = {}; ${compiled}; window.${exportName} = exports.${exportName}; })();`;
+    const names = Array.isArray(exportNames) ? exportNames : [exportNames];
+    return `(() => { const exports = {}; ${compiled}; ${names.map((name) => `window.${name} = exports.${name};`).join('\n')} })();`;
   };
   runtime = await moduleCode('src/projects/cx-chapter-submission.ts', 'observeChapterSubmission');
-  runtime += await moduleCode('src/projects/cx-chapter-dialog.ts', 'dismissChapterSubmissionDialog');
+  runtime += await moduleCode('src/projects/cx-chapter-dialog.ts', ['dismissChapterSubmissionDialog', 'hasChapterSubmissionConfirmation']);
   const source = await readFile('src/projects/cx.ts', 'utf8');
   const ast = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
   const names = new Set(['isExpiredChapterText', 'isExpiredChapterResponse', 'isChapterSubmissionFailure',
@@ -73,7 +74,8 @@ before(async () => {
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
       const kind = url.searchParams.get('kind');
       setTimeout(() => response.end(JSON.stringify({ status: kind === 'success',
-        msg: kind === 'expired' ? '此作业已过期！' : kind === 'success' ? '提交成功' : '暂时提交失败' })), 25);
+        msg: kind === 'expired' ? '此作业已过期！' : kind === 'parameter' ? '无效的参数：code-1!'
+          : kind === 'success' ? '提交成功' : '暂时提交失败' })), 25);
       return;
     }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -107,6 +109,11 @@ async function scenario(kind, actionOwner = 'frame') {
       const nativeSetTimeout = window.setTimeout;
       // Exercise deadline behavior locally without spending 30 seconds on an intentional zero-POST case.
       window.setTimeout = (callback, ms, ...args) => nativeSetTimeout(callback, ms >= 10000 ? 500 : ms, ...args);
+      if (kind === 'no-confirmation') {
+        const nativeNow = Date.now;
+        const startedAt = nativeNow();
+        Date.now = () => startedAt + (nativeNow() - startedAt) * 100;
+      }
       const frame = document.querySelector('#A');
       const child = frame.contentWindow;
       const sibling = document.querySelector('#B').contentWindow;
@@ -119,13 +126,43 @@ async function scenario(kind, actionOwner = 'frame') {
       if (actionOwner === 'parent') {
         document.body.insertAdjacentHTML('afterbegin', '<form><input name="jobid" id="jobid" value="job-A"></form>');
       }
+      actionWindow.submitCalls = 0;
+      actionWindow.signatureReady = false;
+      actionWindow.submittedBeforeReady = false;
       if (kind !== 'missing') {
-        actionWindow.btnBlueSubmit = () => { actionWindow.document.querySelector('#workpop').style.display = 'block'; };
+        actionWindow.btnBlueSubmit = () => {
+          if (kind === 'direct-submit') {
+            actionWindow.submitCheckTimes();
+            return;
+          }
+          if (kind === 'precheck-code-sync') {
+            actionWindow.alert('无效的参数：code-1!');
+            return false;
+          }
+          if (kind === 'precheck-code-async') {
+            nativeSetTimeout(() => actionWindow.alert('无效的参数：code-1!'), 50);
+            return;
+          }
+          if (kind === 'no-confirmation') return;
+          const ready = () => {
+            actionWindow.signatureReady = true;
+            actionWindow.document.querySelector('#workpop').style.display = 'block';
+          };
+          if (kind === 'delayed-precheck') nativeSetTimeout(ready, 50);
+          else ready();
+        };
         actionWindow.submitCheckTimes = () => {
+          actionWindow.submitCalls++;
           if (kind === 'no-post') return;
+          if (kind === 'delayed-precheck' && !actionWindow.signatureReady) {
+            actionWindow.submittedBeforeReady = true;
+            actionWindow.alert('无效的参数：code-1!');
+            return;
+          }
           const body = new URLSearchParams({ jobid: 'job-A', knowledgeid: '359531606', courseid: 'course', clazzid: 'class' });
-          actionWindow.fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=' + kind, { method: 'POST', body })
-            .then((response) => response.json()).then((value) => { if (kind === 'expired') actionWindow.alert(value.msg); });
+          const responseKind = ['delayed-precheck', 'no-confirmation', 'precheck-code-sync', 'precheck-code-async', 'direct-submit'].includes(kind) ? 'success' : kind;
+          actionWindow.fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=' + responseKind, { method: 'POST', body })
+            .then((response) => response.json()).then((value) => { if (kind === 'expired' || kind === 'parameter') actionWindow.alert(value.msg); });
         };
       }
       let outcome;
@@ -133,6 +170,7 @@ async function scenario(kind, actionOwner = 'frame') {
       try { outcome = await runActualChapterUpload(child, frame); } catch (caught) { error = caught.message; }
       await new Promise((resolve) => nativeSetTimeout(resolve, 15));
       return { outcome, error, cacheWrites: window.cacheWrites,
+        submitCalls: actionWindow.submitCalls, submittedBeforeReady: actionWindow.submittedBeforeReady,
         confirmation: actionWindow.getComputedStyle(actionWindow.document.querySelector('#workpop')).display,
         siblingConfirmation: sibling.getComputedStyle(sibling.document.querySelector('#workpop')).display,
         cancellations: actionWindow.cancelCalls || 0 };
@@ -188,4 +226,59 @@ test('production upload ordinary failure remains retryable without completing or
   assert.equal(result.cacheWrites, 0);
   assert.equal(result.posts, 1);
   assert.equal(result.confirmation, 'block');
+});
+
+for (const timing of ['sync', 'async']) {
+  test(`production upload stops after a ${timing} code-1 precheck without native dialogs or a final POST`, async () => {
+    const result = await scenario(`precheck-code-${timing}`);
+    assert.match(result.error, /无效.{0,4}参数|code\s*[-：:]?\s*-?1|预检|确认/);
+    assert.equal(result.submitCalls, 0);
+    assert.equal(result.posts, 0);
+    assert.equal(result.cacheWrites, 0);
+    assert.equal(result.dialogs, 0);
+    assert.equal(result.outcome, undefined);
+    assert.equal(result.siblingConfirmation, 'block');
+  });
+}
+
+test('production upload waits for the async precheck signature and visible confirmation before one final POST', async () => {
+  const result = await scenario('delayed-precheck');
+  assert.equal(result.error, '');
+  assert.equal(result.outcome?.disposition, 'completed');
+  assert.equal(result.submittedBeforeReady, false);
+  assert.equal(result.submitCalls, 1);
+  assert.equal(result.posts, 1);
+  assert.equal(result.cacheWrites, 1);
+  assert.equal(result.dialogs, 0);
+});
+
+test('production upload cannot confirm or cache a task without a visible confirmation layer', async () => {
+  const result = await scenario('no-confirmation');
+  assert.match(result.error, /确认|预检|timed out|超时/);
+  assert.equal(result.submitCalls, 0);
+  assert.equal(result.posts, 0);
+  assert.equal(result.cacheWrites, 0);
+  assert.equal(result.dialogs, 0);
+  assert.equal(result.outcome, undefined);
+});
+
+test('production upload does not submit again after the opening action already completes a final POST', async () => {
+  const result = await scenario('direct-submit');
+  assert.equal(result.error, '');
+  assert.equal(result.outcome?.disposition, 'completed');
+  assert.equal(result.submitCalls, 1);
+  assert.equal(result.posts, 1);
+  assert.equal(result.cacheWrites, 1);
+  assert.equal(result.dialogs, 0);
+});
+
+test('production final response code-1 is retryable without a native dialog or a cached result', async () => {
+  const result = await scenario('parameter');
+  assert.match(result.error, /code-1|参数校验|提交失败/);
+  assert.equal(result.submitCalls, 1);
+  assert.equal(result.posts, 1);
+  assert.equal(result.cacheWrites, 0);
+  assert.equal(result.dialogs, 0);
+  assert.equal(result.outcome, undefined);
+  assert.equal(result.siblingConfirmation, 'block');
 });

@@ -135,6 +135,22 @@ test('native expiry dialog capture suppresses the expired alert and restores pag
   assert.equal(frameWindow.confirm, originalConfirm);
 });
 
+for (const message of ['无效的参数: code-1!', ' \n无效的参数：\u3000code-1！\n ']) {
+  test(`submission parameter failures preserve code-1 despite spacing: ${JSON.stringify(message)}`, async () => {
+    const context = vm.createContext({});
+    await loadCxFunction('isExpiredChapterText', context);
+    await loadCxFunction('isExpiredChapterResponse', context);
+    await loadCxFunction('isExpiredChapterMessage', context);
+    const invoke = await loadCxFunction('invokeChapterActionWithExpiryCapture', context);
+    let nativeAlerts = 0;
+    const frameWindow = { alert() { nativeAlerts++; }, confirm() { return true; } };
+    const originalAlert = frameWindow.alert;
+    await assert.rejects(invoke(frameWindow, {}, () => frameWindow.alert(message), 0, { phase: 'open-confirmation' }), /参数校验失败.*code-1/);
+    assert.equal(nativeAlerts, 0);
+    assert.equal(frameWindow.alert, originalAlert);
+  });
+}
+
 test('native expiry capture handles a response returned from a submit action', async () => {
   const context = vm.createContext({});
   await loadCxFunction('isExpiredChapterText', context);

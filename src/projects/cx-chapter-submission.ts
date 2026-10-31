@@ -14,6 +14,7 @@ type SubmissionRegistry = {
   responding: Set<SubmissionSubscriber>;
   active?: SubmissionSubscriber;
   handlesEvent: (subscriber: SubmissionSubscriber) => boolean;
+  handlesOtherEvent: (subscriber: SubmissionSubscriber) => boolean;
   release: () => void;
 };
 
@@ -57,12 +58,18 @@ function installChapterSubmissionRegistry(owner: SubmissionWindow): SubmissionRe
   const originalSend = prototype?.send;
   const base = owner.location.href;
   let sequence = 0;
+  let responseDepth = 0;
   const metadata = () => ({ requestId: `${Date.now()}-${++sequence}`, ownerWindow: owner });
   const registry: SubmissionRegistry = {
     subscribers, responding,
     handlesEvent(subscriber) {
       const target = owner.event?.target;
       return !!target && !!requestOwners.get(target)?.includes(subscriber);
+    },
+    handlesOtherEvent(subscriber) {
+      const target = owner.event?.target;
+      return (!!target && requestOwners.has(target) && !requestOwners.get(target)?.includes(subscriber))
+        || (responseDepth > 0 && !responding.has(subscriber));
     },
     release() {
       if (subscribers.size) return;
@@ -84,9 +91,11 @@ function installChapterSubmissionRegistry(owner: SubmissionWindow): SubmissionRe
   };
   const withResponseOwner = <T>(tasks: ReturnType<typeof start>, action: () => T): T => {
     const previous = new Set(responding);
+    responseDepth++;
     tasks.forEach(({ subscriber }) => responding.add(subscriber));
     try { return action(); }
     finally {
+      responseDepth--;
       tasks.forEach(({ subscriber }) => { if (!previous.has(subscriber)) responding.delete(subscriber); });
     }
   };
@@ -162,6 +171,7 @@ function installChapterSubmissionRegistry(owner: SubmissionWindow): SubmissionRe
     // Only a matching job in the sent body can grant ownership before the URL is known.
     const url = opened?.url ?? '';
     const tasks = start(url, args[0], () => this.abort());
+    if (opened) requestOwners.set(this, tasks.map(({ subscriber }) => subscriber));
     if (!tasks.length) return originalSend.apply(this, args);
     requestOwners.set(this, tasks.map(({ subscriber }) => subscriber));
     const info = metadata();
@@ -291,6 +301,10 @@ export function observeChapterSubmission(
         return registries.some((registry) => registry.handlesEvent(subscriber))
           || !!owner[submissionRegistryKey]?.responding.has(subscriber);
       } catch { return false; }
+    },
+    isHandlingOtherResponse(owner: SubmissionWindow) {
+      try { return !!owner[submissionRegistryKey]?.handlesOtherEvent(subscriber); }
+      catch { return false; }
     },
     async wait(requireSubmission = false) {
       let timer: ReturnType<typeof setTimeout> | undefined;

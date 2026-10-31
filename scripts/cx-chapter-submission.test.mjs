@@ -60,6 +60,7 @@ before(async () => {
     const kind = url.searchParams.get('kind');
     const payload = kind === 'ordinary'
       ? { status: false, msg: '暂时提交失败，请稍后重试' }
+      : kind === 'parameter' ? { status: false, msg: '无效的参数：code-1!' }
       : kind === 'unknown' ? { msg: 'received' }
       : kind === 'success'
         ? { status: true, msg: '提交成功' }
@@ -226,6 +227,88 @@ test('another job native expiry dialog cannot terminate the active job in the sa
       }, 0, { phase: 'submit', jobId: 'A' });
     }, endpoint), false);
     assert.equal(dialogs, 1);
+  } finally { await page.close(); }
+});
+
+for (const transport of ['fetch', 'xhr-onload']) {
+  test(`chapter precheck preserves another job ${transport} code-1 dialog despite matching current form`, async () => {
+    const page = await openPage();
+    const dialogs = [];
+    page.on('dialog', async (dialog) => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+    try {
+      const result = await page.evaluate(async ({ endpoint, transport }) => {
+        document.body.insertAdjacentHTML('beforeend', '<form><input id="jobid" name="jobid" value="A"></form>');
+        const originals = [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm];
+        let ready = false;
+        let finishOther;
+        const otherDone = new Promise((resolve) => { finishOther = resolve; });
+        let error = '';
+        let expired;
+        try {
+          expired = await invokeChapterActionWithExpiryCapture(window, document, () => {
+            setTimeout(() => { ready = true; }, 120);
+            if (transport === 'fetch') {
+              fetch(endpoint + '?kind=parameter&delay=20', { method: 'POST', body: 'jobid=B' })
+                .then((response) => response.json()).then((value) => { alert(value.msg); finishOther(); });
+            } else {
+              const request = new XMLHttpRequest();
+              request.open('POST', endpoint + '?kind=parameter&delay=20');
+              request.onload = () => { alert(JSON.parse(request.responseText).msg); finishOther(); };
+              request.send('jobid=B');
+            }
+          }, 0, { phase: 'open-confirmation', jobId: 'A', timeoutMs: 500, isConfirmationReady: () => ready });
+        } catch (failure) { error = failure.message; }
+        await otherDone;
+        return { error, expired, ready,
+          restored: [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm]
+            .every((value, index) => value === originals[index]) };
+      }, { endpoint, transport });
+      assert.deepEqual(result, { error: '', expired: false, ready: true, restored: true });
+      assert.deepEqual(dialogs, ['无效的参数：code-1!']);
+    } finally { await page.close(); }
+  });
+}
+
+test('chapter precheck suppresses its own asynchronous code-1 dialog and rejects', async () => {
+  const page = await openPage();
+  const dialogs = [];
+  page.on('dialog', async (dialog) => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  try {
+    const result = await page.evaluate(async () => {
+      document.body.insertAdjacentHTML('beforeend', '<form><input id="jobid" name="jobid" value="A"></form>');
+      const originals = [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm];
+      let error = '';
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => {
+          setTimeout(() => alert('无效的参数：code-1!'), 20);
+        }, 0, { phase: 'open-confirmation', jobId: 'A', timeoutMs: 300, isConfirmationReady: () => false });
+      } catch (failure) { error = failure.message; }
+      return { error, restored: [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm]
+        .every((value, index) => value === originals[index]) };
+    });
+    assert.match(result.error, /code-1/u);
+    assert.equal(result.restored, true);
+    assert.deepEqual(dialogs, []);
+  } finally { await page.close(); }
+});
+
+test('chapter precheck preserves ordinary asynchronous native dialogs', async () => {
+  const page = await openPage();
+  const dialogs = [];
+  page.on('dialog', async (dialog) => { dialogs.push(dialog.message()); await dialog.dismiss(); });
+  try {
+    const result = await page.evaluate(async () => {
+      document.body.insertAdjacentHTML('beforeend', '<form><input id="jobid" name="jobid" value="A"></form>');
+      const originals = [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm];
+      let ready = false;
+      const expired = await invokeChapterActionWithExpiryCapture(window, document, () => {
+        setTimeout(() => { alert('普通提示：请检查答案'); ready = true; }, 20);
+      }, 0, { phase: 'open-confirmation', jobId: 'A', timeoutMs: 500, isConfirmationReady: () => ready });
+      return { expired, ready, restored: [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm]
+        .every((value, index) => value === originals[index]) };
+    });
+    assert.deepEqual(result, { expired: false, ready: true, restored: true });
+    assert.deepEqual(dialogs, ['普通提示：请检查答案']);
   } finally { await page.close(); }
 });
 

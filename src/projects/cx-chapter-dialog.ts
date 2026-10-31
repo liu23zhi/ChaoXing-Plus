@@ -63,7 +63,12 @@ function clickChapterDialogCancel(button: HTMLElement): boolean {
   }
 }
 
-export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], options: { jobId?: string } = {}): void {
+export function hasChapterSubmissionConfirmation(doc: Document): boolean {
+  return Array.from(doc.querySelectorAll<HTMLElement>('#workpop, #confirmSubWin.AlertCon02'))
+    .some((popup) => Boolean(getChapterSubmissionDialog(popup)));
+}
+
+export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], options: { jobId?: string; ownerDocument?: Document } = {}): void {
   const pending = [...windows];
   const visited = new Set<ChapterDialogWindow>();
   const documents = new Set<Document>();
@@ -75,6 +80,7 @@ export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], o
     try { pending.push(actionWindow.top as ChapterDialogWindow); } catch { /* Restricted frame. */ }
     let doc: Document;
     try { doc = actionWindow.document; } catch { continue; }
+    if (options.ownerDocument && doc !== options.ownerDocument) continue;
     if (!doc || documents.has(doc)) continue;
     documents.add(doc);
     if (options.jobId) {
