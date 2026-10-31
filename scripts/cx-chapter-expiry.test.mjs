@@ -232,7 +232,7 @@ test('expired chapter submission captures native alert and confirm messages befo
   assert.match(source, /isExpiredChapterMessage\(message\)/u);
   assert.match(source, /actionWindow\.alert =/u);
   assert.match(source, /actionWindow\.confirm =/u);
-  assert.match(source, /frameWindow\.parent/u);
+  assert.match(source, /ancestor = ancestor\.parent/u);
   assert.match(source, /addActionWindow\(topWindow\)/u);
   assert.match(source, /chapterExpired = true;/u);
 });

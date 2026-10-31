@@ -310,6 +310,8 @@ export const $modal = {
     content: string;
     confirmButtonText?: string;
     cancelButtonText?: string;
+    allowOutsideClick?: SweetAlertOptions['allowOutsideClick'];
+    allowEscapeKey?: SweetAlertOptions['allowEscapeKey'];
     timer?: number;
     timerProgressBar?: boolean;
     defaultConfirmed?: boolean;
@@ -317,6 +319,8 @@ export const $modal = {
     const content = typeof args === 'string' ? args : args.content;
     const confirmButtonText = typeof args === 'string' ? '确认' : args.confirmButtonText ?? '确认';
     const cancelButtonText = typeof args === 'string' ? '取消' : args.cancelButtonText ?? '取消';
+    const allowOutsideClick = typeof args === 'string' ? undefined : args.allowOutsideClick;
+    const allowEscapeKey = typeof args === 'string' ? undefined : args.allowEscapeKey;
     const timer = typeof args === 'string' ? undefined : args.timer;
     const timerProgressBar = typeof args === 'string' ? false : args.timerProgressBar ?? false;
     const defaultConfirmed = typeof args === 'string' ? false : args.defaultConfirmed ?? false;
@@ -327,7 +331,9 @@ export const $modal = {
       confirmButtonText,
       cancelButtonText,
       timer,
-      timerProgressBar
+      timerProgressBar,
+      ...(allowOutsideClick === undefined ? {} : { allowOutsideClick }),
+      ...(allowEscapeKey === undefined ? {} : { allowEscapeKey })
     });
     return result.isConfirmed || (defaultConfirmed && result.dismiss === Swal.DismissReason.timer);
   }

@@ -27,10 +27,12 @@ before(async () => {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
     }).outputText;
     const names = Array.isArray(exportNames) ? exportNames : [exportNames];
-    return `(() => { const exports = {}; ${compiled}; ${names.map((name) => `window.${name} = exports.${name};`).join('\n')} })();`;
+    return `(() => { const exports = {}; const require = () => window; ${compiled}; ${names.map((name) => `window.${name} = exports.${name};`).join('\n')} })();`;
   };
   runtime = await moduleCode('src/projects/cx-chapter-submission.ts', 'observeChapterSubmission');
-  runtime += await moduleCode('src/projects/cx-chapter-dialog.ts', ['dismissChapterSubmissionDialog', 'hasChapterSubmissionConfirmation']);
+  runtime += await moduleCode('src/projects/cx-chapter-dialog.ts', ['dismissChapterSubmissionDialog', 'hasChapterSubmissionConfirmation',
+    'getChapterSubmissionConfirmation', 'submitChapterSubmissionConfirmation']);
+  runtime += await moduleCode('src/projects/cx-chapter-confirmation.ts', 'createChapterConfirmationSession');
   const source = await readFile('src/projects/cx.ts', 'utf8');
   const ast = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
   const names = new Set(['isExpiredChapterText', 'isExpiredChapterResponse', 'isChapterSubmissionFailure',
@@ -109,7 +111,7 @@ async function scenario(kind, actionOwner = 'frame') {
       const nativeSetTimeout = window.setTimeout;
       // Exercise deadline behavior locally without spending 30 seconds on an intentional zero-POST case.
       window.setTimeout = (callback, ms, ...args) => nativeSetTimeout(callback, ms >= 10000 ? 500 : ms, ...args);
-      if (kind === 'no-confirmation') {
+      if (kind === 'no-confirmation' || kind.startsWith('split-')) {
         const nativeNow = Date.now;
         const startedAt = nativeNow();
         Date.now = () => startedAt + (nativeNow() - startedAt) * 100;
@@ -118,6 +120,8 @@ async function scenario(kind, actionOwner = 'frame') {
       const child = frame.contentWindow;
       const sibling = document.querySelector('#B').contentWindow;
       const actionWindow = actionOwner === 'parent' ? window : child;
+      const splitOwner = kind.startsWith('split-');
+      const confirmationWindow = splitOwner ? window : actionWindow;
       for (const owner of [window, child, sibling]) owner.closeConfirmation = () => {
         owner.cancelCalls = (owner.cancelCalls || 0) + 1;
         owner.document.querySelector('#workpop').style.display = 'none';
@@ -127,11 +131,22 @@ async function scenario(kind, actionOwner = 'frame') {
         document.body.insertAdjacentHTML('afterbegin', '<form><input name="jobid" id="jobid" value="job-A"></form>');
       }
       actionWindow.submitCalls = 0;
+      actionWindow.legacyCalls = 0;
       actionWindow.signatureReady = false;
       actionWindow.submittedBeforeReady = false;
+      let unscopedHides = 0;
+      window.$ = () => ({ hide() { unscopedHides++; } });
       if (kind !== 'missing') {
         actionWindow.btnBlueSubmit = () => {
+          if (kind.startsWith('split-open-')) {
+            confirmationWindow.document.querySelector('#workpop').style.display = 'block';
+            if (kind === 'split-open-expired') { actionWindow.alert('此作业已过期！'); return; }
+            if (kind === 'split-open-parameter') { actionWindow.alert('无效的参数：code-1!'); return; }
+            if (kind === 'split-open-throw') throw new Error('提交预检异常');
+            return false;
+          }
           if (kind === 'direct-submit') {
+            confirmationWindow.document.querySelector('#workpop').style.display = 'block';
             actionWindow.submitCheckTimes();
             return;
           }
@@ -146,24 +161,27 @@ async function scenario(kind, actionOwner = 'frame') {
           if (kind === 'no-confirmation') return;
           const ready = () => {
             actionWindow.signatureReady = true;
-            actionWindow.document.querySelector('#workpop').style.display = 'block';
+            confirmationWindow.document.querySelector('#workpop').style.display = 'block';
           };
           if (kind === 'delayed-precheck') nativeSetTimeout(ready, 50);
           else ready();
         };
-        actionWindow.submitCheckTimes = () => {
+        const finalSubmit = () => {
           actionWindow.submitCalls++;
-          if (kind === 'no-post') return;
+          if (kind === 'no-post' || kind === 'split-no-post') return;
           if (kind === 'delayed-precheck' && !actionWindow.signatureReady) {
             actionWindow.submittedBeforeReady = true;
             actionWindow.alert('无效的参数：code-1!');
             return;
           }
           const body = new URLSearchParams({ jobid: 'job-A', knowledgeid: '359531606', courseid: 'course', clazzid: 'class' });
-          const responseKind = ['delayed-precheck', 'no-confirmation', 'precheck-code-sync', 'precheck-code-async', 'direct-submit'].includes(kind) ? 'success' : kind;
+          const responseKind = ['delayed-precheck', 'no-confirmation', 'precheck-code-sync', 'precheck-code-async', 'direct-submit', 'bound-button', 'split-success'].includes(kind) ? 'success' : kind.replace(/^split-/, '');
           actionWindow.fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=' + responseKind, { method: 'POST', body })
-            .then((response) => response.json()).then((value) => { if (kind === 'expired' || kind === 'parameter') actionWindow.alert(value.msg); });
+            .then((response) => response.json()).then((value) => { if (['expired', 'parameter', 'split-expired', 'split-parameter'].includes(kind)) actionWindow.alert(value.msg); });
         };
+        actionWindow.submitCheckTimes = kind === 'bound-button' ? () => { actionWindow.legacyCalls++; } : finalSubmit;
+        // The current Marking template binds the actual final action to #popok.
+        confirmationWindow.document.querySelector('#popok').addEventListener('click', finalSubmit);
       }
       let outcome;
       let error = '';
@@ -171,9 +189,9 @@ async function scenario(kind, actionOwner = 'frame') {
       await new Promise((resolve) => nativeSetTimeout(resolve, 15));
       return { outcome, error, cacheWrites: window.cacheWrites,
         submitCalls: actionWindow.submitCalls, submittedBeforeReady: actionWindow.submittedBeforeReady,
-        confirmation: actionWindow.getComputedStyle(actionWindow.document.querySelector('#workpop')).display,
+        confirmation: confirmationWindow.getComputedStyle(confirmationWindow.document.querySelector('#workpop')).display,
         siblingConfirmation: sibling.getComputedStyle(sibling.document.querySelector('#workpop')).display,
-        cancellations: actionWindow.cancelCalls || 0 };
+        cancellations: confirmationWindow.cancelCalls || 0, legacyCalls: actionWindow.legacyCalls, unscopedHides };
     }, kind, actionOwner);
     await Promise.all(dialogs);
     return { ...result, dialogs: dialogs.length, posts: posts - beforePosts };
@@ -189,6 +207,7 @@ for (const actionOwner of ['frame', 'parent']) {
     assert.equal(result.cacheWrites, 1);
     assert.equal(result.posts, 1);
     assert.equal(result.siblingConfirmation, 'block');
+    assert.equal(result.unscopedHides, 0);
   });
 }
 
@@ -225,8 +244,65 @@ test('production upload ordinary failure remains retryable without completing or
   assert.match(result.error, /提交失败/);
   assert.equal(result.cacheWrites, 0);
   assert.equal(result.posts, 1);
-  assert.equal(result.confirmation, 'block');
+  assert.equal(result.confirmation, 'none');
 });
+
+test('production upload clicks the bound confirmation button instead of an obsolete global function', async () => {
+  const result = await scenario('bound-button');
+  assert.equal(result.error, '');
+  assert.equal(result.outcome?.disposition, 'completed');
+  assert.equal(result.submitCalls, 1);
+  assert.equal(result.legacyCalls, 0);
+  assert.equal(result.posts, 1);
+  assert.equal(result.cacheWrites, 1);
+  assert.equal(result.confirmation, 'none');
+});
+
+test('production upload submits through its newly opened parent confirmation without a parent job form', async () => {
+  const result = await scenario('split-success');
+  assert.equal(result.error, '');
+  assert.equal(result.outcome?.disposition, 'completed');
+  assert.equal(result.submitCalls, 1);
+  assert.equal(result.posts, 1);
+  assert.equal(result.cacheWrites, 1);
+  assert.equal(result.confirmation, 'none');
+  assert.equal(result.siblingConfirmation, 'block');
+});
+
+for (const kind of ['expired', 'parameter', 'ordinary', 'no-post']) {
+  test(`production upload cleans only its parent confirmation after ${kind}`, async () => {
+    const result = await scenario(`split-${kind}`);
+    if (kind === 'expired') {
+      assert.equal(result.error, '');
+      assert.equal(result.outcome?.disposition, 'terminal-expired');
+    } else {
+      assert.match(result.error, /code-1|提交失败|timed out|超时|尚未确认/);
+      assert.equal(result.outcome, undefined);
+    }
+    assert.equal(result.posts, kind === 'no-post' ? 0 : 1);
+    assert.equal(result.submitCalls, 1);
+    assert.equal(result.cacheWrites, 0);
+    assert.equal(result.confirmation, 'none');
+    assert.equal(result.siblingConfirmation, 'block');
+    assert.equal(result.cancellations, 1);
+    assert.equal(result.dialogs, 0);
+  });
+}
+
+for (const kind of ['expired', 'parameter', 'throw', 'false']) {
+  test(`production upload cleans its newly opened parent popup when the precheck immediately reports ${kind}`, async () => {
+    const result = await scenario(`split-open-${kind}`);
+    if (kind === 'expired') assert.equal(result.outcome?.disposition, 'terminal-expired');
+    else assert.match(result.error, /code-1|预检|提交/);
+    assert.equal(result.posts, 0);
+    assert.equal(result.submitCalls, 0);
+    assert.equal(result.cacheWrites, 0);
+    assert.equal(result.confirmation, 'none');
+    assert.equal(result.siblingConfirmation, 'block');
+    assert.equal(result.cancellations, 1);
+    assert.equal(result.dialogs, 0);
+  });
+}
 
 for (const timing of ['sync', 'async']) {
   test(`production upload stops after a ${timing} code-1 precheck without native dialogs or a final POST`, async () => {
@@ -270,6 +346,7 @@ test('production upload does not submit again after the opening action already c
   assert.equal(result.posts, 1);
   assert.equal(result.cacheWrites, 1);
   assert.equal(result.dialogs, 0);
+  assert.equal(result.confirmation, 'none');
 });
 
 test('production final response code-1 is retryable without a native dialog or a cached result', async () => {

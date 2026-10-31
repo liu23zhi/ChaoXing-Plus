@@ -63,12 +63,34 @@ function clickChapterDialogCancel(button: HTMLElement): boolean {
   }
 }
 
-export function hasChapterSubmissionConfirmation(doc: Document): boolean {
-  return Array.from(doc.querySelectorAll<HTMLElement>('#workpop, #confirmSubWin.AlertCon02'))
-    .some((popup) => Boolean(getChapterSubmissionDialog(popup)));
+export function getChapterSubmissionConfirmation(doc: Document) {
+  let confirmation: ({ popup: HTMLElement } & NonNullable<ReturnType<typeof getChapterSubmissionDialog>>) | undefined;
+  for (const popup of Array.from(doc.querySelectorAll<HTMLElement>('#workpop, #confirmSubWin.AlertCon02'))) {
+    const matched = getChapterSubmissionDialog(popup);
+    if (!matched) continue;
+    if (confirmation) return undefined;
+    confirmation = { popup, ...matched };
+  }
+  return confirmation;
 }
 
-export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], options: { jobId?: string; ownerDocument?: Document } = {}): void {
+export function hasChapterSubmissionConfirmation(doc: Document): boolean {
+  return Boolean(getChapterSubmissionConfirmation(doc));
+}
+
+export function submitChapterSubmissionConfirmation(doc: Document): boolean {
+  const matched = getChapterSubmissionConfirmation(doc);
+  const button = matched?.submit;
+  if (!button || !isChapterDialogVisible(button) || button.getAttribute('aria-disabled') === 'true'
+    || button.hasAttribute('disabled') || button.matches(':disabled')) return false;
+  const ownerWindow = button.ownerDocument.defaultView as ChapterDialogWindow | null;
+  const nativeClick = ownerWindow?.HTMLElement?.prototype?.click;
+  if (typeof nativeClick !== 'function') return false;
+  nativeClick.call(button);
+  return true;
+}
+
+export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], options: { jobId?: string; ownerDocument?: Document; popup?: HTMLElement } = {}): void {
   const pending = [...windows];
   const visited = new Set<ChapterDialogWindow>();
   const documents = new Set<Document>();
@@ -90,17 +112,25 @@ export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], o
     }
 
     for (const popup of Array.from(doc.querySelectorAll<HTMLElement>('#workpop, #confirmSubWin.AlertCon02'))) {
+      if (options.popup && popup !== options.popup) continue;
       try {
         const matched = getChapterSubmissionDialog(popup);
         if (!matched) continue;
-        let clicked = clickChapterDialogCancel(matched.cancel);
-        if (!clicked) clicked = clickChapterDialogCancel(matched.close);
-        if (!clicked) {
-          const closeAction = (matched.close.getAttribute('onclick') || '').replace(/\s+/gu, '').replace(/;$/u, '');
-          const ownerWindow = popup.ownerDocument.defaultView as ChapterDialogWindow | null;
-          if ((closeAction === 'popClickFunc()' || closeAction === 'returnpopClickFunc()')
-            && typeof ownerWindow?.popClickFunc === 'function') {
-            ownerWindow.popClickFunc();
+        const cancelled = clickChapterDialogCancel(matched.cancel);
+        const afterCancel = getChapterSubmissionDialog(popup);
+        const inlineAction = (button: HTMLElement) => (button.getAttribute('onclick') || '').replace(/\s+/gu, '').replace(/;$/u, '');
+        const sharedCloseAction = inlineAction(matched.cancel) !== ''
+          && inlineAction(matched.cancel) === inlineAction(matched.close);
+        if (!cancelled || (!sharedCloseAction && afterCancel?.dialog === matched.dialog && afterCancel.content === matched.content
+          && afterCancel.submit === matched.submit && afterCancel.cancel === matched.cancel)) {
+          const closed = clickChapterDialogCancel(matched.close);
+          if (!closed) {
+            const closeAction = (matched.close.getAttribute('onclick') || '').replace(/\s+/gu, '').replace(/;$/u, '');
+            const ownerWindow = popup.ownerDocument.defaultView as ChapterDialogWindow | null;
+            if ((closeAction === 'popClickFunc()' || closeAction === 'returnpopClickFunc()')
+              && typeof ownerWindow?.popClickFunc === 'function') {
+              ownerWindow.popClickFunc();
+            }
           }
         }
 

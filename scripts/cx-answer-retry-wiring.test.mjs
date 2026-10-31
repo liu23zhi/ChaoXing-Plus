@@ -120,7 +120,8 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   assert.equal(source.includes("confirmButtonText: '立即自动答题'"), true);
   assert.equal(source.includes("cancelButtonText: '手动答题'"), true);
   assert.equal(source.includes("worker.emit('stop')"), true);
-  assert.equal(source.includes('await confirmBeforeAutoAnswer(worker);'), true);
+  assert.equal(source.includes('await confirmBeforeAutoAnswer(worker, decisionKey ? {'), true);
+  assert.equal(source.includes('JSON.stringify([chapterTaskContext.scope, chapterTaskContext.tabKey, chapterTaskJobId])'), true);
   assert.equal(source.includes('return result.finish ? result : runRandomChoiceFallback('), false);
   assert.equal(source.includes(': ((await runRandomChoiceFallback('), true);
   assert.equal(source.includes("const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {"), true);

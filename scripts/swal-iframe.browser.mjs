@@ -187,6 +187,49 @@ test('cross-origin confirmation cancellation denial and timer results return to 
   } finally { await page.close(); }
 });
 
+test('automatic-answer confirmation ignores backdrop and Escape dismissal while preserving confirm cancel and timer results', async () => {
+  const page = await openPage();
+  try {
+    const frame = await addFrame(page, 'b.chaoxing.com');
+    await installRuntime(frame);
+    const start = async (options) => {
+      await frame.evaluate((options) => {
+        window.__settled = false;
+        window.__result = undefined;
+        void window.__modalTest.confirm(options).then((result) => {
+          window.__result = result;
+          window.__settled = true;
+        });
+      }, options);
+      await page.waitForSelector('.swal2-container', { visible: true });
+    };
+
+    await start({ content: 'Automatic answer confirmation', allowOutsideClick: false, allowEscapeKey: false });
+    await page.mouse.click(3, 3);
+    await page.keyboard.press('Escape');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await frame.evaluate(() => window.__settled), false);
+    assert.equal(await page.$$eval('.swal2-container', (elements) => elements.length), 1);
+    await page.click('.swal2-confirm');
+    await frame.waitForFunction(() => window.__settled === true);
+    assert.equal(await frame.evaluate(() => window.__result), true);
+
+    await start({ content: 'Manual answer fallback', allowOutsideClick: false, allowEscapeKey: false });
+    await page.mouse.click(3, 3);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await frame.evaluate(() => window.__settled), false);
+    await page.click('.swal2-cancel');
+    await frame.waitForFunction(() => window.__settled === true);
+    assert.equal(await frame.evaluate(() => window.__result), false);
+
+    await start({ content: 'Automatic answer timer', allowOutsideClick: false, allowEscapeKey: false,
+      timer: 100, defaultConfirmed: true });
+    await page.mouse.click(3, 3);
+    await frame.waitForFunction(() => window.__settled === true, { timeout: 3000 });
+    assert.equal(await frame.evaluate(() => window.__result), true);
+  } finally { await page.close(); }
+});
+
 test('a top page without a runtime falls back once after bounded waiting', async () => {
   const page = await openPage({ install: false });
   try {

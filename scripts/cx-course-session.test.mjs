@@ -78,6 +78,162 @@ async function addFrame(page, id, url = childUrl) {
   return frame;
 }
 
+const taskDecisionKey = (chapter = 'chapter', tab = 'tab', job = 'job') => JSON.stringify([
+  JSON.stringify(['course', 'class', chapter]), tab, job
+]);
+
+async function requestTask(frame, key, label = 'taskResult') {
+  await frame.evaluate(({ key, label }) => {
+    window[label] = 'pending';
+    window.session.requestManualDecision(undefined, key).then((value) => { window[label] = value; });
+  }, { key, label });
+}
+
+async function decide(page, count, accepted = true) {
+  await page.waitForFunction((count) => window.prompts === count, {}, count);
+  await page.evaluate((accepted) => window.resolveDecision(accepted), accepted);
+}
+
+test('each deferred task prompts once while a course acceptance cannot bypass a new task', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    await requestTask(page, undefined, 'courseResult');
+    await decide(page, 1);
+    await page.waitForFunction(() => window.courseResult === true);
+    for (const [index, key] of [taskDecisionKey(), taskDecisionKey('chapter', 'tab', 'second')].entries()) {
+      await requestTask(page, key);
+      await decide(page, index + 2);
+      await page.waitForFunction(() => window.taskResult === true);
+      assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), key), true);
+      assert.equal(await page.evaluate(() => window.prompts), index + 2);
+    }
+  } finally { await page.close(); }
+});
+
+test('reused job IDs in different chapters or subtasks each require their own decision', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    const keys = [taskDecisionKey(), taskDecisionKey('chapter', 'other-tab'), taskDecisionKey('other-chapter')];
+    for (const [index, key] of keys.entries()) {
+      await requestTask(page, key);
+      await decide(page, index + 1);
+      await page.waitForFunction(() => window.taskResult === true);
+    }
+    assert.equal(await page.evaluate(() => window.prompts), 3);
+  } finally { await page.close(); }
+});
+
+test('cross-origin callers coalesce one task and serialize distinct task confirmations', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    const first = await addFrame(page, 'first-task');
+    const second = await addFrame(page, 'second-task');
+    await install(first);
+    await install(second);
+    await requestTask(first, taskDecisionKey(), 'firstResult');
+    await requestTask(second, taskDecisionKey(), 'sameResult');
+    await requestTask(second, taskDecisionKey('chapter', 'tab', 'second'), 'secondResult');
+    await page.waitForFunction(() => window.prompts === 1);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 80)));
+    assert.equal(await page.evaluate(() => window.prompts), 1);
+    await page.evaluate(() => window.resolveDecision(true));
+    await first.waitForFunction(() => window.firstResult === true);
+    await second.waitForFunction(() => window.sameResult === true);
+    await decide(page, 2);
+    await second.waitForFunction(() => window.secondResult === true);
+    assert.equal(await page.evaluate(() => window.prompts), 2);
+    assert.equal(await first.evaluate(() => window.prompts), 0);
+    assert.equal(await second.evaluate(() => window.prompts), 0);
+  } finally { await page.close(); }
+});
+
+test('declining a task blocks other tasks until continue accepts only the paused task', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    const first = taskDecisionKey(), second = taskDecisionKey('chapter', 'tab', 'second');
+    await requestTask(page, first);
+    await decide(page, 1, false);
+    await page.waitForFunction(() => window.taskResult === false);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), second), false);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), first), false);
+    assert.equal(await page.evaluate(() => window.prompts), 1);
+    assert.equal(await page.evaluate(() => window.session.resumeManualDecision()), true);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), first), true);
+    await requestTask(page, second);
+    await decide(page, 2);
+    await page.waitForFunction(() => window.taskResult === true);
+  } finally { await page.close(); }
+});
+
+test('task decisions survive reload and a pending task restores as paused for explicit continue', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    const first = taskDecisionKey(), second = taskDecisionKey('chapter', 'tab', 'second');
+    await requestTask(page, first);
+    await decide(page, 1);
+    await page.waitForFunction(() => window.taskResult === true);
+    await page.reload({ waitUntil: 'load' });
+    await install(page);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), first), true);
+    assert.equal(await page.evaluate(() => window.prompts), 0);
+    await requestTask(page, second);
+    await page.waitForFunction(() => window.prompts === 1);
+    await page.reload({ waitUntil: 'load' });
+    await install(page);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), second), false);
+    assert.equal(await page.evaluate(() => window.session.resumeManualDecision()), true);
+    assert.equal(await page.evaluate((key) => window.session.requestManualDecision(undefined, key), second), true);
+    assert.equal(await page.evaluate(() => window.prompts), 0);
+  } finally { await page.close(); }
+});
+
+test('memory-only task decisions are isolated by course without accessing storage', async () => {
+  const page = await openPage();
+  try {
+    await page.evaluate(() => {
+      window.memoryOnly = true;
+      Object.defineProperty(window, 'sessionStorage', { get() { throw new Error('must not access storage'); } });
+    });
+    await install(page);
+    await requestTask(page, taskDecisionKey());
+    await decide(page, 1);
+    await page.waitForFunction(() => window.taskResult === true);
+    assert.equal(await page.evaluate(() => window.session.canReload()), false);
+    await page.evaluate(() => { document.querySelector('#curCourseId').value = 'new-course'; });
+    await requestTask(page, taskDecisionKey());
+    await decide(page, 2);
+    await page.waitForFunction(() => window.taskResult === true);
+    assert.equal(await page.evaluate(async (key) => {
+      document.querySelector('#curCourseId').value = 'course';
+      await window.session.ready();
+      return window.session.requestManualDecision(undefined, key);
+    }, taskDecisionKey()), true);
+    assert.equal(await page.evaluate(() => window.prompts), 2);
+  } finally { await page.close(); }
+});
+
+test('accepting a deferred task does not leak into an unrelated course-level prompt', async () => {
+  const page = await openPage();
+  try {
+    await install(page);
+    await requestTask(page, taskDecisionKey());
+    await decide(page, 1);
+    await page.waitForFunction(() => window.taskResult === true);
+    await page.evaluate(() => {
+      window.courseResult = 'pending';
+      window.session.requestManualDecision().then((value) => { window.courseResult = value; });
+    });
+    await decide(page, 2);
+    await page.waitForFunction(() => window.courseResult === true);
+    assert.equal(await page.evaluate(() => window.prompts), 2);
+  } finally { await page.close(); }
+});
+
 test('two cross-origin task frames share one pending decision and remember manual choice', async () => {
   const page = await openPage();
   try {

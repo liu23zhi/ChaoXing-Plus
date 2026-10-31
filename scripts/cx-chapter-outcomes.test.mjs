@@ -65,6 +65,7 @@ async function uploadFixture({ autoSubmit = true, actions = {}, expired = false,
   const frame = { getAttribute: (name) => name === 'jobid' ? 'job-1' : null };
   let cacheWrites = 0;
   const phases = [];
+  const confirmation = { document: doc, ownerWindow: frameWindow, popup: {} };
   const context = vm.createContext({
     frameWindow, frameDocument: doc, frame, topWindow: frameWindow,
     upload: 'submit', retryableResults: [], cacheableResults: [], deepThinking: false,
@@ -77,6 +78,8 @@ async function uploadFixture({ autoSubmit = true, actions = {}, expired = false,
     chapterTaskContext: { scope: '["course","class","chapter"]', tabKey: 'tab-1' },
     chapterTaskJobId: 'job-1',
     isDeferredChapterContextCurrent: () => current,
+    createChapterConfirmationSession: () => ({ find: () => confirmation, current: () => confirmation, clear() {}, release() {} }),
+    submitChapterSubmissionConfirmation: () => { frameWindow.submitCheckTimes?.(); return true; },
     invokeChapterActionWithExpiryCapture: async (_window, _doc, action, _wait, options) => {
       phases.push(options?.phase || 'save');
       await action();

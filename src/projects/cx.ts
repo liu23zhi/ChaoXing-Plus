@@ -43,7 +43,8 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { observeChapterSubmission } from './cx-chapter-submission.js';
-import { dismissChapterSubmissionDialog, hasChapterSubmissionConfirmation } from './cx-chapter-dialog.js';
+import { dismissChapterSubmissionDialog, submitChapterSubmissionConfirmation } from './cx-chapter-dialog.js';
+import { createChapterConfirmationSession } from './cx-chapter-confirmation.js';
 import { initializeCourseSession, type CourseSession } from './cx-course-session.js';
 import { getTabAnswerPauseController } from './tab-answer-pause.js';
 import {
@@ -648,11 +649,15 @@ async function invokeChapterActionWithExpiryCapture(
     isCompleted?: () => boolean;
     isConfirmationReady?: () => boolean;
     confirmationDocument?: Document;
+    getConfirmation?: () => { document: Document; popup: HTMLElement } | undefined;
+    onConfirmationDismissed?: () => void;
+    onProgress?: (stage: string, detail?: Record<string, unknown>) => void;
     onSubmitted?: () => void;
   } = {}
 ) {
   let nativeExpired = false;
   let parameterFailure: Error | undefined;
+  let actionFailed = false;
   let executing = false;
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? 30000;
@@ -674,11 +679,13 @@ async function invokeChapterActionWithExpiryCapture(
   };
 
   addActionWindow(frameWindow);
-  try {
-    addActionWindow(frameWindow.parent);
-    addActionWindow(frameWindow.top);
-  } catch {
-    // Ignore inaccessible parent windows and keep the frame-local capture.
+  let ancestor = frameWindow;
+  for (let depth = 0; depth < 10; depth++) {
+    try {
+      if (ancestor.parent === ancestor) break;
+      ancestor = ancestor.parent as Window & Record<string, any>;
+      addActionWindow(ancestor);
+    } catch { break; }
   }
   try {
     addActionWindow(topWindow);
@@ -706,10 +713,22 @@ async function invokeChapterActionWithExpiryCapture(
     if (isExpiredChapterResponse(response)) nativeExpired = true;
     if (isChapterSubmissionFailure(response)) submissionFailed = true;
     if (wireEvidence && hasSuccess(response)) submissionSucceeded = true;
+    if (wireEvidence) options.onProgress?.('submission-response', {
+      expired: nativeExpired, failed: submissionFailed, succeeded: submissionSucceeded
+    });
   };
   const observer = observeChapterSubmission(actionWindows, (response) => captureResponse(response, true), {
     jobId: options.jobId, identity: options.identity, ownerWindow: frameWindow, timeoutMs
   });
+  const dismissOwnedConfirmation = () => {
+    const confirmation = options.getConfirmation?.();
+    if (options.getConfirmation && !confirmation) return;
+    dismissChapterSubmissionDialog(actionWindows, {
+      jobId: options.identity?.jobId ?? options.jobId,
+      ownerDocument: confirmation?.document ?? options.confirmationDocument,
+      popup: confirmation?.popup
+    });
+  };
 
   try {
     for (const actionWindow of actionWindows) {
@@ -766,13 +785,16 @@ async function invokeChapterActionWithExpiryCapture(
     }
     let actionResult: unknown;
     if (options.phase === 'open-confirmation' && options.isConfirmationReady?.()) {
-      dismissChapterSubmissionDialog(actionWindows, {
+      if (options.getConfirmation) dismissOwnedConfirmation();
+      else dismissChapterSubmissionDialog(actionWindows, {
         jobId: options.identity?.jobId ?? options.jobId,
         ownerDocument: options.confirmationDocument ?? _frameDocument
       });
+      options.onConfirmationDismissed?.();
       if (options.isConfirmationReady()) throw new Error('上次提交确认尚未关闭，已取消本次提交，请先关闭旧确认窗口。');
     }
     executing = true;
+    options.onProgress?.('action-start');
     try { actionResult = observer.runAction ? observer.runAction(action) : action(); } finally { executing = false; }
     if (actionResult && typeof (actionResult as PromiseLike<unknown>).then === 'function') {
       let actionTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -810,7 +832,8 @@ async function invokeChapterActionWithExpiryCapture(
     if (parameterFailure) throw parameterFailure;
     try {
       const requireSubmission = options.phase === 'submit' && !nativeExpired && !options.isCompleted?.();
-      await observer.wait(requireSubmission);
+      const observed = await observer.wait(requireSubmission);
+      options.onProgress?.('action-complete', observed);
     } catch (error) {
       if (!nativeExpired) throw error;
     }
@@ -821,12 +844,15 @@ async function invokeChapterActionWithExpiryCapture(
     }
     if (submissionSucceeded && !nativeExpired) options.onSubmitted?.();
   } catch (error) {
+    actionFailed = true;
+    options.onProgress?.('action-failed', { error: error instanceof Error ? error.message : String(error) });
     if (!nativeExpired && !isExpiredChapterResponse(error)) throw error;
     nativeExpired = true;
   } finally {
     observer.restore();
     releaseHandlers.forEach((release) => { try { release(); } catch { /* Navigated frame. */ } });
-    if (nativeExpired || parameterFailure) dismissChapterSubmissionDialog(actionWindows, { jobId: options.identity?.jobId ?? options.jobId });
+    if (nativeExpired || parameterFailure || (options.getConfirmation
+      && (actionFailed || submissionSucceeded))) dismissOwnedConfirmation();
   }
 
   return nativeExpired;
@@ -2148,7 +2174,8 @@ function initializeAnswerSession() {
       return $modal.confirm({
         content: `${seconds === 0 ? '点击“立即自动答题”后' : `${seconds} 秒后`}开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。`,
         confirmButtonText: '立即自动答题', cancelButtonText: '手动答题',
-        timer: seconds > 0 ? seconds * 1000 : undefined, timerProgressBar: seconds > 0, defaultConfirmed: seconds > 0
+        timer: seconds > 0 ? seconds * 1000 : undefined, timerProgressBar: seconds > 0, defaultConfirmed: seconds > 0,
+        allowOutsideClick: false, allowEscapeKey: false
       });
     }
   });
@@ -2251,13 +2278,16 @@ function rememberManualAnswerDeclined() {
   publishManualAnswerDecision('declined');
 }
 
-async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
+async function confirmBeforeAutoAnswer(
+  worker: { emit: (event: 'stop' | 'continuate') => void },
+  decisionScope?: { scope: { courseId: string; classId: string }; key: string }
+) {
   if (isWindowsManualAnswerMode()) return true;
   if (getWindowsRuntimeSetting<boolean>('show-answer-dialog', true) === false) {
     return true;
   }
   if (typeof courseSession !== 'undefined' && courseSession) {
-    const accepted = await courseSession.requestManualDecision();
+    const accepted = await courseSession.requestManualDecision(decisionScope?.scope, decisionScope?.key);
     if (!accepted) {
       worker.emit('stop');
       if (typeof getTabAnswerPauseController === 'function') getTabAnswerPauseController().setPaused(true);
@@ -2304,7 +2334,9 @@ async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continu
       cancelButtonText: '手动答题',
       timer: countdown > 0 ? countdown * 1000 : undefined,
       timerProgressBar: countdown > 0,
-      defaultConfirmed: countdown > 0
+      defaultConfirmed: countdown > 0,
+      allowOutsideClick: false,
+      allowEscapeKey: false
     });
 
     if (!result) {
@@ -5149,7 +5181,14 @@ const JobRunner = {
 
     worker.on('close', clearRuntimeControls);
 
-    const confirmed = await confirmBeforeAutoAnswer(worker);
+    const [decisionCourseId, decisionClassId] = JSON.parse(chapterTaskContext.scope) as string[];
+    const decisionKey = allowStaticExpiryFallback
+      ? JSON.stringify([chapterTaskContext.scope, chapterTaskContext.tabKey, chapterTaskJobId])
+      : undefined;
+    const confirmed = await confirmBeforeAutoAnswer(worker, decisionKey ? {
+      scope: { courseId: decisionCourseId, classId: decisionClassId },
+      key: decisionKey
+    } : undefined);
     if (!confirmed) {
       clearRuntimeControls();
       return { finished: false, manual: true };
@@ -5212,6 +5251,7 @@ const JobRunner = {
           attemptId: `${Date.now()}-${Math.random().toString(36).slice(2)}`
         };
         let confirmedSubmission = false;
+        let confirmationSession: ReturnType<typeof createChapterConfirmationSession> | undefined;
         const isSubmissionComplete = () => confirmedSubmission || frameDocument.querySelector('.testTit_status_complete') !== null;
         const checkChapterTask = () => {
           const currentJobId = formValue('form #jobid,form input[name="jobid"]')
@@ -5246,26 +5286,50 @@ const JobRunner = {
           deadline.expiresAt += Date.now() - pausedAt;
           checkChapterTask();
           if (phase === 'submit' && isSubmissionComplete()) return false;
-          const action = resolveChapterAction(phase === 'submit' ? 'submitCheckTimes' : 'btnBlueSubmit');
+          const progress = (stage: string, detail: Record<string, unknown> = {}) => logDebug('info', '章节提交阶段诊断', {
+            phase, stage, targetJobId: submissionJobId, ...detail
+          }, undefined, { correlationId: chapterActionCorrelationId });
+          progress('phase-start');
+          let action: (() => unknown) & { ownerWindow: Window & Record<string, any> };
+          if (phase === 'open-confirmation') {
+            confirmationSession?.release();
+            confirmationSession = undefined;
+            action = resolveChapterAction('btnBlueSubmit');
+            confirmationSession = createChapterConfirmationSession(frameWindow as Window & Record<string, any>, action.ownerWindow, {
+              jobId: submissionJobId,
+              isCurrent: () => { try { checkChapterTask(); return true; } catch { return false; } }
+            });
+          } else {
+            const confirmation = confirmationSession?.current();
+            if (!confirmation) throw new Error('本次提交确认已失效或无法确定所属任务，已取消提交。');
+            action = Object.assign(() => {
+              checkChapterTask();
+              if (confirmationSession?.current()?.popup !== confirmation.popup
+                || !submitChapterSubmissionConfirmation(confirmation.document)) {
+                throw new Error('本次提交确认已失效或按钮不可用，已取消提交。');
+              }
+            }, { ownerWindow: confirmation.ownerWindow });
+          }
           return invokeChapterActionWithExpiryCapture(frameWindow as Window & Record<string, any>, frameDocument,
             action, phase === 'open-confirmation' ? 3000 : 0, {
               phase, jobId: submissionJobId, identity: submissionIdentity,
               timeoutMs: Math.max(1, deadline.expiresAt - Date.now()), isCompleted: isSubmissionComplete,
               onSubmitted: () => { confirmedSubmission = true; },
-              confirmationDocument: action.ownerWindow.document,
+              getConfirmation: () => {
+                try { return confirmationSession?.current() ?? confirmationSession?.find(); }
+                catch { return undefined; }
+              },
+              onConfirmationDismissed: () => confirmationSession?.clear(),
+              onProgress: progress,
               isConfirmationReady: phase === 'open-confirmation' ? () => {
                 checkChapterTask();
-                let owner = action.ownerWindow;
-                for (let depth = 0; depth < 10; depth++) {
-                  try {
-                    const ownerJobId = owner.document.querySelector<HTMLInputElement>('form #jobid,form input[name="jobid"]')?.value;
-                    if ((owner === action.ownerWindow || (submissionJobId && ownerJobId === submissionJobId))
-                      && hasChapterSubmissionConfirmation(owner.document)) return true;
-                    if (owner.parent === owner) break;
-                    owner = owner.parent as Window & Record<string, any>;
-                  } catch { break; }
-                }
-                return false;
+                const previous = confirmationSession?.current();
+                const confirmation = confirmationSession?.find();
+                if (confirmation && !previous) progress('confirmation-ready', {
+                  ownerIsFrame: confirmation.document === frameDocument,
+                  popupId: confirmation.popup.id
+                });
+                return Boolean(confirmation);
               } : undefined
             });
         };
@@ -5383,7 +5447,6 @@ const JobRunner = {
                       chapterFinished = false;
                       return;
                     }
-                    (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
                     chapterFinished = true;
                   } else {
                     await saveChapter();
@@ -5392,7 +5455,6 @@ const JobRunner = {
                 }
               });
             } else {
-              (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
               chapterFinished = true;
               appsMethods().addQuestionCacheFromWorkResult?.(cacheableResults, deepThinking ? 'deep' : 'normal');
             }
@@ -5409,6 +5471,7 @@ const JobRunner = {
         }
           });
         } finally {
+          confirmationSession?.release();
           uploadInProgress = false;
         }
 

@@ -69,7 +69,7 @@ before(async () => {
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  runtime = `(() => { const exports = {}; ${compiled}; window.dismissChapterSubmissionDialog = exports.dismissChapterSubmissionDialog; })();`;
+  runtime = `(() => { const exports = {}; ${compiled}; window.dismissChapterSubmissionDialog = exports.dismissChapterSubmissionDialog; window.getChapterSubmissionConfirmation = exports.getChapterSubmissionConfirmation; window.submitChapterSubmissionConfirmation = exports.submitChapterSubmissionConfirmation; })();`;
   const observerSource = await readFile('src/projects/cx-chapter-submission.ts', 'utf8');
   const observerCode = ts.transpileModule(observerSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
@@ -142,6 +142,160 @@ async function openPage() {
   return page;
 }
 
+test('the exact Marking confirmation invokes its bound submit listener once instead of a stale global function', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (markup) => {
+      document.querySelector('form').remove();
+      document.body.insertAdjacentHTML('beforeend', markup);
+      const submit = document.querySelector('#popok');
+      submit.removeAttribute('onclick');
+      let oldFunctionCalls = 0, instanceCalls = 0, events = 0, correctThis = false;
+      window.submitCheckTimes = () => { oldFunctionCalls++; };
+      submit.click = () => { instanceCalls++; };
+      let response;
+      submit.addEventListener('click', function () {
+        events++;
+        correctThis = this === submit;
+        response = fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=ordinary', { method: 'POST' });
+      });
+      const matched = getChapterSubmissionConfirmation(document);
+      const clicked = submitChapterSubmissionConfirmation(document);
+      await response;
+      return { clicked, matched: matched.popup === document.querySelector('#workpop') && matched.submit === submit,
+        events, correctThis, oldFunctionCalls, instanceCalls };
+    }, anchorConfirmation);
+    assert.deepEqual(result, { clicked: true, matched: true, events: 1, correctThis: true, oldFunctionCalls: 0, instanceCalls: 0 });
+    assert.equal(submissions, beforeSubmissions + 1);
+  } finally { await page.close(); }
+});
+
+test('the old exact confirmation still submits through its own bound control once', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async () => {
+      document.querySelector('form').remove();
+      document.body.insertAdjacentHTML('beforeend', `<div class="AlertCon02" id="confirmSubWin"><h3>
+        <a id="closeFoucsButton" class="closed02" onclick="hideWindow()">关闭</a></h3>
+        <div class="con03"><p id="tipContent">确认提交？</p><div class="marTop30">
+        <a href="javascript:;" onclick="submitCheckTimes()">确定</a><a href="javascript:;" onclick="hideWindow()">取消</a></div></div></div>`);
+      let events = 0;
+      let response;
+      window.submitCheckTimes = () => { events++; response = fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=ordinary', { method: 'POST' }); };
+      window.hideWindow = () => {};
+      const clicked = submitChapterSubmissionConfirmation(document);
+      await response;
+      return { clicked, events };
+    });
+    assert.deepEqual(result, { clicked: true, events: 1 });
+    assert.equal(submissions, beforeSubmissions + 1);
+  } finally { await page.close(); }
+});
+
+test('submission ignores disabled controls, hidden templates and unknown popup content', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(() => {
+      const submit = document.querySelector('#popok');
+      submit.disabled = true;
+      const disabled = submitChapterSubmissionConfirmation(document);
+      submit.disabled = false;
+      submit.setAttribute('aria-disabled', 'true');
+      const ariaDisabled = submitChapterSubmissionConfirmation(document);
+      submit.removeAttribute('aria-disabled');
+      document.querySelector('#workpop').style.display = 'none';
+      const hidden = submitChapterSubmissionConfirmation(document);
+      document.querySelector('#workpop').style.display = 'block';
+      document.querySelector('#popcontent').textContent = '确认删除？';
+      const unknown = submitChapterSubmissionConfirmation(document);
+      return { disabled, ariaDisabled, hidden, unknown, events: window.__submitCalls };
+    });
+    assert.deepEqual(result, { disabled: false, ariaDisabled: false, hidden: false, unknown: false, events: 0 });
+    assert.equal(submissions, beforeSubmissions);
+  } finally { await page.close(); }
+});
+
+test('submission refuses two visible known confirmations instead of choosing one', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(() => {
+      document.querySelector('#popok').addEventListener('click', (event) => event.preventDefault());
+      document.body.insertAdjacentHTML('beforeend', `<div class="AlertCon02" id="confirmSubWin"><h3>
+        <a id="closeFoucsButton" class="closed02" onclick="hideWindow()">关闭</a></h3>
+        <div class="con03"><p id="tipContent">确认提交？</p><div class="marTop30">
+        <a href="javascript:;" onclick="submitCheckTimes()">确定</a><a href="javascript:;" onclick="hideWindow()">取消</a></div></div></div>`);
+      const ambiguous = getChapterSubmissionConfirmation(document) === undefined;
+      const clicked = submitChapterSubmissionConfirmation(document);
+      return { ambiguous, clicked, submitted: window.__submitCalls };
+    });
+    assert.deepEqual(result, { ambiguous: true, clicked: false, submitted: 0 });
+    assert.equal(submissions, beforeSubmissions);
+  } finally { await page.close(); }
+});
+
+test('cleanup with a bound popup preserves another known confirmation in the same document', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(() => {
+      document.body.insertAdjacentHTML('beforeend', `<div class="AlertCon02" id="confirmSubWin"><h3>
+        <a id="closeFoucsButton" class="closed02" onclick="hideWindow()">关闭</a></h3>
+        <div class="con03"><p id="tipContent">确认提交？</p><div class="marTop30">
+        <a href="javascript:;" onclick="submitCheckTimes()">确定</a><a href="javascript:;" onclick="hideWindow()">取消</a></div></div></div>`);
+      let cancelled = 0;
+      window.hideWindow = () => { cancelled++; };
+      const popup = document.querySelector('#confirmSubWin');
+      dismissChapterSubmissionDialog([window], { ownerDocument: document, popup });
+      return { cancelled, hidden: getComputedStyle(popup).display,
+        otherDisplay: getComputedStyle(document.querySelector('#workpop')).display,
+        otherClose: window.__closeCalls, submitted: window.__submitCalls };
+    });
+    assert.deepEqual(result, { cancelled: 1, hidden: 'none', otherDisplay: 'block', otherClose: 0, submitted: 0 });
+  } finally { await page.close(); }
+});
+
+test('submission stays in the requested document and preserves another task confirmation', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (markup) => {
+      const child = document.querySelector('#child').contentWindow;
+      child.document.body.insertAdjacentHTML('beforeend', markup);
+      const submit = child.document.querySelector('#popok');
+      submit.removeAttribute('onclick');
+      let events = 0, correctThis = false, response;
+      submit.addEventListener('click', function () {
+        events++;
+        correctThis = this === submit;
+        response = child.fetch('/mooc-ans/work/addStudentWorkNewWeb?kind=ordinary', { method: 'POST' });
+      });
+      const clicked = submitChapterSubmissionConfirmation(child.document);
+      await response;
+      return { clicked, events, correctThis, parentEvents: window.__submitCalls,
+        parentDisplay: getComputedStyle(document.querySelector('#workpop')).display };
+    }, anchorConfirmation);
+    assert.deepEqual(result, { clicked: true, events: 1, correctThis: true, parentEvents: 0, parentDisplay: 'block' });
+    assert.equal(submissions, beforeSubmissions + 1);
+  } finally { await page.close(); }
+});
+
+test('cleanup runs the known close callback when the visible cancel control has no binding', async () => {
+  const beforeSubmissions = submissions;
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(() => {
+      dismissChapterSubmissionDialog([window]);
+      return { close: window.__closeCalls, submitted: window.__submitCalls,
+        display: getComputedStyle(document.querySelector('#workpop')).display };
+    });
+    assert.deepEqual(result, { close: 1, submitted: 0, display: 'none' });
+    assert.equal(submissions, beforeSubmissions);
+  } finally { await page.close(); }
+});
+
 test('iframe-initiated cleanup uses the top document cancellation listener once and never submits', async () => {
   const beforeSubmissions = submissions;
   const page = await openPage();
@@ -202,7 +356,7 @@ test('cleanup selects the real close control when cancellation is disabled', asy
   } finally { await page.close(); }
 });
 
-test('cleanup locally hides the matching overlay when page callbacks leave it visible without submitting its form', async () => {
+test('cleanup falls back to its close callback when cancellation leaves the same confirmation visible', async () => {
   const beforeSubmissions = submissions;
   const page = await openPage();
   try {
@@ -220,7 +374,7 @@ test('cleanup locally hides the matching overlay when page callbacks leave it vi
         reused: getComputedStyle(popup.querySelector('.popDiv')).display !== 'none'
       };
     });
-    assert.deepEqual(result, { cancelled: 1, close: 0, submit: 0, display: 'none', reused: true });
+    assert.deepEqual(result, { cancelled: 1, close: 1, submit: 0, display: 'none', reused: true });
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(submissions, beforeSubmissions);
   } finally { await page.close(); }

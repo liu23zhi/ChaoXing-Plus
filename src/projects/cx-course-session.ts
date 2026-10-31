@@ -8,7 +8,7 @@ type SessionOptions = {
 };
 export type CourseSession = {
   ready(): Promise<boolean>;
-  requestManualDecision(scope?: CourseSessionScope): Promise<boolean>;
+  requestManualDecision(scope?: CourseSessionScope, decisionKey?: string): Promise<boolean>;
   resumeManualDecision(scope?: CourseSessionScope): Promise<boolean>;
   canReload(): boolean;
   persist(): void;
@@ -28,7 +28,24 @@ type Snapshot = {
   chapters: Record<string, unknown>;
   course?: unknown;
   decision?: Decision;
+  taskDecisions?: Record<string, 'accepted'>;
+  pausedDecisionKey?: string;
 };
+
+const maxDecisionKeyLength = 4000;
+
+function validDecisionKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxDecisionKeyLength;
+}
+
+function normalizeTaskDecisions(value: unknown): Record<string, 'accepted'> {
+  if (!object(value)) return {};
+  const result: Record<string, 'accepted'> = {};
+  for (const [key, decision] of Object.entries(value).slice(0, 5000)) {
+    if (validDecisionKey(key) && decision === 'accepted') result[key] = 'accepted';
+  }
+  return result;
+}
 
 function scopeKey(scope: CourseSessionScope) {
   return JSON.stringify([scope.courseId, scope.classId]);
@@ -175,11 +192,14 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
   let runId = messageId(owner);
   let storageAvailable = true;
   let decisionPromise: Promise<boolean> | undefined;
+  let activeDecisionKey: string | undefined;
+  let pausedDecisionKey: string | undefined;
   let overrideDecision: ((accepted: boolean) => void) | undefined;
   let applying = false;
   let initialized = false;
   let scopeGeneration = 0;
   const memory = new Map<string, Snapshot>();
+  const taskDecisions = new Map<string, Record<string, 'accepted'>>();
   const noDiskWrite = () => { try { return options.noDiskWrite(); } catch { return true; } };
   const tabIdentity = root.getAttribute('data-chaoxing-plus-tab-identity');
   const tabPartition = tabIdentity ? `:tab:${JSON.stringify(tabIdentity)}` : '';
@@ -191,10 +211,13 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
   };
   const snapshot = (scope: CourseSessionScope): Snapshot => {
     const course = normalizedCourse(parseObject(root.getAttribute(courseAttribute))[scopeKey(scope)], scopeKey(scope));
+    const decisions = taskDecisions.get(scopeKey(scope));
     return { version: 1, scope, runId,
       chapters: courseChapters(parseObject(root.getAttribute(chaptersAttribute)), scope),
       ...(course ? { course } : {}),
-      ...(readDecision() ? { decision: readDecision() } : {}) };
+      ...(readDecision() ? { decision: readDecision() } : {}),
+      ...(decisions && Object.keys(decisions).length ? { taskDecisions: { ...decisions } } : {}),
+      ...(pausedDecisionKey ? { pausedDecisionKey } : {}) };
   };
   const save = () => {
     if (!currentScope) return;
@@ -216,6 +239,8 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
     overrideDecision?.(false);
     overrideDecision = undefined;
     decisionPromise = undefined;
+    activeDecisionKey = undefined;
+    pausedDecisionKey = undefined;
     runId = messageId(owner);
     root.removeAttribute(decisionAttribute);
     root.removeAttribute(declinedAttribute);
@@ -229,7 +254,9 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
             && typeof stored.runId === 'string' && stored.runId.length <= 200 && object(stored.chapters)) {
             value = { version: 1, scope, runId: stored.runId, chapters: courseChapters(stored.chapters, scope),
               ...(normalizedCourse(stored.course, scopeKey(scope)) ? { course: normalizedCourse(stored.course, scopeKey(scope)) } : {}),
-              ...(['pending', 'accepted', 'declined'].includes(String(stored.decision)) ? { decision: stored.decision as Decision } : {}) };
+              ...(['pending', 'accepted', 'declined'].includes(String(stored.decision)) ? { decision: stored.decision as Decision } : {}),
+              taskDecisions: normalizeTaskDecisions(stored.taskDecisions),
+              ...(validDecisionKey(stored.pausedDecisionKey) ? { pausedDecisionKey: stored.pausedDecisionKey } : {}) };
           }
         } catch { storageAvailable = false; }
       }
@@ -243,6 +270,8 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
         delete courses[scopeKey(scope)];
         if (value.course) courses[scopeKey(scope)] = value.course;
         root.setAttribute(courseAttribute, JSON.stringify(courses));
+        taskDecisions.set(scopeKey(scope), normalizeTaskDecisions(value.taskDecisions));
+        pausedDecisionKey = value.pausedDecisionKey;
         if (value.decision) {
           const decision = value.decision === 'pending' ? 'declined' : value.decision;
           root.setAttribute(decisionAttribute, decision);
@@ -257,24 +286,44 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
   };
   synchronizeScope();
   initialized = true;
-  const requestDecision = (scope?: CourseSessionScope): Promise<boolean> => {
+  const requestDecision = (scope?: CourseSessionScope, decisionKey?: string): Promise<boolean> => {
     synchronizeScope();
     if (scope && (!currentScope || !validScope(scope) || scopeKey(scope) !== scopeKey(currentScope))) return Promise.resolve(false);
-    const decision = readDecision();
-    if (decision === 'accepted' || decision === 'declined') return Promise.resolve(decision === 'accepted');
-    if (decisionPromise) return decisionPromise;
+    if (decisionKey !== undefined && !validDecisionKey(decisionKey)) return Promise.resolve(false);
+    const decisions = currentScope ? taskDecisions.get(scopeKey(currentScope)) || {} : {};
+    if (decisionKey && decisions[decisionKey] === 'accepted') return Promise.resolve(true);
+    if (readDecision() === 'declined') return Promise.resolve(false);
+    if (!decisionKey && readDecision() === 'accepted') return Promise.resolve(true);
+    if (decisionPromise) {
+      if (activeDecisionKey === decisionKey) return decisionPromise;
+      return decisionPromise.then(() => requestDecision(scope, decisionKey));
+    }
     const expectedScope = currentScope && scopeKey(currentScope);
     const expectedGeneration = scopeGeneration;
     root.setAttribute(decisionAttribute, 'pending');
+    activeDecisionKey = decisionKey;
+    pausedDecisionKey = decisionKey;
     save();
     const explicitDecision = new Promise<boolean>((resolve) => { overrideDecision = resolve; });
     const confirmation = Promise.resolve().then(() => options.confirm()).catch(() => false);
     const pending = Promise.race([confirmation, explicitDecision]).then((accepted) => {
       synchronizeScope();
       if ((currentScope && scopeKey(currentScope)) !== expectedScope || scopeGeneration !== expectedGeneration) return false;
-      root.setAttribute(decisionAttribute, accepted ? 'accepted' : 'declined');
-      if (!accepted) root.setAttribute(declinedAttribute, 'true');
-      else root.removeAttribute(declinedAttribute);
+      if (accepted) {
+        root.removeAttribute(declinedAttribute);
+        if (decisionKey && currentScope) {
+          const acceptedTasks = taskDecisions.get(scopeKey(currentScope)) || {};
+          acceptedTasks[decisionKey] = 'accepted';
+          taskDecisions.set(scopeKey(currentScope), acceptedTasks);
+          root.removeAttribute(decisionAttribute);
+        } else {
+          root.setAttribute(decisionAttribute, 'accepted');
+        }
+        pausedDecisionKey = undefined;
+      } else {
+        root.setAttribute(decisionAttribute, 'declined');
+        root.setAttribute(declinedAttribute, 'true');
+      }
       root.dispatchEvent(new Event('chaoxing-plus:manual-answer-decision'));
       save();
       return accepted;
@@ -289,6 +338,12 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
     if (scope && (!currentScope || !validScope(scope) || scopeKey(scope) !== scopeKey(currentScope))) return Promise.resolve(false);
     root.removeAttribute(declinedAttribute);
     root.setAttribute(decisionAttribute, 'accepted');
+    if (pausedDecisionKey && currentScope) {
+      const acceptedTasks = taskDecisions.get(scopeKey(currentScope)) || {};
+      acceptedTasks[pausedDecisionKey] = 'accepted';
+      taskDecisions.set(scopeKey(currentScope), acceptedTasks);
+    }
+    pausedDecisionKey = undefined;
     try { delete registry.__chaoxing_plus_manual_answer_declined__; } catch { /* Ignore a page-owned property. */ }
     overrideDecision?.(true);
     root.dispatchEvent(new Event('chaoxing-plus:manual-answer-decision'));
@@ -304,7 +359,8 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
       save();
       if (currentScope && !noDiskWrite() && storageAvailable) return true;
       return !readDecision() && Object.keys(parseObject(root.getAttribute(chaptersAttribute))).length === 0
-        && Object.keys(parseObject(root.getAttribute(courseAttribute))).length === 0;
+        && Object.keys(parseObject(root.getAttribute(courseAttribute))).length === 0
+        && !(currentScope && Object.keys(taskDecisions.get(scopeKey(currentScope)) || {}).length);
     },
     persist() { synchronizeScope(); save(); }
   };
@@ -318,20 +374,22 @@ export function initializeCourseSession(frameWindow: Window, options: SessionOpt
     const message = event.data;
     if (!object(message) || message.namespace !== namespace || !['hello', 'decision', 'resume'].includes(String(message.kind))
       || typeof message.id !== 'string' || !/^[a-zA-Z0-9-]{1,160}$/.test(message.id) || !allowedChild(owner, event)) return;
+    if (message.decisionKey !== undefined && !validDecisionKey(message.decisionKey)) return;
     synchronizeScope();
     const source = event.source as Window;
     const replyScope = currentScope;
     const replyRun = runId;
     const matches = Boolean(currentScope && (!message.scope || (validScope(message.scope) && scopeKey(message.scope) === scopeKey(currentScope))));
     const respond = (kind: string, extra: Record<string, unknown>) => {
-      try { source.postMessage({ namespace, kind, id: message.id, scope: replyScope, runId: replyRun, ...extra }, event.origin); } catch { /* Source left the course. */ }
+      try { source.postMessage({ namespace, kind, id: message.id, scope: replyScope, runId: replyRun,
+        ...(message.decisionKey !== undefined ? { decisionKey: message.decisionKey } : {}), ...extra }, event.origin); } catch { /* Source left the course. */ }
     };
     if (message.kind === 'hello') respond('ready', { accepted: matches });
     else if (!matches || !validScope(message.scope) || message.runId !== runId) respond('result', { accepted: false });
     else {
       const requestedScope = message.scope;
       respond('accepted', {});
-      void (message.kind === 'resume' ? resumeDecision(requestedScope) : requestDecision(requestedScope))
+      void (message.kind === 'resume' ? resumeDecision(requestedScope) : requestDecision(requestedScope, message.decisionKey))
         .then((accepted) => respond('result', { accepted }));
     }
   });
@@ -343,7 +401,7 @@ function initializeRemoteSession(frame: Window, owner: Window, options: SessionO
   let remoteScope: CourseSessionScope | undefined;
   let remoteOrigin: string | undefined;
   let remoteRun: string | undefined;
-  const pending = new Map<string, { resolve: (accepted: boolean) => void; timer?: ReturnType<typeof setTimeout> }>();
+  const pending = new Map<string, { resolve: (accepted: boolean) => void; timer?: ReturnType<typeof setTimeout>; decisionKey?: string }>();
   const helloId = messageId(frame);
   let readyResolve: (accepted: boolean) => void;
   const ready = new Promise<boolean>((resolve) => { readyResolve = resolve; });
@@ -372,6 +430,7 @@ function initializeRemoteSession(frame: Window, owner: Window, options: SessionO
       || scopeKey(message.scope) !== scopeKey(remoteScope) || message.runId !== remoteRun) return;
     const entry = pending.get(message.id);
     if (!entry) return;
+    if (message.decisionKey !== entry.decisionKey) return;
     if (message.kind === 'accepted') {
       if (entry.timer) clearTimeout(entry.timer);
       entry.timer = undefined;
@@ -387,20 +446,22 @@ function initializeRemoteSession(frame: Window, owner: Window, options: SessionO
   const timeout = setTimeout(() => finish(false), timeoutMs);
   const interval = setInterval(hello, Math.min(100, timeoutMs));
   hello();
-  const request = async (kind: 'decision' | 'resume', scope?: CourseSessionScope) => {
+  const request = async (kind: 'decision' | 'resume', scope?: CourseSessionScope, decisionKey?: string) => {
       if (!await ready || !remoteScope || !remoteOrigin || (scope && (!validScope(scope) || scopeKey(scope) !== scopeKey(remoteScope)))) return false;
+      if (decisionKey !== undefined && !validDecisionKey(decisionKey)) return false;
       const id = messageId(frame);
       const targetOrigin = remoteOrigin;
       return new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => { pending.delete(id); resolve(false); }, timeoutMs);
-        pending.set(id, { resolve, timer });
-        try { owner.postMessage({ namespace, kind, id, scope: remoteScope, runId: remoteRun }, targetOrigin); }
+        pending.set(id, { resolve, timer, decisionKey });
+        try { owner.postMessage({ namespace, kind, id, scope: remoteScope, runId: remoteRun,
+          ...(decisionKey !== undefined ? { decisionKey } : {}) }, targetOrigin); }
         catch { clearTimeout(timer); pending.delete(id); resolve(false); }
       });
   };
   return {
     ready: () => ready,
-    requestManualDecision: (scope) => request('decision', scope),
+    requestManualDecision: (scope, decisionKey) => request('decision', scope, decisionKey),
     resumeManualDecision: (scope) => request('resume', scope),
     canReload: () => false,
     persist() { /* Only the owner may persist the shared course state. */ }
