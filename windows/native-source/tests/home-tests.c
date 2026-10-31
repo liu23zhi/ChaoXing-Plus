@@ -115,7 +115,7 @@ static CX_OPTIONS options;
 static CX_HOME_CONFIG shared, separate;
 static char settingsOutput[CX_OPTIONS_JSON_CAP];
 static WCHAR errorText[512], browserKind[16];
-static DWORD dialogMode, dialogInspections, homeInspections;
+static DWORD dialogInspections, homeInspections;
 static BOOL examCalled;
 
 static void output(const char *value) {
@@ -219,8 +219,11 @@ static void CALLBACK dialog_tick(HWND window, UINT message, UINT_PTR timer, DWOR
     icon = LoadIconW(home_instance, MAKEINTRESOURCEW(CX_RESOURCE_APP_ICON));
     check(icon && (HICON)SendMessageW(dialog, WM_GETICON, ICON_BIG, 0) == icon,
         "settings dialog binds the actual application window icon");
-    check(GetDlgItem(dialog, SETTINGS_JSON) && !GetDlgItem(dialog, 1501),
-        "settings dialog exposes shared JSON and has no local CRX input");
+    check(!GetDlgItem(dialog, 1509) && !GetDlgItem(dialog, 1501),
+        "settings dialog omits the advanced JSON editor and local CRX input");
+    check(FindWindowExW(dialog, NULL, L"STATIC", L"API key") != NULL
+        && FindWindowExW(dialog, NULL, L"STATIC", L"API key（可选）") == NULL,
+        "settings dialog labels the API key without an optional marker");
     check(GetDlgItem(dialog, SETTINGS_PANEL_ENABLED) && GetDlgItem(dialog, SETTINGS_PANEL_COLLAPSED)
         && GetDlgItem(dialog, SETTINGS_PANEL_TOP) && GetDlgItem(dialog, SETTINGS_PANEL_RIGHT)
         && GetDlgItem(dialog, SETTINGS_PANEL_WIDTH) && GetDlgItem(dialog, SETTINGS_PANEL_THEME),
@@ -237,7 +240,6 @@ static void CALLBACK dialog_tick(HWND window, UINT message, UINT_PTR timer, DWOR
         "settings dialog exposes the same exam and AI controls as the extension floating panel");
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_BASE_URL), L"https://adapter.example/");
     SetWindowTextW(GetDlgItem(dialog, SETTINGS_API_KEY), L"tk_separate");
-    SetWindowTextW(GetDlgItem(dialog, SETTINGS_JSON), dialogMode == 2 ? L"{" : L"{\"common.settings.session\":true}");
     SendMessageW(GetDlgItem(dialog, SETTINGS_BROWSER), CB_SETCURSEL, 1, 0);
     SendMessageW(GetDlgItem(dialog, SETTINGS_PANEL_ENABLED), BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(dialog, SETTINGS_PANEL_COLLAPSED), BM_SETCHECK, BST_CHECKED, 0);
@@ -262,15 +264,10 @@ static void CALLBACK dialog_tick(HWND window, UINT message, UINT_PTR timer, DWOR
     SendMessageW(GetDlgItem(dialog, SETTINGS_EXAM_AUTO_SUBMIT), BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(GetDlgItem(dialog, SETTINGS_LOCAL_CACHE), BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(SETTINGS_SAVE, BN_CLICKED), 0);
-    if (dialogMode == 2) {
-        check(IsWindow(dialog), "invalid JSON keeps the settings dialog open");
-        SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(SETTINGS_CANCEL, BN_CLICKED), 0);
-    }
 }
 static void dialog_tests(void) {
     HOME_STATE *state = make_home(); BOOL accepted; DWORD outputLength = 0;
     home_copy(shared.apiKey, CX_HOME_API_KEY_CAP, L"tk_shared");
-    dialogMode = 1;
     if (!SetTimer(NULL, 0, 20, dialog_tick)) ExitProcess(5);
     accepted = home_settings_dialog(state, FALSE, L"edge", &separate, browserKind, 16);
     if (accepted) home_build_settings(state, &separate, settingsOutput, sizeof(settingsOutput), &outputLength, errorText, 512);
@@ -301,19 +298,12 @@ static void dialog_tests(void) {
         && contains(settingsOutput, "\"cx.new.study.enableExamAutoSubmit\":true")
         && contains(settingsOutput, "\"cx.new.study.enableLocalQuestionCache\":false"),
         "native form emits extension floating-panel settings as shared settings");
-    check(contains(settingsOutput, "\"common.settings.session\":true"),
-        "advanced JSON settings are retained alongside explicit form fields");
     check(!lstrcmpW(shared.apiKey, L"tk_shared") && !lstrcmpW(shared.settingsJson, L"{}"),
         "separate settings never replace the common configuration");
-    dialogMode = 2;
-    if (!SetTimer(NULL, 0, 20, dialog_tick)) ExitProcess(5);
-    check(!home_settings_dialog(state, TRUE, L"edge", NULL, NULL, 0) && !lstrcmpW(shared.apiKey, L"tk_shared"),
-        "cancelling invalid settings preserves the common credentials");
-    dialogMode = 3;
     if (!SetTimer(NULL, 0, 20, dialog_tick)) ExitProcess(5);
     check(home_settings_dialog(state, TRUE, L"edge", NULL, NULL, 0)
         && !lstrcmpW(shared.apiKey, L"tk_separate"), "saving common settings applies validated values");
-    check(dialogInspections == 3, "all real settings dialogs complete their message loops");
+    check(dialogInspections == 2, "all real settings dialogs complete their message loops");
     free_home(state);
 }
 

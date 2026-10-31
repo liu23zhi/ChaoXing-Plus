@@ -241,7 +241,7 @@ test('cx stops waiting for stale attachment counts once the current page has no 
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('function hasPendingCurrentPageJobAttachments() {'), true);
-  assert.equal(source.includes('return attachments.some((attachment) => attachment.job === true);'), true);
+  assert.equal(source.includes('return attachment.job === true && !deferred;'), true);
   assert.equal(source.includes("} else if (visibleContentState === 'finished-job' && !hasPendingCurrentPageJobAttachments()) {"), true);
   assert.equal(source.includes('attachmentCount = 0;'), true);
   assert.equal(source.includes('searching = false;'), true);
@@ -278,14 +278,14 @@ test('cx blocks auto-jump when no visible runnable content is detected but the c
   assert.equal(source.includes("function shouldCheckSiblingSubTasksForState(visibleContentState: VisibleContentState): boolean {"), true);
   assert.equal(source.includes("return visibleContentState === 'finished-job' || visibleContentState === 'empty';"), true);
   assert.equal(source.includes("const siblingSubTaskProgress = CXAnalyses.getChapterSubTaskProgress();"), true);
-  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !hasDeferredChapterTasks && opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
   assert.equal(source.includes('当前章节仍未完成，但未识别到可执行任务，已取消自动跳转。'), true);
 });
 
 test('cx checks sibling sub tasks before showing the final-chapter unfinished warning', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !hasDeferredChapterTasks && opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
   assert.equal(source.includes("if (CXAnalyses.isInFinalChapter() && !shouldCheckSiblingSubTasks) {"), true);
   assert.equal(source.includes('当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。'), true);
 });
@@ -293,7 +293,7 @@ test('cx checks sibling sub tasks before showing the final-chapter unfinished wa
 test('cx prioritizes next-section mode over sibling sub-task recovery', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes("const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
+  assert.equal(source.includes("const shouldCheckSiblingSubTasks = !hasDeferredChapterTasks && opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));"), true);
   assert.match(source, /const shouldWaitBeforeSiblingSubTaskCheck =\r?\n\s+opts\.mode !== 'next' &&/);
   assert.equal(source.includes("if (opts.mode === 'next') {"), true);
   assert.equal(source.includes("nextFn(count.length.toString(), curChapterId.value, curCourseId.value, curClazzId.value, '');"), true);
@@ -409,7 +409,7 @@ test('cx chapter test fallback runs when TiMu is visible without a standard job 
 
   assert.equal(source.includes('enableVisibleQuestionFallback'), true);
   assert.equal(source.includes("visibleContentState === 'visible-nonjob' || visibleContentState === 'visible-unmapped'"), true);
-  assert.equal(source.includes('await JobRunner.chapter(root, opts.workOptions);'), true);
+  assert.match(source, /await JobRunner\.chapter\(root, opts\.workOptions,\s*\{/u);
   assert.equal(source.includes('正在尝试兜底处理当前可见题目'), true);
 });
 
@@ -489,7 +489,8 @@ test('cx keeps task scanning compatible with verbose diagnostics and resolves jo
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes("const prefix = `[Chaoxing Plus][${nextDebugSequence()}] ${label}`;"), true);
-  assert.equal(source.includes("const targetJobId = frameData.jobid || frameData._jobid || root.getAttribute('jobid') || root.getAttribute('_jobid');"), true);
+  assert.match(source, /const targetJobId = frameData\.jobid \|\| frameData\._jobid \|\| root\.getAttribute\('jobid'\) \|\| root\.getAttribute\('_jobid'\)/u);
+  assert.equal(source.includes("win.document.querySelector<HTMLInputElement>('form #jobid')?.value"), true);
   assert.equal(source.includes('await JobRunner.media(opts, win.document, attachment);'), true);
 });
 
@@ -547,7 +548,7 @@ test('cx releases searched chapter jobs when the chapter test remains unfinished
 
   assert.equal(source.includes('releaseSearchedJob(job);'), true);
   assert.equal(source.includes('function releaseSearchedJob(job: Job) {'), true);
-  assert.equal(source.includes('const searchedIndex = searchedJobs.findIndex((searchedJob) => searchedJob.mid === job.mid);'), true);
+  assert.equal(source.includes('const searchedIndex = searchedJobs.indexOf(job);'), true);
   assert.equal(source.includes('searchedJobs.splice(searchedIndex, 1);'), true);
   assert.equal(source.includes("logDebug('warn', '章节测试未完成重试诊断'"), true);
 });

@@ -134,10 +134,15 @@ test('cx remembers a manual answer choice for the current page and pauses the ch
   const source = await readFile(cxProjectPath, 'utf8');
 
   assert.match(source, /manualAnswerDeclinedKey/u);
+  assert.match(source, /manualAnswerDecisionPromise/u);
+  assert.match(source, /data-chaoxing-plus-manual-answer-declined/u);
+  assert.match(source, /data-chaoxing-plus-manual-answer-decision/u);
+  assert.match(source, /publishManualAnswerDecision\('pending'\)/u);
+  assert.match(source, /waitForManualAnswerDecision/u);
   assert.match(source, /if \(\(topWindow as (?:unknown as )?Record<string, unknown>\)\[manualAnswerDeclinedKey\] === true\) \{[\s\S]*?return false;/u);
   assert.match(source, /\(topWindow as (?:unknown as )?Record<string, unknown>\)\[manualAnswerDeclinedKey\] = true;[\s\S]*?worker\.emit\('stop'\);/u);
   assert.match(source, /manual: true/u);
-  assert.match(source, /if \(manualAnswerPaused\) \{[\s\S]*?return;/u);
+  assert.match(source, /if \(manualAnswerPaused \|\| !isDeferredChapterContextCurrent\(studyContext\)\) \{[\s\S]*?return;/u);
 });
 
 test('Windows no-auto-submit prevents both chapter and work/exam submit actions', async () => {
@@ -150,5 +155,5 @@ test('Windows no-auto-submit prevents both chapter and work/exam submit actions'
   assert.equal(source.includes('const shouldSubmit = autoSubmitEnabled && upload === \'submit\' && uploadable;'), true);
   assert.match(source, /const shouldAllowSubmitForPage = upload === 'submit'\s+&& autoSubmitEnabled/);
   assert.match(source, /if \(shouldSubmit\) \{\s+await submitWorkOrExamPage\(type\);/);
-  assert.match(chapterFlow, /if \(autoSubmitEnabled\) \{[\s\S]*?btnBlueSubmit\?\.\(\);[\s\S]*?\} else \{[\s\S]*?noSubmit\?\.\(\);/);
+  assert.match(chapterFlow, /if \(shouldSubmit\) \{[\s\S]*?invokeChapterActionWithExpiryCapture[\s\S]*?\} else \{[\s\S]*?noSubmit\?\.\(\);/);
 });

@@ -233,7 +233,7 @@ test('enabling deep thinking asks for confirmation before persisting the setting
 
 test('chapter and work or exam search chains forward deep thinking to both adapter routes', async () => {
   const source = await readFile(cxSourcePath, 'utf8');
-  const chapterStart = source.indexOf('async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions)');
+  const chapterStart = source.search(/async chapter\s*\(/u);
   const workStart = source.indexOf('function workOrExam(');
   const chapterBlock = source.slice(chapterStart, workStart);
   const workBlock = source.slice(workStart);
@@ -255,7 +255,7 @@ test('chapter and work or exam search chains forward deep thinking to both adapt
 
 test('completed chapter and work or exam answers persist under their search mode', async () => {
   const source = await readFile(cxSourcePath, 'utf8');
-  const chapterStart = source.indexOf('async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions)');
+  const chapterStart = source.search(/async chapter\s*\(/u);
   const workStart = source.indexOf('function workOrExam(');
   const chapterBlock = source.slice(chapterStart, workStart);
   const workBlock = source.slice(workStart);

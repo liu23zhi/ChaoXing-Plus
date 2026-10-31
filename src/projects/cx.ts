@@ -42,6 +42,19 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
+import { observeChapterSubmission } from './cx-chapter-submission.js';
+import {
+  readChapterDeferredState,
+  recordChapterDeferral,
+  markChapterTabInspected,
+  getNextUninspectedChapterTab,
+  chooseNextDeferredChapterTask,
+  markDeferredChapterAttempt,
+  markDeferredChapterResult,
+  markDeferredChapterMissing,
+  type ChapterDeferredState,
+  type DeferredChapterTask
+} from './cx-deferred-chapters.js';
 import { retryUnfinishedResultsInOrder } from '../core/worker/unfinished-retry.js';
 import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, shouldSkipCacheForManualRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
@@ -464,13 +477,19 @@ export type Attachment = {
 
 export type Job = {
   mid: string;
+  jobId?: string;
+  chapterTest?: boolean;
   attachment: Attachment;
-  func: (() => Promise<JobExecutionResult | void>) | undefined;
+  func: ((finalAttempt?: boolean) => Promise<JobExecutionResult | void>) | undefined;
   expired?: boolean;
+  terminalExpired?: boolean;
 };
 
 type JobExecutionResult = {
+  finished?: boolean;
   expired?: boolean;
+  staticExpired?: boolean;
+  terminalExpired?: boolean;
   manual?: boolean;
 };
 
@@ -479,6 +498,8 @@ type ChapterTaskResult = {
   finishedRate?: number;
   uploadable?: boolean;
   expired?: boolean;
+  staticExpired?: boolean;
+  terminalExpired?: boolean;
   manual?: boolean;
 };
 
@@ -503,13 +524,215 @@ function mergeVisibleContentState(current: VisibleContentState, next: VisibleCon
   return 'empty';
 }
 
+function isExpiredChapterText(message: unknown): boolean {
+  const text = String(message ?? '').replace(/[\s\u3000]+/gu, '');
+  const expiredTaskNames = ['作业已过期', '此作业已过期', '任务已过期', '章节测试已过期', '测验已过期', '考试已过期'];
+  return expiredTaskNames.some((marker) => text.includes(marker))
+    || text.includes('已截止，不能作答');
+}
+
+function isExpiredChapterResponse(value: unknown, seen = new Set<unknown>(), depth = 0): boolean {
+  if (value === null || value === undefined || depth > 6) return false;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed[0] === '{' || trimmed[0] === '[' || trimmed[0] === '"') {
+      try {
+        return isExpiredChapterResponse(JSON.parse(trimmed), seen, depth + 1);
+      } catch {
+        return false;
+      }
+    }
+    return isExpiredChapterText(trimmed);
+  }
+  if (typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => isExpiredChapterResponse(item, seen, depth + 1));
+
+  const record = value as Record<string, unknown>;
+  const status = record.status ?? record.success ?? record.ok;
+  const normalizedStatus = typeof status === 'string' ? status.trim().toLowerCase() : status;
+  const statusIsFailure = status === false || status === 0 || status === '0'
+    || ['0', 'false', 'fail', 'failed', 'failure', 'error'].includes(String(normalizedStatus));
+  const messages = [record.msg, record.message, record.errMsg, record.errmsg, record.error_msg, record.errorMessage, record.error];
+  if (messages.some((message) => typeof message === 'string' && isExpiredChapterText(message))
+    && (statusIsFailure || status === undefined)) return true;
+
+  const nestedKeys = ['data', 'result', 'payload', 'body', 'response', 'responseText', 'responseJSON', 'content', 'error', 'err', 'details'];
+  return nestedKeys.some((key) => isExpiredChapterResponse(record[key], seen, depth + 1));
+}
+
+function isChapterSubmissionFailure(value: unknown, seen = new Set<unknown>(), depth = 0): boolean {
+  if (value === null || value === undefined || depth > 6) return false;
+  if (typeof value === 'string') {
+    try {
+      return isChapterSubmissionFailure(JSON.parse(value), seen, depth + 1);
+    } catch {
+      return false;
+    }
+  }
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => isChapterSubmissionFailure(item, seen, depth + 1));
+  const record = value as Record<string, unknown>;
+  const status = record.status ?? record.success ?? record.ok;
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : status;
+  if (normalized === false || normalized === 0 || ['0', 'false', 'fail', 'failed', 'failure', 'error'].includes(String(normalized))) {
+    return true;
+  }
+  return ['data', 'result', 'payload', 'body', 'response', 'responseText', 'responseJSON', 'error', 'details']
+    .some((key) => isChapterSubmissionFailure(record[key], seen, depth + 1));
+}
+
+function isExpiredChapterMessage(message: unknown): boolean {
+  return isExpiredChapterResponse(message);
+}
+
 function isChapterTestExpired(root: ParentNode): boolean {
-  const statusText = Array.from(
-    root.querySelectorAll<HTMLElement>('.ceyan_name, .testTit_status, .newTestTitle')
-  )
-    .map((element) => element.innerText || element.textContent || '')
-    .join('\n');
-  return /已截止/u.test(statusText) && /不能作答/u.test(statusText);
+  const isExactExpiredStatus = (element: HTMLElement) => {
+    if (element.closest?.('.TiMu, .singleQuesId, script, style')) return false;
+    const text = (element.innerText || element.textContent || '').replace(/\s+/gu, '');
+    return text === '已截止，不能作答' || text === '（已截止，不能作答）';
+  };
+  const isDeadlineText = (element: HTMLElement) => {
+    const text = (element.innerText || element.textContent || '').replace(/\s+/gu, '');
+    return text.startsWith('截止时间:') || text.startsWith('截止时间：');
+  };
+
+  const ceyanNames = Array.from(root.querySelectorAll<HTMLElement>('.CeYan .ceyan_name'));
+  for (const ceyanName of ceyanNames) {
+    const statusBlocks = Array.from(ceyanName.querySelectorAll<HTMLElement>('p'));
+    const blocks = statusBlocks.length > 0 ? statusBlocks : [ceyanName];
+    for (const block of blocks) {
+      const hasDeadline = Array.from(block.querySelectorAll<HTMLElement>('span'))
+        .some((element) => isDeadlineText(element));
+      const hasExpiredStatus = Array.from(
+        block.querySelectorAll<HTMLElement>('.orangeColor, .testTit_status')
+      ).some((element) => isExactExpiredStatus(element));
+      if (hasDeadline && hasExpiredStatus) return true;
+    }
+  }
+
+  return Array.from(root.querySelectorAll<HTMLElement>('.newTestCon .testTit_status, .CeYan .testTit_status'))
+    .some((element) => isExactExpiredStatus(element));
+}
+
+async function invokeChapterActionWithExpiryCapture(
+  frameWindow: Window & Record<string, any>,
+  _frameDocument: Document,
+  action: () => unknown,
+  waitMs = 0
+) {
+  let nativeExpired = false;
+  const captureMessage = (message: unknown) => {
+    if (!isExpiredChapterMessage(message)) return undefined;
+    nativeExpired = true;
+    return false;
+  };
+  const actionWindows: Array<Window & Record<string, any>> = [];
+  const addActionWindow = (candidate: unknown) => {
+    if (!candidate || (typeof candidate !== 'object' && typeof candidate !== 'function')) return;
+    const actionWindow = candidate as Window & Record<string, any>;
+    if (!actionWindows.includes(actionWindow)) actionWindows.push(actionWindow);
+  };
+
+  addActionWindow(frameWindow);
+  try {
+    addActionWindow(frameWindow.parent);
+    addActionWindow(frameWindow.top);
+  } catch {
+    // Ignore inaccessible parent windows and keep the frame-local capture.
+  }
+  try {
+    addActionWindow(topWindow);
+  } catch {
+    // Ignore top-window access failures in restricted frames.
+  }
+
+  const originalHandlers: Array<{
+    actionWindow: Window & Record<string, any>;
+    alert: Window['alert'];
+    confirm: Window['confirm'];
+  }> = [];
+  actionWindows.forEach((actionWindow) => {
+    try {
+      originalHandlers.push({ actionWindow, alert: actionWindow.alert, confirm: actionWindow.confirm });
+    } catch {
+      // Cross-origin WindowProxy properties cannot be accessed.
+    }
+  });
+  let submissionFailed = false;
+  const captureResponse = (response: unknown) => {
+    if (isExpiredChapterResponse(response)) nativeExpired = true;
+    if (isChapterSubmissionFailure(response)) submissionFailed = true;
+  };
+  const observer = observeChapterSubmission(actionWindows, captureResponse);
+
+  try {
+    originalHandlers.forEach(({ actionWindow, alert, confirm }) => {
+      actionWindow.alert = (message: unknown) => {
+        const captured = captureMessage(message);
+        if (captured !== undefined) return;
+        if (typeof alert === 'function') {
+          return alert.call(actionWindow, message as string | undefined);
+        }
+        return undefined;
+      };
+      actionWindow.confirm = (message: unknown) => {
+        const captured = captureMessage(message);
+        if (captured !== undefined) return captured;
+        if (typeof confirm === 'function') {
+          return confirm.call(actionWindow, message as string | undefined);
+        }
+        return true;
+      };
+    });
+    const actionResult = action();
+    if (actionResult && typeof (actionResult as PromiseLike<unknown>).then === 'function') {
+      let actionTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const resolved = await Promise.race([
+          actionResult,
+          new Promise<never>((_resolve, reject) => {
+            actionTimeout = setTimeout(() => reject(new Error('章节测试提交响应超时，将按正常次数重试。')), 30000);
+          })
+        ]);
+        captureResponse(resolved);
+      } catch (error) {
+        if (isExpiredChapterResponse(error)) {
+          nativeExpired = true;
+        } else {
+          throw error;
+        }
+      } finally {
+        if (actionTimeout !== undefined) clearTimeout(actionTimeout);
+      }
+    } else {
+      captureResponse(actionResult);
+    }
+    if (waitMs > 0) await sleep(waitMs);
+    try {
+      await observer.wait();
+    } catch (error) {
+      if (!nativeExpired) throw error;
+    }
+    if (submissionFailed && !nativeExpired) throw new Error('章节测试提交失败，将按正常次数重试。');
+  } catch (error) {
+    if (!nativeExpired && !isExpiredChapterResponse(error)) throw error;
+    nativeExpired = true;
+  } finally {
+    observer.restore();
+    originalHandlers.forEach(({ actionWindow, alert, confirm }) => {
+      try {
+        actionWindow.alert = alert;
+        actionWindow.confirm = confirm;
+      } catch {
+        // A frame can navigate while its request is completing.
+      }
+    });
+  }
+
+  return nativeExpired;
 }
 
 function isVisibleQuestionFallbackState(visibleContentState: VisibleContentState): boolean {
@@ -1692,37 +1915,166 @@ async function waitForTikuAdapterBalanceRecovery() {
 }
 
 const manualAnswerDeclinedKey = '__chaoxing_plus_manual_answer_declined__';
+const manualAnswerDeclinedAttribute = 'data-chaoxing-plus-manual-answer-declined';
+const manualAnswerDecisionAttribute = 'data-chaoxing-plus-manual-answer-decision';
+const manualAnswerDecisionEvent = 'chaoxing-plus:manual-answer-decision';
+const manualAnswerDecisionWaitMs = 60 * 60 * 1000;
+let manualAnswerDeclinedInMemory = false;
+let manualAnswerDecisionPromise: Promise<boolean> | undefined;
+
+type ManualAnswerDecision = 'pending' | 'accepted' | 'declined';
+
+function readManualAnswerDecision(): ManualAnswerDecision | undefined {
+  try {
+    const value = topWindow.document.documentElement?.getAttribute(manualAnswerDecisionAttribute);
+    return value === 'pending' || value === 'accepted' || value === 'declined' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function publishManualAnswerDecision(decision: ManualAnswerDecision | undefined) {
+  try {
+    const root = topWindow.document.documentElement;
+    if (!root) return;
+    if (decision) {
+      root.setAttribute(manualAnswerDecisionAttribute, decision);
+    } else {
+      root.removeAttribute(manualAnswerDecisionAttribute);
+    }
+    root.dispatchEvent(new Event(manualAnswerDecisionEvent));
+  } catch {
+    // Ignore restricted or not-yet-created top documents.
+  }
+}
+
+function waitForManualAnswerDecision(): Promise<boolean> {
+  const current = readManualAnswerDecision();
+  if (current !== 'pending') return Promise.resolve(current === 'accepted');
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let interval: ReturnType<typeof setInterval> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let root: HTMLElement | undefined;
+    const finish = (decision: ManualAnswerDecision) => {
+      if (settled) return;
+      settled = true;
+      if (interval) clearInterval(interval);
+      if (timeout) clearTimeout(timeout);
+      root?.removeEventListener(manualAnswerDecisionEvent, check);
+      resolve(decision === 'accepted');
+    };
+    const check = () => {
+      const decision = readManualAnswerDecision();
+      if (decision === 'accepted' || decision === 'declined') finish(decision);
+    };
+
+    try {
+      root = topWindow.document.documentElement ?? undefined;
+      root?.addEventListener(manualAnswerDecisionEvent, check);
+    } catch {
+      root = undefined;
+    }
+    interval = setInterval(check, 100);
+    timeout = setTimeout(() => finish('declined'), manualAnswerDecisionWaitMs);
+    check();
+  });
+}
+
+function hasManualAnswerDeclined() {
+  if (manualAnswerDeclinedInMemory) return true;
+  try {
+    if ((topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] === true) {
+      return true;
+    }
+    return topWindow.document.documentElement?.hasAttribute(manualAnswerDeclinedAttribute) === true;
+  } catch {
+    return false;
+  }
+}
+
+function rememberManualAnswerDeclined() {
+  manualAnswerDeclinedInMemory = true;
+  try {
+    (topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] = true;
+    topWindow.document.documentElement?.setAttribute(manualAnswerDeclinedAttribute, 'true');
+  } catch {
+    // Keep the in-memory decision for restricted documents.
+  }
+  publishManualAnswerDecision('declined');
+}
 
 async function confirmBeforeAutoAnswer(worker: { emit: (event: 'stop' | 'continuate') => void }) {
   if (isWindowsManualAnswerMode()) return true;
   if (getWindowsRuntimeSetting<boolean>('show-answer-dialog', true) === false) {
     return true;
   }
-  if ((topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] === true) {
+  if (hasManualAnswerDeclined()) {
     worker.emit('stop');
     return false;
   }
+
+  if (manualAnswerDecisionPromise) {
+    const result = await manualAnswerDecisionPromise;
+    if (!result) worker.emit('stop');
+    return result;
+  }
+
+  const sharedDecision = readManualAnswerDecision();
+  if (sharedDecision === 'declined') {
+    rememberManualAnswerDeclined();
+    worker.emit('stop');
+    return false;
+  }
+  if (sharedDecision === 'pending') {
+    const result = await waitForManualAnswerDecision();
+    if (!result) {
+      rememberManualAnswerDeclined();
+      worker.emit('stop');
+    }
+    return result;
+  }
+
+  publishManualAnswerDecision('pending');
 
   const rawCountdown = Number(getWindowsRuntimeSetting('answer-countdown', 5));
   const countdown = Number.isFinite(rawCountdown) ? Math.max(0, Math.min(3600, rawCountdown)) : 5;
   const countdownLabel = countdown === 0 ? '点击“立即自动答题”后' : `${countdown} 秒后`;
 
-  const result = await $modal.confirm({
-    content: `${countdownLabel}开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。`,
-    confirmButtonText: '立即自动答题',
-    cancelButtonText: '手动答题',
-    timer: countdown > 0 ? countdown * 1000 : undefined,
-    timerProgressBar: countdown > 0,
-    defaultConfirmed: countdown > 0
-  });
+  const decisionPromise = (async () => {
+    const result = await $modal.confirm({
+      content: `${countdownLabel}开始自动答题。你可以立即进入自动答题，或取消后暂停程序改为手动答题。`,
+      confirmButtonText: '立即自动答题',
+      cancelButtonText: '手动答题',
+      timer: countdown > 0 ? countdown * 1000 : undefined,
+      timerProgressBar: countdown > 0,
+      defaultConfirmed: countdown > 0
+    });
 
-  if (!result) {
-    (topWindow as unknown as Record<string, unknown>)[manualAnswerDeclinedKey] = true;
-    worker.emit('stop');
-    $message.warn({ content: '已暂停自动答题，请手动作答。', duration: 0 });
+    if (!result) {
+      rememberManualAnswerDeclined();
+      $message.warn({ content: '已暂停自动答题，请手动作答。', duration: 0 });
+      publishManualAnswerDecision('declined');
+    } else {
+      publishManualAnswerDecision('accepted');
+      setTimeout(() => {
+        if (readManualAnswerDecision() === 'accepted') publishManualAnswerDecision(undefined);
+      }, 1000);
+    }
+    return result;
+  })();
+  manualAnswerDecisionPromise = decisionPromise;
+
+  try {
+    const result = await decisionPromise;
+    if (!result) worker.emit('stop');
+    return result;
+  } finally {
+    if (manualAnswerDecisionPromise === decisionPromise) {
+      manualAnswerDecisionPromise = undefined;
+    }
   }
-
-  return result;
 }
 
 const manualAnswerRequiredMessage = '检测到题目但当前无法安全自动作答，请手动处理。';
@@ -2697,7 +3049,69 @@ function rateHack() {
 
 function hasPendingCurrentPageJobAttachments() {
   const attachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
-  return attachments.some((attachment) => attachment.job === true);
+  const context = getDeferredChapterContext();
+  return attachments.some((attachment) => {
+    const jobId = String(attachment.jobid || attachment.property._jobid || '');
+    const deferred = Object.values(context.state.tasks)
+      .some((task) => task.tabKey === context.tabKey && task.jobId === jobId);
+    return attachment.job === true && !deferred;
+  });
+}
+
+const deferredChaptersAttribute = 'data-chaoxing-plus-deferred-chapters';
+type DeferredChapterContext = {
+  scope: string;
+  tabKey: string;
+  tabKeys: string[];
+  state: ChapterDeferredState;
+};
+
+function getDeferredChapterContext(previous?: DeferredChapterContext): DeferredChapterContext {
+  const doc = topWindow.document;
+  const courseId = doc.querySelector<HTMLInputElement>('#curCourseId')?.value || '';
+  const classId = doc.querySelector<HTMLInputElement>('#curClazzId')?.value || '';
+  const chapterId = CXAnalyses.getCurrentChapterKey() || topWindow.location.pathname;
+  const scope = previous?.scope || JSON.stringify([courseId, classId, chapterId]);
+  const tabs = getSiblingSubTaskTabs();
+  const tabKeys = tabs.map((tab, index) => tab.getAttribute('id') || tab.getAttribute('cardid') || `tab:${index}`);
+  const activeIndex = tabs.findIndex((tab) => tab.classList.contains('active'));
+  const tabKey = previous?.tabKey || tabKeys[Math.max(0, activeIndex)] || 'default';
+  let saved: Record<string, unknown> = {};
+  try {
+    saved = JSON.parse(doc.documentElement?.getAttribute(deferredChaptersAttribute) || '{}');
+  } catch {
+    // Invalid page-local state starts a fresh chapter queue.
+  }
+  return { scope, tabKey, tabKeys: previous?.tabKeys || (tabKeys.length ? tabKeys : [tabKey]), state: readChapterDeferredState(saved?.[scope], scope) };
+}
+
+function saveDeferredChapterContext(context: DeferredChapterContext) {
+  try {
+    const root = topWindow.document.documentElement;
+    let saved: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(root.getAttribute(deferredChaptersAttribute) || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) saved = parsed;
+    } catch { /* Preserve other valid chapter scopes when possible. */ }
+    saved[context.scope] = context.state;
+    root.setAttribute(deferredChaptersAttribute, JSON.stringify(saved));
+  } catch {
+    // Top-document access can disappear when a user leaves the course.
+  }
+}
+
+function isDeferredChapterContextCurrent(context: DeferredChapterContext) {
+  const current = getDeferredChapterContext();
+  return current.scope === context.scope && current.tabKey === context.tabKey;
+}
+
+function switchDeferredChapterTab(context: DeferredChapterContext, targetKey: string): boolean {
+  if (!isDeferredChapterContextCurrent(context)) return false;
+  const tabs = getSiblingSubTaskTabs();
+  const target = tabs[context.tabKeys.indexOf(targetKey)];
+  if (!target) return false;
+  if (!triggerSyntheticClick(target)) target.click();
+  return true;
 }
 
 function buildVisibleContentRecoverySignature() {
@@ -2721,6 +3135,8 @@ export async function study(opts: StudyOptions) {
   }
 
   const searchedJobs: Job[] = [];
+  const studyContext = getDeferredChapterContext();
+  const maxSubmissionAttempts = 1 + getUnfinishedQuestionRetryAttempts();
   let manualAnswerPaused = false;
   let searching = true;
   let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
@@ -2733,6 +3149,7 @@ export async function study(opts: StudyOptions) {
   }, Math.min(waitTimeout, 10) * 1000);
 
   const runJobs = async (): Promise<void> => {
+    if (!isDeferredChapterContextCurrent(studyContext)) return;
     scanRound += 1;
     const result = searchJob(opts, searchedJobs);
     visibleContentState = result.visibleContentState;
@@ -2763,6 +3180,23 @@ export async function study(opts: StudyOptions) {
         execution = await job.func();
       } catch (e) {
         $console.error('未知错误', e);
+        if (job.chapterTest && job.jobId) {
+          const context = getDeferredChapterContext(studyContext);
+          recordChapterDeferral(context.state, context.tabKey, job.jobId);
+          markDeferredChapterAttempt(context.state, context.tabKey, job.jobId, maxSubmissionAttempts);
+          markDeferredChapterResult(context.state, context.tabKey, job.jobId, {}, maxSubmissionAttempts);
+          saveDeferredChapterContext(context);
+        }
+      }
+
+      if (execution?.expired && job.jobId) {
+        const context = getDeferredChapterContext(studyContext);
+        recordChapterDeferral(context.state, context.tabKey, job.jobId);
+        if (!execution.staticExpired) {
+          markDeferredChapterAttempt(context.state, context.tabKey, job.jobId, maxSubmissionAttempts);
+          markDeferredChapterResult(context.state, context.tabKey, job.jobId, execution, maxSubmissionAttempts);
+        }
+        saveDeferredChapterContext(context);
       }
 
       if (execution?.manual) {
@@ -2790,9 +3224,71 @@ export async function study(opts: StudyOptions) {
   };
 
   await runJobs();
-  if (manualAnswerPaused) {
+  if (manualAnswerPaused || !isDeferredChapterContextCurrent(studyContext)) {
     return;
   }
+  let deferredContext = getDeferredChapterContext();
+  markChapterTabInspected(deferredContext.state, deferredContext.tabKey);
+  saveDeferredChapterContext(deferredContext);
+  const hasDeferredChapterTasks = Object.keys(deferredContext.state.tasks).length > 0;
+  if (hasDeferredChapterTasks) {
+    const uninspectedTab = getNextUninspectedChapterTab(deferredContext.state, deferredContext.tabKeys);
+    if (uninspectedTab) {
+      if (!switchDeferredChapterTab(deferredContext, uninspectedTab)) {
+        $console.warn('无法切换至待检查子任务，已暂停。');
+      }
+      return;
+    }
+    while (isDeferredChapterContextCurrent(studyContext)) {
+      deferredContext = getDeferredChapterContext();
+      const target = chooseNextDeferredChapterTask(deferredContext.state, deferredContext.tabKeys, maxSubmissionAttempts);
+      saveDeferredChapterContext(deferredContext);
+      if (!target) break;
+      if (target.tabKey !== deferredContext.tabKey) {
+        if (!switchDeferredChapterTab(deferredContext, target.tabKey)) {
+          markDeferredChapterMissing(deferredContext.state, target.tabKey, target.jobId, 3);
+          saveDeferredChapterContext(deferredContext);
+          continue;
+        }
+        return;
+      }
+
+      const result = searchJob(opts, [], target);
+      const job = result.job;
+      if (!job?.func) {
+        const attachment = ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || [])
+          .find((item) => String(item.jobid || item.property._jobid || '') === target.jobId);
+        if (attachment?.isPassed) {
+          target.state = 'complete';
+        } else {
+          markDeferredChapterMissing(deferredContext.state, target.tabKey, target.jobId, 3);
+        }
+        saveDeferredChapterContext(deferredContext);
+        await sleep(1000);
+        continue;
+      }
+      if (!markDeferredChapterAttempt(deferredContext.state, target.tabKey, target.jobId, maxSubmissionAttempts)) continue;
+      saveDeferredChapterContext(deferredContext);
+      let execution: JobExecutionResult | void = undefined;
+      try {
+        execution = await job.func(true);
+      } catch (error) {
+        $console.error('章节测试提交失败，将按正常次数重试。', error);
+      }
+      // Another frame can finish a newer attempt while this request is pending.
+      const latestContext = getDeferredChapterContext(deferredContext);
+      markDeferredChapterResult(latestContext.state, target.tabKey, target.jobId, execution || {}, maxSubmissionAttempts);
+      saveDeferredChapterContext(latestContext);
+      if (!isDeferredChapterContextCurrent(studyContext)) return;
+      if (execution?.manual) return;
+      const latestTask = Object.values(latestContext.state.tasks).find((task) => task.tabKey === target.tabKey && task.jobId === target.jobId);
+      if (latestTask?.state === 'abandoned') {
+        $console.warn(latestTask.terminalExpired ? '此作业已过期，已放弃该任务。' : '章节测试已达到正常重试上限，已放弃该任务。');
+      }
+      if (latestTask?.state === 'deferred') await sleep(1000);
+    }
+  }
+  if (!isDeferredChapterContextCurrent(studyContext)) return;
   (topWindow as Record<string, any>)._preChapterId = '';
 
   const resetWorkResults = () => {
@@ -2825,7 +3321,7 @@ export async function study(opts: StudyOptions) {
   }, `学习页面状态诊断详情：visibleContentState=${visibleContentState} currentChapterFinished=${String(currentChapterFinished)} returnedToSameChapter=${String(chapterStayState.returnedToSameChapter)} repeatCount=${chapterStayState.repeatCount} activeChapterId=${chapterCompletionDiagnostics.activeChapterId} activeChapterClassName=${chapterCompletionDiagnostics.activeChapterClassName} completedIconExists=${String(chapterCompletionDiagnostics.completedIconExists)}`, { correlationId: chapterCorrelationId });
   const siblingSubTaskDiagnostics = getSiblingSubTaskDiagnostics();
   const siblingSubTaskProgress = CXAnalyses.getChapterSubTaskProgress();
-  const shouldCheckSiblingSubTasks = opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));
+  const shouldCheckSiblingSubTasks = !hasDeferredChapterTasks && opts.mode !== 'next' && !currentChapterFinished && siblingSubTaskDiagnostics.hasSiblingSubTasks && (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs || (siblingSubTaskProgress.attempts > 0 && isVisibleQuestionFallbackState(visibleContentState)));
   logDebug('info', '同章节子任务诊断', {
     visibleContentState,
     currentChapterFinished,
@@ -2841,7 +3337,8 @@ export async function study(opts: StudyOptions) {
 
   const next = async () => {
     resetWorkResults();
-    if (CXAnalyses.isInFinalTab() && (await CXAnalyses.isStuckInBreakingMode())) {
+    const allSubTasksInspected = CXAnalyses.isInFinalTab() || hasDeferredChapterTasks;
+    if (allSubTasksInspected && (await CXAnalyses.isStuckInBreakingMode())) {
       $message.warn('检测到当前课程可能处于闯关模式且重复进入多次，请先手动完成未完成的章节测试。');
       return;
     }
@@ -2892,7 +3389,7 @@ export async function study(opts: StudyOptions) {
     }
 
     if (opts.mode === 'job') {
-      if (CXAnalyses.isInFinalTab()) {
+      if (allSubTasksInspected) {
         const elements = CXAnalyses.getChapterInfos()
           .filter((el) => el.unFinishCount > 0 || el.element.parentElement?.classList.contains('posCatalog_active'))
           .map((el) => el.element.parentElement as HTMLElement);
@@ -3106,8 +3603,9 @@ function searchIFrame(root: Document) {
   return result;
 }
 
-function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
+function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: DeferredChapterTask): SearchJobResult {
   const knowCardWin = $gm.unsafeWindow as Window & Record<string, any>;
+  const deferredContext = getDeferredChapterContext();
 
   const searchJobElement = (root: HTMLIFrameElement) => {
     return domSearch(
@@ -3138,9 +3636,18 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         (win.frameElement as HTMLIFrameElement | null)?.contentWindow?.parent.frameElement?.getAttribute('data') ||
         '{}';
       const frameData = JSON.parse(frameDataStr);
-      const targetJobId = frameData.jobid || frameData._jobid || root.getAttribute('jobid') || root.getAttribute('_jobid');
+      const targetJobId = frameData.jobid || frameData._jobid || root.getAttribute('jobid') || root.getAttribute('_jobid')
+        || win.document.querySelector<HTMLInputElement>('form #jobid')?.value;
       if (!targetJobId) {
         return { visibleContentState: 'visible-unmapped' };
+      }
+      if (retryTarget && (retryTarget.tabKey !== deferredContext.tabKey || retryTarget.jobId !== String(targetJobId))) {
+        return { visibleContentState: 'finished-job' };
+      }
+      const deferredTask = Object.values(deferredContext.state.tasks)
+        .find((task) => task.tabKey === deferredContext.tabKey && task.jobId === String(targetJobId));
+      if (deferredTask && (!retryTarget || deferredTask.state !== 'deferred')) {
+        return { visibleContentState: 'finished-job' };
       }
 
       const attachment: Attachment | undefined = (knowCardWin.attachments as Attachment[] | undefined)?.find((item) => {
@@ -3155,7 +3662,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
         return { visibleContentState: 'visible-unmapped' };
       }
 
-      const alreadySearchedJob = searchedJobs.find((job) => job.mid === attachment.property.mid);
+      const alreadySearchedJob = searchedJobs.find((job) => job.jobId === String(targetJobId));
       if (alreadySearchedJob?.expired) {
         return { visibleContentState: 'finished-job' };
       }
@@ -3257,7 +3764,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
       }
 
       function releaseSearchedJob(job: Job) {
-        const searchedIndex = searchedJobs.findIndex((searchedJob) => searchedJob.mid === job.mid);
+        const searchedIndex = searchedJobs.indexOf(job);
         if (searchedIndex !== -1) {
           searchedJobs.splice(searchedIndex, 1);
         }
@@ -3303,7 +3810,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
             $console.log(msg);
             return { visibleContentState: 'finished-job' };
           } else if (workType === 'job') {
-            func = async () => {
+            func = async (finalAttempt = false) => {
               clearTopCenterNotice();
               scrollToLearningTask(root);
               logDebug('info', '动作节点诊断：开始章节答题', {
@@ -3317,21 +3824,29 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               const msg = `正在处理章节测试 : ${jobName}`;
               $message.info(msg);
               $console.log(msg);
-              const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              job.expired = false;
+              const chapterResult = await JobRunner.chapter(root, opts.workOptions, {
+                allowStaticExpiryFallback: finalAttempt
+              });
               if (chapterResult.expired) {
                 job.expired = true;
+                job.terminalExpired = chapterResult.terminalExpired === true;
                 logDebug('info', '章节测试已截止，跳过答题提交', {
                   frameSrc,
                   targetJobId,
                   jobName,
                   fallback: false
                 }, undefined, { correlationId: jobCorrelationId });
-                return { expired: true };
+                return {
+                  expired: true,
+                  staticExpired: chapterResult.staticExpired,
+                  terminalExpired: chapterResult.terminalExpired
+                };
               }
               if (chapterResult.manual) {
                 return { manual: true };
               }
-              if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
+              if (!finalAttempt && !chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
                 logDebug('warn', '章节测试未完成重试诊断', {
                   frameSrc,
@@ -3344,7 +3859,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               return chapterResult;
             };
           } else if (opts.enableVisibleQuestionFallback && isVisibleQuestionFallbackState(visibleContentState)) {
-            func = async () => {
+            func = async (finalAttempt = false) => {
               clearTopCenterNotice();
               scrollToLearningTask(root);
               logDebug('info', '动作节点诊断：开始章节答题', {
@@ -3358,21 +3873,29 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
               const msg = '正在尝试兜底处理当前可见题目';
               $message.info(msg);
               $console.log(msg);
-              const chapterResult = await JobRunner.chapter(root, opts.workOptions);
+              job.expired = false;
+              const chapterResult = await JobRunner.chapter(root, opts.workOptions, {
+                allowStaticExpiryFallback: finalAttempt
+              });
               if (chapterResult.expired) {
                 job.expired = true;
+                job.terminalExpired = chapterResult.terminalExpired === true;
                 logDebug('info', '章节测试已截止，跳过答题提交', {
                   frameSrc,
                   targetJobId,
                   jobName,
                   fallback: true
                 }, undefined, { correlationId: jobCorrelationId });
-                return { expired: true };
+                return {
+                  expired: true,
+                  staticExpired: chapterResult.staticExpired,
+                  terminalExpired: chapterResult.terminalExpired
+                };
               }
               if (chapterResult.manual) {
                 return { manual: true };
               }
-              if (!chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
+              if (!finalAttempt && !chapterResult.finished && !CXAnalyses.isCurrentChapterFinished()) {
                 releaseSearchedJob(job);
                 logDebug('warn', '章节测试未完成重试诊断', {
                   frameSrc,
@@ -3442,6 +3965,8 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[]): SearchJobResult {
 
       const job: Job = {
         mid: attachment.property.mid,
+        jobId: String(targetJobId),
+        chapterTest: Boolean(chapterTest),
         attachment,
         func
       };
@@ -3662,7 +4187,11 @@ const JobRunner = {
     $message.success('长时阅读任务完成！');
     await sleep(5000);
   },
-  async chapter(frame: HTMLIFrameElement, options: CommonWorkOptions): Promise<ChapterTaskResult> {
+  async chapter(
+    frame: HTMLIFrameElement,
+    options: CommonWorkOptions,
+    expiryOptions: { allowStaticExpiryFallback?: boolean } = {}
+  ): Promise<ChapterTaskResult> {
     const {
       answererWrappers,
       period,
@@ -3677,6 +4206,7 @@ const JobRunner = {
       deepThinking,
       aiFallbackFailureAction
     } = options;
+    const allowStaticExpiryFallback = expiryOptions.allowStaticExpiryFallback === true;
 
     if (answererWrappers === undefined || answererWrappers.length === 0) {
       answerWrapperEmptyWarning(0);
@@ -3691,8 +4221,6 @@ const JobRunner = {
       return { finished: false };
     }
 
-    await mappingRecognize(frameDocument);
-
     const { TiMu } = domSearchAll({ TiMu: '.TiMu' }, frameDocument);
     const roots = TiMu;
     const nestedWorkIframes = Array.from(frameDocument.querySelectorAll<HTMLIFrameElement>('iframe')).filter((item) => {
@@ -3701,18 +4229,13 @@ const JobRunner = {
       const src = item.getAttribute('src') ?? item.getAttribute('_src') ?? '';
       return name === 'frame_content' || id === 'frame_content' || /work/i.test(src);
     });
-    const expired = isChapterTestExpired(frameDocument) || nestedWorkIframes.some((item) => {
-      try {
-        return Boolean(item.contentWindow?.document && isChapterTestExpired(item.contentWindow.document));
-      } catch {
-        return false;
-      }
-    });
-    if (expired) {
+    const expired = isChapterTestExpired(frameDocument);
+    if (expired && !allowStaticExpiryFallback) {
       $console.warn('章节测试已截止，不能作答，已跳过答题和提交。');
       $message.warn('章节测试已截止，不能作答，已跳过答题和提交。');
-      return { finished: true, expired: true };
+      return { finished: true, expired: true, staticExpired: true };
     }
+    await mappingRecognize(frameDocument);
     const chapterFrameDebug = {
       src: frame.getAttribute('src') ?? '',
       _src: frame.getAttribute('_src') ?? '',
@@ -4153,10 +4676,10 @@ const JobRunner = {
         await sleep(stopSecondWhenFinish * 1000);
         await waitForTikuAdapterBalanceRecovery();
 
-        if (isChapterTestExpired(frameDocument)) {
+        if (!allowStaticExpiryFallback && isChapterTestExpired(frameDocument)) {
           $console.warn('章节测试已截止，不能作答，已跳过答题和提交。');
           $message.warn('章节测试已截止，不能作答，已跳过答题和提交。');
-          return { finished: true, expired: true };
+          return { finished: true, expired: true, staticExpired: true };
         }
 
         logDebug('info', '动作节点诊断：准备提交或保存', {
@@ -4166,6 +4689,8 @@ const JobRunner = {
         }, undefined, { correlationId: chapterActionCorrelationId });
         let chapterFinished = false;
         let chapterExpired = false;
+        let chapterStaticExpired = false;
+        let chapterTerminalExpired = false;
         let latestFinishedRate: number | undefined;
         let latestUploadable: boolean | undefined;
         const autoSubmitEnabled = isWindowsAutoSubmitEnabled();
@@ -4186,8 +4711,9 @@ const JobRunner = {
           await waitForTikuAdapterBalanceRecovery();
 
           if (shouldSubmit) {
-            if (isChapterTestExpired(frameDocument)) {
+            if (!allowStaticExpiryFallback && isChapterTestExpired(frameDocument)) {
               chapterExpired = true;
+              chapterStaticExpired = true;
               $console.warn('章节测试已截止，不能作答，已跳过提交。');
               $message.warn('章节测试已截止，不能作答，已跳过提交。');
               return;
@@ -4198,15 +4724,31 @@ const JobRunner = {
               shouldSubmit,
               uploadable
             }, undefined, { correlationId: chapterActionCorrelationId });
-            (frameWindow as Record<string, any>).btnBlueSubmit?.();
-            await sleep(3000);
-            if (isChapterTestExpired(frameDocument)) {
+            const expiredAfterSubmit = await invokeChapterActionWithExpiryCapture(
+              frameWindow as Window & Record<string, any>,
+              frameDocument,
+              () => (frameWindow as Record<string, any>).btnBlueSubmit?.(),
+              3000
+            );
+            if (expiredAfterSubmit) {
               chapterExpired = true;
+              chapterTerminalExpired = true;
               $console.warn('章节测试已截止，不能作答，已跳过确认提交。');
               $message.warn('章节测试已截止，不能作答，已跳过确认提交。');
               return;
             }
-            (frameWindow as Record<string, any>).submitCheckTimes?.();
+            const expiredAfterConfirm = await invokeChapterActionWithExpiryCapture(
+              frameWindow as Window & Record<string, any>,
+              frameDocument,
+              () => (frameWindow as Record<string, any>).submitCheckTimes?.()
+            );
+            if (expiredAfterConfirm) {
+              chapterExpired = true;
+              chapterTerminalExpired = true;
+              $console.warn('章节测试已截止，不能作答，已跳过确认提交。');
+              $message.warn('章节测试已截止，不能作答，已跳过确认提交。');
+              return;
+            }
             const retakeRequired = detectChapterRetakePrompt();
             if (retakeRequired) {
               const msg = '章节测试提交后提示未达到及格线，正在使用 AI 兜底答案尝试二次改答。';
@@ -4234,21 +4776,38 @@ const JobRunner = {
                   await sleep(3000);
                   await waitForTikuAdapterBalanceRecovery();
                   if (autoSubmitEnabled) {
-                    if (isChapterTestExpired(frameDocument)) {
+                    if (!allowStaticExpiryFallback && isChapterTestExpired(frameDocument)) {
                       chapterExpired = true;
+                      chapterStaticExpired = true;
                       $console.warn('章节测试已截止，不能作答，已跳过二次提交。');
                       $message.warn('章节测试已截止，不能作答，已跳过二次提交。');
                       return;
                     }
-                    (frameWindow as Record<string, any>).btnBlueSubmit?.();
-                    await sleep(3000);
-                    if (isChapterTestExpired(frameDocument)) {
+                    const expiredAfterSubmit = await invokeChapterActionWithExpiryCapture(
+                      frameWindow as Window & Record<string, any>,
+                      frameDocument,
+                      () => (frameWindow as Record<string, any>).btnBlueSubmit?.(),
+                      3000
+                    );
+                    if (expiredAfterSubmit) {
                       chapterExpired = true;
+                      chapterTerminalExpired = true;
                       $console.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
                       $message.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
                       return;
                     }
-                    (frameWindow as Record<string, any>).submitCheckTimes?.();
+                    const expiredAfterConfirm = await invokeChapterActionWithExpiryCapture(
+                      frameWindow as Window & Record<string, any>,
+                      frameDocument,
+                      () => (frameWindow as Record<string, any>).submitCheckTimes?.()
+                    );
+                    if (expiredAfterConfirm) {
+                      chapterExpired = true;
+                      chapterTerminalExpired = true;
+                      $console.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
+                      $message.warn('章节测试已截止，不能作答，已跳过二次确认提交。');
+                      return;
+                    }
                     (topWindow as Record<string, any>).$?.('#workpop')?.hide?.();
                     chapterFinished = true;
                   } else {
@@ -4285,9 +4844,12 @@ const JobRunner = {
           finished: chapterFinished || chapterExpired,
           finishedRate: latestFinishedRate,
           uploadable: latestUploadable,
-          expired: chapterExpired
+          expired: chapterExpired,
+          staticExpired: chapterStaticExpired,
+          terminalExpired: chapterTerminalExpired
         };
     } finally {
+      uploadInProgress = false;
       taskBusy = false;
       workResultsMethods().refresh?.();
     }

@@ -33,7 +33,6 @@
 #define SETTINGS_SAVE 1506
 #define SETTINGS_CANCEL 1507
 #define SETTINGS_STATUS 1508
-#define SETTINGS_JSON 1509
 #define SETTINGS_PANEL_ENABLED 1510
 #define SETTINGS_PANEL_COLLAPSED 1511
 #define SETTINGS_PANEL_TOP 1512
@@ -91,7 +90,6 @@ typedef struct SETTINGS_STATE {
     HWND apiKey;
     HWND browser;
     HWND status;
-    HWND settings;
     HWND panelEnabled;
     HWND panelCollapsed;
     HWND panelTop;
@@ -744,7 +742,6 @@ static BOOL settings_read(SETTINGS_STATE *state) {
     WCHAR error[256]; BOOL ok;
     GetWindowTextW(state->baseUrl, state->value.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP);
     GetWindowTextW(state->apiKey, state->value.apiKey, CX_HOME_API_KEY_CAP);
-    GetWindowTextW(state->settings, state->value.settingsJson, CX_HOME_SETTINGS_CAP);
     buffers = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP * 4);
     if (!buffers) return FALSE;
     custom = buffers; patch = custom + CX_OPTIONS_JSON_CAP; merged = patch + CX_OPTIONS_JSON_CAP;
@@ -755,7 +752,7 @@ static BOOL settings_read(SETTINGS_STATE *state) {
         custom, CX_OPTIONS_JSON_CAP, NULL, NULL);
     if (!converted || !cx_config_merge_settings(custom, (DWORD)converted - 1, patch, patchLength,
         merged, CX_OPTIONS_JSON_CAP, &mergedLength, error, 256)) {
-        settings_set_status(state, error[0] ? error : L"设置 JSON 无效"); goto failed;
+        settings_set_status(state, error[0] ? error : L"共享设置无效"); goto failed;
     }
     wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, merged, (int)mergedLength,
         state->value.settingsJson, CX_HOME_SETTINGS_CAP - 1);
@@ -765,7 +762,7 @@ static BOOL settings_read(SETTINGS_STATE *state) {
     state->value.settingsJson[wideLength] = 0;
     error[0] = 0;
     ok = home_build_settings(state->home, &state->value, validation, CX_OPTIONS_JSON_CAP, &length, error, 256);
-    if (!ok) { settings_set_status(state, error[0] ? error : L"设置 JSON 无效"); goto failed; }
+    if (!ok) { settings_set_status(state, error[0] ? error : L"共享设置无效"); goto failed; }
     if (SendMessageW(state->browser, CB_GETCURSEL, 0, 0) == 1) home_copy(state->browserKind, 16, L"chrome");
     else home_copy(state->browserKind, 16, L"edge");
     SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 4); HeapFree(GetProcessHeap(), 0, buffers);
@@ -816,12 +813,12 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     if (!settings_register()) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->window = CreateWindowExW(WS_EX_DLGMODALFRAME, SETTINGS_CLASS, L"超星学习助手 - 注入设置",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-        MulDiv(940, home_dpi, 96), MulDiv(800, home_dpi, 96), parent, NULL, home_instance, state);
+        MulDiv(940, home_dpi, 96), MulDiv(540, home_dpi, 96), parent, NULL, home_instance, state);
     if (!state->window) { HeapFree(GetProcessHeap(), 0, state); return FALSE; }
     state->font = home_default_font;
     home_control(0, L"STATIC", L"tikuAdapter 地址", WS_CHILD | WS_VISIBLE, 24, 24, 120, 24, state->window, 0);
     state->baseUrl = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.adapterBaseUrl, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 150, 20, 760, 28, state->window, SETTINGS_BASE_URL);
-    home_control(0, L"STATIC", L"API key（可选）", WS_CHILD | WS_VISIBLE, 24, 64, 120, 24, state->window, 0);
+    home_control(0, L"STATIC", L"API key", WS_CHILD | WS_VISIBLE, 24, 64, 120, 24, state->window, 0);
     state->apiKey = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.apiKey, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 150, 60, 760, 28, state->window, SETTINGS_API_KEY);
     home_control(0, L"STATIC", L"单独会话浏览器", WS_CHILD | WS_VISIBLE, 24, 104, 120, 24, state->window, 0);
     state->browser = home_control(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 150, 100, 260, 120, state->window, SETTINGS_BROWSER);
@@ -869,20 +866,16 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     home_control(0, L"STATIC", L"失败重试", WS_CHILD | WS_VISIBLE, 205, 368, 70, 22, state->window, 0);
     state->answerRetry = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 275, 364, 65, 27, state->window, SETTINGS_ANSWER_RETRY);
     state->logEnabled = home_control(0, L"BUTTON", L"写入宿主日志", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 380, 364, 150, 26, state->window, SETTINGS_LOG_ENABLED);
-    home_control(0, L"STATIC", L"高级扩展设置 JSON（共享设置键；同名项由上方表单覆盖）", WS_CHILD | WS_VISIBLE, 24, 406, 820, 24, state->window, 0);
-    state->settings = home_control(WS_EX_CLIENTEDGE, L"EDIT", state->value.settingsJson,
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL, 24, 432, 886, 175, state->window, SETTINGS_JSON);
     settings_populate(state);
     SendMessageW(state->baseUrl, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
     SendMessageW(state->apiKey, EM_SETLIMITTEXT, CX_HOME_API_KEY_CAP - 1, 0);
-    SendMessageW(state->settings, EM_SETLIMITTEXT, CX_HOME_SETTINGS_CAP - 1, 0);
     SendMessageW(state->answerKey, EM_SETLIMITTEXT, CX_OPTIONS_SHORT_CAP - 1, 0);
     SendMessageW(state->panelTop, EM_SETLIMITTEXT, 5, 0); SendMessageW(state->panelRight, EM_SETLIMITTEXT, 5, 0);
     SendMessageW(state->panelWidth, EM_SETLIMITTEXT, 3, 0); SendMessageW(state->answerThreads, EM_SETLIMITTEXT, 1, 0);
     SendMessageW(state->answerCountdown, EM_SETLIMITTEXT, 4, 0); SendMessageW(state->answerRetry, EM_SETLIMITTEXT, 2, 0);
-    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 625, 886, 42, state->window, SETTINGS_STATUS);
-    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 700, 110, 30, state->window, SETTINGS_SAVE);
-    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 700, 110, 30, state->window, SETTINGS_CANCEL);
+    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 410, 886, 42, state->window, SETTINGS_STATUS);
+    home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 470, 110, 30, state->window, SETTINGS_SAVE);
+    home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 470, 110, 30, state->window, SETTINGS_CANCEL);
     ShowWindow(state->window, SW_SHOW); ShowWindow(state->window, SW_SHOW); UpdateWindow(state->window); EnableWindow(parent, FALSE);
     while (IsWindow(state->window) && (got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(state->window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
