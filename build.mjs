@@ -28,6 +28,7 @@ function copyStaticFiles() {
       '512': 'icon_512X512.png'
     },
     permissions: ['storage'],
+    background: { service_worker: 'extension-tab-pause.js' },
     host_permissions: chaoxingHosts,
     action: {
       default_popup: 'popup.html'
@@ -57,6 +58,7 @@ function copyStaticFiles() {
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
+  copyFileSync('src/extension-tab-pause.js', 'dist/extension-tab-pause.js');
 
   if (existsSync('icon/icon_512X512.png')) {
     copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');

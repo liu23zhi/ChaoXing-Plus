@@ -16,6 +16,14 @@ test('manifest declares storage permission for shared tiku config sync', async (
   assert.deepEqual(manifest.permissions, ['storage']);
 });
 
+test('manifest packages the tab pause service worker without broadening permissions', async () => {
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  assert.deepEqual(manifest.background, { service_worker: 'extension-tab-pause.js' });
+  assert.deepEqual(manifest.permissions, ['storage']);
+  assert.equal(await readFile(resolve('dist/extension-tab-pause.js'), 'utf8'),
+    await readFile(resolve('src/extension-tab-pause.js'), 'utf8'));
+});
+
 test('manifest uses zh_CN locale, chaoxing helper name, and chaoxing host permissions', async () => {
   const source = await readFile(manifestPath, 'utf8');
   const manifest = JSON.parse(source);

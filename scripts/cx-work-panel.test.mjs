@@ -56,7 +56,9 @@ test('cx clears stale work result questions when study or work pages load before
 
   assert.equal(source.includes('function clearWorkResultsOnPageLoad()'), true);
   assert.equal(source.includes('clearWorkResultsOnPageLoad();'), true);
-  assert.equal(source.includes('export async function study(opts: StudyOptions) {\n  clearWorkResultsOnPageLoad();'), true);
+  const studyStart = source.indexOf('export async function study(opts: StudyOptions) {');
+  const clearResults = source.indexOf('clearWorkResultsOnPageLoad();', studyStart);
+  assert.ok(clearResults > studyStart && clearResults < source.indexOf('const runJobs = async', studyStart));
   assert.equal(source.includes("oncomplete() {\n        clearWorkResultsOnPageLoad();\n        const isExam = /\\/exam\\/preview/.test(location.href);"), true);
   assert.equal(source.includes('workResultsMethods().init?.();'), true);
   assert.equal(source.includes('workResultsMethods().setResults?.(simplified);'), true);
@@ -205,7 +207,7 @@ test('balance pause guards chapter, preview, and stepwise upload plus stepwise p
 test('runtime controls remain available while an automatic retry is paused for balance recovery', async () => {
   const source = await readCxSource();
 
-  assert.equal(source.match(/isRunning: \(\) => worker\.isRunning \|\| tikuAdapterBalanceRecoveryState\.paused,/gu)?.length, 3);
+  assert.equal(source.match(/isRunning: \(\) => worker\.isRunning[^\r\n]*\|\| tikuAdapterBalanceRecoveryState\.paused,/gu)?.length, 3);
   assert.equal(source.match(/isStopped: \(\) => worker\.isStop \|\| tikuAdapterBalanceRecoveryState\.paused,/gu)?.length, 3);
   assert.doesNotMatch(source, /worker\.on\('done', clearRuntimeControls\);/u);
 });

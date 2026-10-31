@@ -50,6 +50,31 @@ test('normal tasks in every tab are inspected before the first deferred task is 
   assert.equal(state.phase, 'retry');
 });
 
+test('forward tab selection never wraps to an earlier uninspected tab', () => {
+  const state = createChapterDeferredState('scope');
+  markChapterTabInspected(state, 'tab-2');
+  assert.equal(getNextUninspectedChapterTab(state, ['tab-1', 'tab-2', 'tab-3'], 'tab-2'), 'tab-3');
+  markChapterTabInspected(state, 'tab-3');
+  assert.equal(getNextUninspectedChapterTab(state, ['tab-1', 'tab-2', 'tab-3'], 'tab-3'), undefined);
+  assert.equal(getNextUninspectedChapterTab(state, ['tab-1', 'tab-2', 'tab-3'], 'removed-tab'), undefined);
+});
+
+test('saved and disabled results remain paused without using an answer attempt', () => {
+  for (const disposition of ['saved', 'disabled', 'not-ready']) {
+    const state = createChapterDeferredState('scope');
+    const task = recordChapterDeferral(state, 'tab', 'job');
+    markChapterTabInspected(state, 'tab');
+    markDeferredChapterAttempt(state, 'tab', 'job', 3);
+    markDeferredChapterResult(state, 'tab', 'job', { disposition }, 3);
+    assert.equal(task.state, 'deferred');
+    assert.equal(task.pauseReason, disposition);
+    assert.equal(task.attempts, 0);
+    assert.equal(chooseNextDeferredChapterTask(state, ['tab'], 3), undefined);
+    assert.notEqual(state.phase, 'settled');
+    assert.equal(Object.values(readChapterDeferredState(JSON.stringify(state), 'scope').tasks)[0].pauseReason, disposition);
+  }
+});
+
 test('deferred tasks are selected by tab order and retain task insertion order within a tab', () => {
   const state = createChapterDeferredState('scope');
   const later = recordChapterDeferral(state, 'tab-2', 'later');

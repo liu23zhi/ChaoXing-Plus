@@ -42,6 +42,28 @@ const anchorConfirmation = `
     </div>
   </div>`;
 
+test('old confirmSubWin template cancels only its own confirmation and associated mask', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async () => {
+      document.querySelector('#workpop').remove();
+      document.body.insertAdjacentHTML('beforeend', `<div class="mask" id="submission-mask" style="position:fixed;inset:0"></div>
+        <div class="AlertCon02" id="confirmSubWin"><h3><a id="closeFoucsButton" class="closed02" onclick="hideWindow()">关闭</a></h3>
+        <div class="con03"><p id="tipContent">确认提交？</p><div class="marTop30">
+        <a href="javascript:;" onclick="submitCheckTimes()">确定</a><a href="javascript:;" onclick="hideWindow()">取消</a></div></div></div>
+        <div class="mask" id="other-mask">other</div>`);
+      window.submitCheckTimes = () => { window.__submitCalls++; };
+      window.hideWindow = () => { window.__cancelCalls++; };
+      await invokeChapterActionWithExpiryCapture(window, document, () => alert('此作业已过期！'), 0, { phase: 'submit', jobId: 'A' });
+      return { popup: getComputedStyle(document.querySelector('#confirmSubWin')).display,
+        mask: getComputedStyle(document.querySelector('#submission-mask')).display,
+        other: getComputedStyle(document.querySelector('#other-mask')).display,
+        cancelled: window.__cancelCalls, submitted: window.__submitCalls };
+    });
+    assert.deepEqual(result, { popup: 'none', mask: 'none', other: 'block', cancelled: 1, submitted: 0 });
+  } finally { await page.close(); }
+});
+
 before(async () => {
   const source = await readFile('src/projects/cx-chapter-dialog.ts', 'utf8');
   const compiled = ts.transpileModule(source, {

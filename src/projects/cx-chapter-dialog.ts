@@ -14,6 +14,22 @@ function isChapterDialogVisible(element: HTMLElement): boolean {
 
 function getChapterSubmissionDialog(popup: HTMLElement, requireVisible = true) {
   if (popup.closest('.swal2-container, .swal2-popup')) return undefined;
+  if (popup.id === 'confirmSubWin' && popup.classList.contains('AlertCon02')) {
+    const head = popup.querySelector<HTMLElement>('h3');
+    const close = head?.querySelector<HTMLElement>('#closeFoucsButton.closed02');
+    const content = popup.querySelector<HTMLElement>('.con03 > #tipContent');
+    const buttons = Array.from(popup.querySelectorAll<HTMLElement>('.con03 .marTop30 > a'));
+    const callback = (element: HTMLElement) => (element.getAttribute('onclick') || '').replace(/\s+/gu, '').replace(/;$/u, '');
+    const text = (element: HTMLElement) => (element.textContent || '').replace(/\s+/gu, '');
+    const submit = buttons.find((button) => text(button) === '确定' && callback(button) === 'submitCheckTimes()');
+    const cancel = buttons.find((button) => text(button) === '取消' && callback(button) === 'hideWindow()');
+    if (!head || !close || callback(close) !== 'hideWindow()' || !content || !submit || !cancel) return undefined;
+    if (!['确认提交？', '确认提交?', '确认提交'].includes(text(content))) return undefined;
+    if (requireVisible && (!isChapterDialogVisible(popup) || !isChapterDialogVisible(content))) return undefined;
+    const previous = popup.previousElementSibling;
+    const mask = previous?.classList.contains('mask') ? previous as HTMLElement : undefined;
+    return { dialog: popup, head, close, content, submit, cancel, mask };
+  }
   const dialog = popup.querySelector<HTMLElement>('.popDiv.wid440.Marking');
   if (!dialog || dialog.closest('#workpop') !== popup) return undefined;
   const head = dialog.querySelector<HTMLElement>('#workpopFocus.popHead');
@@ -27,7 +43,7 @@ function getChapterSubmissionDialog(popup: HTMLElement, requireVisible = true) {
   if (text(submit) !== '提交' || text(cancel) !== '取消') return undefined;
   if (requireVisible && (!isChapterDialogVisible(popup) || !isChapterDialogVisible(dialog)
     || !isChapterDialogVisible(content))) return undefined;
-  return { dialog, head, close, content, submit, cancel };
+  return { dialog, head, close, content, submit, cancel, mask: undefined as HTMLElement | undefined };
 }
 
 function clickChapterDialogCancel(button: HTMLElement): boolean {
@@ -47,7 +63,7 @@ function clickChapterDialogCancel(button: HTMLElement): boolean {
   }
 }
 
-export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[]): void {
+export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[], options: { jobId?: string } = {}): void {
   const pending = [...windows];
   const visited = new Set<ChapterDialogWindow>();
   const documents = new Set<Document>();
@@ -61,8 +77,13 @@ export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[]): 
     try { doc = actionWindow.document; } catch { continue; }
     if (!doc || documents.has(doc)) continue;
     documents.add(doc);
+    if (options.jobId) {
+      const jobIds = Array.from(doc.querySelectorAll<HTMLInputElement>('input[name="jobid"], input[name="jobId"], input#jobid'))
+        .map((input) => input.value).filter(Boolean);
+      if (jobIds.length && !jobIds.every((jobId) => jobId === options.jobId)) continue;
+    }
 
-    for (const popup of Array.from(doc.querySelectorAll<HTMLElement>('#workpop'))) {
+    for (const popup of Array.from(doc.querySelectorAll<HTMLElement>('#workpop, #confirmSubWin.AlertCon02'))) {
       try {
         const matched = getChapterSubmissionDialog(popup);
         if (!matched) continue;
@@ -82,6 +103,10 @@ export function dismissChapterSubmissionDialog(windows: ChapterDialogWindow[]): 
         if (remaining?.dialog === matched.dialog && remaining.content === matched.content
           && remaining.submit === matched.submit && remaining.cancel === matched.cancel) {
           popup.style.display = 'none';
+          // The old template's adjacent mask is shared with its verification layer.
+          const otherDialogVisible = Array.from(doc.querySelectorAll<HTMLElement>('.AlertCon02'))
+            .some((dialog) => dialog !== popup && isChapterDialogVisible(dialog));
+          if (matched.mask && !otherDialogVisible) matched.mask.style.display = 'none';
         }
       } catch {
         // A document can navigate while its cancellation callback is running.

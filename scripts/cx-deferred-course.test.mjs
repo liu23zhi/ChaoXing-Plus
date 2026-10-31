@@ -144,8 +144,37 @@ test('a newly available unfinished chapter resumes normal scanning after the cou
   assert.equal(state.phase, 'scan');
 });
 
-test('empty courses settle and a pending ledger can still be reconciled if the visible unfinished count is zero', () => {
+test('empty directories block retry and a ready zero-count chapter can still be reconciled', () => {
   const state = createCourseDeferredState(scope);
-  assert.deepEqual(chooseCourseDeferredAction(state, '', [], {}), { type: 'settled' });
+  assert.deepEqual(chooseCourseDeferredAction(state, '', [], {}), { type: 'blocked', reason: 'directory-not-ready' });
   assert.deepEqual(chooseCourseDeferredAction(state, 'chapter-1', chapters([0]), { 'chapter-1': deferred() }), { type: 'retry', chapterId: 'chapter-1' });
+});
+
+test('next never wraps ordinary scanning to a previous chapter', () => {
+  const state = createCourseDeferredState(scope);
+  markCourseChapterInspected(state, 'chapter-2');
+  markCourseChapterInspected(state, 'chapter-3');
+  assert.deepEqual(chooseCourseDeferredAction(state, 'chapter-3', chapters([1, 1, 0]), {
+    'chapter-2': deferred()
+  }, 'next'), { type: 'blocked', reason: 'earlier-normal-work' });
+});
+
+test('an increased normal signature invalidates inspection while preserving terminal tasks', () => {
+  const state = createCourseDeferredState(scope);
+  const available = chapters([1, 1]);
+  available[0].normalSignature = '1';
+  markCourseChapterInspected(state, 'chapter-1', available[0].normalSignature);
+  const progress = { 'chapter-1': deferred('abandoned', 'settled') };
+  available[0].normalSignature = '2';
+  assert.deepEqual(chooseCourseDeferredAction(state, 'chapter-2', available, progress), { type: 'scan', chapterId: 'chapter-1' });
+  assert.equal(progress['chapter-1'].tasks.task.state, 'abandoned');
+});
+
+test('only paused jobs keep the course paused rather than settled', () => {
+  const state = createCourseDeferredState(scope);
+  markCourseChapterInspected(state, 'chapter-1');
+  const progress = { 'chapter-1': deferred() };
+  progress['chapter-1'].tasks.task.pauseReason = 'saved';
+  assert.deepEqual(chooseCourseDeferredAction(state, 'chapter-1', chapters([1]), progress), { type: 'paused' });
+  assert.notEqual(state.phase, 'settled');
 });

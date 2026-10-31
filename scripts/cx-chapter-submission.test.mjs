@@ -60,12 +60,13 @@ before(async () => {
     const kind = url.searchParams.get('kind');
     const payload = kind === 'ordinary'
       ? { status: false, msg: '暂时提交失败，请稍后重试' }
+      : kind === 'unknown' ? { msg: 'received' }
       : kind === 'success'
         ? { status: true, msg: '提交成功' }
         : kind === 'successExpired'
           ? { status: true, msg: '此作业已过期！' }
           : { status: false, msg: '此作业已过期！' };
-    setTimeout(() => response.end(JSON.stringify(payload)), 40);
+    setTimeout(() => response.end(JSON.stringify(payload)), Number(url.searchParams.get('delay') || 40));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
@@ -91,6 +92,238 @@ async function openPage() {
   await page.addScriptTag({ content: helperRuntime });
   return page;
 }
+
+test('overlapping observers restore the original hooks in either completion order', async () => {
+  const page = await openPage();
+  try {
+    assert.equal(await page.evaluate(async () => {
+      const original = [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm];
+      const first = invokeChapterActionWithExpiryCapture(window, document, () => new Promise((resolve) => setTimeout(resolve, 20)));
+      const second = invokeChapterActionWithExpiryCapture(window, document, () => new Promise((resolve) => setTimeout(resolve, 40)));
+      await Promise.all([first, second]);
+      return [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm].every((value, index) => value === original[index]);
+    }), true);
+  } finally { await page.close(); }
+});
+
+test('one job cannot inherit an expired response from another job through a shared top window', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const child = document.querySelector('#child').contentWindow;
+      return invokeChapterActionWithExpiryCapture(child, child.document, () => {
+        fetch(endpoint + '?kind=success', { method: 'POST', body: 'jobid=A' });
+        fetch(endpoint, { method: 'POST', body: 'jobid=B' });
+      }, 0, { phase: 'submit', jobId: 'A' });
+    }, endpoint);
+    assert.equal(result, false);
+  } finally { await page.close(); }
+});
+
+test('final submission requires positive completion evidence instead of treating no request as success', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async () => {
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => {}, 0, { phase: 'submit', timeoutMs: 30 });
+        return 'completed';
+      } catch { return 'retryable'; }
+    });
+    assert.equal(result, 'retryable');
+  } finally { await page.close(); }
+});
+
+test('successful precheck return values cannot substitute for a successful POST response', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => {
+          fetch(endpoint + '?kind=unknown', { method: 'POST', body: 'jobid=A' });
+          return { status: true };
+        }, 0, { phase: 'submit', jobId: 'A' });
+        return 'completed';
+      } catch { return 'retryable'; }
+    }, endpoint);
+    assert.equal(result, 'retryable');
+  } finally { await page.close(); }
+});
+
+test('submission opened before observation is still captured at send', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', endpoint);
+      return invokeChapterActionWithExpiryCapture(window, document, () => request.send('jobid=A'), 0, { phase: 'submit', jobId: 'A' });
+    }, endpoint);
+    assert.equal(result, true);
+  } finally { await page.close(); }
+});
+
+test('final submission waits for an asynchronous precheck to dispatch the actual POST', async () => {
+  const page = await openPage();
+  try {
+    assert.equal(await page.evaluate(async (endpoint) => {
+      return invokeChapterActionWithExpiryCapture(window, document, () => {
+        setTimeout(() => fetch(endpoint + '?kind=success', { method: 'POST', body: new URLSearchParams({ jobid: 'A' }) }), 35);
+      }, 0, { phase: 'submit', jobId: 'A', timeoutMs: 500 });
+    }, endpoint), false);
+  } finally { await page.close(); }
+});
+
+test('reused job IDs in a shared parent are isolated by course, class and chapter identity', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const child = document.querySelector('#child').contentWindow;
+      const identity = { courseId: 'course', classId: 'class', chapterId: 'chapter-A', tabKey: 'tab-A', jobId: 'same-job', attemptId: 'attempt-1' };
+      const seen = [];
+      const observer = observeChapterSubmission([window, child], (value, metadata) => seen.push([JSON.parse(value).status, metadata.identity.attemptId]), { ownerWindow: child, identity });
+      try {
+        await Promise.all([
+          fetch(endpoint + '?kind=success', { method: 'POST', body: new URLSearchParams({ jobid: 'same-job', courseid: 'course', clazzid: 'class', knowledgeid: 'chapter-A' }) }),
+          fetch(endpoint, { method: 'POST', body: JSON.stringify({ jobid: 'same-job', courseid: 'course', _classId: 'class', knowledgeid: 'chapter-B' }) }),
+          fetch(endpoint, { method: 'POST', body: 'jobid=same-job' })
+        ]);
+        await observer.wait();
+        return seen;
+      } finally { observer.restore(); }
+    }, endpoint);
+    assert.deepEqual(result, [[true, 'attempt-1']]);
+  } finally { await page.close(); }
+});
+
+test('overlapping attempts for the same task retain ownership of their own fetch request', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const identity = { courseId: 'course', classId: 'class', chapterId: 'chapter', tabKey: 'tab', jobId: 'same-job' };
+      const first = invokeChapterActionWithExpiryCapture(window, document,
+        () => { fetch(endpoint + '?delay=100', { method: 'POST', body: 'jobid=same-job&knowledgeid=chapter' }); },
+        0, { phase: 'submit', identity: { ...identity, attemptId: 'first' }, timeoutMs: 500 });
+      const second = invokeChapterActionWithExpiryCapture(window, document,
+        () => { fetch(endpoint + '?kind=success', { method: 'POST', body: 'jobid=same-job&knowledgeid=chapter' }); },
+        0, { phase: 'submit', identity: { ...identity, attemptId: 'second' }, timeoutMs: 500 });
+      return Promise.all([first, second]);
+    }, endpoint);
+    assert.deepEqual(result, [true, false]);
+  } finally { await page.close(); }
+});
+
+test('another job native expiry dialog cannot terminate the active job in the same window', async () => {
+  const page = await openPage();
+  let dialogs = 0;
+  page.on('dialog', async (dialog) => { dialogs++; await dialog.dismiss(); });
+  try {
+    assert.equal(await page.evaluate(async (endpoint) => {
+      return invokeChapterActionWithExpiryCapture(window, document, () => {
+        const other = new XMLHttpRequest();
+        other.open('POST', endpoint);
+        other.onload = () => alert(JSON.parse(other.responseText).msg);
+        other.send('jobid=B');
+        fetch(endpoint + '?kind=success&delay=100', { method: 'POST', body: 'jobid=A' });
+      }, 0, { phase: 'submit', jobId: 'A' });
+    }, endpoint), false);
+    assert.equal(dialogs, 1);
+  } finally { await page.close(); }
+});
+
+for (const transport of ['fetch', 'xhr-onload']) {
+  test(`owned ${transport} completion dialogs are suppressed with explicit task identity`, async () => {
+    const page = await openPage();
+    let dialogs = 0;
+    page.on('dialog', async (dialog) => { dialogs++; await dialog.dismiss(); });
+    try {
+      assert.equal(await page.evaluate(async (endpoint, transport) => {
+        return invokeChapterActionWithExpiryCapture(window, document, () => {
+          if (transport === 'fetch') {
+            fetch(endpoint, { method: 'POST', body: 'jobid=A' }).then((response) => response.json()).then((value) => alert(value.msg));
+          } else {
+            const request = new XMLHttpRequest();
+            request.open('POST', endpoint);
+            request.onload = () => alert(JSON.parse(request.responseText).msg);
+            request.send('jobid=A');
+          }
+        }, 0, { phase: 'submit', jobId: 'A' });
+      }, endpoint, transport), true);
+      assert.equal(dialogs, 0);
+    } finally { await page.close(); }
+  });
+}
+
+test('timeout aborts only the owned XHR and suppresses its delayed expired page callback', async () => {
+  const page = await openPage();
+  let dialogs = 0;
+  page.on('dialog', async (dialog) => { dialogs++; await dialog.dismiss(); });
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const original = [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm];
+      let owned;
+      const other = new XMLHttpRequest();
+      const otherDone = new Promise((resolve) => { other.onload = () => resolve(other.status); });
+      let failed = false;
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => {
+          owned = new XMLHttpRequest();
+          owned.open('POST', endpoint + '?delay=200');
+          owned.onreadystatechange = () => { if (owned.readyState === 4 && owned.status) alert(JSON.parse(owned.responseText).msg); };
+          owned.send('jobid=A');
+          other.open('POST', endpoint + '?kind=success&delay=100');
+          other.send('jobid=B');
+        }, 0, { phase: 'submit', jobId: 'A', timeoutMs: 30 });
+      } catch { failed = true; }
+      const otherStatus = await otherDone;
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      return { failed, ownedStatus: owned.status, otherStatus,
+        restored: [fetch, XMLHttpRequest.prototype.open, XMLHttpRequest.prototype.send, alert, confirm].every((value, index) => value === original[index]) };
+    }, endpoint);
+    assert.deepEqual(result, { failed: true, ownedStatus: 0, otherStatus: 200, restored: true });
+    assert.equal(dialogs, 0);
+  } finally { await page.close(); }
+});
+
+test('timeout aborts an owned fetch while preserving another task request', async () => {
+  const page = await openPage();
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      let ownedResult;
+      let otherResult;
+      let failed = false;
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => {
+          ownedResult = fetch(endpoint + '?delay=200', { method: 'POST', body: new FormData(document.createElement('form')) })
+            .then(() => 'unexpected', (error) => error.name);
+          otherResult = fetch(endpoint + '?kind=success&delay=100', { method: 'POST', body: 'jobid=B' }).then((response) => response.status);
+        }, 0, { phase: 'submit', jobId: 'A', timeoutMs: 30 });
+      } catch { failed = true; }
+      return { failed, owned: await ownedResult, other: await otherResult };
+    }, endpoint);
+    assert.deepEqual(result, { failed: true, owned: 'AbortError', other: 200 });
+  } finally { await page.close(); }
+});
+
+test('timeout also aborts a previously opened XHR when its sent body proves task ownership', async () => {
+  const page = await openPage();
+  let dialogs = 0;
+  page.on('dialog', async (dialog) => { dialogs++; await dialog.dismiss(); });
+  try {
+    const result = await page.evaluate(async (endpoint) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', endpoint + '?delay=150');
+      request.onload = () => alert(JSON.parse(request.responseText).msg);
+      let rejected = false;
+      try {
+        await invokeChapterActionWithExpiryCapture(window, document, () => request.send('jobid=A'), 0,
+          { phase: 'submit', jobId: 'A', timeoutMs: 30 });
+      } catch { rejected = true; }
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      return { rejected, status: request.status };
+    }, endpoint);
+    assert.deepEqual(result, { rejected: true, status: 0 });
+    assert.equal(dialogs, 0);
+  } finally { await page.close(); }
+});
 
 test('submission observer waits for asynchronous XHR and inspects text before the page completion callback', async () => {
   const page = await openPage();
@@ -252,7 +485,7 @@ test('submission observer has a bounded response wait and tolerates inaccessible
     exports: {}, URL,
     setTimeout(callback, delay) {
       timeoutDelays.push(delay);
-      return setTimeout(callback, delay === 30000 ? 10 : delay);
+      return setTimeout(callback, delay > 1000 ? 10 : delay);
     },
     clearTimeout
   });
@@ -265,7 +498,7 @@ test('submission observer has a bounded response wait and tolerates inaccessible
   try {
     requestWindow.fetch(endpoint, { method: 'POST' });
     await assert.rejects(observer.wait(), /Chapter submission response timed out\./u);
-    assert.equal(timeoutDelays.includes(30000), true);
+    assert.equal(timeoutDelays.some((delay) => delay > 1000 && delay <= 30000), true);
   } finally { observer.restore(); }
   assert.equal(requestWindow.fetch, originalFetch);
 });
@@ -355,7 +588,7 @@ test('chapter helper bounds a never-resolving action Promise and restores native
       const clearedTimers = [];
       window.setTimeout = (callback, delay, ...args) => {
         requestedDelays.push(delay);
-        return originalSetTimeout(callback, delay === 30000 ? 20 : delay, ...args);
+        return originalSetTimeout(callback, delay > 1000 && delay <= 30000 ? 20 : delay, ...args);
       };
       window.clearTimeout = (timer) => {
         clearedTimers.push(timer);
@@ -371,7 +604,7 @@ test('chapter helper bounds a never-resolving action Promise and restores native
         const error = await Promise.race([actual, safety]);
         return {
           error,
-          bounded: requestedDelays.includes(30000),
+          bounded: requestedDelays.some((delay) => delay > 1000 && delay <= 30000),
           timerCleared: clearedTimers.length > 0,
           restored: child.alert === originalAlert && child.confirm === originalConfirm && child.fetch === originalFetch
         };

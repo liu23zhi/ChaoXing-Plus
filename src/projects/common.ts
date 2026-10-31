@@ -22,6 +22,7 @@ import {
   summarizeSearchInfoError
 } from './work-results-status.js';
 import { shouldCacheSearchInfos } from './cx-retry-cache.js';
+import { getTabAnswerPauseController } from './tab-answer-pause.js';
 import {
   DEFAULT_TIKU_BASE_URL,
   TIKU_ADAPTER_BASEURL_KEY,
@@ -52,6 +53,7 @@ export interface CommonWorkOptions {
 }
 
 type WorkResultsRuntimeControls = {
+  ownerDocument?: Document;
   isRunning: () => boolean;
   isStopped: () => boolean;
   stop: () => void;
@@ -372,12 +374,25 @@ const state = {
     type: runtimeStore.get(WORK_RESULTS_VIEW_KEY, 'numbers' as WorkResultsView),
     questionPositionSyncHandlerType: undefined as QuestionPositionSyncHandlerType | undefined,
     runtimeControls: undefined as WorkResultsRuntimeControls | undefined,
+    controlDocument: document,
     ui: resolveInitialWorkResultsPanelUiState()
   },
   apps: {
     localQuestionCaches: isWindowsNoDiskWrite() ? [] : runtimeStore.get(QUESTION_CACHE_KEY, [] as QuestionCache[])
   }
 };
+
+const tabAnswerPause = getTabAnswerPauseController();
+const unsubscribeTabAnswerPause = tabAnswerPause.subscribe(() => {
+  syncWorkResultsControlDocument();
+  const controls = state.workResults.runtimeControls;
+  if (controls?.isRunning()) {
+    if (tabAnswerPause.isPaused() && !controls.isStopped()) controls.stop();
+    if (!tabAnswerPause.isPaused() && controls.isStopped()) controls.continuate();
+  }
+  renderWorkResultsPanel();
+});
+window.addEventListener('pagehide', unsubscribeTabAnswerPause, { once: true });
 
 function applyQuestionCaches(value: unknown) {
   if (isWindowsNoDiskWrite()) {
@@ -1995,6 +2010,20 @@ function createTikuAdapterConfigSection() {
   return container;
 }
 
+function syncWorkResultsControlDocument(ownerDocument?: Document) {
+  const currentDocument = state.workResults.controlDocument;
+  let stale = false;
+  try {
+    stale = currentDocument.defaultView?.document !== currentDocument;
+  } catch {
+    stale = true;
+  }
+  if (stale || (ownerDocument && ownerDocument !== currentDocument)) {
+    state.workResults.controlDocument = ownerDocument ?? document;
+    state.workResults.runtimeControls = undefined;
+  }
+}
+
 function createWorkResultsPanel() {
   const container = createElement('div');
   container.style.display = 'grid';
@@ -2176,21 +2205,32 @@ function createWorkResultsPanel() {
   heroActions.style.gap = '8px';
   heroActions.style.flexWrap = 'wrap';
 
+  syncWorkResultsControlDocument();
   const runtimeControls = state.workResults.runtimeControls;
-  if (runtimeControls?.isRunning()) {
-    const isPaused = runtimeControls.isStopped();
-    const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });
-    pauseButton.onclick = () => {
-      if (isPaused) {
-        runtimeControls.continuate();
-      } else {
-        runtimeControls.stop();
+  const isRunning = runtimeControls?.isRunning() ?? false;
+  if (isRunning && tabAnswerPause.isPaused() && !runtimeControls!.isStopped()) runtimeControls!.stop();
+  const isPaused = tabAnswerPause.isPaused() || (isRunning && runtimeControls!.isStopped());
+  const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });
+  pauseButton.title = isPaused ? '继续当前标签页的自动答题' : '暂停当前标签页的自动答题';
+  pauseButton.onclick = () => {
+    syncWorkResultsControlDocument();
+    const controls = state.workResults.runtimeControls;
+    const paused = tabAnswerPause.isPaused() || (controls?.isRunning() && controls.isStopped());
+    tabAnswerPause.setPaused(!paused);
+    if (controls?.isRunning()) {
+      if (paused && controls.isStopped()) {
+        controls.continuate();
+      } else if (!paused && !controls.isStopped()) {
+        controls.stop();
       }
-      renderWorkResultsPanel();
-    };
-    applyActionButtonStyle(pauseButton, 'primary');
-    heroActions.append(pauseButton);
-  }
+    }
+    if (paused) document.dispatchEvent(new CustomEvent('chaoxing-plus:answer-continuate', {
+      detail: { hasWorker: controls?.isRunning() ?? false }
+    }));
+    renderWorkResultsPanel();
+  };
+  applyActionButtonStyle(pauseButton, 'primary');
+  heroActions.append(pauseButton);
 
   const typeButton = createElement('button', {
     text: state.workResults.type === 'numbers' ? '切换为题目列表' : '切换为序号列表'
@@ -2724,7 +2764,9 @@ export const CommonProject = Project.create({
             setWorkResults(state.workResults.results.concat(results));
           },
           setRuntimeControls(controls: WorkResultsRuntimeControls) {
+            syncWorkResultsControlDocument(controls.ownerDocument ?? document);
             state.workResults.runtimeControls = controls;
+            if (tabAnswerPause.isPaused()) controls.stop();
             renderWorkResultsPanel();
           },
           clearRuntimeControls() {

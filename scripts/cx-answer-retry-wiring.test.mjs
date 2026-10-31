@@ -15,7 +15,7 @@ test('cx registers runtime stop continue and retry controls with the common work
   const source = await readFile(cxProjectPath, 'utf8');
 
   assert.equal(source.includes('workResultsMethods().setRuntimeControls?.({'), true);
-  assert.equal(source.includes("stop: () => worker.emit('stop')"), true);
+  assert.equal(source.includes("stop: () => { worker.isStop = true; worker.emit('stop'); }"), true);
   assert.equal(source.includes('continuate: () => {'), true);
   assert.equal(source.includes("worker.emit('continuate')"), true);
   assert.equal(source.includes('if (tikuAdapterBalanceRecoveryState.paused)'), true);
@@ -148,12 +148,15 @@ test('cx remembers a manual answer choice for the current page and pauses the ch
 test('Windows no-auto-submit prevents both chapter and work/exam submit actions', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
   const chapterStart = source.indexOf('const effectiveUpload = !autoSubmitEnabled && upload === \'submit\' ? \'save\' : upload;');
-  const chapterEnd = source.indexOf('async function findWorkOrExamRuntimeWindow', chapterStart);
+  const chapterEnd = source.indexOf('async readPPTWithAudio', chapterStart);
+  assert.ok(chapterEnd > chapterStart);
   const chapterFlow = source.slice(chapterStart, chapterEnd);
 
   assert.equal(source.includes("getWindowsRuntimeSetting<boolean>('auto-submit', true) !== false"), true);
   assert.equal(source.includes('const shouldSubmit = autoSubmitEnabled && upload === \'submit\' && uploadable;'), true);
   assert.match(source, /const shouldAllowSubmitForPage = upload === 'submit'\s+&& autoSubmitEnabled/);
-  assert.match(source, /if \(shouldSubmit\) \{\s+await submitWorkOrExamPage\(type\);/);
-  assert.match(chapterFlow, /if \(shouldSubmit\) \{[\s\S]*?invokeChapterActionWithExpiryCapture[\s\S]*?\} else \{[\s\S]*?noSubmit\?\.\(\);/);
+  assert.match(source, /if \(shouldSubmit\) \{[^{}]{0,200}await submitWorkOrExamPage\(type\);/);
+  assert.match(chapterFlow, /if \(shouldSubmit\) \{[\s\S]*?performChapterAction\('submit',[\s\S]*?\} else \{[\s\S]*?await saveChapter\(\);/);
+  assert.match(chapterFlow, /const saveChapter = async \(\) => \{[\s\S]*?resolveChapterAction\('noSubmit'\)/);
+  assert.equal(chapterFlow.includes(".alert = () => {}"), false);
 });

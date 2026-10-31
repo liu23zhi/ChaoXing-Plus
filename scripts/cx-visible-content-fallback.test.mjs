@@ -241,7 +241,7 @@ test('cx stops waiting for stale attachment counts once the current page has no 
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('function hasPendingCurrentPageJobAttachments() {'), true);
-  assert.equal(source.includes('return attachment.job === true && !deferred;'), true);
+  assert.equal(source.includes('return attachment.job === true && attachment.isPassed !== true && !deferred;'), true);
   assert.equal(source.includes("} else if (visibleContentState === 'finished-job' && !hasPendingCurrentPageJobAttachments()) {"), true);
   assert.equal(source.includes('attachmentCount = 0;'), true);
   assert.equal(source.includes('searching = false;'), true);
@@ -308,11 +308,11 @@ test('cx does not refresh unknown visible content after sibling switching has st
   assert.equal(source.includes('const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();'), true);
 });
 
-test('cx jumps back to an earlier unfinished chapter instead of warning when the last chapter is finished', async () => {
+test('only unfinished-task mode can return to an earlier ordinary chapter after reaching the final chapter', async () => {
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('const firstUnfinishedChapter = elements.find((el) => !el.classList.contains(\'posCatalog_active\'));'), true);
-  assert.equal(source.includes('} else if (!CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {'), true);
+  assert.equal(source.includes("} else if (opts.mode === 'job' && !CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {"), true);
   assert.equal(source.includes('content = \'当前章节已完成，正在返回前面的未完成章节继续学习。\';'), true);
   assert.equal(source.includes('showTopCenterNotice(content, { duration: 5000, tone: \'info\' });'), true);
   assert.equal(source.includes('firstUnfinishedChapter?.querySelector<HTMLElement>(\'.posCatalog_name\')?.click();'), true);
@@ -473,7 +473,8 @@ test('cx chapter test does not auto-submit when finished rate is zero and upload
   assert.equal(source.includes('async callback(finishedRate, uploadable) {'), true);
   assert.equal(source.includes("const shouldSubmit = autoSubmitEnabled && upload === 'submit' && uploadable;"), true);
   assert.equal(source.includes("const uploadMsg = `完成率 ${finishedRate.toFixed(2)}% : 3秒后将自动${shouldSubmit ? '提交' : '保存'}`;"), true);
-  assert.equal(source.includes('(frameWindow as Record<string, any>).noSubmit?.();'), true);
+  assert.equal(source.includes("const action = resolveChapterAction('noSubmit');"), true);
+  assert.equal(source.includes('await saveChapter();'), true);
 });
 
 test('cx chapter answerer can append ai fallback results and random fallback handling', async () => {
@@ -543,14 +544,13 @@ test('cx waits for delayed chapter question type readiness before answering', as
   assert.equal(source.includes('const readyQuestionCount = roots.filter((root) => isChapterQuestionTypeReady(root)).length;'), true);
 });
 
-test('cx releases searched chapter jobs when the chapter test remains unfinished after save', async () => {
+test('cx leaves unfinished chapter jobs in the bounded ledger rather than releasing them for immediate rescanning', async () => {
   const source = await readFile(cxPath, 'utf8');
 
-  assert.equal(source.includes('releaseSearchedJob(job);'), true);
-  assert.equal(source.includes('function releaseSearchedJob(job: Job) {'), true);
-  assert.equal(source.includes('const searchedIndex = searchedJobs.indexOf(job);'), true);
-  assert.equal(source.includes('searchedJobs.splice(searchedIndex, 1);'), true);
-  assert.equal(source.includes("logDebug('warn', '章节测试未完成重试诊断'"), true);
+  assert.equal(source.includes('releaseSearchedJob(job);'), false);
+  assert.equal(source.includes('searchedJobs.splice(searchedIndex, 1);'), false);
+  assert.equal(source.includes("execution.disposition === 'saved'"), true);
+  assert.equal(source.includes('markDeferredChapterAttempt(context.state, context.tabKey, job.jobId, maxSubmissionAttempts);'), true);
 });
 
 test('cx retries chapter answers with AI fallback when submit popup says the score is below passing', async () => {

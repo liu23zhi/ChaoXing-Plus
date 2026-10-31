@@ -10,7 +10,7 @@ const helperNames = new Set([
   'hasPendingCurrentPageJobAttachments', 'getDeferredChapterContext',
   'saveDeferredChapterContext', 'isDeferredChapterContextCurrent',
   'switchDeferredChapterTab', 'getDeferredCourseContext', 'saveDeferredCourseContext',
-  'switchDeferredCourseChapter', 'routeDeferredCourse', 'buildVisibleContentRecoverySignature', 'study'
+  'switchDeferredCourseChapter', 'navigateStudyTarget', 'routeDeferredCourse', 'buildVisibleContentRecoverySignature', 'study'
 ]);
 const declarations = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && helperNames.has(node.name?.text));
 assert.equal(declarations.length, helperNames.size, 'extract the current study implementation and all queue context helpers');
@@ -49,11 +49,14 @@ function fixture(tabTasks, options = {}) {
     getAttribute(name) { return name === 'id' ? key : null; },
     classList: { contains(name) { return name === 'active' && shared.activeTab === index; } },
     click() {
+      if (shared.blockNavigation) return;
       shared.events.push(`switch:${shared.chapters ? `${shared.chapterId}:` : ''}${key}`);
       shared.activeTab = index;
     }
   }));
   const navigateChapter = (chapterId) => {
+    shared.navigationClicks = (shared.navigationClicks || 0) + 1;
+    if (shared.blockNavigation) return;
     shared.events.push(`chapter:${chapterId}`);
     shared.chapterId = chapterId;
     shared.activeTab = 0;
@@ -110,7 +113,8 @@ function fixture(tabTasks, options = {}) {
   const unsafeWindow = {};
   Object.defineProperty(unsafeWindow, 'attachments', { get() {
     return currentTasks().filter((item) => !item.attachmentMissing).map((item) => ({
-      jobid: item.jobId, property: { _jobid: item.jobId }, job: !item.complete, isPassed: item.complete
+      jobid: item.jobId, property: { _jobid: item.jobId },
+      job: item.attachmentJob ?? !item.complete, isPassed: item.attachmentPassed ?? item.complete
     }));
   } });
   const topWindow = {
@@ -141,6 +145,7 @@ function fixture(tabTasks, options = {}) {
       waitForTopWindowLoad: async () => {},
       getVisibleContentRecoveryStorage: () => null,
       resumeVisibleContentRecovery: async () => true,
+      handleVisibleContentRecovery: () => 'paused',
       getUnfinishedQuestionRetryAttempts: () => shared.retryAttempts ?? 2,
       setTimeout(callback) { callback(); return 1; },
       async sleep(ms) {
@@ -164,20 +169,22 @@ function fixture(tabTasks, options = {}) {
         getChapterStayState: () => ({ chapterStayKey: stayKey(), returnedToSameChapter: false, repeatCount: 0 }),
         getChapterSubTaskProgress: () => ({ attempts: 0 }),
         isInFinalTab: () => shared.activeTab === tabs().length - 1,
-        isStuckInBreakingMode: async () => false,
+        isStuckInBreakingMode: async () => { shared.breakingChecks = (shared.breakingChecks || 0) + 1; return shared.breakingBlocked || false; },
         isInFinalChapter: () => Boolean(shared.chapters && shared.chapterId === shared.chapters.at(-1).id),
         isFinishedAllChapters: () => Boolean(shared.chapters && shared.chapters.every((chapter) => unfinishedCount(chapter) === 0)),
-        getChapterInfos: () => shared.chapters ? chapterInfos() : [true, false].map((active) => ({
+        getChapterInfos: () => shared.directoryLoading ? [] : shared.chapters ? chapterInfos() : [{
+          chapterId: shared.chapterId,
           unFinishCount: 1,
           element: { parentElement: {
-            classList: { contains(name) { return name === 'posCatalog_active' && active; } },
+            getAttribute(name) { return name === 'id' ? shared.chapterId : null; },
+            classList: { contains(name) { return name === 'posCatalog_active'; } },
             querySelector(selector) {
               return selector === '.posCatalog_name'
-                ? { click() { shared.events.push(active ? 'current-chapter' : 'next-unfinished-chapter'); } }
+                ? { click() { shared.events.push('current-chapter'); } }
                 : null;
             }
           } }
-        })),
+        }],
         scrollToActiveChapter: noop,
         trySwitchToNextUnvisitedSubTask() {
           if (shared.chapters && shared.activeTab + 1 < tabs().length) {
@@ -197,6 +204,7 @@ function fixture(tabTasks, options = {}) {
             && !deferred.some((entry) => entry.tabKey === tabKeys()[shared.activeTab] && entry.jobId === item.jobId));
         if (!candidate) return { visibleContentState: currentChapter()?.visibleContentState || 'finished-job' };
         const key = `${shared.chapters ? `${shared.chapterId}:` : ''}${tabKeys()[shared.activeTab]}:${candidate.jobId}`;
+        if (shared.disableAnswers) return { blocked: { jobId: candidate.jobId, reason: 'disabled' }, visibleContentState: 'standard-job' };
         const job = {
           jobId: candidate.jobId, chapterTest: candidate.chapterTest !== false,
           async func(finalAttempt = false) {
@@ -209,7 +217,8 @@ function fixture(tabTasks, options = {}) {
             if (finalAttempt) {
               result = candidate.retryResults[Math.min(count - 1, candidate.retryResults.length - 1)];
             } else {
-              result = candidate.normalResult ?? (candidate.staticExpired ? { finished: true, expired: true, staticExpired: true } : { finished: true });
+              result = Object.hasOwn(candidate, 'normalResult') ? candidate.normalResult
+                : candidate.staticExpired ? { finished: true, expired: true, staticExpired: true } : { finished: true };
             }
             if (result instanceof Error) throw result;
             if (result?.finished && !result.expired) candidate.complete = true;
@@ -233,7 +242,7 @@ function fixture(tabTasks, options = {}) {
     return saved[JSON.stringify([shared.courseId, shared.classId])];
   }
   async function run(mode = 'job') {
-    await createRuntime().study({ mode });
+    await createRuntime().study({ mode, enableAnswer: !shared.disableAnswers, enableChapterTest: !shared.disableAnswers, backToFirstWhenFinish: shared.backToFirstWhenFinish || false });
   }
   async function settle(maxRuns = 12) {
     for (let index = 0; index < maxRuns; index += 1) {
@@ -251,6 +260,165 @@ function fixture(tabTasks, options = {}) {
   }
   return { shared, get tabs() { return tabs(); }, createRuntime, state, courseState, run, settle, settleCourse };
 }
+
+test('next on the final subtask advances to the following chapter without visiting earlier tabs', async () => {
+  const f = fixture([], { activeTab: 1, chapters: [
+    { id: 'chapter-1', tabTasks: [[task('earlier', [], { staticExpired: false })], [task('expired')]] },
+    { id: 'chapter-2', tabTasks: [[task('later', [], { staticExpired: false })]] }
+  ] });
+  await f.run('next');
+  assert.equal(f.shared.chapterId, 'chapter-2');
+  assert.equal(f.shared.events.some((event) => event === 'switch:chapter-1:tab-1'), false);
+  assert.equal(f.shared.retryCount.size, 0);
+});
+
+test('next visits the following same-chapter subtask before the next chapter', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('expired')], [task('later', [], { staticExpired: false })]] },
+    { id: 'chapter-2', tabTasks: [[]], complete: true }
+  ] });
+  await f.run('next');
+  assert.equal(f.shared.chapterId, 'chapter-1');
+  assert.equal(f.shared.activeTab, 1);
+});
+
+test('ordinary page that was not ready before any expiry is never recorded as inspected', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', visibleContentState: 'visible-unmapped', unFinishCount: 1, tabTasks: [[]] },
+    { id: 'chapter-2', tabTasks: [[task('expired')]] }
+  ] });
+  await f.run('job');
+  assert.deepEqual(f.state('chapter-1')?.inspectedTabs || [], []);
+  f.shared.chapterId = 'chapter-2';
+  await f.run('job');
+  assert.equal(f.shared.retryCount.size, 0);
+  assert.equal(f.shared.chapterId, 'chapter-1');
+});
+
+test('a nonchapter task returning void without attachment completion cannot inspect the page or retry expiry', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('expired'), task('media', [], {
+      staticExpired: false, chapterTest: false, normalResult: undefined
+    })]] },
+    { id: 'chapter-2', tabTasks: [[]], complete: true }
+  ] });
+  await f.run();
+  assert.equal(f.shared.normalCount.get('chapter-1:tab-1:media'), 1);
+  assert.equal(f.shared.retryCount.size, 0);
+  assert.deepEqual(f.state('chapter-1')?.inspectedTabs || [], []);
+  assert.equal(f.courseState()?.inspectedChapters?.includes('chapter-1') || false, false);
+});
+
+test('a void nonchapter task remains uninspected even before the first expiry was discovered', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('media', [], {
+      staticExpired: false, chapterTest: false, normalResult: undefined
+    })]] },
+    { id: 'chapter-2', tabTasks: [[task('expired')]] }
+  ] });
+  await f.run();
+  assert.deepEqual(f.state('chapter-1')?.inspectedTabs || [], []);
+  f.shared.chapterId = 'chapter-2';
+  await f.run();
+  assert.equal(f.shared.retryCount.size, 0);
+  assert.equal(f.shared.chapterId, 'chapter-1');
+});
+
+test('isPassed is authoritative when a completed attachment retains a stale job flag', async () => {
+  const f = fixture([[task('media', [], {
+    chapterTest: false, staticExpired: false, normalResult: undefined, attachmentJob: true, attachmentPassed: true
+  })]]);
+  assert.equal(f.createRuntime().hasPendingCurrentPageJobAttachments(), false);
+});
+
+test('an unavailable directory cannot start a deferred submission', async () => {
+  const f = fixture([[task('expired')]], { directoryLoading: true });
+  await f.run();
+  assert.equal(f.shared.retryCount.size, 0);
+  assert.equal(Object.values(f.state().tasks)[0].attempts, 0);
+});
+
+test('disabled deferred jobs pause with no missing visits and resume when enabled', async () => {
+  const f = fixture([[task('expired')]]);
+  const scope = JSON.stringify(['course-1', 'class-1', 'chapter-1']);
+  const initial = ledger.createChapterDeferredState(scope);
+  ledger.recordChapterDeferral(initial, 'tab-1', 'expired');
+  ledger.markChapterTabInspected(initial, 'tab-1');
+  f.shared.attributes.set(attribute, JSON.stringify({ [scope]: initial }));
+  f.shared.disableAnswers = true;
+  await f.run();
+  const entry = Object.values(f.state().tasks)[0];
+  assert.equal(entry.attempts, 0);
+  assert.equal(entry.missingVisits, 0);
+  assert.equal(entry.state, 'deferred');
+  assert.equal(entry.pauseReason, 'disabled');
+  assert.notEqual(f.courseState().phase, 'settled');
+  f.shared.disableAnswers = false;
+  await f.settle();
+  assert.equal(Object.values(f.state().tasks)[0].state, 'complete');
+});
+
+test('failed deferred navigation is bounded and respects breaking-mode guards', async () => {
+  const f = fixture([], { blockNavigation: true, chapters: [
+    { id: 'chapter-1', tabTasks: [[task('expired')]] },
+    { id: 'chapter-2', tabTasks: [[task('ordinary', [], { staticExpired: false })]] }
+  ] });
+  for (let i = 0; i < 5; i++) await f.run();
+  assert.equal(f.shared.navigationClicks, 3);
+  assert.ok(f.shared.breakingChecks > 0);
+  assert.equal(f.shared.retryCount.size, 0);
+});
+
+test('next also advances same-chapter ordinary subtasks when no task was deferred', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('first', [], { staticExpired: false })], [task('second', [], { staticExpired: false })]] },
+    { id: 'chapter-2', tabTasks: [[]], complete: true }
+  ] });
+  await f.run('next');
+  assert.equal(f.shared.activeTab, 1);
+  assert.equal(f.shared.chapterId, 'chapter-1');
+});
+
+test('a newly added ordinary tab invalidates a previously inspected chapter before retry', async () => {
+  const early = { id: 'chapter-2', tabTasks: [[task('ordinary', [], { staticExpired: false })]] };
+  let added = false;
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('expired')]] }, early,
+    { id: 'chapter-3', tabTasks: [[task('last-normal', [], { staticExpired: false })]] }
+  ], onSleep(ms, shared) {
+    if (!added && shared.chapterId === 'chapter-3') {
+      added = true;
+      early.tabTasks.push([task('late-normal', [], { staticExpired: false })]);
+    }
+  } });
+  await f.settleCourse();
+  const late = f.shared.events.indexOf('normal:chapter-2:tab-2:late-normal');
+  assert.ok(late >= 0);
+  assert.ok(late < f.shared.events.findIndex((event) => event.startsWith('retry:')));
+});
+
+test('deferred completion preserves the configured return to first chapter', async () => {
+  const f = fixture([], { backToFirstWhenFinish: true, chapters: [
+    { id: 'chapter-1', complete: true, tabTasks: [[]] },
+    { id: 'chapter-2', tabTasks: [[task('expired', [{ terminalExpired: true, expired: true }])]] }
+  ], chapterId: 'chapter-2' });
+  await f.run();
+  assert.equal(f.shared.chapterId, 'chapter-1');
+  const abandoned = Object.values(f.state('chapter-2').tasks)[0];
+  assert.equal(abandoned.state, 'abandoned');
+  assert.equal(abandoned.attempts, 1);
+});
+
+test('manual navigation during the deferred countdown cancels the stale target', async () => {
+  const f = fixture([], { chapters: [
+    { id: 'chapter-1', tabTasks: [[task('expired')], []] },
+    { id: 'chapter-2', tabTasks: [[task('ordinary', [], { staticExpired: false })]] }
+  ], onSleep(ms, shared) { if (ms === 5000) shared.activeTab = 1; } });
+  await f.run();
+  assert.equal(f.shared.chapterId, 'chapter-1');
+  assert.equal(f.shared.activeTab, 1);
+  assert.equal(f.shared.events.some((event) => event.startsWith('chapter:')), false);
+});
 
 test('all ordinary jobs across multiple tabs finish before multiple deferred jobs are revisited', async () => {
   const f = fixture([
@@ -592,21 +760,25 @@ test('a terminal chapter stays abandoned while later deferred chapters finish in
   assert.equal(f.shared.retryCount.get('chapter-1:tab-1:terminal'), 1);
 });
 
-test('next mode scans later normal chapters before wrapping to earlier chapters and finally revisiting expiry', async () => {
+test('next mode moves forward and pauses at the end when earlier normal chapters remain', async () => {
   const f = fixture([], { chapterId: 'chapter-2', chapters: [
     { id: 'chapter-1', tabTasks: [[task('before', [], { staticExpired: false })]] },
     { id: 'chapter-2', tabTasks: [[task('expired')]] },
     { id: 'chapter-3', tabTasks: [[task('after', [], { staticExpired: false })]] }
   ] });
-  await f.settleCourse('next');
+  await f.run('next');
+  await f.run('next');
+  await f.run('next');
   const after = f.shared.events.indexOf('normal:chapter-3:tab-1:after');
   const before = f.shared.events.indexOf('normal:chapter-1:tab-1:before');
   const retry = f.shared.events.indexOf('retry:chapter-2:tab-1:expired');
-  assert.ok(after >= 0 && before > after && retry > before);
+  assert.ok(after >= 0);
+  assert.equal(before, -1);
+  assert.equal(retry, -1);
   assert.deepEqual(f.shared.events.filter((event) => event.startsWith('chapter:')), [
-    'chapter:chapter-3', 'chapter:chapter-1', 'chapter:chapter-2'
+    'chapter:chapter-3'
   ]);
-  assert.equal(f.shared.retryCount.get('chapter-2:tab-1:expired'), 1);
+  assert.equal(f.shared.retryCount.size, 0);
 });
 
 test('manual mode leaves a deferred chapter pending without automatically navigating to another chapter', async () => {

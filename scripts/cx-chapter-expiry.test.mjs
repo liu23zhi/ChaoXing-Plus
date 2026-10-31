@@ -111,6 +111,8 @@ test('chapter expiry response detection accepts wrapped JSON failure responses w
   assert.equal(isExpiredChapterResponse([{ error: { message: '此作业已过期！', status: ' failed ' } }]), true);
   assert.equal(isExpiredChapterResponse({ data: { error: { errMsg: '此作业已过期!', success: 'false' } } }), true);
   assert.equal(isExpiredChapterResponse({ msg: '提交成功', status: false }), false);
+  assert.equal(isExpiredChapterResponse({ status: true, data: { msg: '此作业已过期！' } }), false);
+  assert.equal(isExpiredChapterResponse({ success: 'true', error: { status: false, msg: '此作业已过期！' } }), false);
 });
 
 test('native expiry dialog capture suppresses the expired alert and restores page handlers', async () => {

@@ -5,6 +5,7 @@ export type DeferredChapterTask = {
   state: 'deferred' | 'complete' | 'abandoned';
   terminalExpired: boolean;
   missingVisits: number;
+  pauseReason?: 'saved' | 'disabled' | 'not-ready' | 'manual';
 };
 
 export type ChapterDeferredState = {
@@ -49,7 +50,7 @@ export function readChapterDeferredState(value: unknown, scope: string): Chapter
     const task = item as Record<string, unknown>;
     if (typeof task.tabKey !== 'string' || !task.tabKey || typeof task.jobId !== 'string' || !task.jobId) continue;
     const terminalExpired = task.terminalExpired === true;
-    state.tasks[taskKey(task.tabKey, task.jobId)] = {
+    const normalized: DeferredChapterTask = {
       tabKey: task.tabKey,
       jobId: task.jobId,
       attempts: nonNegativeInteger(task.attempts),
@@ -57,6 +58,10 @@ export function readChapterDeferredState(value: unknown, scope: string): Chapter
       terminalExpired,
       missingVisits: nonNegativeInteger(task.missingVisits)
     };
+    if (task.pauseReason === 'saved' || task.pauseReason === 'disabled' || task.pauseReason === 'not-ready' || task.pauseReason === 'manual') {
+      normalized.pauseReason = task.pauseReason;
+    }
+    state.tasks[taskKey(task.tabKey, task.jobId)] = normalized;
   }
   return state;
 }
@@ -77,8 +82,10 @@ export function markChapterTabInspected(state: ChapterDeferredState, tabKey: str
   if (!state.inspectedTabs.includes(tabKey)) state.inspectedTabs.push(tabKey);
 }
 
-export function getNextUninspectedChapterTab(state: ChapterDeferredState, tabKeys: readonly string[]): string | undefined {
-  return tabKeys.find((tabKey) => !state.inspectedTabs.includes(tabKey));
+export function getNextUninspectedChapterTab(state: ChapterDeferredState, tabKeys: readonly string[], currentTabKey?: string): string | undefined {
+  if (currentTabKey !== undefined && !tabKeys.includes(currentTabKey)) return undefined;
+  const start = currentTabKey === undefined ? 0 : tabKeys.indexOf(currentTabKey) + 1;
+  return tabKeys.slice(start).find((tabKey) => !state.inspectedTabs.includes(tabKey));
 }
 
 export function chooseNextDeferredChapterTask(
@@ -95,10 +102,10 @@ export function chooseNextDeferredChapterTask(
   for (const task of tasks) {
     if (task.state === 'deferred' && (task.terminalExpired || task.attempts >= limit)) task.state = 'abandoned';
   }
-  const pending = tasks.filter((task) => task.state === 'deferred');
+  const pending = tasks.filter((task) => task.state === 'deferred' && !task.pauseReason);
   // Keep discovery order inside each tab and use the current page's tab order.
   const next = tabKeys.map((tabKey) => pending.find((task) => task.tabKey === tabKey)).find(Boolean) ?? pending[0];
-  state.phase = next ? 'retry' : 'settled';
+  state.phase = next || tasks.some((task) => task.state === 'deferred') ? 'retry' : 'settled';
   return next;
 }
 
@@ -109,7 +116,7 @@ export function markDeferredChapterAttempt(
   maxAttempts: number
 ): boolean {
   const task = state.tasks[taskKey(tabKey, jobId)];
-  if (!task || task.state !== 'deferred') return false;
+  if (!task || task.state !== 'deferred' || task.pauseReason) return false;
   if (task.terminalExpired || task.attempts >= nonNegativeInteger(maxAttempts)) {
     task.state = 'abandoned';
     return false;
@@ -123,7 +130,7 @@ export function markDeferredChapterResult(
   state: ChapterDeferredState,
   tabKey: string,
   jobId: string,
-  result: { finished?: boolean; terminalExpired?: boolean; manual?: boolean },
+  result: { finished?: boolean; terminalExpired?: boolean; manual?: boolean; disposition?: string },
   maxAttempts: number
 ): void {
   const task = state.tasks[taskKey(tabKey, jobId)];
@@ -131,9 +138,10 @@ export function markDeferredChapterResult(
   if (result.terminalExpired) {
     task.terminalExpired = true;
     task.state = 'abandoned';
-  } else if (result.manual) {
+  } else if (result.manual || ['saved', 'manual', 'disabled', 'not-ready'].includes(result.disposition || '')) {
     // Pair this result with a successful attempt reservation before opening the worker.
     task.attempts = Math.max(0, task.attempts - 1);
+    task.pauseReason = result.manual ? 'manual' : result.disposition as DeferredChapterTask['pauseReason'];
   } else if (result.finished) {
     task.state = 'complete';
     task.missingVisits = 0;

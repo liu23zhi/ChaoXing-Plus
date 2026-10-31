@@ -29,6 +29,80 @@
   const sharedStoreSyncEvent = 'chaoxing-plus:shared-store-sync';
   const sharedStoreHydrateEvent = 'chaoxing-plus:shared-store-hydrate';
   const swalAliasKey = '__chaoxing_plus_swal__';
+  const tabPauseKind = 'chaoxing-plus:tab-answer-pause';
+  const pendingPauseRequests = new Set();
+  const applyTabPause = (message) => {
+    if (message?.kind !== tabPauseKind || typeof message.paused !== 'boolean') return;
+    if (typeof message.tabIdentity === 'string' && /^\d+$/.test(message.tabIdentity)) {
+      root.setAttribute('data-chaoxing-plus-tab-identity', message.tabIdentity);
+    }
+    root.setAttribute('data-chaoxing-plus-tab-paused', String(message.paused));
+    root.setAttribute('data-chaoxing-plus-tab-pause-ready', message.durable === true ? 'extension' : 'memory');
+    document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+  };
+  if (chrome.runtime.onMessage?.addListener) {
+    chrome.runtime.onMessage.addListener((message, sender) => {
+      if (sender.id === chrome.runtime.id && pendingPauseRequests.size === 0) applyTabPause(message);
+    });
+  }
+  document.addEventListener('chaoxing-plus:tab-pause-request', (event) => {
+    const detail = event.detail;
+    if (!detail || typeof detail.paused !== 'boolean' || typeof detail.requestId !== 'string'
+      || detail.requestId.length > 160 || !chrome.runtime.sendMessage) return;
+    pendingPauseRequests.add(detail.requestId);
+    root.setAttribute('data-chaoxing-plus-tab-pause-pending', 'true');
+    try {
+      chrome.runtime.sendMessage({ kind: tabPauseKind, operation: 'write', paused: detail.paused, requestId: detail.requestId }, (response) => {
+        void chrome.runtime.lastError;
+        pendingPauseRequests.delete(detail.requestId);
+        if (pendingPauseRequests.size === 0) {
+          root.removeAttribute('data-chaoxing-plus-tab-pause-pending');
+          if (response?.requestId === detail.requestId) applyTabPause(response);
+          else root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+        }
+      });
+    } catch {
+      pendingPauseRequests.delete(detail.requestId);
+      if (pendingPauseRequests.size === 0) root.removeAttribute('data-chaoxing-plus-tab-pause-pending');
+      root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+    }
+  });
+  const hydrateTabPause = () => new Promise((resolve) => {
+    if (!chrome.runtime.sendMessage) { resolve(); return; }
+    const requestId = `init:${Date.now()}:${Math.random()}`;
+    const timer = setTimeout(() => {
+      root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
+      root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+      document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+      resolve();
+    }, 2000);
+    try {
+      chrome.runtime.sendMessage({ kind: tabPauseKind, operation: 'read', requestId }, (response) => {
+        void chrome.runtime.lastError;
+        clearTimeout(timer);
+        if (response?.requestId === requestId) applyTabPause(response);
+        else {
+          root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
+          root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+          document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+        }
+        resolve();
+      });
+    } catch {
+      clearTimeout(timer);
+      root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
+      root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+      document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+      resolve();
+    }
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+      root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
+      document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+      void hydrateTabPause();
+    }
+  });
 
   const shouldShareStoreKey = (key) => (
     typeof key === 'string'
@@ -259,6 +333,8 @@
       // 总开关关闭：不注入主脚本，页面保持原样，也不创建面板。
       return;
     }
+
+    await hydrateTabPause();
 
     root.dataset[injectedMarkerKey] = frameMarker;
     window[injectedWindowKey] = frameMarker;
