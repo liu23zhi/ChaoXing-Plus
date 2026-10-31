@@ -53,7 +53,7 @@ test('compiled portable package launches the GUI child and removes its private f
       const result = run(...args);
       assert.equal(result.error, undefined, `${args.join(' ')}: ${result.error?.message ?? ''}`);
       assert.equal(result.status, 0, `${args.join(' ')} exited ${result.status}: ${result.stdout}\n${result.stderr}`);
-      if (args[0] === '--version') assert.equal(result.stdout.trim(), '6.2.0');
+      if (args[0] === '--version') assert.equal(result.stdout.trim(), '0.1.0');
       else assert.match(result.stdout, /--help/);
     }
     await fs.writeFile(path.join(directory, 'config with spaces.json'), JSON.stringify({ answerThreads: 3 }));

@@ -393,7 +393,7 @@ static BOOL diagnostic_validate_schema(const char *json, const JT *tokens) {
     innerWidth = jkey(json, tokens, 0, "innerWidth"); innerHeight = jkey(json, tokens, 0, "innerHeight");
     viewport = jkey(json, tokens, 0, "visualViewport"); panelCount = jkey(json, tokens, 0, "panelCount");
     topPanel = jkey(json, tokens, 0, "topPanel"); scope = jkey(json, tokens, 0, "scope");
-    if (!jeq(json, tokens, version, "6.2.0") || !jeq(json, tokens, host, "native")
+    if (!jeq(json, tokens, version, "0.1.0") || !jeq(json, tokens, host, "native")
         || !jeq(json, tokens, source, "native-page") || !diagnostic_timestamp(json, tokens, collectedAt)
         || !diagnostic_bool(json, tokens, bundleLoaded) || !diagnostic_number(json, tokens, dpr, FALSE, 16)
         || !diagnostic_number(json, tokens, innerWidth, FALSE, 200000)
@@ -948,7 +948,7 @@ static BOOL write_window_json(CX_DIAGNOSTICS *state, const char *status, DWORD c
     json.capacity = sizeof(text);
     json.ok = TRUE;
     GetSystemTime(&now);
-    window_json_text(&json, "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-window\",\"collectedAt\":\"");
+    window_json_text(&json, "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-window\",\"collectedAt\":\"");
     window_json_digits(&json, now.wYear, 4); window_json_text(&json, "-");
     window_json_digits(&json, now.wMonth, 2); window_json_text(&json, "-");
     window_json_digits(&json, now.wDay, 2); window_json_text(&json, "T");
@@ -1206,7 +1206,7 @@ BOOL cx_diagnostics_write_host_summary(CX_DIAGNOSTICS *state, BOOL attachMode,
     json.capacity = sizeof(text);
     json.ok = TRUE;
     GetSystemTime(&now);
-    window_json_text(&json, "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-host\",\"collectedAt\":\"");
+    window_json_text(&json, "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-host\",\"collectedAt\":\"");
     window_json_digits(&json, now.wYear, 4); window_json_text(&json, "-");
     window_json_digits(&json, now.wMonth, 2); window_json_text(&json, "-");
     window_json_digits(&json, now.wDay, 2); window_json_text(&json, "T");

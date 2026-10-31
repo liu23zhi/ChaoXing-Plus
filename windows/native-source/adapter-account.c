@@ -203,7 +203,7 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     if (!g_http.crack(url, 0, 0, &parts) || !parts.dwHostNameLength || !parts.dwUrlPathLength || parts.dwUserNameLength || parts.dwPasswordLength) { cx_error(error, errorCap, L"扩展服务地址解析失败。"); goto done; }
     used = parts.dwUrlPathLength; if (parts.dwExtraInfoLength && !cx_append_w(object, 8192, &used, extra)) { cx_error(error, errorCap, L"扩展服务查询参数过长。"); goto done; }
     if (parts.nScheme == INTERNET_SCHEME_HTTPS) flags = WINHTTP_FLAG_SECURE; else if (parts.nScheme != INTERNET_SCHEME_HTTP) { cx_error(error, errorCap, L"只支持 HTTP 或 HTTPS 扩展服务。"); goto done; }
-    session = g_http.open(L"超星学习助手/6.2.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    session = g_http.open(L"超星学习助手/0.1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     conn = session ? g_http.connect(session, host, parts.nPort, 0) : NULL;
     req = conn ? g_http.openRequest(conn, method, object, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags) : NULL;
     if (!session || !conn || !req || !g_http.setTimeouts(req, (int)timeout, (int)timeout, (int)timeout, (int)timeout)

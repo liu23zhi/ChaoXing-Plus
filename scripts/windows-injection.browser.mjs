@@ -534,7 +534,7 @@ test('production Node attach exposes memory diagnostics with quiet no-disk-write
       writeFile(join(assetsDir, 'chaoxing-plus.windows.js'), assets.bundle),
       writeFile(join(assetsDir, 'trampoline.js'), assets.trampoline),
       writeFile(join(assetsDir, 'vendor', 'sweetalert2.min.css'), ''),
-      writeFile(join(assetsDir, 'package-manifest.json'), '{"version":"6.2.0"}')
+      writeFile(join(assetsDir, 'package-manifest.json'), '{"version":"6.3.0"}')
     ]);
     await page.goto(`http://a.chaoxing.com:${port}/exam-ans/production-diagnostics-${++sequence}?private-token=fixture`);
     child = spawn(process.execPath, [resolve('windows/node-source/main.mjs'),

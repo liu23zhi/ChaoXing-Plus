@@ -296,7 +296,7 @@ test('native page diagnostics are collected after top-level bundle ACK with a fl
   assertPrivateBoundary(text);
   const diagnostic = JSON.parse(text);
   assertDiagnosticSchema(diagnostic);
-  assert.equal(diagnostic.version, '6.2.0');
+  assert.equal(diagnostic.version, '0.1.0');
   assert.equal(diagnostic.host, 'native');
   assert.equal(diagnostic.source, 'native-page');
   assert.equal(typeof diagnostic.collectedAt, 'string');
@@ -330,7 +330,7 @@ test('native page diagnostics are collected after top-level bundle ACK with a fl
   const summaryPath = await findDiagnosticsFileNamed(result.diagnosticsDir, 'render-diagnostics-host.json');
   assert.ok(summaryPath, 'the host diagnostics summary must be published');
   const summary = JSON.parse(await readFile(summaryPath, 'utf8'));
-  assert.equal(summary.version, '6.2.0');
+  assert.equal(summary.version, '0.1.0');
   assert.equal(summary.host, 'native');
   assert.equal(summary.source, 'native-host');
   assert.equal(typeof summary.collectedAt, 'string');

@@ -103,7 +103,7 @@ static int h_self_check(const CX_OPTIONS *options) {
     }
     if (winsock) WSACleanup();
     for (i = 0; i < h_check_count; ++i) if (lstrcmpA(h_check_items[i].status, "failed") == 0) ++failures;
-    h_check_text("{\"mode\":\"self-check\",\"host\":\"native\",\"version\":\"6.2.0\",\"success\":");
+    h_check_text("{\"mode\":\"self-check\",\"host\":\"native\",\"version\":\"0.1.0\",\"success\":");
     h_check_text(failures ? "false" : "true");
     h_check_text(",\"scope\":{\"discoveryScan\":false,\"launch\":false,\"connect\":false,\"write\":false},\"port\":");
     h_decimal(portText, port); h_check_text(portText);

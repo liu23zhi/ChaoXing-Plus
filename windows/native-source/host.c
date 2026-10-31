@@ -2297,7 +2297,7 @@ static void h_collect_page_diagnostics(H_NATIVE_PAGE *page) {
         "var e=p.length?p[0]:null,r=e?e.getBoundingClientRect():null,s=e?getComputedStyle(e):null;"
         "function n(x){return typeof x==='number'&&isFinite(x)?Math.round(x*1000)/1000:0;}"
         "function c(x){return typeof x==='string'&&x.length<=256&&!/[^A-Za-z0-9 .,()%#+-]|url\\s*\\(/i.test(x)?x:'';}"
-        "var o={version:'6.2.0',host:'native',source:'native-page',collectedAt:new Date().toISOString(),"
+        "var o={version:'0.1.0',host:'native',source:'native-page',collectedAt:new Date().toISOString(),"
         "bundleLoaded:window.__CX_WIN_BUNDLE_LOADED__===true,devicePixelRatio:n(d),"
         "innerWidth:n(window.innerWidth),innerHeight:n(window.innerHeight),"
         "visualViewport:{width:v?n(v.width):0,height:v?n(v.height):0,scale:v?n(v.scale):1},"
@@ -3052,7 +3052,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     if (h_base_options.help) {
         h_out_begin();
-        h_print_utf8("超星学习助手 Windows 宿主 6.2.0（原生原型）\n"
+        h_print_utf8("超星学习助手 Windows 宿主 0.1.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
@@ -3116,7 +3116,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         h_out_flush();
         return 0;
     }
-    if (h_base_options.version) { h_out_begin(); h_print_utf8("6.2.0\n"); h_out_flush(); return 0; }
+    if (h_base_options.version) { h_out_begin(); h_print_utf8("0.1.0\n"); h_out_flush(); return 0; }
     if (h_base_options.capabilities) {
         if (!cx_asset_validate_embedded(h_main_error, HOST_ERROR_CAP)) { h_print(h_main_error); return 2; }
         h_out_begin();

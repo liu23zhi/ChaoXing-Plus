@@ -57,7 +57,7 @@ static void init_options(CX_OPTIONS *target, const WCHAR *suffix) {
 }
 
 static const char validJson[] =
-    "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-page\","
+    "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-page\","
     "\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,"
     "\"devicePixelRatio\":1.25,\"innerWidth\":1280,\"innerHeight\":720,"
     "\"visualViewport\":{\"width\":1280,\"height\":720,\"scale\":1},"
@@ -65,7 +65,7 @@ static const char validJson[] =
     "\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false}}";
 
 static const char validPanelJson[] =
-    "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-page\","
+    "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-page\","
     "\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,"
     "\"devicePixelRatio\":1,\"innerWidth\":1280,\"innerHeight\":720,"
     "\"visualViewport\":{\"width\":1280,\"height\":720,\"scale\":1},"
@@ -111,9 +111,9 @@ static void test_success(void) {
 
 static void test_schema_rejection(void) {
     CX_DIAGNOSTICS *state;
-    const char extra[] = "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":0,\"topPanel\":null,\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false},\"secret\":\"question-answer\"}";
-    const char url[] = "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":1,\"topPanel\":{\"visible\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"fractionalDevicePixel\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"style\":{\"backdropFilter\":\"url(http://private)\",\"boxShadow\":\"none\",\"transform\":\"none\",\"backgroundColor\":\"white\"}},\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false}}";
-    const char relativeUrl[] = "{\"version\":\"6.2.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":1,\"topPanel\":{\"visible\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"fractionalDevicePixel\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"style\":{\"backdropFilter\":\"uRl (relative-private-canary)\",\"boxShadow\":\"none\",\"transform\":\"none\",\"backgroundColor\":\"white\"}},\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false}}";
+    const char extra[] = "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":0,\"topPanel\":null,\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false},\"secret\":\"question-answer\"}";
+    const char url[] = "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":1,\"topPanel\":{\"visible\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"fractionalDevicePixel\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"style\":{\"backdropFilter\":\"url(http://private)\",\"boxShadow\":\"none\",\"transform\":\"none\",\"backgroundColor\":\"white\"}},\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false}}";
+    const char relativeUrl[] = "{\"version\":\"0.1.0\",\"host\":\"native\",\"source\":\"native-page\",\"collectedAt\":\"2026-10-28T12:34:56.789Z\",\"bundleLoaded\":true,\"devicePixelRatio\":1,\"innerWidth\":1,\"innerHeight\":1,\"visualViewport\":{\"width\":1,\"height\":1,\"scale\":1},\"panelCount\":1,\"topPanel\":{\"visible\":true,\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"fractionalDevicePixel\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1},\"style\":{\"backdropFilter\":\"uRl (relative-private-canary)\",\"boxShadow\":\"none\",\"transform\":\"none\",\"backgroundColor\":\"white\"}},\"scope\":{\"pageOnly\":true,\"windowDpi\":false,\"screenshots\":false}}";
     init_options(&options, L"schema");
     state = cx_diagnostics_create(&options, errorText, 512);
     check("reject extra diagnostic fields", state && !cx_diagnostics_write_page_json(state, extra, sizeof(extra) - 1, errorText, 512) && errorText[0]);
@@ -130,7 +130,7 @@ static void test_schema_rejection(void) {
 
 static void test_input_limits(void) {
     CX_DIAGNOSTICS *state; char *large;
-    const char invalidUtf8[] = "{\"version\":\"6.2.0\",\xC0\xAF}";
+    const char invalidUtf8[] = "{\"version\":\"0.1.0\",\xC0\xAF}";
     init_options(&options, L"limits"); state = cx_diagnostics_create(&options, errorText, 512);
     check("reject invalid UTF-8 before publishing", state && !cx_diagnostics_write_page_json(state, invalidUtf8, sizeof(invalidUtf8) - 1, errorText, 512) && errorText[0]);
     cx_diagnostics_close(state);

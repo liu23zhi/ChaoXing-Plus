@@ -60,7 +60,7 @@ test('native console helper forwards version, full Unicode help and unknown-opti
       assert.equal(forwarded.status, direct.status);
       assert.equal(forwarded.stdout, direct.stdout, args.join(' '));
       assert.equal(forwarded.stderr, direct.stderr, args.join(' '));
-      if (args[0] === '--version') assert.equal(forwarded.stdout.trim(), '6.2.0');
+      if (args[0] === '--version') assert.equal(forwarded.stdout.trim(), '0.1.0');
       if (args[0] === '--help') {
         assert.match(forwarded.stdout, /\u8d85\u661f\u5b66\u4e60\u52a9\u624b Windows/u);
         assert.match(forwarded.stdout, /--silent-scenario/u);

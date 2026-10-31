@@ -293,7 +293,7 @@ BOOL cx_options_parse_cli(CX_OPTIONS *o, int argc, WCHAR **argv,
             || cx_streq_ic(name, L"-help") || cx_streq_ic(name, L"--help")
             || cx_streq(name, L"-?") || cx_streq(name, L"/?") || cx_streq(name, L"?")) { o->help = TRUE; continue; }
         if (cx_streq(name, L"--capabilities")) { o->capabilities = TRUE; continue; }
-        /* 版本别名：-v / -V / --v / --version / --Version 均打印 6.2.0。 */
+        /* 版本别名：-v / -V / --v / --version / --Version 均打印 0.1.0。 */
         if (cx_streq(name, L"--version") || cx_streq_ic(name, L"-v") || cx_streq_ic(name, L"--v")
             || cx_streq_ic(name, L"--version")) { o->version = TRUE; continue; }
         if (cx_streq(name, L"--print-effective-config")) { o->printEffectiveConfig = TRUE; continue; }

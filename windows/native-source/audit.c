@@ -272,7 +272,7 @@ BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
     if (!buffer) return fail(error, errorCap, L"Unable to allocate audit report.", 0);
     out.text = buffer; out.used = 0; out.capacity = CX_AUDIT_REPORT_CAP; out.valid = TRUE; buffer[0] = 0;
     stamp(finishedAt, FALSE);
-    append(&out, "{\"version\":\"6.2.0\",\"host\":\"native\",\"startedAt\":"); json_string(&out, audit->startedAt);
+    append(&out, "{\"version\":\"0.1.0\",\"host\":\"native\",\"startedAt\":"); json_string(&out, audit->startedAt);
     append(&out, ",\"finishedAt\":"); json_string(&out, finishedAt);
     append(&out, ",\"mode\":"); json_string(&out, report->attached ? "attach" : "launch");
     json_number(&out, "durationMs", report->durationMs); json_number(&out, "clientPid", report->clientPid);

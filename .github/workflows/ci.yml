@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows 6.2.0 类型检查、构建与全量测试
+    name: Windows 扩展 6.3.0 / 原生 EXE 0.1.0 类型检查、构建与全量测试
     runs-on: windows-latest
     timeout-minutes: 90
     env:

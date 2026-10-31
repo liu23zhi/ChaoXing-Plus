@@ -31,7 +31,7 @@ function report(result, status = 0) {
   const value = JSON.parse(result.stdout);
   assert.equal(value.mode, 'self-check');
   assert.equal(value.host, 'native');
-  assert.equal(value.version, '6.2.0');
+  assert.equal(value.version, '0.1.0');
   assert.equal(value.success, status === 0);
   assert.deepEqual(value.scope, { discoveryScan: false, launch: false, connect: false, write: false });
   assert.ok(Array.isArray(value.checks));

@@ -78,7 +78,7 @@ static void test_files(void) {
     a = cx_audit_create(o, errorText, 256);
     check("write complete report into nested Unicode path", cx_audit_write_report(a, &r, errorText, 256));
     text = read_file(o->reportPath);
-    check("report contains metadata and escaped stop reason", contains(text, "\"version\":\"6.2.0\"") && contains(text, "\"host\":\"native\"") && contains(text, "\"startedAt\":\"2") && contains(text, "\"finishedAt\":\"2") && contains(text, "duration\\\"\\\\\\n\\t\\u0001"));
+    check("report contains metadata and escaped stop reason", contains(text, "\"version\":\"0.1.0\"") && contains(text, "\"host\":\"native\"") && contains(text, "\"startedAt\":\"2") && contains(text, "\"finishedAt\":\"2") && contains(text, "duration\\\"\\\\\\n\\t\\u0001"));
     check("report contains only fixed endpoint reason codes and bounded counters", contains(text, "\"endpointProbe\":{\"attempts\":3,\"elapsedMs\":50")
         && contains(text, "\"lastReason\":\"ready\"") && contains(text, "\"no-listener\":1")
         && contains(text, "\"http-failed\":1") && contains(text, "\"ready\":1")

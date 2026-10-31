@@ -760,7 +760,7 @@ test('宿主 attach 模式可完成 bootstrap -> bundle -> 配置回写', async 
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'attach');
     assert.equal(report.host, 'node');
-    assert.equal(report.version, '6.2.0');
+    assert.equal(report.version, '6.3.0');
     assert.equal(report.endpoint.browser, 'Chrome/75.0.3770.100');
     assert.equal(report.totals.bootstraps >= 1, true);
     assert.equal(report.totals.bundles >= 1, true);
@@ -1139,7 +1139,7 @@ test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', asy
     assert.equal(result.code, 0, result.stderr);
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'self-check');
-    assert.equal(report.version, '6.2.0');
+    assert.equal(report.version, '6.3.0');
     assert.equal(report.host, 'node');
     assert.equal(report.failures.length, 0);
     assert.equal(report.capabilities.unsupported.implemented, false);
@@ -1273,7 +1273,7 @@ for (const startupNoDiskWrite of [true, false]) {
         const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
         assert.equal(report.mode, 'attach');
     assert.equal(report.host, 'node');
-    assert.equal(report.version, '6.2.0');
+    assert.equal(report.version, '6.3.0');
       }
     } finally {
       if (resultPromise) await resultPromise;
@@ -1402,7 +1402,7 @@ test('Node --capabilities 如实列出已支持的数据、诊断与配置能力
   ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
   assert.equal(result.code, 0, result.stderr);
   const capabilities = JSON.parse(result.stdout);
-  assert.equal(capabilities.hostVersion, '6.2.0');
+  assert.equal(capabilities.hostVersion, '6.3.0');
   assert.equal(capabilities.executionMode, 'normal');
   assert.deepEqual(capabilities.supported.executionModes, ['normal', 'memory', 'delete-suspend']);
   for (const key of [
@@ -1435,7 +1435,7 @@ test('Node --version 只输出版本号且不创建数据目录', async () => {
       '--data-dir', dataDir
     ], { env: { CXPLUS_NO_LOG_FILE: '1' } });
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(result.stdout.trim(), '6.2.0');
+  assert.equal(result.stdout.trim(), '6.3.0');
     assert.equal(await fs.access(dataDir).then(() => true, () => false), false,
       '--version 不得创建数据目录或日志');
   } finally {
@@ -1459,7 +1459,7 @@ test('Node --list-clients --report 写入列表报告且 --no-disk-write 抑制'
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.mode, 'list-clients');
     assert.equal(report.host, 'node');
-    assert.equal(report.version, '6.2.0');
+  assert.equal(report.version, '6.3.0');
     assert.equal(report.stopReason, 'list-clients');
     assert.equal(report.success, true);
     assert.equal(report.scanMode, 'common');

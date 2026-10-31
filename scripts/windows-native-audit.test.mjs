@@ -32,7 +32,7 @@ async function run(mode = '') {
     const reportFile = path.join(directory, 'reports 中文', 'nested', 'run.json');
     if (!mode) {
       const report = JSON.parse(await fs.readFile(reportFile, 'utf8'));
-      assert.equal(report.version, '6.2.0');
+      assert.equal(report.version, '0.1.0');
       assert.equal(report.host, 'native');
       assert.equal(report.mode, 'launch');
       assert.equal(report.durationMs, 123);

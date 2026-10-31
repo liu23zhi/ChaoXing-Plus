@@ -127,7 +127,7 @@ function usage() {
     '  --delete-suspend     删除挂起执行模式（启动完成后删除程序/数据，退出时再次清理）',
     '  --execution-mode normal|memory 选择执行模式；memory 为宿主侧零落盘（客户端仍正常可见启动）',
     '  --memory-exec        --execution-mode memory 的简写',
-    '  --version            输出宿主版本号 6.2.0',
+    '  --version            输出宿主版本号 6.3.0',
     '  --capabilities       输出机器可读的能力标记与未实现能力说明',
     '  --quiet              减少控制台输出，不保证屏蔽参数错误或系统提示'
   ].join('\n');
@@ -344,7 +344,7 @@ async function runSelfCheck(options, logger) {
 
   const report = {
     mode: 'self-check',
-    version: '6.2.0',
+    version: '6.3.0',
     host: 'node',
     generatedAt: nowIso(),
     repositoryRoot,
@@ -438,12 +438,12 @@ async function main() {
     return;
   }
   if (options.version) {
-    console.log('6.2.0');
+    console.log('6.3.0');
     return;
   }
   if (options.capabilities) {
     console.log(JSON.stringify({
-      hostVersion: '6.2.0',
+      hostVersion: '6.3.0',
       executionMode: options.executionMode,
       supported: {
         executionModes: ['normal', 'memory', 'delete-suspend'],
@@ -751,7 +751,7 @@ async function main() {
           const listFinishedAt = nowIso();
           await writeReport(options.reportPath, {
             mode: 'list-clients',
-            version: '6.2.0',
+            version: '6.3.0',
             host: 'node',
             stopReason: 'list-clients',
             startedAt: listStartedAt,
@@ -801,7 +801,7 @@ async function main() {
     const sessionHistory = [];
     const report = {
       mode: options.attachPort ? 'attach' : 'launch',
-      version: '6.2.0',
+      version: '6.3.0',
       host: 'node',
       executionMode: options.executionMode,
       startedAt: nowIso(),

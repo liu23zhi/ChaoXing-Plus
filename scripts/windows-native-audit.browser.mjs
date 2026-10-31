@@ -125,7 +125,7 @@ function assertPrivate(text) {
 
 function assertReport(report) {
   assert.equal(report.host, 'native');
-  assert.equal(report.version, '6.2.0');
+  assert.equal(report.version, '0.1.0');
   assert.equal(report.success, true);
   assert.equal(report.mode, 'attach');
   assert.equal(typeof report.startedAt, 'string');
