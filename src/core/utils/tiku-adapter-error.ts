@@ -1,7 +1,9 @@
 export const TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE = '服务器内部错误，搜题失败。';
 export const TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE = '当前账号余额不足，请充值后重试。';
 
-export type TikuAdapterFailureCode = 'INSUFFICIENT_BALANCE' | 'UPSTREAM_ERROR';
+export const TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE = '当前 Key 额度已用尽或本次请求将超额，请调整额度或更换 Key 后重试。';
+
+export type TikuAdapterFailureCode = 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED' | 'UPSTREAM_ERROR';
 
 export class TikuAdapterRequestError extends Error {
   readonly code: TikuAdapterFailureCode;
@@ -11,7 +13,9 @@ export class TikuAdapterRequestError extends Error {
   constructor(code: TikuAdapterFailureCode, status?: number) {
     super(code === 'INSUFFICIENT_BALANCE'
       ? TIKU_ADAPTER_BALANCE_FAILURE_MESSAGE
-      : TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE);
+      : code === 'ACCESS_TOKEN_QUOTA_EXCEEDED'
+        ? TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE
+        : TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE);
     this.name = 'TikuAdapterRequestError';
     this.code = code;
     this.status = status;
@@ -90,8 +94,16 @@ export function isTikuAdapterInsufficientBalance(value: unknown, status?: number
   return status === 401 && /当前余额不足/.test(String(value ?? ''));
 }
 
+export function isTikuAdapterQuotaExceeded(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  const code = (record.error as Record<string, unknown> | undefined)?.code ?? record.code;
+  return String(code ?? '').trim().toUpperCase() === 'ACCESS_TOKEN_QUOTA_EXCEEDED';
+}
+
 export function createTikuAdapterRequestError(value: unknown, status?: number): TikuAdapterRequestError {
-  const code = isTikuAdapterInsufficientBalance(value, status) ? 'INSUFFICIENT_BALANCE' : 'UPSTREAM_ERROR';
+  const code = isTikuAdapterInsufficientBalance(value, status) ? 'INSUFFICIENT_BALANCE'
+    : isTikuAdapterQuotaExceeded(value) ? 'ACCESS_TOKEN_QUOTA_EXCEEDED' : 'UPSTREAM_ERROR';
   return new TikuAdapterRequestError(code, status);
 }
 
