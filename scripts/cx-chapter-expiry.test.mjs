@@ -11,6 +11,7 @@ async function loadCxFunction(name, context) {
   if (name === 'invokeChapterActionWithExpiryCapture') {
     await loadCxFunction('isChapterSubmissionFailure', context);
     context.observeChapterSubmission ??= () => ({ async wait() {}, restore() {} });
+    context.dismissChapterSubmissionDialog ??= () => {};
     context.setTimeout ??= setTimeout;
     context.clearTimeout ??= clearTimeout;
   }

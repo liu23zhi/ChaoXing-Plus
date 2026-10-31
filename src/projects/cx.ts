@@ -43,6 +43,7 @@ import {
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
 import { observeChapterSubmission } from './cx-chapter-submission.js';
+import { dismissChapterSubmissionDialog } from './cx-chapter-dialog.js';
 import {
   readChapterDeferredState,
   recordChapterDeferral,
@@ -55,6 +56,13 @@ import {
   type ChapterDeferredState,
   type DeferredChapterTask
 } from './cx-deferred-chapters.js';
+import {
+  readCourseDeferredState,
+  markCourseChapterInspected,
+  chooseCourseDeferredAction,
+  type CourseDeferredState,
+  type CourseChapterMetadata
+} from './cx-deferred-course.js';
 import { retryUnfinishedResultsInOrder } from '../core/worker/unfinished-retry.js';
 import { createSearchRequestDeduplicator, hasInsufficientBalanceError, shouldSkipCacheForAutomaticRetry, shouldSkipCacheForManualRetry, type RetryFailureSnapshot } from './cx-retry-cache.js';
 import {
@@ -730,6 +738,7 @@ async function invokeChapterActionWithExpiryCapture(
         // A frame can navigate while its request is completing.
       }
     });
+    if (nativeExpired) dismissChapterSubmissionDialog(actionWindows);
   }
 
   return nativeExpired;
@@ -3114,6 +3123,105 @@ function switchDeferredChapterTab(context: DeferredChapterContext, targetKey: st
   return true;
 }
 
+const deferredCoursesAttribute = 'data-chaoxing-plus-deferred-courses';
+type DeferredCourseContext = {
+  scope: string;
+  chapterId: string;
+  chapters: Array<CourseChapterMetadata & { element?: HTMLElement }>;
+  chapterStates: Record<string, ChapterDeferredState>;
+  state: CourseDeferredState;
+};
+
+function getDeferredCourseContext(chapterContext: DeferredChapterContext): DeferredCourseContext {
+  const [courseId, classId, chapterId] = JSON.parse(chapterContext.scope) as string[];
+  const scope = JSON.stringify([courseId, classId]);
+  const chapters: DeferredCourseContext['chapters'] = CXAnalyses.getChapterInfos().flatMap((chapter) => {
+    const container = chapter.element.closest?.('.posCatalog_select') || chapter.element.parentElement;
+    const id = container?.getAttribute?.('id') || chapter.chapterId;
+    return id ? [{ id, element: chapter.element, unFinishCount: chapter.unFinishCount,
+      active: container?.classList.contains('posCatalog_active') }] : [];
+  });
+  if (!chapters.some((chapter) => chapter.id === chapterId)) {
+    chapters.push({ id: chapterId, element: undefined, unFinishCount: 1, active: true });
+  }
+  const chapterStates: Record<string, ChapterDeferredState> = {};
+  let saved: Record<string, unknown> = {};
+  try {
+    const ledgers = JSON.parse(topWindow.document.documentElement.getAttribute(deferredChaptersAttribute) || '{}');
+    for (const [key, value] of Object.entries(ledgers || {})) {
+      try {
+        const [savedCourse, savedClass, savedChapter] = JSON.parse(key) as string[];
+        if (savedCourse === courseId && savedClass === classId && typeof savedChapter === 'string') {
+          chapterStates[savedChapter] = readChapterDeferredState(value, key);
+        }
+      } catch { /* Ignore a malformed chapter scope. */ }
+    }
+    saved = JSON.parse(topWindow.document.documentElement.getAttribute(deferredCoursesAttribute) || '{}');
+  } catch { /* Invalid page-local state starts a fresh course queue. */ }
+  chapterStates[chapterId] = chapterContext.state;
+  return { scope, chapterId, chapters, chapterStates, state: readCourseDeferredState(saved?.[scope], scope) };
+}
+
+function saveDeferredCourseContext(context: DeferredCourseContext) {
+  try {
+    const root = topWindow.document.documentElement;
+    let saved: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(root.getAttribute(deferredCoursesAttribute) || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) saved = parsed;
+    } catch { /* Preserve other course scopes when possible. */ }
+    saved[context.scope] = context.state;
+    root.setAttribute(deferredCoursesAttribute, JSON.stringify(saved));
+  } catch { /* A user can leave the course while its task is completing. */ }
+}
+
+function switchDeferredCourseChapter(context: DeferredChapterContext, chapterId: string): boolean {
+  if (!isDeferredChapterContextCurrent(context)) return false;
+  const target = getDeferredCourseContext(context).chapters.find((chapter) => chapter.id === chapterId)?.element;
+  if (!target) return false;
+  if (!triggerSyntheticClick(target)) target.click();
+  return true;
+}
+
+function routeDeferredCourse(context: DeferredChapterContext, mode: StudyOptions['mode']): 'scan' | 'retry' | 'settled' | 'none' {
+  const course = getDeferredCourseContext(context);
+  if (!getNextUninspectedChapterTab(context.state, context.tabKeys)) {
+    markCourseChapterInspected(course.state, course.chapterId);
+    const tasks = Object.values(context.state.tasks);
+    if (tasks.length > 0 && tasks.every((task) => task.state !== 'deferred' || task.terminalExpired)) {
+      context.state.phase = 'settled';
+      saveDeferredChapterContext(context);
+    }
+  }
+  const hasDeferredTasks = Object.values(course.chapterStates).some((chapter) => Object.keys(chapter.tasks).length > 0);
+  if (!hasDeferredTasks) {
+    saveDeferredCourseContext(course);
+    return 'none';
+  }
+  const wasSettled = course.state.phase === 'settled';
+  const action = chooseCourseDeferredAction(course.state, course.chapterId, course.chapters, course.chapterStates);
+  saveDeferredCourseContext(course);
+  if (action.type === 'settled') {
+    if (!wasSettled) {
+      const abandoned = Object.values(course.chapterStates).some((chapter) => Object.values(chapter.tasks).some((task) => task.state === 'abandoned'));
+      if (CXAnalyses.isFinishedAllChapters()) {
+        void $modal.alert({ content: '全部任务点已完成！', icon: 'success', allowOutsideClick: false, allowEscapeKey: false });
+      } else if (abandoned) $message.warn('其它任务已处理，无法提交的章节测试已放弃。');
+      else $message.success('延期的章节测试已处理完成。');
+    }
+    return 'settled';
+  }
+  if (action.chapterId !== course.chapterId) {
+    if (mode === 'manually') {
+      $message.info('当前章节已处理，截止任务已延期，请手动切换章节。');
+    } else if (!switchDeferredCourseChapter(context, action.chapterId)) {
+      $console.warn('无法切换至待处理章节，已暂停。');
+    }
+    return 'scan';
+  }
+  return action.type;
+}
+
 function buildVisibleContentRecoverySignature() {
   const chapterKey = CXAnalyses.getCurrentChapterKey() || 'unknown-chapter';
   return `${chapterKey}::url=${topWindow.location.href}`;
@@ -3135,6 +3243,7 @@ export async function study(opts: StudyOptions) {
   }
 
   const searchedJobs: Job[] = [];
+  const completedOrdinaryJobIds = new Set<string>();
   const studyContext = getDeferredChapterContext();
   const maxSubmissionAttempts = 1 + getUnfinishedQuestionRetryAttempts();
   let manualAnswerPaused = false;
@@ -3178,6 +3287,9 @@ export async function study(opts: StudyOptions) {
       let execution: JobExecutionResult | void = undefined;
       try {
         execution = await job.func();
+        if (job.jobId && !execution?.expired && !execution?.manual && (execution?.finished || !job.chapterTest)) {
+          completedOrdinaryJobIds.add(job.jobId);
+        }
       } catch (e) {
         $console.error('未知错误', e);
         if (job.chapterTest && job.jobId) {
@@ -3228,23 +3340,52 @@ export async function study(opts: StudyOptions) {
     return;
   }
   let deferredContext = getDeferredChapterContext();
+  const hasDeferredChapterTasks = Object.keys(deferredContext.state.tasks).length > 0;
+  const courseContext = getDeferredCourseContext(deferredContext);
+  const hasCourseDeferredTasks = Object.values(courseContext.chapterStates).some((chapter) => Object.keys(chapter.tasks).length > 0);
+  if (hasCourseDeferredTasks && !getCurrentChapterCompletionDiagnostics().currentChapterFinished) {
+    const deferredJobIds = new Set(Object.values(deferredContext.state.tasks)
+      .filter((task) => task.tabKey === deferredContext.tabKey).map((task) => task.jobId));
+    const unresolvedAttachments = ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || []).some((attachment) => {
+      const jobId = String(attachment.jobid || attachment.property._jobid || '');
+      return attachment.job === true && attachment.isPassed !== true && !deferredJobIds.has(jobId) && !completedOrdinaryJobIds.has(jobId);
+    });
+    if (unresolvedAttachments || !shouldCheckSiblingSubTasksForState(visibleContentState)) {
+      const msg = '当前页面仍有未处理任务，已暂停跳转和截止任务回访，请检查页面加载或学习设置。';
+      showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
+      $message.warn({ content: msg, duration: 0 });
+      $console.warn(msg);
+      return;
+    }
+  }
   markChapterTabInspected(deferredContext.state, deferredContext.tabKey);
   saveDeferredChapterContext(deferredContext);
-  const hasDeferredChapterTasks = Object.keys(deferredContext.state.tasks).length > 0;
-  if (hasDeferredChapterTasks) {
+  if (hasCourseDeferredTasks) {
     const uninspectedTab = getNextUninspectedChapterTab(deferredContext.state, deferredContext.tabKeys);
     if (uninspectedTab) {
+      if (opts.mode === 'manually') {
+        $message.info('当前页面已处理，截止任务已延期，请手动切换子任务。');
+        return;
+      }
       if (!switchDeferredChapterTab(deferredContext, uninspectedTab)) {
         $console.warn('无法切换至待检查子任务，已暂停。');
       }
       return;
     }
+  }
+  const courseAction = routeDeferredCourse(deferredContext, opts.mode);
+  if (courseAction === 'scan' || courseAction === 'settled') return;
+  if (hasDeferredChapterTasks && courseAction === 'retry') {
     while (isDeferredChapterContextCurrent(studyContext)) {
       deferredContext = getDeferredChapterContext();
       const target = chooseNextDeferredChapterTask(deferredContext.state, deferredContext.tabKeys, maxSubmissionAttempts);
       saveDeferredChapterContext(deferredContext);
       if (!target) break;
       if (target.tabKey !== deferredContext.tabKey) {
+        if (opts.mode === 'manually') {
+          $message.info('请手动切换至待回访的子任务。');
+          return;
+        }
         if (!switchDeferredChapterTab(deferredContext, target.tabKey)) {
           markDeferredChapterMissing(deferredContext.state, target.tabKey, target.jobId, 3);
           saveDeferredChapterContext(deferredContext);
@@ -3287,6 +3428,9 @@ export async function study(opts: StudyOptions) {
       }
       if (latestTask?.state === 'deferred') await sleep(1000);
     }
+    if (!isDeferredChapterContextCurrent(studyContext)) return;
+    routeDeferredCourse(getDeferredChapterContext(), opts.mode);
+    return;
   }
   if (!isDeferredChapterContextCurrent(studyContext)) return;
   (topWindow as Record<string, any>)._preChapterId = '';

@@ -22,6 +22,11 @@ before(async () => {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   runtime = `(() => { const exports = {}; ${compiled}; window.observeChapterSubmission = exports.observeChapterSubmission; })();`;
+  const dialogSource = await readFile('src/projects/cx-chapter-dialog.ts', 'utf8');
+  const dialogCompiled = ts.transpileModule(dialogSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+  }).outputText;
+  runtime += `\n(() => { const exports = {}; ${dialogCompiled}; window.dismissChapterSubmissionDialog = exports.dismissChapterSubmissionDialog; })();`;
   const cxSource = await readFile('src/projects/cx.ts', 'utf8');
   const parsedCx = ts.createSourceFile('cx.ts', cxSource, ts.ScriptTarget.Latest, true);
   const helperNames = new Set([
