@@ -486,14 +486,22 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /真实客户端自动发现注入矩阵/u, 'CI 摘要必须记录自动发现的真实客户端矩阵');
   assert.match(workflow, /matrix:/u, '真实客户端注入必须使用矩阵');
   assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
+  assert.match(workflow, /github\.event_name != 'pull_request'[\s\S]*vars\.CI_PRIVATE_CLIENTS_ENABLED == 'true'/u,
+    '私有客户端 discovery 必须在显式启用且非 PR 事件时运行');
+  assert.match(workflow, /windows-real-client:[\s\S]*?vars\.CI_PRIVATE_CLIENTS_ENABLED == 'true'/u,
+    '真实客户端注入必须在显式启用且非 PR 事件时运行');
   assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
   assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
   assert.match(workflow, /REPOSITORY_VARS_JSON:\s*\$\{\{\s*toJSON\(vars\)\s*\}\}/u,
-    '发现步骤必须从 vars context 获取仓库变量');
+    '发现步骤必须从 vars context 获取数据库变量名标记');
   assert.match(workflow, /repositoryVars\s*=\s*\$env:REPOSITORY_VARS_JSON\s*\|\s*ConvertFrom-Json/u,
-    '发现步骤必须解析 vars context 并只输出变量名和长度');
-  assert.match(workflow, /DATABASE_BASE64:\s*\$\{\{\s*vars\[matrix\.database_var\]\s*\}\}/u,
-    '真实客户端 job 必须按矩阵变量名读取数据库变量');
+    '发现步骤必须解析 vars context 并只输出变量名');
+  assert.match(workflow, /database_secret\s*=\s*\$databaseVar\.Name/u,
+    '矩阵必须将发现的数据库变量名映射为同名 Secret');
+  assert.match(workflow, /DATABASE_BASE64:\s*\$\{\{\s*secrets\[matrix\.database_secret\]\s*\}\}/u,
+    '真实客户端 job 必须从同名 Secret 读取数据库载荷');
+  assert.match(workflow, /\$value\s+-cne\s+'enabled'/u,
+    '仓库变量只能使用 enabled 标记，不能承载数据库载荷');
   assert.doesNotMatch(workflow, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN/u,
     '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据');
   assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');
@@ -505,6 +513,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /tests\/private-clients/u, '真实客户端必须来自私有测试目录');
   assert.match(workflow, /lfs: true/u, '客户端测试必须拉取 Git LFS 资产');
   assert.match(workflow, /Expand-Archive/u, '真实客户端测试必须解压数据库 ZIP');
+  assert.match(workflow, /not a ZIP payload[\s\S]*UserExamInfo\.db/u,
+    '数据库解码后必须在解压前校验 ZIP 格式并给出配置提示');
   assert.match(workflow, /RedirectStandardOutput \$stdoutPath[\s\S]*?RedirectStandardError \$stderrPath/u, '真实客户端回归必须捕获宿主标准输出与错误输出');
   assert.match(workflow, /\[real-client\] FAILED case=\$CaseName stage=\$stage/u, '真实客户端失败必须报告具体阶段');
   assert.match(workflow, /Write-HostDiagnostics/u, '真实客户端回归必须输出截断且脱敏的宿主日志');

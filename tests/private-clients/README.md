@@ -7,6 +7,6 @@
 | `chaoxing-exam-v4.1.4.*.exe` | `cdp-port` |
 | `chaoxing-exam-v4.3.*.exe` | `dll-proxy` |
 
-CI 会自动读取所有非空的 `Examination_Client_Database_*` GitHub Actions 变量，与发现的每个客户端组合。它会把选中的 EXE 复制到独立临时目录，并在同一目录写入 `UserExamInfo.db`。数据库 ZIP 由变量提供；CI 会要求解压后恰好得到一个非空的 `UserExamInfo.db`，并在测试结束时删除临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。
+私有客户端测试默认关闭。完成安全迁移后，将仓库变量 `CI_PRIVATE_CLIENTS_ENABLED=true` 启用；该测试只在非 PR 事件运行。CI 会自动发现值为 `enabled` 的 `Examination_Client_Database_*` GitHub Actions 变量，并与每个客户端组合。变量只用于发现名称，数据库载荷必须放入**同名 Repository Secret**，内容为 ZIP 文件的 Base64 文本。ZIP 必须包含且只包含一个非空的 `UserExamInfo.db`。CI 会把选中的 EXE 复制到独立临时目录，在解压前验证 ZIP 签名，再将数据库写入客户端目录；测试结束时删除临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。
 
-工作流使用 GitHub Actions 的 `vars` context 获取变量名和值；发现阶段只输出变量名和字符数，注入阶段在使用前注册掩码，不输出数据库内容。
+配置示例：变量 `Examination_Client_Database_I=enabled`，Secret `Examination_Client_Database_I=<ZIP 的 Base64>`。发现日志只包含变量名，不输出 Secret 内容；注入步骤会在处理前注册载荷掩码。

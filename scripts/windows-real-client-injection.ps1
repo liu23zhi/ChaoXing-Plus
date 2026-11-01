@@ -80,8 +80,13 @@ try {
   $stage = 'decode-database'
   $base64 = ($DatabaseBase64 -replace '\s', '')
   if ([string]::IsNullOrWhiteSpace($base64)) { throw 'Database variable is empty' }
-  [IO.File]::WriteAllBytes($databaseZip, [Convert]::FromBase64String($base64))
+  $databaseBytes = [Convert]::FromBase64String($base64)
+  if ($databaseBytes.Length -lt 4 -or $databaseBytes[0] -ne 0x50 -or $databaseBytes[1] -ne 0x4b) {
+    throw 'Database payload is not a ZIP payload. Store Base64 of a ZIP containing exactly one non-empty UserExamInfo.db in the same-named GitHub Secret.'
+  }
+  [IO.File]::WriteAllBytes($databaseZip, $databaseBytes)
   Write-Host "[real-client] database archive decoded bytes=$((Get-Item -LiteralPath $databaseZip).Length)"
+  Write-Host '[real-client] database archive signature=PK'
 
   $stage = 'extract-database'
   Expand-Archive -LiteralPath $databaseZip -DestinationPath $databaseRoot -Force

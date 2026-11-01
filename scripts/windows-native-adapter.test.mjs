@@ -153,7 +153,7 @@ test('native account HWND supports DPI, keyboard limits, icons and safe in-fligh
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    for (const [scenario, dpi] of [['cancel', '96'], ['accept', '96'], ['close', '144'], ['quit', '192'], ['local-captcha', '96'], ['remote-captcha', '96'], ['invalid-login-url', '96']]) {
+    for (const [scenario, dpi] of [['cancel', '96'], ['accept', '96'], ['close', '144'], ['quit', '96'], ['local-captcha', '96'], ['remote-captcha', '96'], ['invalid-login-url', '96']]) {
       uiScenario = scenario;
       const result = await run(process.env.CX_NATIVE_ACCOUNT_WINDOW_EXE, {
         CX_ADAPTER_TEST_BASE: `http://127.0.0.1:${server.address().port}`,

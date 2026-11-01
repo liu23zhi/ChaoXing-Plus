@@ -85,7 +85,7 @@ jobs:
     permissions:
       contents: read
     needs: windows-build
-    if: ${{ needs.windows-build.result == 'success' }}
+    if: ${{ needs.windows-build.result == 'success' && github.event_name != 'pull_request' && vars.CI_PRIVATE_CLIENTS_ENABLED == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
@@ -111,7 +111,10 @@ jobs:
             $match = [regex]::Match([string]$property.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
             $value = [string]$property.Value
             if ($match.Success -and -not [string]::IsNullOrWhiteSpace($value)) {
-              [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value; Length = $value.Length }
+              if ($value -cne 'enabled') {
+                throw "变量 $($property.Name) 只能设置为 enabled 标记；数据库载荷必须放入同名 Actions Secret"
+              }
+              [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value }
             }
           }
           $databaseVars = @($databaseVars)
@@ -138,13 +141,14 @@ jobs:
                 inject_mode = $injectMode
                 database = $databaseVar.Suffix
                 database_var = $databaseVar.Name
+                database_secret = $databaseVar.Name
               }
             }
           }
           $matrix = [ordered]@{ include = @($entries) } | ConvertTo-Json -Compress -Depth 5
           [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "matrix=$matrix`n", [Text.UTF8Encoding]::new($false))
           Write-Host "发现 $($clientFiles.Count) 个客户端、$($databaseVars.Count) 个数据库变量，生成 $($entries.Count) 个注入用例"
-          $databaseVars | ForEach-Object { Write-Host "数据库变量 $($_.Name)，字符数 $($_.Length)" }
+          $databaseVars | ForEach-Object { Write-Host "数据库标记 $($_.Name)" }
 
   windows-unit:
     name: Windows 单元与原生测试
@@ -384,7 +388,7 @@ jobs:
     permissions:
       contents: read
     needs: [windows-build, windows-real-client-discovery]
-    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
+    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' && vars.CI_PRIVATE_CLIENTS_ENABLED == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -417,17 +421,21 @@ jobs:
         shell: pwsh
         env:
           DATABASE_VARIABLE_NAME: ${{ matrix.database_var }}
-          DATABASE_BASE64: ${{ vars[matrix.database_var] }}
+          DATABASE_SECRET_NAME: ${{ matrix.database_secret }}
+          DATABASE_BASE64: ${{ secrets[matrix.database_secret] }}
         run: |
           if ($env:DATABASE_VARIABLE_NAME -notmatch '^Examination_Client_Database_.+$') {
             throw "数据库变量名格式错误: $env:DATABASE_VARIABLE_NAME"
           }
+          if ($env:DATABASE_SECRET_NAME -cne $env:DATABASE_VARIABLE_NAME) {
+            throw "数据库 Secret 名称与发现的变量名不匹配: $env:DATABASE_VARIABLE_NAME"
+          }
           $db = [string]$env:DATABASE_BASE64
-          if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }
+          if ([string]::IsNullOrWhiteSpace($db)) { throw "缺少同名 Actions Secret: $env:DATABASE_SECRET_NAME" }
           $compactDb = $db -replace '\s', ''
-          if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }
+          if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "同名 Actions Secret 为空: $env:DATABASE_SECRET_NAME" }
           Write-Output "::add-mask::$compactDb"
-          Write-Host "读取变量 $env:DATABASE_VARIABLE_NAME（字符数 $($compactDb.Length)），开始真实客户端注入"
+          Write-Host "读取 Secret $env:DATABASE_SECRET_NAME（载荷已掩码），开始真实客户端注入"
           ./scripts/windows-real-client-injection.ps1 `
             -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
             -InjectMode '${{ matrix.inject_mode }}' `
