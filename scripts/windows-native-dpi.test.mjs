@@ -9,6 +9,48 @@ const executable = process.env.CX_NATIVE_HOST_EXE;
 const invoke = (...args) => spawnSync(executable, args, {
   encoding: 'utf8', timeout: 10_000, windowsHide: true
 });
+const isUnsupportedDpiShim = (result) => {
+  if (result.status !== 8 || typeof result.stdout !== 'string') return false;
+  const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim());
+  const last = lines.length - 1;
+  return lines[last - 1] === 'DPI_SHIM_UNOBSERVED'
+    && lines[last] === 'NATIVE DPI PROCESS TESTS SKIP'
+    && !lines.includes('NATIVE DPI PROCESS TESTS PASS')
+    && !lines.includes('NATIVE DPI PROCESS TESTS FAIL');
+};
+
+test('DPI integration skips only on the dedicated unsupported-shim result', () => {
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'diagnostic\nDPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), true);
+  assert.equal(isUnsupportedDpiShim({ status: 8, stdout: 'NATIVE DPI PROCESS TESTS FAIL\n' }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'DPI_SHIM_UNOBSERVED trailing text\nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: ' DPI_SHIM_UNOBSERVED \nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'NATIVE DPI PROCESS TESTS SKIP\nDPI_SHIM_UNOBSERVED\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'NATIVE DPI PROCESS TESTS FAIL\nDPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'DPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\nNATIVE DPI PROCESS TESTS PASS\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({
+    status: 1,
+    stdout: 'DPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), false);
+  assert.equal(isUnsupportedDpiShim({ status: null, stdout: null }), false);
+});
 
 test('native DPI compatibility is advertised and documented in help', { skip: !executable }, () => {
   const result = invoke('--capabilities');
@@ -64,9 +106,7 @@ test('temporary DPI override changes a real test child and restores the next ord
     const result = spawnSync(process.env.CX_NATIVE_DPI_PROCESS_EXE, children, {
       cwd: directory, encoding: 'utf8', timeout: 20_000, windowsHide: true
     });
-    if (result.stdout.includes('DPI_SHIM_UNOBSERVED')) {
-      assert.equal(result.status, 8, result.stdout + result.stderr);
-      assert.match(result.stdout, /NATIVE DPI PROCESS TESTS SKIP/);
+    if (isUnsupportedDpiShim(result)) {
       t.skip('当前 Windows runner 未观察到瞬时 AppCompat DPI 层；注册表事务与恢复仍已验证');
       return;
     }
