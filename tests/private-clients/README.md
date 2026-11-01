@@ -8,3 +8,5 @@
 | `chaoxing-exam-v4.3.*.exe` | `dll-proxy` |
 
 CI 会自动读取所有非空的 `Examination_Client_Database_*` GitHub Actions 变量，与发现的每个客户端组合。它会把选中的 EXE 复制到独立临时目录，并在同一目录写入 `UserExamInfo.db`。数据库 ZIP 由变量提供；CI 会要求解压后恰好得到一个非空的 `UserExamInfo.db`，并在测试结束时删除临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。
+
+工作流使用 GitHub Actions 的 `vars` context 获取变量名和值；发现阶段只输出变量名和字符数，注入阶段在使用前注册掩码，不输出数据库内容。

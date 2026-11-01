@@ -84,7 +84,6 @@ jobs:
     name: 发现真实客户端注入矩阵
     permissions:
       contents: read
-      actions: read
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -98,7 +97,7 @@ jobs:
         id: discover
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          REPOSITORY_VARS_JSON: ${{ toJSON(vars) }}
         run: |
           $clientDirectory = Join-Path $env:GITHUB_WORKSPACE 'tests/private-clients'
           if (-not (Test-Path -LiteralPath $clientDirectory -PathType Container)) {
@@ -107,14 +106,12 @@ jobs:
           $clientFiles = @(Get-ChildItem -LiteralPath $clientDirectory -Filter '*.exe' -File -Recurse | Sort-Object FullName)
           if ($clientFiles.Count -eq 0) { throw '私有客户端目录中没有 EXE' }
 
-          $variablesEndpoint = "repos/$env:GITHUB_REPOSITORY/actions/variables"
-          $databaseVariableRows = @(& gh api --paginate --jq '.variables[] | select(.name | test("^Examination_Client_Database_"; "i")) | [.name, ((.value // "") | length)] | @json' $variablesEndpoint)
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub Actions variables API request failed' }
-          $databaseVars = foreach ($row in $databaseVariableRows) {
-            $parts = $row | ConvertFrom-Json
-            $match = [regex]::Match([string]$parts[0], '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if ($match.Success -and [int]$parts[1] -gt 0) {
-              [pscustomobject]@{ Name = [string]$parts[0]; Suffix = $match.Groups[1].Value }
+          $repositoryVars = $env:REPOSITORY_VARS_JSON | ConvertFrom-Json
+          $databaseVars = foreach ($property in $repositoryVars.PSObject.Properties) {
+            $match = [regex]::Match([string]$property.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $value = [string]$property.Value
+            if ($match.Success -and -not [string]::IsNullOrWhiteSpace($value)) {
+              [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value; Length = $value.Length }
             }
           }
           $databaseVars = @($databaseVars)
@@ -147,6 +144,7 @@ jobs:
           $matrix = [ordered]@{ include = @($entries) } | ConvertTo-Json -Compress -Depth 5
           [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "matrix=$matrix`n", [Text.UTF8Encoding]::new($false))
           Write-Host "发现 $($clientFiles.Count) 个客户端、$($databaseVars.Count) 个数据库变量，生成 $($entries.Count) 个注入用例"
+          $databaseVars | ForEach-Object { Write-Host "数据库变量 $($_.Name)，字符数 $($_.Length)" }
 
   windows-unit:
     name: Windows 单元与原生测试
@@ -385,7 +383,6 @@ jobs:
     name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
     permissions:
       contents: read
-      actions: read
     needs: [windows-build, windows-real-client-discovery]
     if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
     runs-on: windows-latest
@@ -419,18 +416,13 @@ jobs:
       - name: 执行真实客户端注入
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
           DATABASE_VARIABLE_NAME: ${{ matrix.database_var }}
+          DATABASE_BASE64: ${{ vars[matrix.database_var] }}
         run: |
           if ($env:DATABASE_VARIABLE_NAME -notmatch '^Examination_Client_Database_.+$') {
             throw "数据库变量名格式错误: $env:DATABASE_VARIABLE_NAME"
           }
-          $encodedName = [uri]::EscapeDataString($env:DATABASE_VARIABLE_NAME)
-          $variableEndpoint = "repos/$env:GITHUB_REPOSITORY/actions/variables/$encodedName"
-          $variableJson = & gh api $variableEndpoint
-          if ($LASTEXITCODE -ne 0) { throw "无法读取数据库变量: $env:DATABASE_VARIABLE_NAME" }
-          $databaseVariable = $variableJson | ConvertFrom-Json
-          $db = [string]$databaseVariable.value
+          $db = [string]$env:DATABASE_BASE64
           if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }
           $compactDb = $db -replace '\s', ''
           if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }

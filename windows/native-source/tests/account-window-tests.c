@@ -5,6 +5,28 @@ static WCHAR scenario[64];
 static DWORD mainThread, dpi = 96;
 static HWND found;
 static void out(const char *value) { DWORD n; WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), value, (DWORD)lstrlenA(value), &n, NULL); }
+static void check(BOOL condition, const char *message);
+static UINT observed_window_dpi(HWND window) {
+    typedef UINT (WINAPI *DPI_FOR_WINDOW)(HWND);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    DPI_FOR_WINDOW getForWindow = user32 ? (DPI_FOR_WINDOW)GetProcAddress(user32, "GetDpiForWindow") : NULL;
+    return getForWindow ? getForWindow(window) : 0;
+}
+static UINT observed_system_dpi(void) {
+    typedef UINT (WINAPI *DPI_FOR_SYSTEM)(void);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    DPI_FOR_SYSTEM getForSystem = user32 ? (DPI_FOR_SYSTEM)GetProcAddress(user32, "GetDpiForSystem") : NULL;
+    return getForSystem ? getForSystem() : 0;
+}
+static void check_client_dimensions(HWND window) {
+    RECT bounds; char message[192]; int expectedWidth, expectedHeight;
+    GetClientRect(window, &bounds);
+    expectedWidth = MulDiv(650, (int)dpi, 96); expectedHeight = MulDiv(400, (int)dpi, 96);
+    wsprintfA(message, "INFO account client dimensions: requestedDpi=%lu expected=%dx%d actual=%ldx%ld systemDpi=%u windowDpi=%u",
+        dpi, expectedWidth, expectedHeight, bounds.right, bounds.bottom, observed_system_dpi(), observed_window_dpi(window));
+    out(message); out("\r\n");
+    check(bounds.right == expectedWidth && bounds.bottom == expectedHeight, "account client dimensions scale with DPI");
+}
 static void check(BOOL condition, const char *message) {
     out(condition ? "PASS " : "FAIL "); out(message); out("\r\n"); if (!condition) ExitProcess(1);
 }
@@ -15,7 +37,7 @@ static BOOL CALLBACK find_window(HWND window, LPARAM unused) {
     return TRUE;
 }
 static DWORD WINAPI inspect_window(LPVOID unused) {
-    HWND child, edits[5]; DWORD i, count = 0, started = GetTickCount(); WCHAR name[64]; RECT bounds; LOGFONTW font;
+    HWND child, edits[5]; DWORD i, count = 0, started = GetTickCount(); WCHAR name[64]; LOGFONTW font;
     static const WPARAM limits[] = {CX_HOME_ADAPTER_URL_CAP - 1, 255, 255, 127, CX_HOME_API_KEY_CAP - 1};
     (void)unused;
     while (!found && GetTickCount() - started < 10000) { EnumWindows(find_window, 0); if (!found) Sleep(10); }
@@ -24,8 +46,7 @@ static DWORD WINAPI inspect_window(LPVOID unused) {
     check(IsWindowVisible(found), "account window visible after hidden startup");
     check(SendMessageW(found, WM_GETICON, ICON_BIG, 0) != 0 && SendMessageW(found, WM_GETICON, ICON_SMALL, 0) != 0, "account window big and small icons bound");
     check(GetClassLongPtrW(found, GCLP_HICON) != 0 && GetClassLongPtrW(found, GCLP_HICONSM) != 0, "account class big and small icons bound");
-    GetClientRect(found, &bounds);
-    check(bounds.right == MulDiv(650, (int)dpi, 96) && bounds.bottom == MulDiv(400, (int)dpi, 96), "account client dimensions scale with DPI");
+    check_client_dimensions(found);
     for (child = GetWindow(found, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
         GetClassNameW(child, name, 64);
         if (!lstrcmpiW(name, L"EDIT") || !lstrcmpiW(name, L"BUTTON")) check((GetWindowLongPtrW(child, GWL_STYLE) & WS_TABSTOP) != 0, "interactive control participates in tab navigation");

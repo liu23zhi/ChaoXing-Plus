@@ -110,7 +110,8 @@ async function setPaused(page, value) {
   await page.evaluate((paused) => window.pauseController.setPaused(paused), value);
   try {
     await page.waitForFunction((paused) => window.pauseController.isPaused() === paused
-      && document.documentElement.getAttribute('data-chaoxing-plus-tab-pause-pending') !== 'true', {}, value);
+      && document.documentElement.getAttribute('data-chaoxing-plus-tab-pause-pending') !== 'true',
+    { polling: 'mutation' }, value);
   } catch (error) {
     const diagnostics = await pauseDiagnostic(page);
     throw new Error(`${error.message}\nTab pause diagnostics: ${JSON.stringify(diagnostics)}`);

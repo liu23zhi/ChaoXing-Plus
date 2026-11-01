@@ -488,14 +488,18 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
   assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
   assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
-  assert.match(workflow, /permissions:[\s\S]*?actions: read/u, 'CI 必须仅授予读取 Actions variables 所需权限');
-  assert.match(workflow, /gh api --paginate --jq[\s\S]*?Examination_Client_Database_/u, 'CI 必须分页读取数据库变量名并只暴露长度给发现步骤');
-  assert.doesNotMatch(workflow, /toJSON\(vars\)|CONFIG_VARS_JSON/u, 'CI 不得把变量值放入发现步骤的环境块');
+  assert.match(workflow, /REPOSITORY_VARS_JSON:\s*\$\{\{\s*toJSON\(vars\)\s*\}\}/u,
+    '发现步骤必须从 vars context 获取仓库变量');
+  assert.match(workflow, /repositoryVars\s*=\s*\$env:REPOSITORY_VARS_JSON\s*\|\s*ConvertFrom-Json/u,
+    '发现步骤必须解析 vars context 并只输出变量名和长度');
+  assert.match(workflow, /DATABASE_BASE64:\s*\$\{\{\s*vars\[matrix\.database_var\]\s*\}\}/u,
+    '真实客户端 job 必须按矩阵变量名读取数据库变量');
+  assert.doesNotMatch(workflow, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN/u,
+    '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据');
   assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');
   assert.match(workflow, /DATABASE_VARIABLE_NAME:\s*\$\{\{\s*matrix\.database_var\s*\}\}/u, '矩阵只应传递数据库变量名');
-  assert.match(workflow, /actions\/variables\/\$encodedName/u, '真实客户端 job 必须通过 API 按名称读取数据库变量');
   assert.match(workflow, /::add-mask::\$compactDb/u, '真实客户端数据库内容必须在使用前规范化并掩码');
-  assert.doesNotMatch(workflow, /DATABASE_BASE64:\s*\$\{\{\s*vars\[|vars\[matrix\.database_var\]/u, '数据库值不得通过 Actions env 表达式直接注入日志');
+  assert.doesNotMatch(workflow, /Write-Host\s+.*DATABASE_BASE64|Write-Output\s+.*DATABASE_BASE64/u, '数据库值不得直接写入日志');
   assert.doesNotMatch(workflow, /database:\s*I\s*$/mu, '真实客户端矩阵不得硬编码数据库 I');
   assert.doesNotMatch(workflow, /database:\s*II\s*$/mu, '真实客户端矩阵不得硬编码数据库 II');
   assert.match(workflow, /tests\/private-clients/u, '真实客户端必须来自私有测试目录');
