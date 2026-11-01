@@ -23,6 +23,8 @@ test('native host sources expose ordinary auditable execution boundaries', async
   assert.match(host, /Runtime\.evaluate/);
   assert.ok(/h_collect_page_diagnostics\(page\)/.test(host), 'native host must sample page diagnostics after a top-level bundle');
   assert.ok(/static void h_collect_page_diagnostics\(/.test(host), 'native host must define the page diagnostics collector');
+  assert.match(build, /@\{ Name = 'account-window-tests'[^\r\n]*Manifest = 'host\.manifest'/u,
+    'the account window UI test process must use the same DPI manifest as the production host');
   assert.ok(/cx_diagnostics_write_page_json\(/.test(host), 'native host must persist the diagnostics schema through the module');
   assert.ok(/if \(task\.top\).*h_collect_page_diagnostics/s.test(host), 'only top-level bundle tasks may trigger diagnostics');
   assert.ok(/Page diagnostics sample failed; continuing without page diagnostics/.test(host), 'diagnostic failure must remain non-fatal');
@@ -308,6 +310,14 @@ test('native host embeds a DPI-aware asInvoker manifest', { skip: !process.env.C
   assert.ok(text.includes('ChaoxingPlus.NativeHost'), 'host manifest identity must be embedded');
   assert.ok(text.includes('dpiAware'), 'host manifest must declare DPI awareness');
   assert.ok(text.includes('asInvoker'), 'host manifest must keep the standard asInvoker execution level');
+});
+
+test('native account-window test executable embeds the DPI-aware host manifest', { skip: !process.env.CX_NATIVE_ACCOUNT_WINDOW_EXE }, async () => {
+  const bytes = await fs.readFile(process.env.CX_NATIVE_ACCOUNT_WINDOW_EXE);
+  const text = bytes.toString('latin1');
+  assert.ok(text.includes('ChaoxingPlus.NativeHost'), 'account-window test manifest identity must match the production host');
+  assert.ok(text.includes('dpiAware'), 'account-window test process must be DPI aware');
+  assert.ok(text.includes('asInvoker'), 'account-window test must keep the standard asInvoker execution level');
 });
 
 

@@ -82,6 +82,9 @@ jobs:
 
   windows-real-client-discovery:
     name: 发现真实客户端注入矩阵
+    permissions:
+      contents: read
+      actions: read
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -95,7 +98,7 @@ jobs:
         id: discover
         shell: pwsh
         env:
-          CONFIG_VARS_JSON: ${{ toJSON(vars) }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $clientDirectory = Join-Path $env:GITHUB_WORKSPACE 'tests/private-clients'
           if (-not (Test-Path -LiteralPath $clientDirectory -PathType Container)) {
@@ -104,14 +107,17 @@ jobs:
           $clientFiles = @(Get-ChildItem -LiteralPath $clientDirectory -Filter '*.exe' -File -Recurse | Sort-Object FullName)
           if ($clientFiles.Count -eq 0) { throw '私有客户端目录中没有 EXE' }
 
-          $configVars = if ([string]::IsNullOrWhiteSpace($env:CONFIG_VARS_JSON)) {
-            [pscustomobject]@{}
-          } else {
-            $env:CONFIG_VARS_JSON | ConvertFrom-Json
+          $variablesEndpoint = "repos/$env:GITHUB_REPOSITORY/actions/variables"
+          $databaseVariableRows = @(& gh api --paginate --jq '.variables[] | select(.name | test("^Examination_Client_Database_"; "i")) | [.name, ((.value // "") | length)] | @json' $variablesEndpoint)
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Actions variables API request failed' }
+          $databaseVars = foreach ($row in $databaseVariableRows) {
+            $parts = $row | ConvertFrom-Json
+            $match = [regex]::Match([string]$parts[0], '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($match.Success -and [int]$parts[1] -gt 0) {
+              [pscustomobject]@{ Name = [string]$parts[0]; Suffix = $match.Groups[1].Value }
+            }
           }
-          $databaseVars = @($configVars.PSObject.Properties | Where-Object {
-            $_.Name -match '^Examination_Client_Database_(.+)$' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value)
-          })
+          $databaseVars = @($databaseVars)
           if ($databaseVars.Count -eq 0) { throw '没有配置非空的 Examination_Client_Database_* 变量' }
 
           $entries = foreach ($clientFile in $clientFiles) {
@@ -129,12 +135,11 @@ jobs:
             }
             $relativePath = [IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $clientFile.FullName).Replace([IO.Path]::DirectorySeparatorChar, '/')
             foreach ($databaseVar in $databaseVars) {
-              $suffix = [regex]::Match($databaseVar.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Groups[1].Value
               [ordered]@{
                 client = $version
                 installer = $relativePath
                 inject_mode = $injectMode
-                database = $suffix
+                database = $databaseVar.Suffix
                 database_var = $databaseVar.Name
               }
             }
@@ -378,6 +383,9 @@ jobs:
 
   windows-real-client:
     name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
+    permissions:
+      contents: read
+      actions: read
     needs: [windows-build, windows-real-client-discovery]
     if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
     runs-on: windows-latest
@@ -411,16 +419,27 @@ jobs:
       - name: 执行真实客户端注入
         shell: pwsh
         env:
-          DATABASE_BASE64: ${{ vars[matrix.database_var] }}
+          GH_TOKEN: ${{ github.token }}
+          DATABASE_VARIABLE_NAME: ${{ matrix.database_var }}
         run: |
-          $db = $env:DATABASE_BASE64
-          if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库变量未配置或为空: ${{ matrix.database_var }}" }
+          if ($env:DATABASE_VARIABLE_NAME -notmatch '^Examination_Client_Database_.+$') {
+            throw "数据库变量名格式错误: $env:DATABASE_VARIABLE_NAME"
+          }
+          $encodedName = [uri]::EscapeDataString($env:DATABASE_VARIABLE_NAME)
+          $variableEndpoint = "repos/$env:GITHUB_REPOSITORY/actions/variables/$encodedName"
+          $variableJson = & gh api $variableEndpoint
+          if ($LASTEXITCODE -ne 0) { throw "无法读取数据库变量: $env:DATABASE_VARIABLE_NAME" }
+          $databaseVariable = $variableJson | ConvertFrom-Json
+          $db = [string]$databaseVariable.value
+          if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }
           $compactDb = $db -replace '\s', ''
+          if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "数据库变量为空: $env:DATABASE_VARIABLE_NAME" }
           Write-Output "::add-mask::$compactDb"
+          Write-Host "读取变量 $env:DATABASE_VARIABLE_NAME（字符数 $($compactDb.Length)），开始真实客户端注入"
           ./scripts/windows-real-client-injection.ps1 `
             -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
             -InjectMode '${{ matrix.inject_mode }}' `
-            -DatabaseBase64 $db `
+            -DatabaseBase64 $compactDb `
             -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
             -CaseName '${{ matrix.client }}-${{ matrix.database }}'
 

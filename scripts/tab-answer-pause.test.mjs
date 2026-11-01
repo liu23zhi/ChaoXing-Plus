@@ -57,15 +57,64 @@ after(async () => {
 async function openPage(t, url = base) {
   const page = await browser.newPage();
   t.after(() => page.close());
+  page.__pauseConsoleErrors = [];
+  page.on('pageerror', error => page.__pauseConsoleErrors.push(error.message));
+  page.on('console', message => {
+    if (message.type() === 'error') page.__pauseConsoleErrors.push(message.text());
+  });
   await page.goto(url);
   await page.waitForFunction(() => !!window.pauseController);
+  await page.evaluate(() => {
+    window.__pauseDiagnostics = [];
+    const root = document.documentElement;
+    const record = type => window.__pauseDiagnostics.push({
+      type,
+      time: Date.now(),
+      paused: root.getAttribute('data-chaoxing-plus-tab-paused'),
+      pending: root.getAttribute('data-chaoxing-plus-tab-pause-pending'),
+      ready: root.getAttribute('data-chaoxing-plus-tab-pause-ready'),
+      tabIdentity: root.getAttribute('data-chaoxing-plus-tab-identity')
+    });
+    document.addEventListener('chaoxing-plus:tab-pause-request', event => {
+      record(`request:${event.detail?.paused}:${event.detail?.requestId}`);
+    });
+    document.addEventListener('chaoxing-plus:tab-pause-change', () => record('change'));
+    new MutationObserver(records => {
+      for (const mutation of records) record(`attribute:${mutation.attributeName}`);
+    }).observe(root, { attributes: true, attributeFilter: [
+      'data-chaoxing-plus-tab-paused', 'data-chaoxing-plus-tab-pause-pending',
+      'data-chaoxing-plus-tab-pause-ready', 'data-chaoxing-plus-tab-identity'
+    ] });
+  });
   return page;
+}
+
+async function pauseDiagnostic(page) {
+  const state = await page.evaluate(() => ({
+    url: location.href,
+    controllerPaused: window.pauseController?.isPaused(),
+    attributes: Object.fromEntries([...document.documentElement.attributes]
+      .filter(attribute => attribute.name.startsWith('data-chaoxing-plus-tab-pause')
+        || attribute.name === 'data-chaoxing-plus-tab-paused'
+        || attribute.name === 'data-chaoxing-plus-tab-identity')
+      .map(attribute => [attribute.name, attribute.value])),
+    events: window.__pauseDiagnostics?.slice(-30) ?? []
+  })).catch(error => ({ pageEvaluationError: error.message }));
+  const workers = browser.targets()
+    .filter(target => target.type() === 'service_worker' && target.url().startsWith('chrome-extension://'))
+    .map(target => target.url());
+  return { state, workers, consoleErrors: page.__pauseConsoleErrors.slice(-20) };
 }
 
 async function setPaused(page, value) {
   await page.evaluate((paused) => window.pauseController.setPaused(paused), value);
-  await page.waitForFunction((paused) => window.pauseController.isPaused() === paused
-    && document.documentElement.getAttribute('data-chaoxing-plus-tab-pause-pending') !== 'true', {}, value);
+  try {
+    await page.waitForFunction((paused) => window.pauseController.isPaused() === paused
+      && document.documentElement.getAttribute('data-chaoxing-plus-tab-pause-pending') !== 'true', {}, value);
+  } catch (error) {
+    const diagnostics = await pauseDiagnostic(page);
+    throw new Error(`${error.message}\nTab pause diagnostics: ${JSON.stringify(diagnostics)}`);
+  }
 }
 
 test('extension pause survives reload, replace and a different origin in the same tab', async (t) => {

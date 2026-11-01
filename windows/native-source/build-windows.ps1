@@ -143,7 +143,7 @@ try {
             @{ Name = 'browser-session-tests'; Entry = 'BrowserSessionTestMain'; Objects = @('memory','json','browser-extension','browser-session'); Resources = @() },
             @{ Name = 'adapter-account-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account'); Resources = @() },
             @{ Name = 'extension-cache-tests'; Entry = 'ExtensionCacheTestMain'; Objects = @('memory','json','adapter-account'); Resources = @() },
-            @{ Name = 'account-window-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account','account-window'); Resources = @($resourceObject) },
+            @{ Name = 'account-window-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account','account-window'); Resources = @($resourceObject); Manifest = 'host.manifest' },
             @{ Name = 'home-tests'; Entry = 'HomeTestMain'; Objects = @('memory','json','options','config-store'); Resources = @($resourceObject) },
             @{ Name = 'assets-tests'; Entry = 'AssetTestMain'; Objects = @('memory','assets'); Resources = @($resourceObject) },
             @{ Name = 'options-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','options','config-store'); Resources = @() },
