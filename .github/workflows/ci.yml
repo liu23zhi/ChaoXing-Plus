@@ -21,207 +21,178 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-
       - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-
       - name: 安装依赖
         run: npm ci
-
       - name: 类型检查
         run: npm run typecheck
-
       - name: Linux 扩展构建
         run: npm run build
 
-  windows:
-    name: Windows 原生、浏览器与发布验证
+  windows-build:
+    name: Windows 构建共享测试产物
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 构建扩展包
+        run: npm run build
+      - name: 构建 Windows 注入资源
+        run: npm run build:windows -- --release
+      - name: 构建原生宿主与编译测试
+        run: npm run build:native
+      - name: 校验构建产物
+        shell: pwsh
+        run: |
+          $required = @(
+            'dist-windows/windows-bootstrap.js',
+            'dist-windows/chaoxing-plus.windows.js',
+            'windows/native-build/bin/chaoxing_plus.exe',
+            'windows/native-build/bin/account-window-tests.exe',
+            'windows/native-build/bin/browser-session-tests.exe'
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "构建产物缺失: $path" }
+          }
+      - name: 上传共享 Windows 测试产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: |
+            dist-windows/
+            windows/native-build/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-unit:
+    name: Windows 单元与原生测试
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 90
-    outputs:
-      release-artifact-url: ${{ steps.upload_release.outputs.artifact-url }}
     env:
       CXPLUS_NO_LOG_FILE: '1'
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-
       - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-
       - name: 安装依赖
         run: npm ci
-
-      - name: 构建扩展包
-        id: build_extension
-        run: npm run build
-
-      - name: 构建 Windows 注入资源（发布模式，关闭调试日志）
-        id: build_windows_assets
-        run: npm run build:windows -- --release
-
-      - name: 构建原生宿主与编译测试
-        id: build_native
-        run: npm run build:native
-
-      - name: 准备 Windows 浏览器与窗口测试环境
-        id: browser_environment
+      - name: 下载共享 Windows 测试产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 准备 Windows 测试环境
+        shell: pwsh
+        run: ./scripts/ci/prepare-windows-test-environment.ps1 -RequireBrowsers
+      - name: 单元测试（不含隔离暂停与可见窗口）
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          function Get-CommandPath([string]$name) {
-            $command = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($command) { return $command.Source }
-            return $null
-          }
-          function Resolve-Browser([string[]]$candidates) {
-            foreach ($candidate in $candidates) {
-              if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-              if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                return (Resolve-Path -LiteralPath $candidate).Path
-              }
-            }
-            return $null
-          }
-          $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
-          $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
-          $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
-          $edgeCandidates = @(
-            $env:CX_BROWSER_EDGE_PATH,
-            (Get-CommandPath 'msedge.exe')
+          $excluded = @(
+            'tab-answer-pause.test.mjs',
+            'windows-selection-window.test.mjs',
+            'windows-scan-progress-window.test.mjs',
+            'windows-native-selection.test.mjs',
+            'windows-native-home.test.mjs',
+            'windows-native-adapter.test.mjs',
+            'windows-native-browser-session.test.mjs'
           )
-          if ($programFilesX86) { $edgeCandidates += Join-Path $programFilesX86 'Microsoft\Edge\Application\msedge.exe' }
-          if ($programFiles) { $edgeCandidates += Join-Path $programFiles 'Microsoft\Edge\Application\msedge.exe' }
-          if ($localAppData) { $edgeCandidates += Join-Path $localAppData 'Microsoft\Edge\Application\msedge.exe' }
-          $chromeCandidates = @(
-            $env:CX_BROWSER_CHROME_PATH,
-            (Get-CommandPath 'chrome.exe')
-          )
-          if ($programFilesX86) { $chromeCandidates += Join-Path $programFilesX86 'Google\Chrome\Application\chrome.exe' }
-          if ($programFiles) { $chromeCandidates += Join-Path $programFiles 'Google\Chrome\Application\chrome.exe' }
-          if ($localAppData) { $chromeCandidates += Join-Path $localAppData 'Google\Chrome\Application\chrome.exe' }
-          $edge = Resolve-Browser $edgeCandidates
-          $chrome = Resolve-Browser $chromeCandidates
-          if (-not $edge) { throw 'Windows runner 未找到 Microsoft Edge；原生 Edge 验证不能静默跳过' }
-          if (-not $chrome) { throw 'Windows runner 未找到 Google Chrome；原生 Chrome 验证不能静默跳过' }
-          foreach ($browser in @(@{ Name = 'Edge'; Path = $edge }, @{ Name = 'Chrome'; Path = $chrome })) {
-            $version = (Get-Item -LiteralPath $browser.Path).VersionInfo.ProductVersion
-            if ([string]::IsNullOrWhiteSpace($version)) { throw "无法读取 $($browser.Name) 版本: $($browser.Path)" }
-            Write-Host "$($browser.Name): $($browser.Path) ($version)"
-          }
-          foreach ($command in @('powershell.exe', 'pwsh.exe')) {
-            $path = Get-CommandPath $command
-            if (-not $path) { throw "Windows runner 缺少 $command" }
-            Write-Host "${command}: $path"
-          }
-          "CX_BROWSER_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CX_BROWSER_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # Puppeteer lifecycle fixtures exercise the native host's default Chrome identity.
-          "CX_BROWSER_EXECUTABLE=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CX_BROWSER_DEPENDENCIES=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CI_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CI_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: 导出原生编译测试路径
-        id: export_native
-        if: ${{ !cancelled() && steps.build_native.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $bin = (Resolve-Path '.\windows\native-build\bin').Path
-          $executables = [ordered]@{
-            CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver.exe'
-            CX_NATIVE_SILENT_EXE = 'silent-tests.exe'
-            CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
-            CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'
-            CX_NATIVE_ASSETS_EXE = 'assets-tests.exe'
-            CX_NATIVE_OPTIONS_EXE = 'options-tests.exe'
-            CX_NATIVE_SESSION_EXE = 'session-tests.exe'
-            CX_NATIVE_SELECTION_EXE = 'selection-tests.exe'
-            CX_NATIVE_TRANSPORT_EXE = 'transport-tests.exe'
-            CX_NATIVE_AUDIT_EXE = 'audit-tests.exe'
-            CX_NATIVE_CONFIG_EXE = 'config-store-tests.exe'
-            CX_NATIVE_CACHE_EXE = 'discovery-cache-driver.exe'
-            CX_NATIVE_CACHE_HOST_EXE = 'discovery-cache-host-tests.exe'
-            CX_NATIVE_CLI_SELECTION_EXE = 'cli-selection-tests.exe'
-            CX_NATIVE_ELEVATION_EXE = 'elevation-tests.exe'
-            CX_NATIVE_ELEVATION_HOST_EXE = 'elevation-host-tests.exe'
-            CX_NATIVE_DPI_EXE = 'dpi-tests.exe'
-            CX_NATIVE_DPI_PROCESS_EXE = 'dpi-process-tests.exe'
-            CX_NATIVE_DPI_CHILD_EXE = 'dpi-child.exe'
-            CX_NATIVE_PROCESS_CHECK_EXE = 'process-check-tests.exe'
-            CX_NATIVE_PROCESS_FIXTURE_EXE = 'process-fixture.exe'
-            CX_NATIVE_DIAGNOSTICS_EXE = 'diagnostics-tests.exe'
-            CX_NATIVE_HOME_EXE = 'home-tests.exe'
-            CX_NATIVE_EXTENSION_CACHE_EXE = 'extension-cache-tests.exe'
-            CX_NATIVE_ADAPTER_EXE = 'adapter-account-tests.exe'
-            CX_NATIVE_ACCOUNT_WINDOW_EXE = 'account-window-tests.exe'
-            CX_NATIVE_BROWSER_SESSION_EXE = 'browser-session-tests.exe'
-            CX_NATIVE_MULTI_HOST_EXE = 'multi-file\chaoxing_plus.exe'
-            CX_NATIVE_CONSOLE_HELPER_EXE = 'multi-file\chaoxing_plus.com'
-            CX_NATIVE_PACKAGE_LAUNCHER_EXE = 'multi-file\package-to-single\chaoxing_plus.exe'
-            CX_NATIVE_MULTI_ASSETS_EXE = 'multi-assets-tests.exe'
-            CX_NATIVE_CONSOLE_HELPER_FIXTURE_EXE = 'console-helper-fixture.exe'
-          }
-          foreach ($entry in $executables.GetEnumerator()) {
-            $path = Join-Path $bin $entry.Value
-            if (-not (Test-Path -LiteralPath $path)) { throw "缺少原生编译测试产物: $path" }
-            "$($entry.Key)=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
-
-      - name: 单元测试（含原生编译入口）
-        id: unit_tests
-        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Where-Object { $excluded -notcontains $_.Name } | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          if ($testFiles.Count -eq 0) { throw '单元测试清单为空' }
           Write-Host "单元测试文件数: $($testFiles.Count)"
-          if ($testFiles.Count -eq 0) { throw '没有发现 scripts/*.test.mjs，拒绝以空测试集通过' }
-          $isolatedTestFiles = @($testFiles | Where-Object { [IO.Path]::GetFileName($_) -eq 'tab-answer-pause.test.mjs' })
-          if ($isolatedTestFiles.Count -ne 1) { throw "标签页暂停浏览器回归必须且只能发现一次，实际: $($isolatedTestFiles.Count)" }
-          $parallelTestFiles = @($testFiles | Where-Object { [IO.Path]::GetFileName($_) -ne 'tab-answer-pause.test.mjs' })
-          if ($parallelTestFiles.Count -eq 0) { throw '并行单元测试清单为空' }
-          "CI_TEST_FILES=$($testFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CI_TEST_PARALLEL_FILES=$($parallelTestFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # 受限并发：默认按 CPU 并发会同时启动多个 Chromium/原生宿主用例，在 CI 小规格 runner 上出现过截止类偶发。
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-unit-tests.tap'
-          node --test --test-reporter=tap --test-concurrency=4 --test-timeout=300000 @parallelTestFiles 2>&1 | Tee-Object -FilePath $tapPath
-          $testExitCode = $LASTEXITCODE
-          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
-          if (-not $skipLine) { throw '全量单元测试未产生 TAP 汇总，无法核对 skip 数' }
-          $skipped = $skipLine.Matches[0].Groups[1].Value
-          Write-Host "并行单元测试子用例跳过数: $skipped"
-          "CI_TEST_PARALLEL_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          if ($testExitCode -ne 0) { exit $testExitCode }
+          node --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 @testFiles 2>&1 | Tee-Object -FilePath $tapPath
+          $exitCode = $LASTEXITCODE
+          if (-not (Select-String -LiteralPath $tapPath -Pattern '^# skipped (\d+)$' | Select-Object -Last 1)) { throw '单元测试未产生 TAP 汇总' }
+          if ($exitCode -ne 0) { exit $exitCode }
+      - name: 写入单元测试摘要
+        if: always()
+        shell: pwsh
+        run: |
+          "## Windows 单元与原生测试`n`n测试在独立 runner 串行分组执行；完整 TAP 日志位于 runner 临时目录。" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-      - name: 标签页暂停隔离浏览器回归
-        id: pause_tests
-        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
+  windows-pause:
+    name: Windows 标签页暂停隔离回归
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CXPLUS_NO_LOG_FILE: '1'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 下载共享 Windows 测试产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 准备 Windows 测试环境
+        shell: pwsh
+        run: ./scripts/ci/prepare-windows-test-environment.ps1 -RequireBrowsers
+      - name: 标签页暂停回归（独立 runner）
         shell: pwsh
         run: |
           $testFile = (Resolve-Path -LiteralPath 'scripts/tab-answer-pause.test.mjs').Path
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-tab-answer-pause.tap'
           node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 $testFile 2>&1 | Tee-Object -FilePath $tapPath
-          $testExitCode = $LASTEXITCODE
-          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
-          if (-not $skipLine) { throw '标签页暂停回归未产生 TAP 汇总，无法核对 skip 数' }
-          $skipped = $skipLine.Matches[0].Groups[1].Value
-          Write-Host "标签页暂停子用例跳过数: $skipped"
-          "CI_TEST_ISOLATED_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          if ($testExitCode -ne 0) { exit $testExitCode }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Windows 交互窗口与浏览器可见性回归
-        id: window_tests
-        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
+  windows-window:
+    name: Windows 可见窗口与 Edge/Chrome 会话回归
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CXPLUS_NO_LOG_FILE: '1'
+      CX_TEST_NATIVE_WINDOW: '1'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 下载共享 Windows 测试产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 准备 Windows 测试环境
+        shell: pwsh
+        run: ./scripts/ci/prepare-windows-test-environment.ps1 -RequireBrowsers
+      - name: 可见窗口与浏览器会话回归（独立 runner）
         shell: pwsh
         run: |
-          $env:CX_TEST_NATIVE_WINDOW = '1'
-          $windowFiles = @(
+          $files = @(
             'scripts/windows-selection-window.test.mjs',
             'scripts/windows-scan-progress-window.test.mjs',
             'scripts/windows-native-selection.test.mjs',
@@ -229,53 +200,75 @@ jobs:
             'scripts/windows-native-adapter.test.mjs',
             'scripts/windows-native-browser-session.test.mjs'
           ) | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
-          Write-Host "交互窗口测试文件数: $($windowFiles.Count)"
-          if ($windowFiles.Count -eq 0) { throw '交互窗口测试清单为空' }
-          "CI_WINDOW_FILES=$($windowFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($files.Count -ne 6) { throw "可见窗口测试清单不完整: $($files.Count)" }
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-window-tests.tap'
-          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @windowFiles 2>&1 | Tee-Object -FilePath $tapPath
-          $testExitCode = $LASTEXITCODE
-          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
-          if (-not $skipLine) { throw '交互窗口回归未产生 TAP 汇总，无法核对 skip 数' }
-          $skipped = $skipLine.Matches[0].Groups[1].Value
-          Write-Host "交互窗口子用例跳过数: $skipped"
-          "CI_WINDOW_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          if ($testExitCode -ne 0) { exit $testExitCode }
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files 2>&1 | Tee-Object -FilePath $tapPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 浏览器回归（含原生构建浏览器入口）
-        id: browser_tests
-        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
+  windows-browser:
+    name: Windows 浏览器回归
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CXPLUS_NO_LOG_FILE: '1'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 下载共享 Windows 测试产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 准备 Windows 测试环境
+        shell: pwsh
+        run: ./scripts/ci/prepare-windows-test-environment.ps1 -RequireBrowsers
+      - name: 浏览器回归（独立 runner）
         shell: pwsh
         run: |
-          $browserFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
-          Write-Host "浏览器测试文件数: $($browserFiles.Count)"
-          if ($browserFiles.Count -eq 0) { throw '没有发现 scripts/*.browser.mjs，拒绝以空测试集通过' }
-          "CI_BROWSER_FILES=$($browserFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $files = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          if ($files.Count -eq 0) { throw '浏览器测试清单为空' }
+          Write-Host "浏览器测试文件数: $($files.Count)"
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-browser-tests.tap'
-          node --test --test-reporter=tap --test-concurrency=4 --test-timeout=600000 @browserFiles 2>&1 | Tee-Object -FilePath $tapPath
-          $testExitCode = $LASTEXITCODE
-          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
-          if (-not $skipLine) { throw '浏览器回归未产生 TAP 汇总，无法核对 skip 数' }
-          $skipped = $skipLine.Matches[0].Groups[1].Value
-          Write-Host "浏览器回归子用例跳过数: $skipped"
-          "CI_BROWSER_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          if ($testExitCode -ne 0) { exit $testExitCode }
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files 2>&1 | Tee-Object -FilePath $tapPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 发布包冒烟
-        id: package_smoke
-        if: ${{ !cancelled() && steps.build_extension.outcome == 'success' && steps.build_windows_assets.outcome == 'success' && steps.build_native.outcome == 'success' }}
-        shell: pwsh
+  windows-release:
+    name: Windows 发布包验证
+    needs: [windows-build, windows-unit, windows-pause, windows-window, windows-browser]
+    if: ${{ always() && needs.windows-build.result == 'success' && needs.windows-unit.result == 'success' && needs.windows-pause.result == 'success' && needs.windows-window.result == 'success' && needs.windows-browser.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      release-artifact-url: ${{ steps.upload_release.outputs.artifact-url }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 安装依赖
+        run: npm ci
+      - name: 下载共享 Windows 构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 构建发布包
         run: npm run release:windows
-
       - name: 发布目录 Node 入口回归
-        id: release_node_tests
-        if: ${{ !cancelled() && steps.package_smoke.outcome == 'success' }}
-        shell: pwsh
         run: node --test --test-concurrency=1 --test-timeout=180000 scripts/windows-node-exe.test.mjs
-
       - name: 发布目录复制后入口自检
-        id: release_smoke
-        if: ${{ !cancelled() && steps.package_smoke.outcome == 'success' }}
         shell: pwsh
         run: |
           $build = (Resolve-Path 'windows/native-build').Path
@@ -287,7 +280,6 @@ jobs:
           $package = Join-Path $copied 'release'
           node (Join-Path $package 'verify-release.mjs')
           if ($LASTEXITCODE -ne 0) { throw "发布包完整性自校验失败: $LASTEXITCODE" }
-          # 原生发布直接落在 native-build/release，只提供两个变体。
           foreach ($required in @('release-info.json', 'SHA256SUMS.txt', 'verify-release.mjs', 'single-file\chaoxing_plus.exe', 'multi-file\start-windows.cmd', 'multi-file\windows\share-file\config.example.json', 'multi-file\chaoxing_plus.exe', 'multi-file\chaoxing_plus.com', 'multi-file\assets\windows-bootstrap.js', 'multi-file\assets\chaoxing-plus.windows.js', 'multi-file\assets\trampoline.js', 'multi-file\assets\vendor\sweetalert2.min.css', 'multi-file\winmm-proxy.dll', 'multi-file\package-to-single\chaoxing_plus.exe', 'multi-file\release-info.json', 'multi-file\SHA256SUMS.txt', 'multi-file\verify-release.mjs')) {
             if (-not (Test-Path -LiteralPath (Join-Path $package $required))) { throw "发布包缺少: $required" }
           }
@@ -309,113 +301,105 @@ jobs:
           } finally { Pop-Location }
           $wrapper = Start-Process -FilePath (Join-Path $package 'multi-file\package-to-single\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($wrapper.ExitCode -ne 0) { throw "多文件单 EXE 包装器自检失败: $($wrapper.ExitCode)" }
-
-      - name: 上传发布包
+      - name: 上传 Windows 发布包
         id: upload_release
-        if: ${{ !cancelled() && steps.unit_tests.outcome == 'success' && steps.pause_tests.outcome == 'success' && steps.window_tests.outcome == 'success' && steps.browser_tests.outcome == 'success' && steps.package_smoke.outcome == 'success' && steps.release_node_tests.outcome == 'success' && steps.release_smoke.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: Windows 发布包
           path: windows/native-build/release/
           if-no-files-found: error
 
-      - name: 写入 CI 摘要
-        if: always()
+  windows-real-client:
+    name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - client: v4.1.4.25512
+            installer: tests/private-clients/chaoxing-exam-v4.1.4.25512.exe
+            inject_mode: cdp-port
+            database: I
+          - client: v4.1.4.25512
+            installer: tests/private-clients/chaoxing-exam-v4.1.4.25512.exe
+            inject_mode: cdp-port
+            database: II
+          - client: v4.3.0.4
+            installer: tests/private-clients/chaoxing-exam-v4.3.0.4.exe
+            inject_mode: dll-proxy
+            database: I
+          - client: v4.3.0.4
+            installer: tests/private-clients/chaoxing-exam-v4.3.0.4.exe
+            inject_mode: dll-proxy
+            database: II
+          - client: v4.1.4.25389
+            installer: tests/private-clients/chaoxing-exam-v4.1.4.25389.exe
+            inject_mode: cdp-port
+            database: I
+          - client: v4.1.4.25389
+            installer: tests/private-clients/chaoxing-exam-v4.1.4.25389.exe
+            inject_mode: cdp-port
+            database: II
+    env:
+      DATABASE_BASE64: ${{ matrix.database == 'I' && vars.EXAMINATION_CLIENT_DATABASE_I || vars.EXAMINATION_CLIENT_DATABASE_II }}
+    steps:
+      - name: 检出代码与 Git LFS 客户端资产
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: 下载共享 Windows 构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-ci-build-${{ github.sha }}
+          path: .
+      - name: 校验私有客户端资产
+        shell: pwsh
+        run: |
+          $path = '${{ matrix.installer }}'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Git LFS 客户端资产缺失: $path" }
+          $size = (Get-Item -LiteralPath $path).Length
+          if ($size -lt 100MB) { throw "客户端资产大小异常: $size bytes" }
+      - name: 确保 7-Zip 可用
+        shell: pwsh
+        run: |
+          if (-not (Get-Command 7z.exe -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles '7-Zip\7z.exe'))) {
+            choco install 7zip --no-progress -y
+          }
+      - name: 执行真实客户端注入
         shell: pwsh
         env:
-          CI_JOB_STATUS: ${{ job.status }}
-          CI_RUN_NUMBER: ${{ github.run_number }}
-          CI_EVENT_NAME: ${{ github.event_name }}
-          CI_REF_NAME: ${{ github.ref_name }}
-          CI_SHA: ${{ github.sha }}
-          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CI_EXTENSION_BUILD_OUTCOME: ${{ steps.build_extension.outcome }}
-          CI_WINDOWS_ASSETS_OUTCOME: ${{ steps.build_windows_assets.outcome }}
-          CI_NATIVE_BUILD_OUTCOME: ${{ steps.build_native.outcome }}
-          CI_BROWSER_ENVIRONMENT_OUTCOME: ${{ steps.browser_environment.outcome }}
-          CI_WINDOW_TESTS_OUTCOME: ${{ steps.window_tests.outcome }}
-          CI_UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
-          CI_PAUSE_TESTS_OUTCOME: ${{ steps.pause_tests.outcome }}
-          CI_BROWSER_TESTS_OUTCOME: ${{ steps.browser_tests.outcome }}
-          CI_PACKAGE_SMOKE_OUTCOME: ${{ steps.package_smoke.outcome }}
-          CI_RELEASE_NODE_TESTS_OUTCOME: ${{ steps.release_node_tests.outcome }}
-          CI_RELEASE_SMOKE_OUTCOME: ${{ steps.release_smoke.outcome }}
-          CI_UPLOAD_OUTCOME: ${{ steps.upload_release.outcome }}
+          DATABASE_BASE64: ${{ env.DATABASE_BASE64 }}
         run: |
-          function ConvertTo-CiStatusLabel([string]$status) {
-            switch ($status) {
-            'success' { '通过' }
-            'failure' { '失败' }
-            'cancelled' { '已取消' }
-            default { '未执行' }
-            }
-          }
-          $statusText = ConvertTo-CiStatusLabel $env:CI_JOB_STATUS
-          $extensionBuildStatus = ConvertTo-CiStatusLabel $env:CI_EXTENSION_BUILD_OUTCOME
-          $windowsAssetsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOWS_ASSETS_OUTCOME
-          $nativeBuildStatus = ConvertTo-CiStatusLabel $env:CI_NATIVE_BUILD_OUTCOME
-          $browserEnvironmentStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_ENVIRONMENT_OUTCOME
-          $windowTestsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOW_TESTS_OUTCOME
-          $unitTestsStatus = ConvertTo-CiStatusLabel $env:CI_UNIT_TESTS_OUTCOME
-          $pauseTestsStatus = ConvertTo-CiStatusLabel $env:CI_PAUSE_TESTS_OUTCOME
-          $browserTestsStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_TESTS_OUTCOME
-          $packageSmokeStatus = ConvertTo-CiStatusLabel $env:CI_PACKAGE_SMOKE_OUTCOME
-          $releaseNodeTestsStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_NODE_TESTS_OUTCOME
-          $releaseSmokeStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_SMOKE_OUTCOME
-          $uploadStatus = ConvertTo-CiStatusLabel $env:CI_UPLOAD_OUTCOME
-          $browserFiles = if ($env:CI_BROWSER_FILES) { $env:CI_BROWSER_FILES } else { '未开始' }
-          $windowFiles = if ($env:CI_WINDOW_FILES) { $env:CI_WINDOW_FILES } else { '未开始' }
-          $parallelTestSkipped = if ($env:CI_TEST_PARALLEL_SKIPPED) { $env:CI_TEST_PARALLEL_SKIPPED } else { '未报告' }
-          $isolatedTestSkipped = if ($env:CI_TEST_ISOLATED_SKIPPED) { $env:CI_TEST_ISOLATED_SKIPPED } else { '未报告' }
-          $windowSkipped = if ($env:CI_WINDOW_SKIPPED) { $env:CI_WINDOW_SKIPPED } else { '未报告' }
-          $browserSkipped = if ($env:CI_BROWSER_SKIPPED) { $env:CI_BROWSER_SKIPPED } else { '未报告' }
-          $summary = @"
-          ## 持续集成摘要
-
-          | 项目 | 内容 |
-          | --- | --- |
-          | 结果 | **$statusText** |
-          | 运行编号 | $env:CI_RUN_NUMBER |
-          | 触发事件 | $env:CI_EVENT_NAME |
-          | 分支或标签 | ``$env:CI_REF_NAME`` |
-          | 提交 | ``$env:CI_SHA`` |
-          | 工作流运行 | [打开本次运行]($env:CI_RUN_URL) |
-
-          ### 检查阶段
-
-          | 检查项目 | 结果 | 补充信息 |
-          | --- | --- | --- |
-          | Windows 扩展包构建 | $extensionBuildStatus | Linux 类型检查与构建见汇总 job |
-          | Windows 注入资源构建 | $windowsAssetsStatus | |
-          | 原生宿主与编译测试构建 | $nativeBuildStatus | |
-          | Windows 浏览器环境 | $browserEnvironmentStatus | Edge: ``$env:CI_EDGE_PATH``；Chrome: ``$env:CI_CHROME_PATH`` |
-          | 单元测试（并行组） | $unitTestsStatus | 共 $env:CI_TEST_FILES 个文件（并发 $env:CI_TEST_PARALLEL_FILES + 隔离 1）；跳过子用例 $parallelTestSkipped |
-          | 标签页暂停隔离浏览器回归 | $pauseTestsStatus | 1 个文件，串行；跳过子用例 $isolatedTestSkipped |
-          | 交互窗口与可见浏览器回归 | $windowTestsStatus | $windowFiles 个测试文件；跳过子用例 $windowSkipped |
-          | 浏览器回归 | $browserTestsStatus | $browserFiles 个测试文件；跳过子用例 $browserSkipped |
-          | 发布包冒烟 | $packageSmokeStatus | |
-          | 发布目录 Node 入口回归 | $releaseNodeTestsStatus | 发布目录生成后执行 |
-          | 发布目录复制、自检与完整性校验 | $releaseSmokeStatus | |
-          | 发布包上传 | $uploadStatus | ``Windows 发布包`` |
-          "@
-          if ($env:GITHUB_STEP_SUMMARY) {
-            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-          } else {
-            Write-Host $summary
-          }
+          $db = $env:DATABASE_BASE64
+          if ([string]::IsNullOrWhiteSpace($db)) { throw 'Examination_Client_Database_I/II is not configured' }
+          ./scripts/windows-real-client-injection.ps1 `
+            -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
+            -InjectMode '${{ matrix.inject_mode }}' `
+            -DatabaseBase64 $db `
+            -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
+            -CaseName '${{ matrix.client }}-${{ matrix.database }}'
 
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
         shell: bash
         env:
           SOURCE_RESULT: ${{ needs.source.result }}
-          WINDOWS_RESULT: ${{ needs.windows.result }}
-          RELEASE_ARTIFACT_URL: ${{ needs.windows.outputs.release-artifact-url }}
+          WINDOWS_BUILD_RESULT: ${{ needs.windows-build.result }}
+          WINDOWS_UNIT_RESULT: ${{ needs.windows-unit.result }}
+          WINDOWS_PAUSE_RESULT: ${{ needs.windows-pause.result }}
+          WINDOWS_WINDOW_RESULT: ${{ needs.windows-window.result }}
+          WINDOWS_BROWSER_RESULT: ${{ needs.windows-browser.result }}
+          WINDOWS_RELEASE_RESULT: ${{ needs.windows-release.result }}
+          WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
+          RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -428,14 +412,19 @@ jobs:
               *) echo '未执行' ;;
             esac
           }
-
           {
             echo '## 持续集成结果'
             echo
             echo '| 验证环境 | 结果 |'
             echo '| --- | --- |'
             printf '| Ubuntu 类型检查与扩展构建 | %s |\n' "$(result_label "$SOURCE_RESULT")"
-            printf '| Windows 原生、浏览器与发布验证 | %s |\n' "$(result_label "$WINDOWS_RESULT")"
+            printf '| Windows 构建共享产物 | %s |\n' "$(result_label "$WINDOWS_BUILD_RESULT")"
+            printf '| Windows 单元与原生测试 | %s |\n' "$(result_label "$WINDOWS_UNIT_RESULT")"
+            printf '| Windows 标签页暂停隔离回归 | %s |\n' "$(result_label "$WINDOWS_PAUSE_RESULT")"
+            printf '| Windows 可见窗口与浏览器会话 | %s |\n' "$(result_label "$WINDOWS_WINDOW_RESULT")"
+            printf '| Windows 浏览器回归 | %s |\n' "$(result_label "$WINDOWS_BROWSER_RESULT")"
+            printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
+            printf '| 真实客户端 3×2 注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"
@@ -446,4 +435,3 @@ jobs:
             printf '代码提交：`%s`\n' "$COMMIT_SHA"
             printf '\n[查看完整运行日志](%s)\n' "$RUN_URL"
           } >> "$GITHUB_STEP_SUMMARY"
-

@@ -435,11 +435,15 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
 });
 
 test('CI 工作流与发布脚本入口已接入仓库', async () => {
-  const workflow = await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const workflow = [
+    await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8'),
+    await fs.readFile(path.join(root, 'scripts', 'ci', 'prepare-windows-test-environment.ps1'), 'utf8'),
+    await fs.readFile(path.join(root, 'scripts', 'windows-real-client-injection.ps1'), 'utf8')
+  ].join('\n');
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
   assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows\][\s\S]*?if: always\(\)/u, '汇总 job 必须在两个环境结束后报告结果');
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境并报告结果');
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /node-version: '22'/u);
   assert.match(workflow, /npm ci/u);
@@ -448,51 +452,44 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /npm run build:windows/u);
   assert.match(workflow, /npm run build:native/u);
   assert.match(workflow, /tab-answer-pause\.test\.mjs/u, '高并发全量测试必须包含并显式隔离标签页暂停浏览器回归');
-  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=4 --test-timeout=300000 @parallelTestFiles/u);
+  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 @testFiles/u, '单元测试必须限制并发');
   assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 \$testFile/u, '标签页暂停浏览器回归必须串行执行');
-  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=4 --test-timeout=600000 @browserFiles/u);
+  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u, '浏览器回归必须在独立 runner 串行执行');
   assert.match(workflow, /npm run release:windows/u);
   assert.match(workflow, /Copy-Item -LiteralPath .*'release'/u, 'CI 必须在独立目录验证发布产物');
   assert.match(workflow, /path: windows\/native-build\/release\//u, 'CI 必须直接上传原生发布目录');
   assert.match(workflow, /name: Windows 发布包/u, 'CI 发布包展示名应使用中文');
-  assert.match(workflow, /name: 写入 CI 摘要/u, 'CI 必须写入 GitHub Actions 摘要');
+  assert.match(workflow, /name: 输出各环境结果与发布产物/u, 'CI 必须写入 GitHub Actions 摘要');
   assert.match(workflow, /if: always\(\)/u, 'CI 摘要必须在失败后仍尝试写入');
   assert.match(workflow, /GITHUB_STEP_SUMMARY/u, 'CI 摘要必须写入 GITHUB_STEP_SUMMARY');
-  assert.match(workflow, /id: browser_environment/u, 'CI 必须显式准备浏览器环境');
+  assert.match(workflow, /prepare-windows-test-environment\.ps1 -RequireBrowsers/u, 'CI 必须显式准备浏览器环境');
   assert.match(workflow, /CX_BROWSER_EDGE_PATH/u, 'CI 必须导出 Edge 可执行文件路径');
   assert.match(workflow, /CX_BROWSER_CHROME_PATH/u, 'CI 必须导出 Chrome 可执行文件路径');
-  assert.match(workflow, /steps\.export_native\.outcome == 'success' && steps\.browser_environment\.outcome == 'success'/u, '依赖原生程序和浏览器的回归必须在对应环境失败时显式停止');
-  assert.match(workflow, /CX_BROWSER_EXECUTABLE=\$chrome/u, '原生生命周期夹具默认要求 Chrome，Puppeteer 必须使用 Chrome');
+  assert.match(workflow, /CX_BROWSER_EXECUTABLE/u, '原生生命周期夹具默认要求 Chrome，Puppeteer 必须使用 Chrome');
   assert.doesNotMatch(workflow, /CX_BROWSER_EXECUTABLE=\$edge/u, 'Edge 专项不能替代默认要求 Chrome 的生命周期回归');
   assert.match(workflow, /CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver\.exe'/u, 'CI 必须强制检查复用的原生 discovery 驱动');
   assert.match(workflow, /CX_NATIVE_SILENT_EXE = 'silent-tests\.exe'/u, 'CI 必须强制检查静默引擎原生测试产物');
   assert.match(workflow, /CX_NATIVE_EXTENSION_CACHE_EXE/u, 'CI 必须导出扩展缓存原生测试入口');
-  assert.match(workflow, /name: Windows 交互窗口与浏览器可见性回归/u, 'CI 必须执行交互窗口回归');
-  assert.match(workflow, /--test-reporter=tap --test-concurrency=1 --test-timeout=600000 @windowFiles/u, '交互窗口回归必须串行执行');
-  assert.match(workflow, /CX_TEST_NATIVE_WINDOW = '1'/u, 'CI 必须开启真实窗口回归');
+  assert.match(workflow, /name: Windows 可见窗口与 Edge\/Chrome 会话回归/u, 'CI 必须执行交互窗口回归');
+  assert.match(workflow, /--test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u, '交互窗口回归必须串行执行');
+  assert.match(workflow, /CX_TEST_NATIVE_WINDOW: '1'/u, 'CI 必须开启真实窗口回归');
   assert.match(workflow, /scripts\/windows-native-adapter\.test\.mjs/u, 'CI 必须覆盖原生账号窗口回归');
   assert.match(workflow, /'scripts\/windows-native-browser-session\.test\.mjs'/u, 'CI 必须在交互环境覆盖 Chrome 与 Edge 可见窗口清理');
   assert.match(workflow, /\$testFiles\.Count -eq 0/u, '全量单元测试清单为空时必须失败');
-  assert.match(workflow, /\$windowFiles\.Count -eq 0/u, '交互窗口测试清单为空时必须失败');
-  assert.match(workflow, /\$browserFiles\.Count -eq 0/u, '浏览器测试清单为空时必须失败');
+  assert.match(workflow, /\$files\.Count -eq 0/u, '浏览器测试清单为空时必须失败');
   assert.match(workflow, /name: 发布目录 Node 入口回归/u, 'CI 必须在发布目录生成后补跑 Node 入口回归');
   assert.match(workflow, /scripts\/windows-node-exe\.test\.mjs/u, 'CI 必须补跑发布目录图标与 Node 入口测试');
-  assert.match(workflow, /steps\.unit_tests\.outcome == 'success'.*steps\.pause_tests\.outcome == 'success'.*steps\.window_tests\.outcome == 'success'.*steps\.browser_tests\.outcome == 'success'.*steps\.package_smoke\.outcome == 'success'.*steps\.release_node_tests\.outcome == 'success'.*steps\.release_smoke\.outcome == 'success'/u, 'CI 只有全部验证成功后才能上传发布包');
-  assert.match(workflow, /CI_TEST_FILES/u, 'CI 摘要必须记录单元测试文件数');
-  assert.match(workflow, /CI_BROWSER_FILES/u, 'CI 摘要必须记录浏览器回归文件数');
-  assert.match(workflow, /CI_TEST_PARALLEL_SKIPPED/u, 'CI 摘要必须记录并行单元测试实际跳过数');
-  assert.match(workflow, /CI_TEST_ISOLATED_SKIPPED/u, 'CI 摘要必须记录隔离浏览器测试实际跳过数');
+  assert.match(workflow, /needs: \[windows-build, windows-unit, windows-pause, windows-window, windows-browser\]/u, 'CI 只有全部 Windows 验证成功后才能生成发布包');
   assert.match(workflow, /CX_DISCOVERY_TEST_DRIVER/u, 'CI 必须导出 discovery 测试驱动');
-  assert.match(workflow, /CI_PAUSE_TESTS_OUTCOME: \$\{\{ steps\.pause_tests\.outcome \}\}/u, 'CI 摘要必须独立记录隔离浏览器回归');
-  assert.match(workflow, /CI_WINDOW_SKIPPED/u, 'CI 摘要必须记录窗口回归实际跳过数');
-  assert.match(workflow, /CI_BROWSER_SKIPPED/u, 'CI 摘要必须记录浏览器回归实际跳过数');
-  assert.match(workflow, /CI_UNIT_TESTS_OUTCOME: \$\{\{ steps\.unit_tests\.outcome \}\}/u, 'CI 摘要必须记录单元测试结果');
-  assert.match(workflow, /CI_BROWSER_TESTS_OUTCOME: \$\{\{ steps\.browser_tests\.outcome \}\}/u, 'CI 摘要必须记录浏览器回归结果');
-  assert.match(workflow, /CI_RELEASE_NODE_TESTS_OUTCOME: \$\{\{ steps\.release_node_tests\.outcome \}\}/u, 'CI 摘要必须记录发布目录 Node 回归结果');
-  assert.match(workflow, /CI_UPLOAD_OUTCOME: \$\{\{ steps\.upload_release\.outcome \}\}/u, 'CI 摘要必须记录发布包上传结果');
-  assert.doesNotMatch(workflow, /Expand-Archive|native-build\/\*\.zip/u, '原生 CI 不再依赖 ZIP');
+  assert.match(workflow, /真实客户端 3×2 注入矩阵/u, 'CI 摘要必须记录真实客户端矩阵');
+  assert.match(workflow, /matrix:/u, '真实客户端注入必须使用矩阵');
+  assert.match(workflow, /database: I/u, '真实客户端矩阵必须包含数据库 I');
+  assert.match(workflow, /database: II/u, '真实客户端矩阵必须包含数据库 II');
+  assert.match(workflow, /tests\/private-clients/u, '真实客户端必须来自私有测试目录');
+  assert.match(workflow, /lfs: true/u, '客户端测试必须拉取 Git LFS 资产');
+  assert.match(workflow, /Expand-Archive/u, '真实客户端测试必须解压数据库 ZIP');
   assert.match(workflow, /actions\/upload-artifact@v4/u);
-  assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
+  assert.match(workflow, /prepare-windows-test-environment\.ps1/u, 'native compiled test paths must be prepared in each runner');
   assert.match(workflow, /发布目录复制后入口自检/u);
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');
   assert.match(workflow, /single-file\\chaoxing_plus\.exe/u, 'CI must check the GUI variant');
@@ -518,7 +515,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   for (const name of nativeExecutables) {
     assert.match(workflow, new RegExp(name), `CI must export ${name} so native tests and browser suites run`);
   }
-  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=4 --test-timeout=600000 @browserFiles/u);
+  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u);
 
   const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts['release:windows'], 'node windows/share-file/package-windows.mjs');
