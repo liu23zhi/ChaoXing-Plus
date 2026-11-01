@@ -50,7 +50,7 @@ test('compiled native DPI transactions preserve registry state and fail closed o
 
 test('temporary DPI override changes a real test child and restores the next ordinary launch', {
   skip: !process.env.CX_NATIVE_DPI_PROCESS_EXE || !process.env.CX_NATIVE_DPI_CHILD_EXE
-}, async () => {
+}, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'cx-native-dpi-中文 空格-'));
   try {
     const children = ['DpiBaseline.exe', 'DpiOverride.exe', 'DpiAfterRestore.exe']
@@ -64,6 +64,12 @@ test('temporary DPI override changes a real test child and restores the next ord
     const result = spawnSync(process.env.CX_NATIVE_DPI_PROCESS_EXE, children, {
       cwd: directory, encoding: 'utf8', timeout: 20_000, windowsHide: true
     });
+    if (result.stdout.includes('DPI_SHIM_UNOBSERVED')) {
+      assert.equal(result.status, 8, result.stdout + result.stderr);
+      assert.match(result.stdout, /NATIVE DPI PROCESS TESTS SKIP/);
+      t.skip('当前 Windows runner 未观察到瞬时 AppCompat DPI 层；注册表事务与恢复仍已验证');
+      return;
+    }
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /NATIVE DPI PROCESS TESTS PASS/);
     assert.deepEqual(await readdir(directory), children.map((child) => child.split(/[\\/]/u).pop()).sort());

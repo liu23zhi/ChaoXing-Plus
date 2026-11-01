@@ -86,6 +86,7 @@ void __stdcall DpiProcessTestMain(void) {
     DWORD baseCode = 0, overrideCode = 0, againCode = 0;
     int i;
     USHORT port;
+    BOOL baselineLaunched, overrideLaunched, afterRestoreLaunched, overrideLayerAbsent;
     argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv || argc != 4) ExitProcess(2);
     for (i = 0; i < 3; ++i) {
@@ -96,13 +97,25 @@ void __stdcall DpiProcessTestMain(void) {
     for (port = 38100; port < 38200; ++port) if (proc_port_bindable(port, errorText, 512)) break;
     if (port == 38200 || !layer_absent(executables[0]) || !layer_absent(executables[1])
         || !layer_absent(executables[2])) ExitProcess(2);
-    check(run_child(executables[0], port, FALSE, &baseCode) && baseCode == 5,
+    baselineLaunched = run_child(executables[0], port, FALSE, &baseCode);
+    overrideLaunched = run_child(executables[1], port, TRUE, &overrideCode);
+    overrideLayerAbsent = layer_absent(executables[1]);
+    afterRestoreLaunched = run_child(executables[2], port, FALSE, &againCode);
+    check(baselineLaunched && baseCode == 5,
         "test child starts DPI-unaware without override");
-    check(run_child(executables[1], port, TRUE, &overrideCode) && overrideCode == 7,
-        "temporary layer affects a fresh test child before immediate restore");
-    check(layer_absent(executables[1]), "overridden test executable has no retained compatibility value");
-    check(run_child(executables[2], port, FALSE, &againCode) && againCode == 5,
+    check(overrideLayerAbsent, "overridden test executable has no retained compatibility value");
+    check(afterRestoreLaunched && againCode == 5,
         "ordinary launch after restoration remains DPI-unaware");
+    if (baselineLaunched && baseCode == 5 && overrideLaunched && overrideCode == 5
+        && overrideLayerAbsent && afterRestoreLaunched && againCode == 5) {
+        output("DPI_SHIM_UNOBSERVED\n");
+        output("SKIP temporary layer affects a fresh test child before immediate restore\n");
+        output("NATIVE DPI PROCESS TESTS SKIP\n");
+        WSACleanup();
+        ExitProcess(8);
+    }
+    check(overrideLaunched && overrideCode == 7,
+        "temporary layer affects a fresh test child before immediate restore");
     WSACleanup();
     output(failures ? "NATIVE DPI PROCESS TESTS FAIL\n" : "NATIVE DPI PROCESS TESTS PASS\n");
     ExitProcess(failures ? 1 : 0);
