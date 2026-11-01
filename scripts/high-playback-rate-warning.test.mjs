@@ -5,12 +5,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-high-playback-rate-cjs');
+const outDir = createTestDirectory('high-playback-rate-cjs');
 const helperModulePath = resolve(outDir, 'high-playback-rate-warning.js');
-const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'high-playback-rate-warning.ts');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const helperSourcePath = resolveTestPath('src', 'projects', 'high-playback-rate-warning.ts');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 let helperModulePromise;
 

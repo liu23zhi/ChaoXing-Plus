@@ -6,17 +6,18 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-tiku-health-cjs');
+const outDir = createTestDirectory('tiku-health-cjs');
 const modulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
 
 async function loadModule() {
   await mkdir(outDir, { recursive: true });
   await writeFile(resolve(outDir, 'package.json'), '{"type":"commonjs"}\n');
   await execFileAsync(process.execPath, [
-    resolve('scripts/test-helpers/tsc-compat.mjs'),
-    resolve('src/projects/tiku-adapter-config.ts'),
+    resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs'),
+    resolveTestPath('src', 'projects', 'tiku-adapter-config.ts'),
     '--outDir', outDir, '--module', 'commonjs', '--target', 'es2022',
     '--moduleResolution', 'node', '--skipLibCheck'
   ]);

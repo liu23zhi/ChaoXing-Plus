@@ -7,12 +7,13 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import ts from '@typescript/typescript6';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-cx-recovery-cjs');
+const outDir = createTestDirectory('cx-recovery-cjs');
 const helperModulePath = resolve(outDir, 'cx-recovery.js');
-const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx-recovery.ts');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const helperSourcePath = resolveTestPath('src', 'projects', 'cx-recovery.ts');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadHelperModule() {
   await mkdir(outDir, { recursive: true });
@@ -51,7 +52,7 @@ function createStorage() {
 }
 
 async function createVideoMonitor(mod) {
-  const source = await readFile(resolve(process.cwd(), 'src', 'projects', 'cx.ts'), 'utf8');
+  const source = await readFile(resolveTestPath('src', 'projects', 'cx.ts'), 'utf8');
   const start = source.indexOf('const attemptedVideoRoutes = new Set<unknown>();');
   const intervalEnd = '}, 3000);';
   const end = source.indexOf(intervalEnd, start);

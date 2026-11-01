@@ -1,16 +1,17 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import ts from '@typescript/typescript6';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
 const swalPath = resolve('node_modules/sweetalert2/dist/sweetalert2.all.js');
-const screenshots = resolve('.tmp-tests-swal');
+const screenshots = createTestDirectory('swal');
 let browser;
 let server;
 let port;
@@ -30,7 +31,6 @@ before(async () => {
     ${compiled}
     window.__modalTest = module.exports.$modal;
   })();`;
-  await mkdir(screenshots, { recursive: true });
   server = createServer((_request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><html><head><title>Swal iframe regression</title></head>

@@ -5,12 +5,13 @@ import { mkdir, rename } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-retry-order');
-const sourcePath = resolve(process.cwd(), 'src', 'core', 'worker', 'unfinished-retry.ts');
+const outDir = createTestDirectory('retry-order');
+const sourcePath = resolveTestPath('src', 'core', 'worker', 'unfinished-retry.ts');
 const modulePath = resolve(outDir, 'unfinished-retry.cjs');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadModule() {
   await mkdir(outDir, { recursive: true });

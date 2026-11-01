@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import ts from '@typescript/typescript6';
+import { resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
@@ -20,7 +21,7 @@ before(async () => {
   pauseSource = ts.transpileModule(await readFile('src/projects/tab-answer-pause.ts', 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext }
   }).outputText.replace(/^export /gm, '');
-  fixtureDirectory = await mkdtemp(resolve('.tmp-tests-tab-answer-pause-'));
+  fixtureDirectory = await mkdtemp(resolveTestPath('.tmp-tests-tab-answer-pause-'));
   const manifest = {
     manifest_version: 3, name: 'Local tab pause fixture', version: '1.0.0', permissions: ['storage'],
     background: { service_worker: 'extension-tab-pause.js' },

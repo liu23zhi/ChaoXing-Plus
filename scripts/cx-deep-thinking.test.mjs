@@ -6,15 +6,16 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import ts from '@typescript/typescript6';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-deep-thinking-cjs');
+const outDir = createTestDirectory('deep-thinking-cjs');
 const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
-const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts');
-const commonSourcePath = resolve(process.cwd(), 'src', 'projects', 'common.ts');
-const cxSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx.ts');
-const messageSourcePath = resolve(process.cwd(), 'src', 'runtime', 'message.ts');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const helperSourcePath = resolveTestPath('src', 'projects', 'tiku-adapter-config.ts');
+const commonSourcePath = resolveTestPath('src', 'projects', 'common.ts');
+const cxSourcePath = resolveTestPath('src', 'projects', 'cx.ts');
+const messageSourcePath = resolveTestPath('src', 'runtime', 'message.ts');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadHelperModule() {
   await mkdir(outDir, { recursive: true });

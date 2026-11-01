@@ -1,12 +1,14 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import ts from '@typescript/typescript6';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
+const screenshots = createTestDirectory('windows-host-log');
 let browser;
 let bootstrap;
 let uiRuntime;
@@ -319,8 +321,7 @@ test('the built Windows business bundle obeys its injection-log flag without reb
       listeners: window.diagnosticListeners.size,
       sameControl: document.querySelector('#panel-common-work-results input') === window.originalBuiltControl
     })), { sections: 0, listeners: 0, sameControl: true });
-    await mkdir('.tmp-tests-windows-host-log', { recursive: true });
-    await page.screenshot({ path: '.tmp-tests-windows-host-log/release-panel.png', fullPage: true });
+    await page.screenshot({ path: resolve(screenshots, 'release-panel.png'), fullPage: true });
     return;
   }
   await page.waitForSelector('[data-windows-host-log]');
@@ -354,7 +355,6 @@ test('the built Windows business bundle obeys its injection-log flag without reb
     rows: document.querySelectorAll('[data-windows-host-log] [data-sequence]').length,
     storage: window.storageTouches
   })), { sameSection: true, sameControl: true, rows: 6, storage: initial.storage });
-  await mkdir('.tmp-tests-windows-host-log', { recursive: true });
-  await page.screenshot({ path: '.tmp-tests-windows-host-log/panel.png', fullPage: true });
+  await page.screenshot({ path: resolve(screenshots, 'panel.png'), fullPage: true });
 });
 

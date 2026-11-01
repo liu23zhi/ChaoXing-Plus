@@ -4,9 +4,11 @@ import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const helperModulePath = resolve(process.cwd(), '.tmp-tests', 'store.js');
+const outDir = createTestDirectory('runtime-store');
+const helperModulePath = resolve(outDir, 'store.js');
 const helperSourcePath = resolve(process.cwd(), 'src', 'runtime', 'store.ts');
 const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
 let importVersion = 0;
@@ -16,7 +18,7 @@ async function compileStoreHelper() {
     tscCliPath,
     helperSourcePath,
     '--outDir',
-    resolve(process.cwd(), '.tmp-tests'),
+    outDir,
     '--module',
     'nodenext',
     '--target',

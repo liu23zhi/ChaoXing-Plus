@@ -4,12 +4,13 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
-const outDir = resolve('.tmp-tests-adapter-quota-cjs');
+const outDir = createTestDirectory('adapter-quota-cjs');
 await mkdir(outDir, { recursive: true });
 await writeFile(resolve(outDir, 'package.json'), '{"type":"commonjs"}');
-execFileSync(process.execPath, [resolve('scripts/test-helpers/tsc-compat.mjs'),
-  resolve('src/projects/tiku-adapter-config.ts'), '--outDir', outDir,
+execFileSync(process.execPath, [resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs'),
+  resolveTestPath('src', 'projects', 'tiku-adapter-config.ts'), '--outDir', outDir,
   '--module', 'commonjs', '--target', 'es2022', '--moduleResolution', 'node', '--skipLibCheck']);
 const require = createRequire(import.meta.url);
 const adapter = require(resolve(outDir, 'projects/tiku-adapter-config.js'));

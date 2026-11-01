@@ -5,12 +5,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const resolverSourcePath = resolve(process.cwd(), 'src', 'core', 'worker', 'question.resolver.ts');
-const outDir = resolve(process.cwd(), '.tmp-tests-cjs');
+const resolverSourcePath = resolveTestPath('src', 'core', 'worker', 'question.resolver.ts');
+const outDir = createTestDirectory('question-resolver-cjs');
 const resolverModulePath = resolve(outDir, 'worker', 'question.resolver.js');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function compileResolverHelper() {
   await mkdir(outDir, { recursive: true });

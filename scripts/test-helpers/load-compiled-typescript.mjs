@@ -2,9 +2,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from '@typescript/typescript6';
+import { createTestDirectory } from './temp-directory.mjs';
 
-const root = process.cwd();
-const outDir = resolve(root, '.tmp-tests');
+const outDir = createTestDirectory('compiled-typescript');
 const loadedModules = new Map();
 let importVersion = 0;
 

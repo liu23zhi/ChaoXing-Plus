@@ -5,12 +5,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-tiku-cjs');
+const outDir = createTestDirectory('tiku-cjs');
 const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
-const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'tiku-adapter-config.ts');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const helperSourcePath = resolveTestPath('src', 'projects', 'tiku-adapter-config.ts');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function compileHelperModule() {
   await mkdir(outDir, { recursive: true });

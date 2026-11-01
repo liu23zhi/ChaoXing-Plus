@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES ?? '.', 'package.json'));
 const puppeteer = browserRequire('puppeteer');
@@ -12,7 +13,7 @@ let browser;
 let fixtureDirectory;
 
 before(async () => {
-  fixtureDirectory = await mkdtemp(resolve('.tmp-tests-cx-runtime-integration-'));
+  fixtureDirectory = await mkdtemp(resolveTestPath('.tmp-tests-cx-runtime-integration-'));
   await mkdir(resolve(fixtureDirectory, 'vendor'));
   await copyFile('dist/chaoxing-plus.js', resolve(fixtureDirectory, 'chaoxing-plus.js'));
   await copyFile('dist/extension-entry.js', resolve(fixtureDirectory, 'extension-entry.js'));

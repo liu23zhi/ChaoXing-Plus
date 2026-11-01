@@ -1,15 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { checkChrome75Syntax } from '../windows/share-file/chrome75-syntax.mjs';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
-const outDir = resolve(root, '.tmp-tests-windows-chrome75-cjs');
+const outDir = createTestDirectory('windows-chrome75-cjs');
 const helperModulePath = resolve(outDir, 'projects', 'tiku-adapter-config.js');
 const helperSourcePath = resolve(root, 'src', 'projects', 'tiku-adapter-config.ts');
 const tscCliPath = resolve(root, 'scripts', 'test-helpers', 'tsc-compat.mjs');
@@ -118,8 +119,3 @@ test('windows 构建脚本与入口脚本约定', async () => {
   assert.equal(packageJson.scripts['windows:node'], 'node windows/node-source/main.mjs');
   assert.equal(packageJson.scripts['windows:self-check'], 'windows\\native-build\\bin\\chaoxing_plus.exe --self-check');
 });
-
-test.after(async () => {
-  await rm(outDir, { recursive: true, force: true });
-});
-

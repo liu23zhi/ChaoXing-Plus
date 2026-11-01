@@ -6,12 +6,13 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import ts from '@typescript/typescript6';
+import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 
 const execFileAsync = promisify(execFile);
-const outDir = resolve(process.cwd(), '.tmp-tests-cx-retry-cache-cjs');
+const outDir = createTestDirectory('cx-retry-cache-cjs');
 const helperModulePath = resolve(outDir, 'cx-retry-cache.js');
-const helperSourcePath = resolve(process.cwd(), 'src', 'projects', 'cx-retry-cache.ts');
-const tscCliPath = resolve(process.cwd(), 'scripts', 'test-helpers', 'tsc-compat.mjs');
+const helperSourcePath = resolveTestPath('src', 'projects', 'cx-retry-cache.ts');
+const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
 
 async function loadHelperModule() {
   await mkdir(outDir, { recursive: true });
@@ -47,7 +48,7 @@ function deferred() {
 }
 
 async function loadAnswererFactory(factoryName, dependencies) {
-  const source = await readFile(resolve('src/projects/cx.ts'), 'utf8');
+  const source = await readFile(resolveTestPath('src', 'projects', 'cx.ts'), 'utf8');
   const parsed = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
   let factory;
   const visit = (node) => {
