@@ -1,4 +1,4 @@
-name: CI
+name: 持续集成
 
 on:
   push:
@@ -34,18 +34,81 @@ jobs:
         run: npm ci
 
       - name: 类型检查
+        id: typecheck
         run: npm run typecheck
 
       - name: 构建扩展包
+        id: build_extension
         run: npm run build
 
-      - name: 构建 Windows 注入资源（release 关闭调试日志）
+      - name: 构建 Windows 注入资源（发布模式，关闭调试日志）
+        id: build_windows_assets
         run: npm run build:windows -- --release
 
       - name: 构建原生宿主与编译测试
+        id: build_native
         run: npm run build:native
 
+      - name: 准备 Windows 浏览器与窗口测试环境
+        id: browser_environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-CommandPath([string]$name) {
+            $command = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($command) { return $command.Source }
+            return $null
+          }
+          function Resolve-Browser([string[]]$candidates) {
+            foreach ($candidate in $candidates) {
+              if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+              if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $candidate).Path
+              }
+            }
+            return $null
+          }
+          $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
+          $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
+          $edgeCandidates = @(
+            $env:CX_BROWSER_EDGE_PATH,
+            (Get-CommandPath 'msedge.exe')
+          )
+          if ($programFilesX86) { $edgeCandidates += Join-Path $programFilesX86 'Microsoft\Edge\Application\msedge.exe' }
+          if ($programFiles) { $edgeCandidates += Join-Path $programFiles 'Microsoft\Edge\Application\msedge.exe' }
+          if ($localAppData) { $edgeCandidates += Join-Path $localAppData 'Microsoft\Edge\Application\msedge.exe' }
+          $chromeCandidates = @(
+            $env:CX_BROWSER_CHROME_PATH,
+            (Get-CommandPath 'chrome.exe')
+          )
+          if ($programFilesX86) { $chromeCandidates += Join-Path $programFilesX86 'Google\Chrome\Application\chrome.exe' }
+          if ($programFiles) { $chromeCandidates += Join-Path $programFiles 'Google\Chrome\Application\chrome.exe' }
+          if ($localAppData) { $chromeCandidates += Join-Path $localAppData 'Google\Chrome\Application\chrome.exe' }
+          $edge = Resolve-Browser $edgeCandidates
+          $chrome = Resolve-Browser $chromeCandidates
+          if (-not $edge) { throw 'Windows runner 未找到 Microsoft Edge；原生 Edge 验证不能静默跳过' }
+          if (-not $chrome) { throw 'Windows runner 未找到 Google Chrome；原生 Chrome 验证不能静默跳过' }
+          foreach ($browser in @(@{ Name = 'Edge'; Path = $edge }, @{ Name = 'Chrome'; Path = $chrome })) {
+            $version = (Get-Item -LiteralPath $browser.Path).VersionInfo.ProductVersion
+            if ([string]::IsNullOrWhiteSpace($version)) { throw "无法读取 $($browser.Name) 版本: $($browser.Path)" }
+            Write-Host "$($browser.Name): $($browser.Path) ($version)"
+          }
+          foreach ($command in @('powershell.exe', 'pwsh.exe')) {
+            $path = Get-CommandPath $command
+            if (-not $path) { throw "Windows runner 缺少 $command" }
+            Write-Host "${command}: $path"
+          }
+          "CX_BROWSER_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CX_BROWSER_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CX_BROWSER_EXECUTABLE=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CX_BROWSER_DEPENDENCIES=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CI_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CI_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 导出原生编译测试路径
+        id: export_native
+        if: ${{ !cancelled() && steps.build_native.outcome == 'success' }}
         shell: pwsh
         run: |
           $bin = (Resolve-Path '.\windows\native-build\bin').Path
@@ -71,6 +134,7 @@ jobs:
             CX_NATIVE_PROCESS_FIXTURE_EXE = 'process-fixture.exe'
             CX_NATIVE_DIAGNOSTICS_EXE = 'diagnostics-tests.exe'
             CX_NATIVE_HOME_EXE = 'home-tests.exe'
+            CX_NATIVE_EXTENSION_CACHE_EXE = 'extension-cache-tests.exe'
             CX_NATIVE_ADAPTER_EXE = 'adapter-account-tests.exe'
             CX_NATIVE_ACCOUNT_WINDOW_EXE = 'account-window-tests.exe'
             CX_NATIVE_BROWSER_SESSION_EXE = 'browser-session-tests.exe'
@@ -87,25 +151,59 @@ jobs:
           }
 
       - name: 单元测试（含原生编译入口）
+        id: unit_tests
+        if: ${{ !cancelled() && steps.export_native.outcome == 'success' }}
         shell: pwsh
         run: |
           $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
           Write-Host "单元测试文件数: $($testFiles.Count)"
+          "CI_TEST_FILES=$($testFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           # 受限并发：默认按 CPU 并发会同时启动多个 Chromium/原生宿主用例，在 CI 小规格 runner 上出现过截止类偶发。
           node --test --test-concurrency=4 --test-timeout=300000 @testFiles
 
+      - name: Windows 交互窗口与浏览器可见性回归
+        id: window_tests
+        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $env:CX_TEST_NATIVE_WINDOW = '1'
+          $windowFiles = @(
+            'scripts/windows-selection-window.test.mjs',
+            'scripts/windows-scan-progress-window.test.mjs',
+            'scripts/windows-native-selection.test.mjs',
+            'scripts/windows-native-home.test.mjs',
+            'scripts/windows-native-adapter.test.mjs',
+            'scripts/windows-native-browser-session.test.mjs'
+          ) | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
+          Write-Host "交互窗口测试文件数: $($windowFiles.Count)"
+          "CI_WINDOW_FILES=$($windowFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          node --test --test-concurrency=1 --test-timeout=600000 @windowFiles
+
       - name: 浏览器回归（含原生构建浏览器入口）
+        id: browser_tests
+        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
         shell: pwsh
         run: |
           $browserFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
           Write-Host "浏览器测试文件数: $($browserFiles.Count)"
+          "CI_BROWSER_FILES=$($browserFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           node --test --test-concurrency=4 --test-timeout=600000 @browserFiles
 
       - name: 发布包冒烟
+        id: package_smoke
+        if: ${{ !cancelled() && steps.build_extension.outcome == 'success' && steps.build_windows_assets.outcome == 'success' && steps.build_native.outcome == 'success' }}
         shell: pwsh
         run: npm run release:windows
 
+      - name: 发布目录 Node 入口回归
+        id: release_node_tests
+        if: ${{ !cancelled() && steps.package_smoke.outcome == 'success' }}
+        shell: pwsh
+        run: node --test --test-concurrency=1 --test-timeout=180000 scripts/windows-node-exe.test.mjs
+
       - name: 发布目录复制后入口自检
+        id: release_smoke
+        if: ${{ !cancelled() && steps.package_smoke.outcome == 'success' }}
         shell: pwsh
         run: |
           $build = (Resolve-Path 'windows/native-build').Path
@@ -127,23 +225,107 @@ jobs:
           $native = Start-Process -FilePath (Join-Path $package 'single-file\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($native.ExitCode -ne 0) { throw "发布包原生自检失败: $($native.ExitCode)" }
           node (Join-Path $package 'multi-file\verify-release.mjs')
-          if ($LASTEXITCODE -ne 0) { throw "multi-file 变体完整性自校验失败: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "多文件变体完整性自校验失败: $LASTEXITCODE" }
           $multi = Start-Process -FilePath (Join-Path $package 'multi-file\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
-          if ($multi.ExitCode -ne 0) { throw "multi-file 原生自检失败: $($multi.ExitCode)" }
+          if ($multi.ExitCode -ne 0) { throw "多文件变体原生自检失败: $($multi.ExitCode)" }
           Push-Location -LiteralPath (Join-Path $package 'multi-file')
           try {
             $resolved = @(Get-Command .\chaoxing_plus -CommandType Application)[0].Source
             if ([IO.Path]::GetExtension($resolved) -ne '.com') { throw "扩展名省略入口未选择 .com: $resolved" }
             .\chaoxing_plus --self-check --quiet --no-disk-write
-            if ($LASTEXITCODE -ne 0) { throw "Console 辅助入口自检失败: $LASTEXITCODE" }
+            if ($LASTEXITCODE -ne 0) { throw "控制台辅助入口自检失败: $LASTEXITCODE" }
           } finally { Pop-Location }
           $wrapper = Start-Process -FilePath (Join-Path $package 'multi-file\package-to-single\chaoxing_plus.exe') -ArgumentList '--self-check','--quiet','--no-disk-write' -PassThru -Wait
           if ($wrapper.ExitCode -ne 0) { throw "多文件单 EXE 包装器自检失败: $($wrapper.ExitCode)" }
 
       - name: 上传发布包
+        id: upload_release
+        if: ${{ !cancelled() && steps.unit_tests.outcome == 'success' && steps.window_tests.outcome == 'success' && steps.browser_tests.outcome == 'success' && steps.package_smoke.outcome == 'success' && steps.release_node_tests.outcome == 'success' && steps.release_smoke.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: windows-release
+          name: Windows 发布包
           path: windows/native-build/release/
           if-no-files-found: error
+
+      - name: 写入 CI 摘要
+        if: always()
+        shell: pwsh
+        env:
+          CI_JOB_STATUS: ${{ job.status }}
+          CI_RUN_NUMBER: ${{ github.run_number }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_REF_NAME: ${{ github.ref_name }}
+          CI_SHA: ${{ github.sha }}
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          CI_EXTENSION_BUILD_OUTCOME: ${{ steps.build_extension.outcome }}
+          CI_WINDOWS_ASSETS_OUTCOME: ${{ steps.build_windows_assets.outcome }}
+          CI_NATIVE_BUILD_OUTCOME: ${{ steps.build_native.outcome }}
+          CI_BROWSER_ENVIRONMENT_OUTCOME: ${{ steps.browser_environment.outcome }}
+          CI_WINDOW_TESTS_OUTCOME: ${{ steps.window_tests.outcome }}
+          CI_UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
+          CI_BROWSER_TESTS_OUTCOME: ${{ steps.browser_tests.outcome }}
+          CI_PACKAGE_SMOKE_OUTCOME: ${{ steps.package_smoke.outcome }}
+          CI_RELEASE_NODE_TESTS_OUTCOME: ${{ steps.release_node_tests.outcome }}
+          CI_RELEASE_SMOKE_OUTCOME: ${{ steps.release_smoke.outcome }}
+          CI_UPLOAD_OUTCOME: ${{ steps.upload_release.outcome }}
+        run: |
+          function ConvertTo-CiStatusLabel([string]$status) {
+            switch ($status) {
+            'success' { '通过' }
+            'failure' { '失败' }
+            'cancelled' { '已取消' }
+            default { '未执行' }
+            }
+          }
+          $statusText = ConvertTo-CiStatusLabel $env:CI_JOB_STATUS
+          $typecheckStatus = ConvertTo-CiStatusLabel $env:CI_TYPECHECK_OUTCOME
+          $extensionBuildStatus = ConvertTo-CiStatusLabel $env:CI_EXTENSION_BUILD_OUTCOME
+          $windowsAssetsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOWS_ASSETS_OUTCOME
+          $nativeBuildStatus = ConvertTo-CiStatusLabel $env:CI_NATIVE_BUILD_OUTCOME
+          $browserEnvironmentStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_ENVIRONMENT_OUTCOME
+          $windowTestsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOW_TESTS_OUTCOME
+          $unitTestsStatus = ConvertTo-CiStatusLabel $env:CI_UNIT_TESTS_OUTCOME
+          $browserTestsStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_TESTS_OUTCOME
+          $packageSmokeStatus = ConvertTo-CiStatusLabel $env:CI_PACKAGE_SMOKE_OUTCOME
+          $releaseNodeTestsStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_NODE_TESTS_OUTCOME
+          $releaseSmokeStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_SMOKE_OUTCOME
+          $uploadStatus = ConvertTo-CiStatusLabel $env:CI_UPLOAD_OUTCOME
+          $testFiles = if ($env:CI_TEST_FILES) { $env:CI_TEST_FILES } else { '未开始' }
+          $browserFiles = if ($env:CI_BROWSER_FILES) { $env:CI_BROWSER_FILES } else { '未开始' }
+          $windowFiles = if ($env:CI_WINDOW_FILES) { $env:CI_WINDOW_FILES } else { '未开始' }
+          $summary = @"
+          ## 持续集成摘要
+
+          | 项目 | 内容 |
+          | --- | --- |
+          | 结果 | **$statusText** |
+          | 运行编号 | $env:CI_RUN_NUMBER |
+          | 触发事件 | $env:CI_EVENT_NAME |
+          | 分支或标签 | ``$env:CI_REF_NAME`` |
+          | 提交 | ``$env:CI_SHA`` |
+          | 工作流运行 | [打开本次运行]($env:CI_RUN_URL) |
+
+          ### 检查阶段
+
+          | 检查项目 | 结果 | 补充信息 |
+          | --- | --- | --- |
+          | 类型检查 | $typecheckStatus | |
+          | 扩展包构建 | $extensionBuildStatus | |
+          | Windows 注入资源构建 | $windowsAssetsStatus | |
+          | 原生宿主与编译测试构建 | $nativeBuildStatus | |
+          | Windows 浏览器环境 | $browserEnvironmentStatus | Edge: ``$env:CI_EDGE_PATH``；Chrome: ``$env:CI_CHROME_PATH`` |
+          | 单元测试 | $unitTestsStatus | $testFiles 个测试文件 |
+          | 交互窗口与可见浏览器回归 | $windowTestsStatus | $windowFiles 个测试文件 |
+          | 浏览器回归 | $browserTestsStatus | $browserFiles 个测试文件 |
+          | 发布包冒烟 | $packageSmokeStatus | |
+          | 发布目录 Node 入口回归 | $releaseNodeTestsStatus | 发布目录生成后执行 |
+          | 发布目录复制、自检与完整性校验 | $releaseSmokeStatus | |
+          | 发布包上传 | $uploadStatus | ``Windows 发布包`` |
+          "@
+          if ($env:GITHUB_STEP_SUMMARY) {
+            $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+            Write-Host $summary
+          }
 

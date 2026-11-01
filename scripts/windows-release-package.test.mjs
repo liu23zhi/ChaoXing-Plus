@@ -436,7 +436,7 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
 
 test('CI 工作流与发布脚本入口已接入仓库', async () => {
   const workflow = await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-  assert.match(workflow, /^name: CI$/mu);
+  assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /node-version: '22'/u);
   assert.match(workflow, /npm ci/u);
@@ -449,6 +449,29 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /npm run release:windows/u);
   assert.match(workflow, /Copy-Item -LiteralPath .*'release'/u, 'CI 必须在独立目录验证发布产物');
   assert.match(workflow, /path: windows\/native-build\/release\//u, 'CI 必须直接上传原生发布目录');
+  assert.match(workflow, /name: Windows 发布包/u, 'CI 发布包展示名应使用中文');
+  assert.match(workflow, /name: 写入 CI 摘要/u, 'CI 必须写入 GitHub Actions 摘要');
+  assert.match(workflow, /if: always\(\)/u, 'CI 摘要必须在失败后仍尝试写入');
+  assert.match(workflow, /GITHUB_STEP_SUMMARY/u, 'CI 摘要必须写入 GITHUB_STEP_SUMMARY');
+  assert.match(workflow, /id: browser_environment/u, 'CI 必须显式准备浏览器环境');
+  assert.match(workflow, /CX_BROWSER_EDGE_PATH/u, 'CI 必须导出 Edge 可执行文件路径');
+  assert.match(workflow, /CX_BROWSER_CHROME_PATH/u, 'CI 必须导出 Chrome 可执行文件路径');
+  assert.match(workflow, /CX_BROWSER_EXECUTABLE=/u, 'CI 必须为 Puppeteer 选择完整浏览器可执行文件');
+  assert.match(workflow, /CX_NATIVE_EXTENSION_CACHE_EXE/u, 'CI 必须导出扩展缓存原生测试入口');
+  assert.match(workflow, /name: Windows 交互窗口与浏览器可见性回归/u, 'CI 必须执行交互窗口回归');
+  assert.match(workflow, /--test-concurrency=1 --test-timeout=600000 @windowFiles/u, '交互窗口回归必须串行执行');
+  assert.match(workflow, /CX_TEST_NATIVE_WINDOW = '1'/u, 'CI 必须开启真实窗口回归');
+  assert.match(workflow, /scripts\/windows-native-adapter\.test\.mjs/u, 'CI 必须覆盖原生账号窗口回归');
+  assert.match(workflow, /name: 发布目录 Node 入口回归/u, 'CI 必须在发布目录生成后补跑 Node 入口回归');
+  assert.match(workflow, /scripts\/windows-node-exe\.test\.mjs/u, 'CI 必须补跑发布目录图标与 Node 入口测试');
+  assert.match(workflow, /steps\.unit_tests\.outcome == 'success'.*steps\.window_tests\.outcome == 'success'.*steps\.browser_tests\.outcome == 'success'.*steps\.package_smoke\.outcome == 'success'.*steps\.release_node_tests\.outcome == 'success'.*steps\.release_smoke\.outcome == 'success'/u, 'CI 只有全部验证成功后才能上传发布包');
+  assert.match(workflow, /CI_TEST_FILES/u, 'CI 摘要必须记录单元测试文件数');
+  assert.match(workflow, /CI_BROWSER_FILES/u, 'CI 摘要必须记录浏览器回归文件数');
+  assert.match(workflow, /CI_TYPECHECK_OUTCOME: \$\{\{ steps\.typecheck\.outcome \}\}/u, 'CI 摘要必须记录类型检查结果');
+  assert.match(workflow, /CI_UNIT_TESTS_OUTCOME: \$\{\{ steps\.unit_tests\.outcome \}\}/u, 'CI 摘要必须记录单元测试结果');
+  assert.match(workflow, /CI_BROWSER_TESTS_OUTCOME: \$\{\{ steps\.browser_tests\.outcome \}\}/u, 'CI 摘要必须记录浏览器回归结果');
+  assert.match(workflow, /CI_RELEASE_NODE_TESTS_OUTCOME: \$\{\{ steps\.release_node_tests\.outcome \}\}/u, 'CI 摘要必须记录发布目录 Node 回归结果');
+  assert.match(workflow, /CI_UPLOAD_OUTCOME: \$\{\{ steps\.upload_release\.outcome \}\}/u, 'CI 摘要必须记录发布包上传结果');
   assert.doesNotMatch(workflow, /Expand-Archive|native-build\/\*\.zip/u, '原生 CI 不再依赖 ZIP');
   assert.match(workflow, /actions\/upload-artifact@v4/u);
   assert.match(workflow, /\$env:GITHUB_ENV/u, 'native compiled test paths must be exported to later CI steps');
