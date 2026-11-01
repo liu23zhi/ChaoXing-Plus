@@ -198,6 +198,8 @@ test('compiled native transport self-test', { skip: !process.env.CX_NATIVE_TRANS
   for (const regression of [
     'zero Upgrade timeout performs no connection',
     'zero timeout never waits for an empty socket',
+    'positive timeout bounds an idle socket',
+    'scheduler delay does not enlarge a polling wait budget',
     'partial header resumes on the next read',
     'continuation completes a preserved fragmented message',
     'continuous control frames respect the total deadline',

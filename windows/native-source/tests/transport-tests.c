@@ -1,5 +1,31 @@
 /* Exercise the actual transport over connected loopback sockets. */
+#include "../net.h"
+
+static struct {
+    BOOL enabled, invalid;
+    DWORD calls, maxWaitUs, delayMs, delayed;
+} waitProbe;
+
+/* Keep real socket I/O while observing its budget, independently of scheduling. */
+static int WSAAPI test_select(int nfds, fd_set *reads, fd_set *writes, fd_set *errors, const struct timeval *timeout) {
+    int result;
+    if (waitProbe.enabled) {
+        ++waitProbe.calls;
+        if (!timeout || timeout->tv_sec < 0 || timeout->tv_sec > 4294
+            || timeout->tv_usec < 0 || timeout->tv_usec >= 1000000) waitProbe.invalid = TRUE;
+        else {
+            DWORD waitUs = (DWORD)timeout->tv_sec * 1000000UL + (DWORD)timeout->tv_usec;
+            if (waitUs > waitProbe.maxWaitUs) waitProbe.maxWaitUs = waitUs;
+        }
+    }
+    result = select(nfds, reads, writes, errors, timeout);
+    if (waitProbe.enabled && waitProbe.delayMs) { ++waitProbe.delayed; Sleep(waitProbe.delayMs); }
+    return result;
+}
+
+#define select test_select
 #include "../net.c"
+#undef select
 
 #ifdef CX_TEST_OLD_READ
 #define net_ws_read_timeout(ws, text, length, timeout, error, cap) net_ws_read(ws, text, length, error, cap)
@@ -16,6 +42,20 @@ static void output(const char *text) {
 static void check(const char *name, BOOL result) {
     output(result ? "PASS " : "FAIL "); output(name); output("\n");
     if (!result) ++failedChecks;
+}
+static void deadline_diagnostic(const char *name, int result, DWORD elapsed) {
+    char number[11];
+    output("DEADLINE "); output(name); output(" result=");
+    if (result < 0) output("-");
+    decimal(number, (DWORD)(result < 0 ? -result : result)); output(number);
+    output(" elapsedMs="); decimal(number, elapsed); output(number);
+    output(" selectCalls="); decimal(number, waitProbe.calls); output(number);
+    output(" maxWaitUs="); decimal(number, waitProbe.maxWaitUs); output(number);
+    output(" invalidWait="); output(waitProbe.invalid ? "1" : "0");
+    output(" delayedCalls="); decimal(number, waitProbe.delayed); output(number); output("\n");
+}
+static void probe_waits(DWORD delayMs) {
+    ZeroMemory(&waitProbe, sizeof(waitProbe)); waitProbe.enabled = TRUE; waitProbe.delayMs = delayMs;
 }
 static BOOL pair_open(TestPair *pair) {
     SOCKET listener = INVALID_SOCKET, client = INVALID_SOCKET;
@@ -110,10 +150,21 @@ static void test_upgrade_zero_deadline(void) {
 static void test_deadlines(void) {
     TestPair pair; char *text = NULL; DWORD length = 0, started, elapsed; int result;
     if (!pair_open(&pair)) { check("create timing loopback pair", FALSE); return; }
+    probe_waits(0);
     started = GetTickCount(); result = read_for(&pair, 0, &text, &length); elapsed = GetTickCount() - started;
-    check("zero timeout never waits for an empty socket", result == 0 && elapsed < 50 && !text && !length);
+    waitProbe.enabled = FALSE; deadline_diagnostic("zero idle", result, elapsed);
+    check("zero timeout never waits for an empty socket", result == 0 && elapsed < 250
+        && !waitProbe.invalid && !waitProbe.maxWaitUs && !text && !length);
+    probe_waits(0);
     started = GetTickCount(); result = read_for(&pair, 25, &text, &length); elapsed = GetTickCount() - started;
-    check("positive timeout bounds an idle socket", result == 0 && elapsed < 90 && !text && !length);
+    waitProbe.enabled = FALSE; deadline_diagnostic("positive idle", result, elapsed);
+    check("positive timeout bounds an idle socket", result == 0 && elapsed < 500
+        && !waitProbe.invalid && waitProbe.maxWaitUs <= 25000 && !text && !length);
+    probe_waits(125);
+    started = GetTickCount(); result = read_for(&pair, 0, &text, &length); elapsed = GetTickCount() - started;
+    waitProbe.enabled = FALSE; deadline_diagnostic("delayed polling", result, elapsed);
+    check("scheduler delay does not enlarge a polling wait budget", result == 0 && elapsed < 500
+        && waitProbe.delayed && waitProbe.calls == 1 && !waitProbe.invalid && !waitProbe.maxWaitUs && !text && !length);
     pair_close(&pair);
     if (pair_open(&pair)) {
         ControlWriter writer; HANDLE thread;

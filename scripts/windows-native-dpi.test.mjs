@@ -13,7 +13,8 @@ const isUnsupportedDpiShim = (result) => {
   if (result.status !== 8 || typeof result.stdout !== 'string') return false;
   const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim());
   const last = lines.length - 1;
-  return lines[last - 1] === 'DPI_SHIM_UNOBSERVED'
+  const marker = lines.indexOf('DPI_SHIM_UNOBSERVED');
+  return marker >= 0 && marker < last
     && lines[last] === 'NATIVE DPI PROCESS TESTS SKIP'
     && !lines.includes('NATIVE DPI PROCESS TESTS PASS')
     && !lines.includes('NATIVE DPI PROCESS TESTS FAIL');
@@ -24,6 +25,14 @@ test('DPI integration skips only on the dedicated unsupported-shim result', () =
     status: 8,
     stdout: 'diagnostic\nDPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\n'
   }), true);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'DPI_SHIM_UNOBSERVED\nSKIP temporary layer affects a fresh test child before immediate restore\nNATIVE DPI PROCESS TESTS SKIP\n'
+  }), true);
+  assert.equal(isUnsupportedDpiShim({
+    status: 8,
+    stdout: 'DPI_SHIM_UNOBSERVED\nNATIVE DPI PROCESS TESTS SKIP\nunexpected output\n'
+  }), false);
   assert.equal(isUnsupportedDpiShim({ status: 8, stdout: 'NATIVE DPI PROCESS TESTS FAIL\n' }), false);
   assert.equal(isUnsupportedDpiShim({
     status: 8,

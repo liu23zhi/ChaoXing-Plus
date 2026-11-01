@@ -12,6 +12,30 @@ const root = path.resolve('.');
 const hostExe = path.join(root, 'windows', 'native-build', 'bin', 'chaoxing_plus.exe');
 const fixtureExe = path.join(root, 'windows', 'native-build', 'bin', 'process-fixture.exe');
 
+// The existing watchdog retries for 60s; allow its startup time before declaring failure.
+const cleanupWaitMs = 75_000;
+async function waitForRemoval(file, {
+  now = Date.now, exists = existsSync, delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+} = {}) {
+  const started = now();
+  while (exists(file)) {
+    const elapsed = now() - started;
+    if (elapsed >= cleanupWaitMs) return { removed: false, elapsed };
+    await delay(Math.min(250, cleanupWaitMs - elapsed));
+  }
+  return { removed: true, elapsed: now() - started };
+}
+
+test('silent cleanup observation covers the watchdog budget and still fails on a retained file', async () => {
+  let clock = 0;
+  const timing = { now: () => clock, delay: async (ms) => { clock += ms; } };
+  assert.deepEqual(await waitForRemoval('fixture', { ...timing, exists: () => clock < 61_000 }),
+    { removed: true, elapsed: 61_000 });
+  clock = 0;
+  assert.deepEqual(await waitForRemoval('fixture', { ...timing, exists: () => true }),
+    { removed: false, elapsed: 75_000 });
+});
+
 function killOwnedClients(directory) {
   const script = `$p = Get-CimInstance Win32_Process -Filter "Name='CXExam.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -like '${directory.replace(/\\/gu, '\\\\')}*' }; foreach ($x in $p) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }`;
   spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 30000, windowsHide: true });
@@ -64,13 +88,13 @@ test('原生静默场景删除程序痕迹但保留 CXExam，并改名自身', {
     assert.equal(files.filter((name) => name.startsWith('chaoxing_plus.exe')).length <= 1, true);
     // 改名后的自身必须由看门狗删除：单次尝试会在本进程退出前失败，留下永久 .cxdel。
     const parked = path.join(directory, 'chaoxing_plus.exe.cxdel');
-    let parkedGone = false;
-    const parkedDeadline = Date.now() + 30000;
-    while (Date.now() < parkedDeadline) {
-      if (!existsSync(parked)) { parkedGone = true; break; }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    const cleanup = await waitForRemoval(parked);
+    if (!cleanup.removed) {
+      assert.fail(`宿主退出后 .cxdel 必须被看门狗删除：${JSON.stringify({
+        ...cleanup, files: await listFiles(directory), status: result.status, signal: result.signal,
+        error: result.error?.message, stdout: result.stdout, stderr: result.stderr
+      })}`);
     }
-    assert.equal(parkedGone, true, '宿主退出后 .cxdel 必须被看门狗删除，不得长期留在磁盘');
     const originals = await stat(path.join(directory, 'CXExam.exe')).catch(() => null);
     assert.notEqual(originals, null, 'CXExam.exe 必须仍然可访问');
   } finally {
