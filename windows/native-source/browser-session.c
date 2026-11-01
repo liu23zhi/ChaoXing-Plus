@@ -135,8 +135,21 @@ static BOOL bs_remove(const WCHAR *directory) {
 static BOOL bs_cleanup(CX_BROWSER_SESSION *s, WCHAR *error, DWORD cap) {
     DWORD i;
     if (s->cleaned) return TRUE;
-    for (i = 0; i < 40; ++i) { if (bs_remove(s->root)) { s->cleaned = TRUE; return TRUE; } Sleep(50); }
+    for (i = 0; i < 200; ++i) { if (bs_remove(s->root)) { s->cleaned = TRUE; return TRUE; } Sleep(50); }
     bs_error(error, cap, L"浏览器已退出，但临时资料仍被占用，请稍后重试清理。"); return FALSE;
+}
+
+static BOOL bs_wait_job_empty(CX_BROWSER_SESSION *s, DWORD timeout) {
+    DWORD started = GetTickCount();
+    if (!s || !s->job) return TRUE;
+    for (;;) {
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info;
+        ZeroMemory(&info, sizeof(info));
+        if (!QueryInformationJobObject(s->job, JobObjectBasicAccountingInformation, &info, sizeof(info), NULL)) return FALSE;
+        if (!info.ActiveProcesses) return TRUE;
+        if ((DWORD)(GetTickCount() - started) >= timeout) return FALSE;
+        Sleep(20);
+    }
 }
 
 static BOOL bs_read(CX_BROWSER_SESSION *s, DWORD wanted, char **reply, WCHAR *error, DWORD cap) {
@@ -324,19 +337,22 @@ BOOL cx_browser_poll(CX_BROWSER_SESSION *s, BOOL *running, WCHAR *error, DWORD e
 }
 
 BOOL cx_browser_close(CX_BROWSER_SESSION *s, WCHAR *error, DWORD errorCapacity) {
-    char *reply = NULL; BOOL running = FALSE; DWORD started;
+    char *reply = NULL;
     if (!s) return TRUE;
     if (s->process && WaitForSingleObject(s->process, 0) == WAIT_TIMEOUT && s->writePipe && s->readPipe) { (void)bs_command(s, "Browser.close", NULL, NULL, &reply, NULL, 0); if (reply) HeapFree(GetProcessHeap(), 0, reply); }
-    started = GetTickCount();
-    while ((DWORD)(GetTickCount() - started) < 3000) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info; ZeroMemory(&info, sizeof(info)); if (!s->job || !QueryInformationJobObject(s->job, JobObjectBasicAccountingInformation, &info, sizeof(info), NULL) || !info.ActiveProcesses) break; Sleep(20); }
-    if (s->job) TerminateJobObject(s->job, 0);
-    if (s->process) WaitForSingleObject(s->process, 3000);
-    return cx_browser_poll(s, &running, error, errorCapacity) && !running;
+    if (!bs_wait_job_empty(s, 3000)) {
+        if (s->job) TerminateJobObject(s->job, 0);
+        if (!bs_wait_job_empty(s, 5000)) { bs_error(error, errorCapacity, L"无法等待临时浏览器进程组退出。"); return FALSE; }
+    }
+    if (s->process) WaitForSingleObject(s->process, 0);
+    return bs_cleanup(s, error, errorCapacity);
 }
 
 void cx_browser_destroy(CX_BROWSER_SESSION *s) {
+    DWORD i;
     if (!s) return;
     (void)cx_browser_close(s, NULL, 0);
+    for (i = 0; !s->cleaned && i < 3; ++i) { Sleep(100); (void)bs_cleanup(s, NULL, 0); }
     if (s->job) CloseHandle(s->job); if (s->process) CloseHandle(s->process); if (s->readPipe) CloseHandle(s->readPipe); if (s->writePipe) CloseHandle(s->writePipe);
     if (s->receive) HeapFree(GetProcessHeap(), 0, s->receive); SecureZeroMemory(s, sizeof(*s)); HeapFree(GetProcessHeap(), 0, s);
 }

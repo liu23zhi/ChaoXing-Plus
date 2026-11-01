@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { appendFile, copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -55,7 +55,12 @@ test('temporary DPI override changes a real test child and restores the next ord
   try {
     const children = ['DpiBaseline.exe', 'DpiOverride.exe', 'DpiAfterRestore.exe']
       .map((name) => join(directory, name));
-    for (const child of children) await copyFile(process.env.CX_NATIVE_DPI_CHILD_EXE, child);
+    for (const [index, child] of children.entries()) {
+      await copyFile(process.env.CX_NATIVE_DPI_CHILD_EXE, child);
+      // AppCompat can cache decisions by image identity on hosted Windows runners.
+      // Keep each launch target distinct while preserving the same test entry point.
+      await appendFile(child, Buffer.from(`CX_DPI_VARIANT_${index}\0`, 'ascii'));
+    }
     const result = spawnSync(process.env.CX_NATIVE_DPI_PROCESS_EXE, children, {
       cwd: directory, encoding: 'utf8', timeout: 20_000, windowsHide: true
     });

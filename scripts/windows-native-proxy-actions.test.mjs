@@ -298,9 +298,19 @@ test('实例检查按完整路径：不同目录的同名 CXExam.exe 不互相�
     const result = run(['--client', clientB, '--no-elevate', '--no-log', '--no-disk-write', '--duration', '1']);
     assert.doesNotMatch(result.output, /client-already-running/u, `不同路径不应被判为同实例: ${result.output}`);
   } finally {
-    if (running) running.kill();
-    await rm(dirA, { recursive: true, force: true });
-    await rm(dirB, { recursive: true, force: true });
+    if (running) {
+      const stopped = new Promise((resolve) => {
+        if (running.exitCode !== null || running.signalCode !== null) {
+          resolve();
+          return;
+        }
+        running.once('close', resolve);
+      });
+      if (running.exitCode === null && running.signalCode === null) running.kill();
+      await stopped;
+    }
+    await rm(dirA, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(dirB, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
