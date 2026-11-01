@@ -443,7 +443,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
   assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境并报告结果');
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境并报告结果');
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /node-version: '22'/u);
   assert.match(workflow, /npm ci/u);
@@ -451,6 +451,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /npm run build$/mu);
   assert.match(workflow, /npm run build:windows/u);
   assert.match(workflow, /npm run build:native/u);
+  assert.match(workflow, /'dist\/manifest\.json'/u, 'Windows 构建必须校验扩展 dist 产物');
+  assert.match(workflow, /path:\s*\|[\s\S]*?dist\/[\s\S]*?dist-windows\//u, '拆分 Windows job 必须共享扩展 dist 产物');
   assert.match(workflow, /tab-answer-pause\.test\.mjs/u, '高并发全量测试必须包含并显式隔离标签页暂停浏览器回归');
   assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 @testFiles/u, '单元测试必须限制并发');
   assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 \$testFile/u, '标签页暂停浏览器回归必须串行执行');
@@ -481,10 +483,17 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /scripts\/windows-node-exe\.test\.mjs/u, 'CI 必须补跑发布目录图标与 Node 入口测试');
   assert.match(workflow, /needs: \[windows-build, windows-unit, windows-pause, windows-window, windows-browser\]/u, 'CI 只有全部 Windows 验证成功后才能生成发布包');
   assert.match(workflow, /CX_DISCOVERY_TEST_DRIVER/u, 'CI 必须导出 discovery 测试驱动');
-  assert.match(workflow, /真实客户端 3×2 注入矩阵/u, 'CI 摘要必须记录真实客户端矩阵');
+  assert.match(workflow, /真实客户端自动发现注入矩阵/u, 'CI 摘要必须记录自动发现的真实客户端矩阵');
   assert.match(workflow, /matrix:/u, '真实客户端注入必须使用矩阵');
-  assert.match(workflow, /database: I/u, '真实客户端矩阵必须包含数据库 I');
-  assert.match(workflow, /database: II/u, '真实客户端矩阵必须包含数据库 II');
+  assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
+  assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
+  assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
+  assert.match(workflow, /toJSON\(vars\)/u, 'CI 必须把配置变量集合交给发现步骤');
+  assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');
+  assert.match(workflow, /vars\[matrix\.database_var\]/u, '真实客户端 job 必须按发现的变量名读取数据库');
+  assert.match(workflow, /::add-mask::\$compactDb/u, '真实客户端数据库内容必须在日志中掩码');
+  assert.doesNotMatch(workflow, /database:\s*I\s*$/mu, '真实客户端矩阵不得硬编码数据库 I');
+  assert.doesNotMatch(workflow, /database:\s*II\s*$/mu, '真实客户端矩阵不得硬编码数据库 II');
   assert.match(workflow, /tests\/private-clients/u, '真实客户端必须来自私有测试目录');
   assert.match(workflow, /lfs: true/u, '客户端测试必须拉取 Git LFS 资产');
   assert.match(workflow, /Expand-Archive/u, '真实客户端测试必须解压数据库 ZIP');

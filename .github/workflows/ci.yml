@@ -57,6 +57,9 @@ jobs:
         shell: pwsh
         run: |
           $required = @(
+            'dist/manifest.json',
+            'dist/chaoxing-plus.js',
+            'dist/_locales/zh_CN/messages.json',
             'dist-windows/windows-bootstrap.js',
             'dist-windows/chaoxing-plus.windows.js',
             'windows/native-build/bin/chaoxing_plus.exe',
@@ -71,10 +74,74 @@ jobs:
         with:
           name: windows-ci-build-${{ github.sha }}
           path: |
+            dist/
             dist-windows/
             windows/native-build/
           if-no-files-found: error
           retention-days: 7
+
+  windows-real-client-discovery:
+    name: 发现真实客户端注入矩阵
+    needs: windows-build
+    if: ${{ needs.windows-build.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 扫描客户端与数据库变量
+        id: discover
+        shell: pwsh
+        env:
+          CONFIG_VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          $clientDirectory = Join-Path $env:GITHUB_WORKSPACE 'tests/private-clients'
+          if (-not (Test-Path -LiteralPath $clientDirectory -PathType Container)) {
+            throw "私有客户端目录不存在: $clientDirectory"
+          }
+          $clientFiles = @(Get-ChildItem -LiteralPath $clientDirectory -Filter '*.exe' -File -Recurse | Sort-Object FullName)
+          if ($clientFiles.Count -eq 0) { throw '私有客户端目录中没有 EXE' }
+
+          $configVars = if ([string]::IsNullOrWhiteSpace($env:CONFIG_VARS_JSON)) {
+            [pscustomobject]@{}
+          } else {
+            $env:CONFIG_VARS_JSON | ConvertFrom-Json
+          }
+          $databaseVars = @($configVars.PSObject.Properties | Where-Object {
+            $_.Name -match '^Examination_Client_Database_(.+)$' -and -not [string]::IsNullOrWhiteSpace([string]$_.Value)
+          })
+          if ($databaseVars.Count -eq 0) { throw '没有配置非空的 Examination_Client_Database_* 变量' }
+
+          $entries = foreach ($clientFile in $clientFiles) {
+            $fileName = [IO.Path]::GetFileNameWithoutExtension($clientFile.Name)
+            if ($fileName -notmatch '^chaoxing-exam-(?<version>v[0-9.]+)$') {
+              throw "无法从客户端文件名识别版本: $($clientFile.Name)"
+            }
+            $version = $Matches.version
+            $injectMode = if ($fileName -match '^chaoxing-exam-v4\.3\.') {
+              'dll-proxy'
+            } elseif ($fileName -match '^chaoxing-exam-v4\.1\.4\.') {
+              'cdp-port'
+            } else {
+              throw "未定义客户端注入通道: $($clientFile.Name)"
+            }
+            $relativePath = [IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $clientFile.FullName).Replace([IO.Path]::DirectorySeparatorChar, '/')
+            foreach ($databaseVar in $databaseVars) {
+              $suffix = [regex]::Match($databaseVar.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase).Groups[1].Value
+              [ordered]@{
+                client = $version
+                installer = $relativePath
+                inject_mode = $injectMode
+                database = $suffix
+                database_var = $databaseVar.Name
+              }
+            }
+          }
+          $matrix = [ordered]@{ include = @($entries) } | ConvertTo-Json -Compress -Depth 5
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "matrix=$matrix`n", [Text.UTF8Encoding]::new($false))
+          Write-Host "发现 $($clientFiles.Count) 个客户端、$($databaseVars.Count) 个数据库变量，生成 $($entries.Count) 个注入用例"
 
   windows-unit:
     name: Windows 单元与原生测试
@@ -311,40 +378,13 @@ jobs:
 
   windows-real-client:
     name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
-    needs: windows-build
-    if: ${{ needs.windows-build.result == 'success' }}
+    needs: [windows-build, windows-real-client-discovery]
+    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - client: v4.1.4.25512
-            installer: tests/private-clients/chaoxing-exam-v4.1.4.25512.exe
-            inject_mode: cdp-port
-            database: I
-          - client: v4.1.4.25512
-            installer: tests/private-clients/chaoxing-exam-v4.1.4.25512.exe
-            inject_mode: cdp-port
-            database: II
-          - client: v4.3.0.4
-            installer: tests/private-clients/chaoxing-exam-v4.3.0.4.exe
-            inject_mode: dll-proxy
-            database: I
-          - client: v4.3.0.4
-            installer: tests/private-clients/chaoxing-exam-v4.3.0.4.exe
-            inject_mode: dll-proxy
-            database: II
-          - client: v4.1.4.25389
-            installer: tests/private-clients/chaoxing-exam-v4.1.4.25389.exe
-            inject_mode: cdp-port
-            database: I
-          - client: v4.1.4.25389
-            installer: tests/private-clients/chaoxing-exam-v4.1.4.25389.exe
-            inject_mode: cdp-port
-            database: II
-    env:
-      DATABASE_BASE64: ${{ matrix.database == 'I' && vars.EXAMINATION_CLIENT_DATABASE_I || vars.EXAMINATION_CLIENT_DATABASE_II }}
+      matrix: ${{ fromJSON(needs.windows-real-client-discovery.outputs.matrix) }}
     steps:
       - name: 检出代码与 Git LFS 客户端资产
         uses: actions/checkout@v4
@@ -371,10 +411,12 @@ jobs:
       - name: 执行真实客户端注入
         shell: pwsh
         env:
-          DATABASE_BASE64: ${{ env.DATABASE_BASE64 }}
+          DATABASE_BASE64: ${{ vars[matrix.database_var] }}
         run: |
           $db = $env:DATABASE_BASE64
-          if ([string]::IsNullOrWhiteSpace($db)) { throw 'Examination_Client_Database_I/II is not configured' }
+          if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库变量未配置或为空: ${{ matrix.database_var }}" }
+          $compactDb = $db -replace '\s', ''
+          Write-Output "::add-mask::$compactDb"
           ./scripts/windows-real-client-injection.ps1 `
             -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
             -InjectMode '${{ matrix.inject_mode }}' `
@@ -385,7 +427,7 @@ jobs:
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -398,6 +440,7 @@ jobs:
           WINDOWS_WINDOW_RESULT: ${{ needs.windows-window.result }}
           WINDOWS_BROWSER_RESULT: ${{ needs.windows-browser.result }}
           WINDOWS_RELEASE_RESULT: ${{ needs.windows-release.result }}
+          WINDOWS_REAL_CLIENT_DISCOVERY_RESULT: ${{ needs.windows-real-client-discovery.result }}
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
@@ -424,7 +467,8 @@ jobs:
             printf '| Windows 可见窗口与浏览器会话 | %s |\n' "$(result_label "$WINDOWS_WINDOW_RESULT")"
             printf '| Windows 浏览器回归 | %s |\n' "$(result_label "$WINDOWS_BROWSER_RESULT")"
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
-            printf '| 真实客户端 3×2 注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
+            printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
+            printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"
