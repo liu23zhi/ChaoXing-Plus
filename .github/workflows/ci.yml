@@ -14,12 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows:
-    name: Windows 扩展 6.3.0 / 原生 EXE 0.1.0 类型检查、构建与全量测试
-    runs-on: windows-latest
-    timeout-minutes: 90
-    env:
-      CXPLUS_NO_LOG_FILE: '1'
+  source:
+    name: Ubuntu 类型检查与扩展构建
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -34,8 +32,31 @@ jobs:
         run: npm ci
 
       - name: 类型检查
-        id: typecheck
         run: npm run typecheck
+
+      - name: Linux 扩展构建
+        run: npm run build
+
+  windows:
+    name: Windows 原生、浏览器与发布验证
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      release-artifact-url: ${{ steps.upload_release.outputs.artifact-url }}
+    env:
+      CXPLUS_NO_LOG_FILE: '1'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
 
       - name: 构建扩展包
         id: build_extension
@@ -101,7 +122,8 @@ jobs:
           }
           "CX_BROWSER_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CX_BROWSER_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CX_BROWSER_EXECUTABLE=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Puppeteer lifecycle fixtures exercise the native host's default Chrome identity.
+          "CX_BROWSER_EXECUTABLE=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CX_BROWSER_DEPENDENCIES=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CI_EDGE_PATH=$edge" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CI_CHROME_PATH=$chrome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -113,6 +135,8 @@ jobs:
         run: |
           $bin = (Resolve-Path '.\windows\native-build\bin').Path
           $executables = [ordered]@{
+            CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver.exe'
+            CX_NATIVE_SILENT_EXE = 'silent-tests.exe'
             CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
             CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'
             CX_NATIVE_ASSETS_EXE = 'assets-tests.exe'
@@ -152,14 +176,44 @@ jobs:
 
       - name: 单元测试（含原生编译入口）
         id: unit_tests
-        if: ${{ !cancelled() && steps.export_native.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
         shell: pwsh
         run: |
           $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
           Write-Host "单元测试文件数: $($testFiles.Count)"
+          if ($testFiles.Count -eq 0) { throw '没有发现 scripts/*.test.mjs，拒绝以空测试集通过' }
+          $isolatedTestFiles = @($testFiles | Where-Object { [IO.Path]::GetFileName($_) -eq 'tab-answer-pause.test.mjs' })
+          if ($isolatedTestFiles.Count -ne 1) { throw "标签页暂停浏览器回归必须且只能发现一次，实际: $($isolatedTestFiles.Count)" }
+          $parallelTestFiles = @($testFiles | Where-Object { [IO.Path]::GetFileName($_) -ne 'tab-answer-pause.test.mjs' })
+          if ($parallelTestFiles.Count -eq 0) { throw '并行单元测试清单为空' }
           "CI_TEST_FILES=$($testFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CI_TEST_PARALLEL_FILES=$($parallelTestFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           # 受限并发：默认按 CPU 并发会同时启动多个 Chromium/原生宿主用例，在 CI 小规格 runner 上出现过截止类偶发。
-          node --test --test-concurrency=4 --test-timeout=300000 @testFiles
+          $tapPath = Join-Path $env:RUNNER_TEMP 'ci-unit-tests.tap'
+          node --test --test-reporter=tap --test-concurrency=4 --test-timeout=300000 @parallelTestFiles 2>&1 | Tee-Object -FilePath $tapPath
+          $testExitCode = $LASTEXITCODE
+          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
+          if (-not $skipLine) { throw '全量单元测试未产生 TAP 汇总，无法核对 skip 数' }
+          $skipped = $skipLine.Matches[0].Groups[1].Value
+          Write-Host "并行单元测试子用例跳过数: $skipped"
+          "CI_TEST_PARALLEL_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($testExitCode -ne 0) { exit $testExitCode }
+
+      - name: 标签页暂停隔离浏览器回归
+        id: pause_tests
+        if: ${{ !cancelled() && steps.export_native.outcome == 'success' && steps.browser_environment.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $testFile = (Resolve-Path -LiteralPath 'scripts/tab-answer-pause.test.mjs').Path
+          $tapPath = Join-Path $env:RUNNER_TEMP 'ci-tab-answer-pause.tap'
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 $testFile 2>&1 | Tee-Object -FilePath $tapPath
+          $testExitCode = $LASTEXITCODE
+          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
+          if (-not $skipLine) { throw '标签页暂停回归未产生 TAP 汇总，无法核对 skip 数' }
+          $skipped = $skipLine.Matches[0].Groups[1].Value
+          Write-Host "标签页暂停子用例跳过数: $skipped"
+          "CI_TEST_ISOLATED_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($testExitCode -ne 0) { exit $testExitCode }
 
       - name: Windows 交互窗口与浏览器可见性回归
         id: window_tests
@@ -176,8 +230,17 @@ jobs:
             'scripts/windows-native-browser-session.test.mjs'
           ) | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
           Write-Host "交互窗口测试文件数: $($windowFiles.Count)"
+          if ($windowFiles.Count -eq 0) { throw '交互窗口测试清单为空' }
           "CI_WINDOW_FILES=$($windowFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          node --test --test-concurrency=1 --test-timeout=600000 @windowFiles
+          $tapPath = Join-Path $env:RUNNER_TEMP 'ci-window-tests.tap'
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @windowFiles 2>&1 | Tee-Object -FilePath $tapPath
+          $testExitCode = $LASTEXITCODE
+          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
+          if (-not $skipLine) { throw '交互窗口回归未产生 TAP 汇总，无法核对 skip 数' }
+          $skipped = $skipLine.Matches[0].Groups[1].Value
+          Write-Host "交互窗口子用例跳过数: $skipped"
+          "CI_WINDOW_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($testExitCode -ne 0) { exit $testExitCode }
 
       - name: 浏览器回归（含原生构建浏览器入口）
         id: browser_tests
@@ -186,8 +249,17 @@ jobs:
         run: |
           $browserFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
           Write-Host "浏览器测试文件数: $($browserFiles.Count)"
+          if ($browserFiles.Count -eq 0) { throw '没有发现 scripts/*.browser.mjs，拒绝以空测试集通过' }
           "CI_BROWSER_FILES=$($browserFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          node --test --test-concurrency=4 --test-timeout=600000 @browserFiles
+          $tapPath = Join-Path $env:RUNNER_TEMP 'ci-browser-tests.tap'
+          node --test --test-reporter=tap --test-concurrency=4 --test-timeout=600000 @browserFiles 2>&1 | Tee-Object -FilePath $tapPath
+          $testExitCode = $LASTEXITCODE
+          $skipLine = Get-Content -LiteralPath $tapPath | Select-String -Pattern '^# skipped (\d+)$' | Select-Object -Last 1
+          if (-not $skipLine) { throw '浏览器回归未产生 TAP 汇总，无法核对 skip 数' }
+          $skipped = $skipLine.Matches[0].Groups[1].Value
+          Write-Host "浏览器回归子用例跳过数: $skipped"
+          "CI_BROWSER_SKIPPED=$skipped" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($testExitCode -ne 0) { exit $testExitCode }
 
       - name: 发布包冒烟
         id: package_smoke
@@ -240,7 +312,7 @@ jobs:
 
       - name: 上传发布包
         id: upload_release
-        if: ${{ !cancelled() && steps.unit_tests.outcome == 'success' && steps.window_tests.outcome == 'success' && steps.browser_tests.outcome == 'success' && steps.package_smoke.outcome == 'success' && steps.release_node_tests.outcome == 'success' && steps.release_smoke.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.unit_tests.outcome == 'success' && steps.pause_tests.outcome == 'success' && steps.window_tests.outcome == 'success' && steps.browser_tests.outcome == 'success' && steps.package_smoke.outcome == 'success' && steps.release_node_tests.outcome == 'success' && steps.release_smoke.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: Windows 发布包
@@ -257,13 +329,13 @@ jobs:
           CI_REF_NAME: ${{ github.ref_name }}
           CI_SHA: ${{ github.sha }}
           CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CI_TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
           CI_EXTENSION_BUILD_OUTCOME: ${{ steps.build_extension.outcome }}
           CI_WINDOWS_ASSETS_OUTCOME: ${{ steps.build_windows_assets.outcome }}
           CI_NATIVE_BUILD_OUTCOME: ${{ steps.build_native.outcome }}
           CI_BROWSER_ENVIRONMENT_OUTCOME: ${{ steps.browser_environment.outcome }}
           CI_WINDOW_TESTS_OUTCOME: ${{ steps.window_tests.outcome }}
           CI_UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
+          CI_PAUSE_TESTS_OUTCOME: ${{ steps.pause_tests.outcome }}
           CI_BROWSER_TESTS_OUTCOME: ${{ steps.browser_tests.outcome }}
           CI_PACKAGE_SMOKE_OUTCOME: ${{ steps.package_smoke.outcome }}
           CI_RELEASE_NODE_TESTS_OUTCOME: ${{ steps.release_node_tests.outcome }}
@@ -279,21 +351,24 @@ jobs:
             }
           }
           $statusText = ConvertTo-CiStatusLabel $env:CI_JOB_STATUS
-          $typecheckStatus = ConvertTo-CiStatusLabel $env:CI_TYPECHECK_OUTCOME
           $extensionBuildStatus = ConvertTo-CiStatusLabel $env:CI_EXTENSION_BUILD_OUTCOME
           $windowsAssetsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOWS_ASSETS_OUTCOME
           $nativeBuildStatus = ConvertTo-CiStatusLabel $env:CI_NATIVE_BUILD_OUTCOME
           $browserEnvironmentStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_ENVIRONMENT_OUTCOME
           $windowTestsStatus = ConvertTo-CiStatusLabel $env:CI_WINDOW_TESTS_OUTCOME
           $unitTestsStatus = ConvertTo-CiStatusLabel $env:CI_UNIT_TESTS_OUTCOME
+          $pauseTestsStatus = ConvertTo-CiStatusLabel $env:CI_PAUSE_TESTS_OUTCOME
           $browserTestsStatus = ConvertTo-CiStatusLabel $env:CI_BROWSER_TESTS_OUTCOME
           $packageSmokeStatus = ConvertTo-CiStatusLabel $env:CI_PACKAGE_SMOKE_OUTCOME
           $releaseNodeTestsStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_NODE_TESTS_OUTCOME
           $releaseSmokeStatus = ConvertTo-CiStatusLabel $env:CI_RELEASE_SMOKE_OUTCOME
           $uploadStatus = ConvertTo-CiStatusLabel $env:CI_UPLOAD_OUTCOME
-          $testFiles = if ($env:CI_TEST_FILES) { $env:CI_TEST_FILES } else { '未开始' }
           $browserFiles = if ($env:CI_BROWSER_FILES) { $env:CI_BROWSER_FILES } else { '未开始' }
           $windowFiles = if ($env:CI_WINDOW_FILES) { $env:CI_WINDOW_FILES } else { '未开始' }
+          $parallelTestSkipped = if ($env:CI_TEST_PARALLEL_SKIPPED) { $env:CI_TEST_PARALLEL_SKIPPED } else { '未报告' }
+          $isolatedTestSkipped = if ($env:CI_TEST_ISOLATED_SKIPPED) { $env:CI_TEST_ISOLATED_SKIPPED } else { '未报告' }
+          $windowSkipped = if ($env:CI_WINDOW_SKIPPED) { $env:CI_WINDOW_SKIPPED } else { '未报告' }
+          $browserSkipped = if ($env:CI_BROWSER_SKIPPED) { $env:CI_BROWSER_SKIPPED } else { '未报告' }
           $summary = @"
           ## 持续集成摘要
 
@@ -310,14 +385,14 @@ jobs:
 
           | 检查项目 | 结果 | 补充信息 |
           | --- | --- | --- |
-          | 类型检查 | $typecheckStatus | |
-          | 扩展包构建 | $extensionBuildStatus | |
+          | Windows 扩展包构建 | $extensionBuildStatus | Linux 类型检查与构建见汇总 job |
           | Windows 注入资源构建 | $windowsAssetsStatus | |
           | 原生宿主与编译测试构建 | $nativeBuildStatus | |
           | Windows 浏览器环境 | $browserEnvironmentStatus | Edge: ``$env:CI_EDGE_PATH``；Chrome: ``$env:CI_CHROME_PATH`` |
-          | 单元测试 | $unitTestsStatus | $testFiles 个测试文件 |
-          | 交互窗口与可见浏览器回归 | $windowTestsStatus | $windowFiles 个测试文件 |
-          | 浏览器回归 | $browserTestsStatus | $browserFiles 个测试文件 |
+          | 单元测试（并行组） | $unitTestsStatus | 共 $env:CI_TEST_FILES 个文件（并发 $env:CI_TEST_PARALLEL_FILES + 隔离 1）；跳过子用例 $parallelTestSkipped |
+          | 标签页暂停隔离浏览器回归 | $pauseTestsStatus | 1 个文件，串行；跳过子用例 $isolatedTestSkipped |
+          | 交互窗口与可见浏览器回归 | $windowTestsStatus | $windowFiles 个测试文件；跳过子用例 $windowSkipped |
+          | 浏览器回归 | $browserTestsStatus | $browserFiles 个测试文件；跳过子用例 $browserSkipped |
           | 发布包冒烟 | $packageSmokeStatus | |
           | 发布目录 Node 入口回归 | $releaseNodeTestsStatus | 发布目录生成后执行 |
           | 发布目录复制、自检与完整性校验 | $releaseSmokeStatus | |
@@ -328,4 +403,47 @@ jobs:
           } else {
             Write-Host $summary
           }
+
+  summary:
+    name: 持续集成汇总
+    runs-on: ubuntu-24.04
+    needs: [source, windows]
+    if: always()
+    steps:
+      - name: 输出各环境结果与发布产物
+        shell: bash
+        env:
+          SOURCE_RESULT: ${{ needs.source.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          RELEASE_ARTIFACT_URL: ${{ needs.windows.outputs.release-artifact-url }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          result_label() {
+            case "$1" in
+              success) echo '通过' ;;
+              failure) echo '失败' ;;
+              cancelled) echo '已取消' ;;
+              skipped) echo '已跳过' ;;
+              *) echo '未执行' ;;
+            esac
+          }
+
+          {
+            echo '## 持续集成结果'
+            echo
+            echo '| 验证环境 | 结果 |'
+            echo '| --- | --- |'
+            printf '| Ubuntu 类型检查与扩展构建 | %s |\n' "$(result_label "$SOURCE_RESULT")"
+            printf '| Windows 原生、浏览器与发布验证 | %s |\n' "$(result_label "$WINDOWS_RESULT")"
+            echo
+            if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
+              printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"
+            else
+              echo 'Windows 发布包未生成或上传失败。'
+            fi
+            echo
+            printf '代码提交：`%s`\n' "$COMMIT_SHA"
+            printf '\n[查看完整运行日志](%s)\n' "$RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
 

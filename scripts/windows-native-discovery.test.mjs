@@ -27,6 +27,12 @@ for (const candidate of driverCandidates) {
 
 const nativeTest = process.platform === 'win32' && driver;
 
+test('native test build provides the no-CRT discovery driver required by these cases', async () => {
+  const buildScript = await fs.readFile(path.join(repositoryRoot, 'windows', 'native-source', 'build-windows.ps1'), 'utf8');
+  assert.match(buildScript, /Name = 'discovery-cache-driver'; Entry = 'DiscoveryCacheDriverMain'; Objects = @\('memory','process','discovery'\)/u);
+  assert.match(buildScript, /\$test\.Name \+ '\.exe'/u);
+});
+
 async function runScan(mode, commonRoot, fixedRoot, extra = []) {
   const { stdout, stderr } = await execFileAsync(driver, ['scan', mode, commonRoot, fixedRoot, ...extra], {
     windowsHide: true,
