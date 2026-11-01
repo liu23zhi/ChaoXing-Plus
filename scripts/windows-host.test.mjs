@@ -1044,7 +1044,7 @@ test('不保留本轮数据时保留已有诊断目录及其中用户文件', as
       path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir, '--config', configPath,
       '--diagnose', '--diagnostics-dir', diagnosticsDir, '--no-retain-data',
-      '--no-log', '--duration', '100', '--quiet'
+      '--no-log', '--duration', '2500', '--quiet'
     ]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(await fs.readFile(sentinelPath, 'utf8'), 'keep user data');

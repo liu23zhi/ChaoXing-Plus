@@ -115,6 +115,10 @@ CX_DPI_OVERRIDE *cx_dpi_begin(const WCHAR *client, WCHAR *error, DWORD errorCap)
     }
     status = RegSetValueExW(s->key, s->name, 0, REG_SZ, (const BYTE *)s->temporary, s->temporarySize);
     if (status != ERROR_SUCCESS) { code = (DWORD)status; goto failed; }
+    /* Hosted Windows runners can start the child before the newly written
+       AppCompat layer is observed unless the user hive is flushed first. */
+    status = RegFlushKey(s->key);
+    if (status != ERROR_SUCCESS) { code = (DWORD)status; goto failed; }
     return s;
 failed:
     d_free(s); d_error(error, errorCap, L"Cannot apply temporary DPI compatibility setting; client was not launched", code);
