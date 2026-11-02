@@ -44,6 +44,23 @@ public class CXClientEntry {
         return found;
     }
 
+    public static string WindowClasses(uint processId) {
+        StringBuilder names = new StringBuilder();
+        EnumWindows((handle, parameter) => {
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            if (owner != processId) return true;
+            StringBuilder name = new StringBuilder(128);
+            GetClassNameW(handle, name, 128);
+            string value = name.ToString();
+            if (value.Length == 0) return true;
+            if (names.Length > 0) names.Append('|');
+            names.Append(value);
+            return true;
+        }, IntPtr.Zero);
+        return names.ToString();
+    }
+
     public static int WindowDpi(IntPtr handle) {
         IntPtr user32 = LoadLibraryW("user32.dll");
         if (user32 != IntPtr.Zero) {
@@ -104,55 +121,93 @@ function Wait-ClientLayoutReady {
     return [pscustomobject]@{ Ready = $false; Width = 0; Height = 0 }
 }
 
+function Get-ClientPageTargetCount {
+    param(
+        [Parameter(Mandatory = $true)] [int] $ProcessId
+    )
+    try {
+        $connection = Get-NetTCPConnection -State Listen -OwningProcess $ProcessId -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $connection) { return -1 }
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($connection.LocalPort)/json/list" -UseBasicParsing -TimeoutSec 3
+        return @($response.Content | ConvertFrom-Json).Count
+    } catch {
+        return -1
+    }
+}
+
+# The check page needs a few seconds of environment probing before the button reacts, and a click that
+# arrives while it is still probing is simply dropped. Click, then prove that a CEF page appeared, and
+# retry until the page shows up or the window disappears.
 function Wait-ClientExamEntry {
     param(
         [Parameter(Mandatory = $true)] [string] $ClientPath,
         [int] $TimeoutSeconds = 120,
-        [int] $PollMilliseconds = 500
+        [int] $PollMilliseconds = 500,
+        [int] $Attempts = 6,
+        [int] $SettleSeconds = 10
     )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $attempt = 0
     $window = [IntPtr]::Zero
     $clientProcess = $null
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ClientPath)) -ErrorAction SilentlyContinue)) {
-            $path = $null
-            try { $path = $candidate.Path } catch { }
-            if (-not $path -or -not $path.Equals($ClientPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
-            $handle = [CXClientEntry]::Find([uint32]$candidate.Id, 'ExamCheckUI')
-            if ($handle -ne [IntPtr]::Zero) { $window = $handle; $clientProcess = $candidate; break }
+    $point = $null
+    $dpi = 0
+    $size = ''
+    while ($attempt -lt $Attempts -and (Get-Date) -lt $deadline) {
+        if (-not $clientProcess) {
+            foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ClientPath)) -ErrorAction SilentlyContinue)) {
+                $path = $null
+                try { $path = $candidate.Path } catch { }
+                if (-not $path -or -not $path.Equals($ClientPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $handle = [CXClientEntry]::Find([uint32]$candidate.Id, 'ExamCheckUI')
+                if ($handle -ne [IntPtr]::Zero) { $window = $handle; $clientProcess = $candidate; break }
+            }
+            if (-not $clientProcess) { Start-Sleep -Milliseconds $PollMilliseconds; continue }
         }
-        if ($window -ne [IntPtr]::Zero) { break }
-        Start-Sleep -Milliseconds $PollMilliseconds
-    }
-    if ($window -eq [IntPtr]::Zero) {
-        return [pscustomobject]@{ Clicked = $false; Reason = 'entry-window-not-found'; Window = 0; ProcessId = 0; Point = $null; Dpi = 0 }
-    }
 
-    $layout = Wait-ClientLayoutReady -Window $window -TimeoutSeconds 60
-    if (-not $layout.Ready) {
-        return [pscustomobject]@{
-            Clicked = $false; Reason = "entry-layout-not-ready:$($layout.Width)x$($layout.Height)"
-            Window = [int64]$window; ProcessId = $clientProcess.Id; Point = $null; Dpi = 0
+        $window = [CXClientEntry]::Find([uint32]$clientProcess.Id, 'ExamCheckUI')
+        if ($window -eq [IntPtr]::Zero) {
+            $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
+            return [pscustomobject]@{
+                Clicked = $true; Reason = 'entry-window-closed'; Window = 0; ProcessId = $clientProcess.Id
+                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages
+            }
+        }
+
+        $layout = Wait-ClientLayoutReady -Window $window -TimeoutSeconds 60
+        if (-not $layout.Ready) {
+            Start-Sleep -Milliseconds $PollMilliseconds
+            continue
+        }
+        $size = "$($layout.Width)x$($layout.Height)"
+        $dpi = [CXClientEntry]::WindowDpi($window)
+        $entry = Get-ClientEntryPoint -Dpi $dpi
+        $point = "$($entry.X),$($entry.Y)"
+        $lParam = [IntPtr](($entry.Y -shl 16) -bor ($entry.X -band 0xFFFF))
+        [void][CXClientEntry]::PostMessageW($window, 0x0200, [IntPtr]::Zero, $lParam)
+        Start-Sleep -Milliseconds 120
+        [void][CXClientEntry]::PostMessageW($window, 0x0201, [IntPtr]1, $lParam)
+        Start-Sleep -Milliseconds 90
+        [void][CXClientEntry]::PostMessageW($window, 0x0202, [IntPtr]::Zero, $lParam)
+        $attempt++
+
+        Start-Sleep -Seconds $SettleSeconds
+        $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
+        if ($pages -gt 0) {
+            return [pscustomobject]@{
+                Clicked = $true; Reason = 'entry-page-detected'; Window = [int64]$window; ProcessId = $clientProcess.Id
+                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages
+            }
         }
     }
 
-    $dpi = [CXClientEntry]::WindowDpi($window)
-    $point = Get-ClientEntryPoint -Dpi $dpi
-    $lParam = [IntPtr](($point.Y -shl 16) -bor ($point.X -band 0xFFFF))
-    [void][CXClientEntry]::PostMessageW($window, 0x0200, [IntPtr]::Zero, $lParam)
-    Start-Sleep -Milliseconds 120
-    $pressed = [CXClientEntry]::PostMessageW($window, 0x0201, [IntPtr]1, $lParam)
-    $pressedError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    Start-Sleep -Milliseconds 90
-    [void][CXClientEntry]::PostMessageW($window, 0x0202, [IntPtr]::Zero, $lParam)
-
+    if (-not $clientProcess) {
+        return [pscustomobject]@{ Clicked = $false; Reason = 'entry-window-not-found'; Window = 0; ProcessId = 0; Point = $null; Dpi = 0; Attempts = 0; ClientSize = ''; PageTargets = 0 }
+    }
     return [pscustomobject]@{
-        Clicked = $pressed
-        Reason = if ($pressed) { 'entry-click-sent' } else { "post-message-failed:$pressedError" }
-        Window = [int64]$window
-        ProcessId = $clientProcess.Id
-        Point = "$($point.X),$($point.Y)"
-        Dpi = $dpi
-        ClientSize = "$($layout.Width)x$($layout.Height)"
+        Clicked = $true; Reason = 'entry-page-missing'; Window = [int64]$window; ProcessId = $clientProcess.Id
+        Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size
+        PageTargets = (Get-ClientPageTargetCount -ProcessId $clientProcess.Id)
+        Windows = [CXClientEntry]::WindowClasses([uint32]$clientProcess.Id)
     }
 }

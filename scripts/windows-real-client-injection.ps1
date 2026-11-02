@@ -10,12 +10,15 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-client-database.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
+. (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
 $tempRoot = Join-Path $env:RUNNER_TEMP ("cx-real-client-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $tempRoot 'package'
 $reportPath = Join-Path $tempRoot 'report.json'
 $stdoutPath = Join-Path $tempRoot 'native-host.stdout.log'
 $stderrPath = Join-Path $tempRoot 'native-host.stderr.log'
 $hostProcess = $null
+$clientPath = ''
+$runStarted = Get-Date
 $base64 = ''
 $stage = 'initialize'
 
@@ -38,6 +41,43 @@ function Stop-OwnedProcess([System.Diagnostics.Process] $process) {
   try {
     if (-not $process.HasExited) { $process.Kill($true); $process.WaitForExit(10000) | Out-Null }
   } catch { }
+}
+
+# Cleanup must not depend on the host's own exit path: the client can survive when the host is killed,
+# when the entry click never produced a page, or when the host handed off to an elevated instance.
+function Stop-ClientProcess([string] $ClientPath) {
+  if (-not $ClientPath) { return }
+  $stopped = 0
+  foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ClientPath)) -ErrorAction SilentlyContinue)) {
+    try {
+      $actual = $candidate.Path
+      if (-not $actual -or -not $actual.Equals($ClientPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+      $candidate.Kill($true)
+      $candidate.WaitForExit(10000) | Out-Null
+      ++$stopped
+    } catch {
+      Write-Host "[real-client] unable to stop client pid=$($candidate.Id): $($_.Exception.Message)"
+    }
+  }
+  Write-Host "[real-client] stopped $stopped leftover client process(es)"
+}
+
+# A host that handed off to an elevated instance is not our child handle anymore; stop it by image path
+# but only if it started during this run, so a host the operator started by hand is left alone.
+function Stop-StartedHost([string] $HostPath, [datetime] $StartedAt) {
+  if (-not $HostPath) { return }
+  $stopped = 0
+  foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($HostPath)) -ErrorAction SilentlyContinue)) {
+    try {
+      if ($candidate.StartTime -lt $StartedAt) { continue }
+      $actual = $candidate.Path
+      if (-not $actual -or -not $actual.Equals($HostPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+      $candidate.Kill($true)
+      $candidate.WaitForExit(10000) | Out-Null
+      ++$stopped
+    } catch { }
+  }
+  if ($stopped -gt 0) { Write-Host "[real-client] stopped $stopped leftover host process(es)" }
 }
 
 function Write-HostDiagnostics {
@@ -75,6 +115,7 @@ try {
   if ($clients.Count -ne 1) { throw "Expected exactly one CXExam.exe after unpacking, found $($clients.Count)" }
   $client = $clients[0]
   $clientDirectory = $client.DirectoryName
+  $clientPath = $client.FullName
   Write-Host "[real-client] extracted client=$($client.FullName) bytes=$($client.Length)"
 
   $stage = 'install-database'
@@ -86,7 +127,7 @@ try {
     '--inject-mode', $InjectMode,
     '--client', $client.FullName,
     '--report', $reportPath,
-    '--duration', '120000',
+    '--duration', '180000',
     '--no-log',
     '--no-diagnose',
     '--stop-client-on-exit'
@@ -100,11 +141,19 @@ try {
   # The client parks on its native check window and only builds the CEF page after the button is
   # pressed; without this click the host has no page to inject and the report stays at pageSessions=0.
   $stage = 'enter-exam'
-  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 120
+  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90
   if ($entry.Reason -eq 'entry-window-not-found') {
-    Write-Host "[real-client] exam entry window was not found within 120s; continuing to collect the report"
+    Write-Host '[real-client] exam entry window was not found within 90s; continuing to collect the report'
   } else {
-    Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) clicked=$($entry.Clicked) reason=$($entry.Reason)"
+    Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) dpi=$($entry.Dpi) client=$($entry.ClientSize) attempts=$($entry.Attempts) pages=$($entry.PageTargets) clicked=$($entry.Clicked) reason=$($entry.Reason)"
+  }
+
+  if ($entry.PageTargets -lt 1) {
+    # Without a CEF page the host cannot inject anything; close the client now so the run ends with a
+    # complete report instead of holding the client open for the whole duration.
+    Write-Host '[real-client] no CEF page appeared after the entry attempts; closing the client before the report'
+    Start-Sleep -Seconds 15
+    Stop-ClientProcess $clientPath
   }
 
   $stage = 'wait-native-host'
@@ -124,7 +173,7 @@ try {
   $stage = 'validate-report'
   if (-not $report.success) { throw "Injection report is not successful for $CaseName" }
   if (-not $report.ownershipVerified) { throw "Client ownership was not verified for $CaseName" }
-  if ([int]$report.totals.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: the client never left its native check window (entry click=$($entry.Reason))" }
+  if ([int]$report.totals.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: entry reason=$($entry.Reason) attempts=$($entry.Attempts) pageTargets=$($entry.PageTargets) client=$($entry.ClientSize) windows=$($entry.Windows)" }
   if ([int]$report.totals.bootstraps -lt 1) { throw "No bootstrap was injected for $CaseName" }
   if ([int]$report.totals.bundles -lt 1) { throw "No bundle was injected for $CaseName" }
   # The run ends either when the duration elapses or when the client is closed/killed first; both
@@ -138,6 +187,11 @@ try {
   Write-HostDiagnostics
   throw
 } finally {
+  Stop-ClientProcess $clientPath
   Stop-OwnedProcess $hostProcess
+  Stop-StartedHost $NativeHost $runStarted
+  # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
+  $shell = Repair-ShellDesktop -Force
+  Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }

@@ -23,4 +23,6 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 进入考试需要自动点击：客户端启动后停在原生检查窗口（窗口类 `ExamCheckUI`，按钮「进入考试」），**在它被点击之前不会创建任何 CEF 页面**，宿主也就没有可注入的上下文（`pageSessions` 恒为 0）。客户端二进制里没有可用的自定义命令行开关（全量字符串里只有 `--StartFragment`/`--EndFragment`/`--PO` 三处 HTML 标记），所以注入脚本 `scripts/windows-real-client-injection.ps1` 会在宿主启动后调用 `scripts/windows-client-entry.ps1`，按客户区尺寸换算按钮位置并 `PostMessage` 点击。该点击要求与客户端同完整性级别：GitHub Windows runner 与由它启动的宿主都是高完整性进程，本机手动运行时需用同一个提权上下文执行。
 
-报告校验要求 `success`、`ownershipVerified`、`pageSessions/bootstraps/bundles ≥ 1`；`stopReason` 允许 `duration`（跑满时长）或 `client-exit`（客户端先被关闭或杀掉，宿主仍会写出完整报告）。
+报告校验要求 `success`、`ownershipVerified`、`totals.pageSessions/bootstraps/bundles ≥ 1`；`stopReason` 允许 `duration`（跑满时长）或 `client-exit`（客户端先被关闭或杀掉，宿主仍会写出完整报告）。没有出现 CEF 页面时脚本会提前关闭客户端再取报告，不会把它挂到时长结束。
+
+清理阶段除了关掉客户端与残留宿主，还会调用 `scripts/windows-client-shell.ps1` 检查资源管理器：客户端退出后任务栏（`Shell_TrayWnd`）可能不再出现，此时脚本会重启 Explorer；没有交互式桌面（CI runner 的服务会话）时直接跳过，日志会打印 `shell repair action=...`。
