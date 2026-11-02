@@ -25,4 +25,6 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 报告校验要求 `success`、`ownershipVerified`、`totals.pageSessions/bootstraps/bundles ≥ 1`；`stopReason` 允许 `duration`（跑满时长）或 `client-exit`（客户端先被关闭或杀掉，宿主仍会写出完整报告）。没有出现 CEF 页面时脚本会提前关闭客户端再取报告，不会把它挂到时长结束。
 
+失败现场会落盘到 `RUNNER_TEMP` 并由 CI 作为 artifact 上传（`real-client-failure-<客户端>-<数据库>`）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：出现 `ExamCheckHintUI` 说明被客户端自检拦截，出现 `Chrome_WidgetWin_0` 说明 CEF 页面已就绪。
+
 清理阶段除了关掉客户端与残留宿主，还会调用 `scripts/windows-client-shell.ps1` 检查资源管理器：客户端退出后任务栏（`Shell_TrayWnd`）可能不再出现，此时脚本会重启 Explorer；没有交互式桌面（CI runner 的服务会话）时直接跳过，日志会打印 `shell repair action=...`。

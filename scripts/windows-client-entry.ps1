@@ -1,16 +1,19 @@
 # Drive the native exam check window so the real client creates its CEF page.
 #
-# The client stops at a native Duilib window (class ExamCheckUI, "check passed / enter exam") and only
-# builds its CEF page after that button is pressed. Nothing on the client command line selects the exam
-# (the binary carries no custom switches), so the injection job has to click the button itself.
+# The client stops at a native Duilib window (class ExamCheckUI) and only builds its CEF page after the
+# "enter exam" button is pressed. Two things make a blind click unreliable:
+#   * the button is hidden while the environment probe is still running (the page shows a progress ring),
+#     so a click that arrives too early is dropped;
+#   * Duilib lays the controls out for a 1200x700 design surface and clips instead of rescaling.
+# So the helper scans the rendered window for the blue button and clicks where it actually is, waits for
+# the button to appear at all, and retries until a CEF page exists. The design point stays as a fallback
+# for sessions where the screen cannot be captured.
 #
-# Duilib lays the controls out for a 1200x700 design surface and clips (it does not rescale) when the
-# window is smaller, so the button keeps its design position (412,78) scaled by the window DPI. Deriving
-# the point from the current client size instead lands ~50px away on smaller windows and the click is lost.
-#
-# Window messages from a lower integrity process are rejected by UIPI, therefore this helper must run
-# in the same integrity context as the client (the GitHub Windows runner and the elevated host both do).
+# Window messages from a lower integrity process are rejected by UIPI, therefore this helper must run in
+# the same integrity context as the client (the GitHub Windows runner and the elevated host both do).
 # Dot-sourced by scripts/windows-real-client-injection.ps1; keep this file pure ASCII.
+
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
 
 Add-Type -TypeDefinition @'
 using System;
@@ -23,11 +26,14 @@ public class CXClientEntry {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr handle, StringBuilder name, int cap);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr handle, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RECT rect);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr handle, ref POINT point);
     [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr handle);
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr handle, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessageW(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
-    public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     public delegate uint DpiForWindow(IntPtr handle);
 
     public static IntPtr Find(uint processId, string className) {
@@ -85,16 +91,126 @@ public class CXClientEntry {
 }
 '@
 
-# Design position of the "enter exam" button on the 1200x700 layout, in device pixels for the given DPI.
+# Pixel scan for the solid blue button. The capture uses System.Drawing from PowerShell and only the raw
+# pixels cross into C#, so this type needs no extra assembly references (Add-Type -ReferencedAssemblies
+# would replace the default reference set and break the build on PowerShell 7).
+Add-Type -TypeDefinition @'
+using System;
+
+public class CXExamEntryScan {
+    public static bool IsButtonBlue(byte b, byte g, byte r) {
+        return b > 180 && r >= 30 && r <= 130 && g >= 90 && g <= 190;
+    }
+
+    // Returns {x,y} in client coordinates, or an empty array when no blue button is visible.
+    // The check page also draws a blue progress ring and blue percentage text while probing, and the
+    // button itself carries white text, so a row is judged by blue coverage + span (not by one solid run)
+    // and the block must be button sized and mostly blue.
+    public static int[] Scan(byte[] buffer, int stride, int width, int height, int offsetX, int offsetY) {
+        int bestRows = 0, bestY0 = 0, bestY1 = 0, bestX0 = 0, bestX1 = 0;
+        int currentRows = 0, currentY0 = 0, currentX0 = 0, currentX1 = 0;
+        int[] starts = new int[128];
+        int[] ends = new int[128];
+        for (int y = 0; y < height; y++) {
+            int runs = 0, runStart = -1;
+            for (int x = 0; x <= width; x++) {
+                bool blue = false;
+                if (x < width) {
+                    int index = y * stride + x * 4;
+                    blue = IsButtonBlue(buffer[index], buffer[index + 1], buffer[index + 2]);
+                }
+                if (blue && runStart < 0) runStart = x;
+                if (!blue && runStart >= 0) {
+                    if (runs < starts.Length) { starts[runs] = runStart; ends[runs] = x - 1; runs++; }
+                    runStart = -1;
+                }
+            }
+            // Merge runs separated by the white button label so the whole button becomes one segment.
+            int segmentStart = -1, segmentEnd = -1, segmentBlue = 0, bestStart = -1, bestEnd = -1, bestBlue = 0;
+            for (int i = 0; i < runs; i++) {
+                if (segmentStart < 0) { segmentStart = starts[i]; segmentEnd = ends[i]; segmentBlue = ends[i] - starts[i] + 1; }
+                else if (starts[i] - segmentEnd <= 12) { segmentBlue += ends[i] - starts[i] + 1; segmentEnd = ends[i]; }
+                else {
+                    if (bestStart < 0 || segmentEnd - segmentStart > bestEnd - bestStart) { bestStart = segmentStart; bestEnd = segmentEnd; bestBlue = segmentBlue; }
+                    segmentStart = starts[i]; segmentEnd = ends[i]; segmentBlue = ends[i] - starts[i] + 1;
+                }
+            }
+            if (segmentStart >= 0 && (bestStart < 0 || segmentEnd - segmentStart > bestEnd - bestStart)) { bestStart = segmentStart; bestEnd = segmentEnd; bestBlue = segmentBlue; }
+            int span = bestStart < 0 ? 0 : bestEnd - bestStart + 1;
+            bool candidate = bestStart >= 0 && span >= 40 && span <= 350 && (long)bestBlue * 100 >= (long)span * 40;
+            bool continues = candidate && currentRows > 0
+                && Math.Abs(bestStart - currentX0) <= 6
+                && Math.Abs(bestEnd - currentX1) <= 6;
+            if (!continues) {
+                if (currentRows > bestRows) { bestRows = currentRows; bestY0 = currentY0; bestY1 = y - 1; bestX0 = currentX0; bestX1 = currentX1; }
+                currentRows = 0;
+                if (candidate) { currentX0 = bestStart; currentX1 = bestEnd; currentY0 = y; currentRows = 1; }
+                continue;
+            }
+            currentRows++;
+        }
+        if (currentRows > bestRows) { bestRows = currentRows; bestY0 = currentY0; bestY1 = height - 1; bestX0 = currentX0; bestX1 = currentX1; }
+        if (bestRows < 15) return new int[0];
+        int blockWidth = bestX1 - bestX0 + 1;
+        int blockHeight = bestY1 - bestY0 + 1;
+        if (blockWidth < 40 || blockWidth > 350 || blockHeight < 15 || blockHeight > 150) return new int[0];
+        int sampled = 0, bluePixels = 0;
+        for (int sampleY = bestY0; sampleY <= bestY1; sampleY += 2) {
+            for (int sampleX = bestX0; sampleX <= bestX1; sampleX += 4) {
+                int index = sampleY * stride + sampleX * 4;
+                sampled++;
+                if (IsButtonBlue(buffer[index], buffer[index + 1], buffer[index + 2])) bluePixels++;
+            }
+        }
+        if (sampled == 0 || bluePixels * 100 < sampled * 50) return new int[0];
+        return new int[] { (bestX0 + bestX1) / 2 - offsetX, (bestY0 + bestY1) / 2 - offsetY };
+    }
+}
+'@
+
+# Design position of the button on the 1200x700 layout, used only when the screen cannot be scanned.
 function Get-ClientEntryPoint {
-    param(
-        [int] $Dpi = 96
-    )
+    param([int] $Dpi = 96)
     if ($Dpi -lt 96 -or $Dpi -gt 480) { throw "Unsupported window DPI: $Dpi" }
     return [pscustomobject]@{
         X = [int][Math]::Round(412 * $Dpi / 96)
         Y = [int][Math]::Round(78 * $Dpi / 96)
         Dpi = $Dpi
+    }
+}
+
+function Find-ExamEntryButton {
+    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+    $windowRect = New-Object CXClientEntry+RECT
+    if (-not [CXClientEntry]::GetWindowRect($Window, [ref]$windowRect)) { return [pscustomobject]@{ State = 'unavailable' } }
+    $origin = New-Object CXClientEntry+POINT
+    $origin.X = 0
+    $origin.Y = 0
+    if (-not [CXClientEntry]::ClientToScreen($Window, [ref]$origin)) { return [pscustomobject]@{ State = 'unavailable' } }
+    $width = $windowRect.Right - $windowRect.Left
+    $height = $windowRect.Bottom - $windowRect.Top
+    if ($width -le 0 -or $height -le 0 -or $width -gt 5000 -or $height -gt 5000) { return [pscustomobject]@{ State = 'unavailable' } }
+    $bitmap = $null
+    $graphics = $null
+    $data = $null
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $bitmap = New-Object System.Drawing.Bitmap $width, $height
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($windowRect.Left, $windowRect.Top, 0, 0, (New-Object System.Drawing.Size $width, $height))
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $width, $height
+        $data = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $buffer = New-Object byte[] ($data.Stride * $height)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
+        $found = [CXExamEntryScan]::Scan($buffer, $data.Stride, $width, $height, $origin.X - $windowRect.Left, $origin.Y - $windowRect.Top)
+        if ($null -eq $found -or $found.Length -eq 0) { return [pscustomobject]@{ State = 'absent' } }
+        return [pscustomobject]@{ State = 'found'; X = $found[0]; Y = $found[1] }
+    } catch {
+        return [pscustomobject]@{ State = 'unavailable' }
+    } finally {
+        if ($data -and $bitmap) { $bitmap.UnlockBits($data) }
+        if ($graphics) { $graphics.Dispose() }
+        if ($bitmap) { $bitmap.Dispose() }
     }
 }
 
@@ -122,9 +238,7 @@ function Wait-ClientLayoutReady {
 }
 
 function Get-ClientPageTargetCount {
-    param(
-        [Parameter(Mandatory = $true)] [int] $ProcessId
-    )
+    param([Parameter(Mandatory = $true)] [int] $ProcessId)
     try {
         $connection = Get-NetTCPConnection -State Listen -OwningProcess $ProcessId -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $connection) { return -1 }
@@ -135,16 +249,23 @@ function Get-ClientPageTargetCount {
     }
 }
 
-# The check page needs a few seconds of environment probing before the button reacts, and a click that
-# arrives while it is still probing is simply dropped. Click, then prove that a CEF page appeared, and
-# retry until the page shows up or the window disappears.
+function Save-EntryFrame {
+    param([string] $Prefix, [string] $Name)
+    if (-not $Prefix) { return }
+    if (-not (Get-Command Save-DesktopScreenshot -ErrorAction SilentlyContinue)) { return }
+    [void](Save-DesktopScreenshot -Path "$Prefix-$Name.png" -ScalePercent 50)
+}
+
+# Click the button as soon as it is actually on screen, prove that a CEF page appeared, and retry until it
+# does or the window disappears. Frames are captured right before the first click and right after each click.
 function Wait-ClientExamEntry {
     param(
         [Parameter(Mandatory = $true)] [string] $ClientPath,
         [int] $TimeoutSeconds = 120,
         [int] $PollMilliseconds = 500,
         [int] $Attempts = 6,
-        [int] $SettleSeconds = 10
+        [int] $SettleSeconds = 10,
+        [string] $ScreenshotPrefix = ''
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $attempt = 0
@@ -153,6 +274,8 @@ function Wait-ClientExamEntry {
     $point = $null
     $dpi = 0
     $size = ''
+    $target = ''
+    $preClickSaved = $false
     while ($attempt -lt $Attempts -and (Get-Date) -lt $deadline) {
         if (-not $clientProcess) {
             foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ClientPath)) -ErrorAction SilentlyContinue)) {
@@ -170,7 +293,7 @@ function Wait-ClientExamEntry {
             $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
             return [pscustomobject]@{
                 Clicked = $true; Reason = 'entry-window-closed'; Window = 0; ProcessId = $clientProcess.Id
-                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages
+                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages; Target = $target
             }
         }
 
@@ -181,9 +304,31 @@ function Wait-ClientExamEntry {
         }
         $size = "$($layout.Width)x$($layout.Height)"
         $dpi = [CXClientEntry]::WindowDpi($window)
-        $entry = Get-ClientEntryPoint -Dpi $dpi
-        $point = "$($entry.X),$($entry.Y)"
-        $lParam = [IntPtr](($entry.Y -shl 16) -bor ($entry.X -band 0xFFFF))
+
+        $button = Find-ExamEntryButton -Window $window
+        if ($button.State -eq 'absent') {
+            # Still probing the environment: the button is not rendered yet, a click would be lost.
+            Start-Sleep -Milliseconds 1500
+            continue
+        }
+        if ($button.State -eq 'found') {
+            $clickX = $button.X
+            $clickY = $button.Y
+            $target = 'button-scan'
+        } else {
+            $design = Get-ClientEntryPoint -Dpi $dpi
+            $clickX = $design.X
+            $clickY = $design.Y
+            $target = 'design-point'
+        }
+        $point = "$clickX,$clickY"
+        # Frame 1: the button is on screen and still untouched.
+        if (-not $preClickSaved) {
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '1-before-click'
+            $preClickSaved = $true
+        }
+
+        $lParam = [IntPtr](($clickY -shl 16) -bor ($clickX -band 0xFFFF))
         [void][CXClientEntry]::PostMessageW($window, 0x0200, [IntPtr]::Zero, $lParam)
         Start-Sleep -Milliseconds 120
         [void][CXClientEntry]::PostMessageW($window, 0x0201, [IntPtr]1, $lParam)
@@ -192,22 +337,27 @@ function Wait-ClientExamEntry {
         $attempt++
 
         Start-Sleep -Seconds $SettleSeconds
+        # Frame 2: right after the click, before the client is closed.
+        $frameName = if ($attempt -eq 1) { '2-after-click' } else { "2-after-click-$attempt" }
+        Save-EntryFrame -Prefix $ScreenshotPrefix -Name $frameName
         $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
         if ($pages -gt 0) {
             return [pscustomobject]@{
                 Clicked = $true; Reason = 'entry-page-detected'; Window = [int64]$window; ProcessId = $clientProcess.Id
-                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages
+                Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages; Target = $target
             }
         }
     }
 
     if (-not $clientProcess) {
-        return [pscustomobject]@{ Clicked = $false; Reason = 'entry-window-not-found'; Window = 0; ProcessId = 0; Point = $null; Dpi = 0; Attempts = 0; ClientSize = ''; PageTargets = 0 }
+        return [pscustomobject]@{ Clicked = $false; Reason = 'entry-window-not-found'; Window = 0; ProcessId = 0; Point = $null; Dpi = 0; Attempts = 0; ClientSize = ''; PageTargets = 0; Target = '' }
     }
+    $finalReason = if ($attempt -eq 0) { 'entry-button-never-visible' } else { 'entry-page-missing' }
     return [pscustomobject]@{
-        Clicked = $true; Reason = 'entry-page-missing'; Window = [int64]$window; ProcessId = $clientProcess.Id
+        Clicked = ($attempt -gt 0); Reason = $finalReason; Window = [int64]$window; ProcessId = $clientProcess.Id
         Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size
         PageTargets = (Get-ClientPageTargetCount -ProcessId $clientProcess.Id)
+        Target = $target
         Windows = [CXClientEntry]::WindowClasses([uint32]$clientProcess.Id)
     }
 }

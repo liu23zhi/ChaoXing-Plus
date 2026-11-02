@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-client-database.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
+. (Join-Path $PSScriptRoot 'windows-client-diagnostics.ps1')
 $tempRoot = Join-Path $env:RUNNER_TEMP ("cx-real-client-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $tempRoot 'package'
 $reportPath = Join-Path $tempRoot 'report.json'
@@ -80,6 +81,23 @@ function Stop-StartedHost([string] $HostPath, [datetime] $StartedAt) {
   if ($stopped -gt 0) { Write-Host "[real-client] stopped $stopped leftover host process(es)" }
 }
 
+function Save-FailureArtifacts {
+    param([string] $CaseName)
+    $target = $env:RUNNER_TEMP
+    if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { return }
+    foreach ($entry in @(@{ Source = $reportPath; Name = 'report.json' }, @{ Source = $stdoutPath; Name = 'host.stdout.log' }, @{ Source = $stderrPath; Name = 'host.stderr.log' })) {
+        if (-not (Test-Path -LiteralPath $entry.Source -PathType Leaf)) { continue }
+        try { Copy-Item -LiteralPath $entry.Source -Destination (Join-Path $target "cx-real-client-$CaseName-$($entry.Name)") -Force } catch { }
+    }
+    if ($clientDirectory) {
+        $debugLog = Join-Path $clientDirectory 'debug.log'
+        if (Test-Path -LiteralPath $debugLog -PathType Leaf) {
+            try { Copy-Item -LiteralPath $debugLog -Destination (Join-Path $target "cx-real-client-$CaseName-client-debug.log") -Force } catch { }
+        }
+    }
+    [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 50)
+}
+
 function Write-HostDiagnostics {
   foreach ($entry in @(@{ Label = 'stdout'; Path = $stdoutPath }, @{ Label = 'stderr'; Path = $stderrPath })) {
     if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { continue }
@@ -99,6 +117,11 @@ function Write-HostDiagnostics {
 
 try {
   Write-Host "[real-client] case=$CaseName mode=$InjectMode stage=validate-inputs"
+  if ($env:RUNNER_TEMP -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+    $environmentPath = Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-environment.json"
+    try { (Get-DesktopEnvironment) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $environmentPath -Encoding utf8 } catch { }
+    [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-start.png") -ScalePercent 50)
+  }
   if (-not (Test-Path -LiteralPath $ClientInstaller -PathType Leaf)) { throw "Client fixture is missing: $ClientInstaller" }
   if (-not (Test-Path -LiteralPath $NativeHost -PathType Leaf)) { throw "Native host is missing: $NativeHost" }
   New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
@@ -141,11 +164,12 @@ try {
   # The client parks on its native check window and only builds the CEF page after the button is
   # pressed; without this click the host has no page to inject and the report stays at pageSessions=0.
   $stage = 'enter-exam'
-  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90
+  $entryPrefix = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName" } else { "" }
+  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90 -ScreenshotPrefix $entryPrefix
   if ($entry.Reason -eq 'entry-window-not-found') {
     Write-Host '[real-client] exam entry window was not found within 90s; continuing to collect the report'
   } else {
-    Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) dpi=$($entry.Dpi) client=$($entry.ClientSize) attempts=$($entry.Attempts) pages=$($entry.PageTargets) clicked=$($entry.Clicked) reason=$($entry.Reason)"
+    Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) dpi=$($entry.Dpi) client=$($entry.ClientSize) attempts=$($entry.Attempts) pages=$($entry.PageTargets) clicked=$($entry.Clicked) reason=$($entry.Reason) windows=$([CXClientEntry]::WindowClasses([uint32]$entry.ProcessId))"
   }
 
   if ($entry.PageTargets -lt 1) {
@@ -183,6 +207,7 @@ try {
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {
   Write-Host "[real-client] FAILED case=$CaseName stage=$stage type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
+  Save-FailureArtifacts -CaseName $CaseName
   if (-not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) { Write-Host "[real-client] stack=$($_.ScriptStackTrace)" }
   Write-HostDiagnostics
   throw

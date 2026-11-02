@@ -73,6 +73,10 @@ test('注入脚本在报告校验前自动点击进入考试，并接受客户�
     '客户端被关闭或杀掉后仍应接受完整报告');
   assert.match(script, /entry reason=\$\(\$entry\.Reason\) attempts=\$\(\$entry\.Attempts\) pageTargets=\$\(\$entry\.PageTargets\)/u,
     'pageSessions 为 0 时必须报告点击重试次数与页面数');
+  assert.match(script, /windows=\$\(\[CXClientEntry\]::WindowClasses/u,
+    '进入考试日志必须带上客户端窗口类列表，用于区分点击失败与被客户端自检拦截');
+  assert.match(script, /Save-FailureArtifacts -CaseName \$CaseName/u,
+    '失败时必须保留截图/报告/宿主日志供 CI 上传');
   assert.doesNotMatch(script, /stopReason -ne 'duration'/u, '不得再要求客户端必须自然跑到时长结束');
 });
 
@@ -95,6 +99,11 @@ test('进入考试助手保持纯 ASCII 且不发送重复点击', () => {
   assert.match(text, /Wait-ClientLayoutReady/u, '必须等 Duilib 布局完成再点击，否则会点到 137x36 的初始窗口');
   assert.match(text, /GetDpiForWindow/u, '按钮坐标必须按窗口 DPI 换算，不能按客户区比例');
   assert.match(text, /Get-ClientPageTargetCount/u, '点击后必须用 CDP 页面数确认真的进入了考试');
+  assert.match(text, /Find-ExamEntryButton/u, '必须按渲染结果定位按钮，而不是写死坐标');
+  assert.match(text, /CXExamEntryScan/u, '必须有像素扫描实现');
+  assert.equal((text.match(/1-before-click/gu) ?? []).length, 1, '点击前必须留一帧（按钮已出现）');
+  assert.match(text, /2-after-click/u, '点击后、关闭前必须留一帧');
+  assert.match(text, /entry-button-never-visible/u, '按钮始终没出现时要与点击无效区分开');
   assert.match(text, /entry-page-detected/u, '必须区分"页面已出现"和"点了但没反应"');
   assert.match(text, /-Attempts 6|Attempts = 6/u, '检查页探测期间点击会被丢弃，必须允许重试');
   assert.doesNotMatch(text, /0\.34333|0\.11143/u, '不得再用客户区比例推算按钮坐标');

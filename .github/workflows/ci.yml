@@ -466,6 +466,17 @@ jobs:
             -DatabaseBase64 $compactDb `
             -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
             -CaseName '${{ matrix.client }}-${{ matrix.database }}'
+      - name: 上传失败现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-client-failure-${{ matrix.client }}-${{ matrix.database }}
+          path: |
+            ${{ runner.temp }}/cx-real-client-*.png
+            ${{ runner.temp }}/cx-real-client-*.json
+            ${{ runner.temp }}/cx-real-client-*.log
+          if-no-files-found: warn
+          retention-days: 7
 
   summary:
     name: 持续集成汇总
