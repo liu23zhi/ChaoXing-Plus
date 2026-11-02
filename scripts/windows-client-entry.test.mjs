@@ -195,6 +195,15 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.match(script, /CropLeft \$cropLeft -CropTop \$cropTop/u, '确认按钮扫描必须限制在弹窗区域');
   assert.match(script, /overlap \* 100 >= \(long\)span \* 60/u, '圆角按钮需要按重叠判定连续性');
   assert.match(script, /Via = 'keyboard'/u, '扫描找不到按钮时必须有键盘兜底');
+  assert.match(script, /function Get-ClientDialogWindow/u, '弹窗是独立窗口，必须先定位它');
+  assert.match(script, /'ExamCheckHintUI', '#32770'/u, '必须按客户端弹窗类名查找');
+  assert.match(script, /function Invoke-WindowClick/u, '点击必须发到目标窗口自身');
+  assert.match(script, /dialog-window/u, '确认点击必须走弹窗窗口（检查窗口收不到）');
+  assert.match(script, /\$stillOpen = \(Get-ClientDialogWindow/u, '点完必须确认弹窗真的消失');
+  assert.match(script, /confirm dialog handled clicked=/u, '必须记录弹窗处理结果');
+  const confirmBody = script.slice(script.indexOf('function Confirm-ClientExamEntry'));
+  assert.ok(confirmBody.indexOf('Get-ClientDialogWindow') < confirmBody.indexOf('Find-ClientConfirmButton'),
+    '必须先定位弹窗窗口再扫描按钮');
 });
 test('真实 CI 帧：检测未通过弹窗的确定按钮能被定位', () => {
   const harness = String.raw`
@@ -245,4 +254,42 @@ function Scan-Crop([string]$Path, [double]$left, [double]$top, [double]$width, [
   assert.ok(Math.abs(confirmY - 448) <= 12, `确定按钮 Y 应接近 448，实际 ${confirmY}`);
   const [entryX, entryY] = pick('BEFORE_ENTRY').split(',').map(Number);
   assert.ok(Math.abs(entryX - 601) <= 20 && Math.abs(entryY - 78) <= 20, `进入考试按钮位置异常: ${entryX},${entryY}`);
+});
+
+test('按弹窗窗口自身坐标也能定位确定按钮', () => {
+  // CI 帧里弹窗是独立窗口：只截到弹窗时，用宽裁剪带（2%..98% x / 10%..95% y）必须仍能命中。
+  const harness = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$entry = '` + entryScript.replace(/'/g, "''") + String.raw`'
+$text = Get-Content -LiteralPath $entry -Raw
+$start = $text.IndexOf('public class CXExamEntryScan')
+$begin = $text.LastIndexOf("@'", $start) + 2
+$end = $text.IndexOf("'@", $start)
+Add-Type -TypeDefinition $text.Substring($begin, $end - $begin)
+
+$full = [System.Drawing.Bitmap]::FromFile('` + fixtureAfter.replace(/'/g, "''") + String.raw`')
+# 弹窗在整帧中的位置（按帧内容测量）：留 2px 余量
+$rect = New-Object System.Drawing.Rectangle 397, 247, 405, 251
+$dialog = $full.Clone($rect, $full.PixelFormat)
+$cropLeft = [int]($dialog.Width * 0.02); $cropTop = [int]($dialog.Height * 0.10)
+$cropWidth = [int]($dialog.Width * 0.96); $cropHeight = [int]($dialog.Height * 0.85)
+$scanRect = New-Object System.Drawing.Rectangle $cropLeft, $cropTop, $cropWidth, $cropHeight
+$data = $dialog.LockBits($scanRect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$buffer = New-Object byte[] ($data.Stride * $cropHeight)
+[System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
+$found = [CXExamEntryScan]::Scan($buffer, $data.Stride, $cropWidth, $cropHeight, 0, 0)
+$dialog.UnlockBits($data)
+$dialog.Dispose(); $full.Dispose()
+if ($found.Length -eq 0) { 'DIALOG=absent' } else { "DIALOG=$($found[0] + $cropLeft + $rect.X),$($found[1] + $cropTop + $rect.Y)" }
+`;
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness],
+    { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.error?.code === 'ENOENT') return;
+  assert.equal(result.status, 0, result.stderr);
+  const match = /DIALOG=([^\r\n]+)/u.exec(result.stdout);
+  assert.ok(match, `缺少 DIALOG 结果: ${result.stdout}${result.stderr}`);
+  assert.notEqual(match[1].trim(), 'absent', '弹窗窗口内必须能定位确定按钮');
+  const [x, y] = match[1].trim().split(',').map(Number);
+  assert.ok(Math.abs(x - 668) <= 12 && Math.abs(y - 448) <= 12, `弹窗内确定按钮位置异常: ${x},${y}`);
 });

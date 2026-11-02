@@ -33,6 +33,9 @@ public class CXClientEntry {
     [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessageW(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr param);
+    public delegate bool EnumWindowsProc(IntPtr handle, IntPtr param);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     public delegate uint DpiForWindow(IntPtr handle);
@@ -252,14 +255,22 @@ function Find-ExamEntryButton {
 # "some features may be affected, enter anyway?" with a blue confirm button. The dialog is drawn in the same
 # window, so the button is located by scanning the dialog band and clicking it.
 function Find-ClientConfirmButton {
-    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+    param(
+        [Parameter(Mandatory = $true)] [IntPtr] $Window,
+        # Ratios of the window client area. The check page keeps its dialog band narrow so the entry button
+        # is never mistaken for the confirm button; the dialog window is scanned almost fully.
+        [double] $Left = 0.30,
+        [double] $Top = 0.30,
+        [double] $Width = 0.40,
+        [double] $Height = 0.45
+    )
     $rect = New-Object CXClientEntry+RECT
     if (-not [CXClientEntry]::GetClientRect($Window, [ref]$rect)) { return [pscustomobject]@{ State = 'unavailable' } }
     if ($rect.Right -le 0 -or $rect.Bottom -le 0) { return [pscustomobject]@{ State = 'unavailable' } }
-    $cropLeft = [int]($rect.Right * 0.30)
-    $cropTop = [int]($rect.Bottom * 0.30)
-    $cropWidth = [int]($rect.Right * 0.40)
-    $cropHeight = [int]($rect.Bottom * 0.45)
+    $cropLeft = [int]($rect.Right * $Left)
+    $cropTop = [int]($rect.Bottom * $Top)
+    $cropWidth = [int]($rect.Right * $Width)
+    $cropHeight = [int]($rect.Bottom * $Height)
     $scan = Get-WindowScanBuffer -Window $Window -CropLeft $cropLeft -CropTop $cropTop -CropWidth $cropWidth -CropHeight $cropHeight
     if (-not $scan) { return [pscustomobject]@{ State = 'unavailable' } }
     try {
@@ -271,42 +282,82 @@ function Find-ClientConfirmButton {
     }
 }
 
-# Fallback click: press the confirm button on the "still enter the exam?" dialog so the client proceeds to its
-# CEF page even when one check item failed.
+# The dialog is its own window (class ExamCheckHintUI) drawn over the check window, so a click posted to
+# ExamCheckUI never reaches it - the CI frame showed the dialog unchanged after the posted click.
+function Get-ClientDialogWindow {
+    param(
+        [Parameter(Mandatory = $true)] [IntPtr] $CheckWindow,
+        [int] $ProcessId = 0
+    )
+    if (-not $ProcessId) { return [IntPtr]::Zero }
+    foreach ($className in @('ExamCheckHintUI', '#32770')) {
+        $handle = [CXClientEntry]::Find([uint32]$ProcessId, $className)
+        if ($handle -ne [IntPtr]::Zero -and $handle -ne $CheckWindow -and [CXClientEntry]::IsWindowVisible($handle)) {
+            return $handle
+        }
+    }
+    return [IntPtr]::Zero
+}
+
+# Click inside a window by posted messages only (repository rule: never synthesize global mouse input).
+function Invoke-WindowClick {
+    param([Parameter(Mandatory = $true)] [IntPtr] $Window, [int] $X, [int] $Y)
+    $lParam = [IntPtr](($Y -shl 16) -bor ($X -band 0xFFFF))
+    [void][CXClientEntry]::PostMessageW($Window, 0x0200, [IntPtr]::Zero, $lParam)
+    Start-Sleep -Milliseconds 120
+    [void][CXClientEntry]::PostMessageW($Window, 0x0201, [IntPtr]1, $lParam)
+    Start-Sleep -Milliseconds 90
+    [void][CXClientEntry]::PostMessageW($Window, 0x0202, [IntPtr]::Zero, $lParam)
+}
+
+# Fallback click: accept the "some features may be affected, enter anyway?" dialog so the client creates
+# its CEF page even when one check item failed.
 function Confirm-ClientExamEntry {
     param(
         [Parameter(Mandatory = $true)] [IntPtr] $Window,
         [int] $TimeoutSeconds = 8,
         [int] $PollMilliseconds = 400,
-        [string] $ScreenshotPrefix = ''
+        [string] $ScreenshotPrefix = '',
+        [int] $ProcessId = 0
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $button = Find-ClientConfirmButton -Window $Window
+        $dialog = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
+        if ($dialog -ne [IntPtr]::Zero) {
+            $target = $dialog
+            # The dialog window only contains the dialog, so nearly the whole client area can be scanned.
+            $button = Find-ClientConfirmButton -Window $dialog -Left 0.02 -Top 0.10 -Width 0.96 -Height 0.85
+        } else {
+            $target = $Window
+            $button = Find-ClientConfirmButton -Window $Window
+        }
         if ($button.State -eq 'found') {
-            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $Window
-            $lParam = [IntPtr](($button.Y -shl 16) -bor ($button.X -band 0xFFFF))
-            [void][CXClientEntry]::PostMessageW($Window, 0x0200, [IntPtr]::Zero, $lParam)
-            Start-Sleep -Milliseconds 120
-            [void][CXClientEntry]::PostMessageW($Window, 0x0201, [IntPtr]1, $lParam)
-            Start-Sleep -Milliseconds 90
-            [void][CXClientEntry]::PostMessageW($Window, 0x0202, [IntPtr]::Zero, $lParam)
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $target
+            [void][CXClientEntry]::SetForegroundWindow($target)
+            Start-Sleep -Milliseconds 250
+            $via = if ($dialog -ne [IntPtr]::Zero) { 'dialog-window' } else { 'check-window' }
+            Invoke-WindowClick -Window $target -X $button.X -Y $button.Y
             Start-Sleep -Seconds 2
-            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $Window
-            return [pscustomobject]@{ Clicked = $true; X = $button.X; Y = $button.Y; Via = 'scan' }
+            $stillOpen = (Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId) -ne [IntPtr]::Zero
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $target
+            if (-not $stillOpen) {
+                return [pscustomobject]@{ Clicked = $true; X = $button.X; Y = $button.Y; Via = $via }
+            }
+            $dialog = [IntPtr]::Zero
         }
         if ($button.State -eq 'unavailable') { break }
         Start-Sleep -Milliseconds $PollMilliseconds
     }
-    # Last resort: the confirm button carries focus, so Enter accepts the dialog as well. This covers a
-    # dialog drawn with a different palette that the blue scan cannot find.
-    Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-keyboard' -Window $Window
-    [void][CXClientEntry]::PostMessageW($Window, 0x0100, [IntPtr]0x0D, [IntPtr]0)
+    # Last resort: the confirm button carries focus, so Enter accepts the dialog as well.
+    $dialog = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
+    $target = if ($dialog -ne [IntPtr]::Zero) { $dialog } else { $Window }
+    Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-keyboard' -Window $target
+    [void][CXClientEntry]::PostMessageW($target, 0x0100, [IntPtr]0x0D, [IntPtr]0)
     Start-Sleep -Milliseconds 80
-    [void][CXClientEntry]::PostMessageW($Window, 0x0101, [IntPtr]0x0D, [IntPtr]0)
+    [void][CXClientEntry]::PostMessageW($target, 0x0101, [IntPtr]0x0D, [IntPtr]0)
     Start-Sleep -Seconds 2
-    $after = Find-ClientConfirmButton -Window $Window
-    if ($after.State -eq 'absent') { return [pscustomobject]@{ Clicked = $true; X = 0; Y = 0; Via = 'keyboard' } }
+    $after = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
+    if ($after -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $true; X = 0; Y = 0; Via = 'keyboard' } }
     return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0 }
 }
 
@@ -399,6 +450,27 @@ function Wait-ClientExamEntry {
             }
         }
 
+        # While the confirm dialog is up, the entry button behind it is dimmed: accept the dialog instead of
+        # clicking into a disabled area (the CI frames show three wasted attempts doing exactly that).
+        $dialogWindow = Get-ClientDialogWindow -CheckWindow $window -ProcessId $clientProcess.Id
+        if ($dialogWindow -ne [IntPtr]::Zero) {
+            $accepted = Confirm-ClientExamEntry -Window $window -TimeoutSeconds 6 -ScreenshotPrefix $ScreenshotPrefix -ProcessId $clientProcess.Id
+            Write-Host "[real-client] confirm dialog handled clicked=$($accepted.Clicked) via=$($accepted.Via)"
+            Start-Sleep -Seconds 1
+            $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
+            if ($pages -gt 0) {
+                return [pscustomobject]@{
+                    Clicked = $true; Reason = 'entry-page-detected-after-confirm'; Window = [int64]$window
+                    ProcessId = $clientProcess.Id; Point = "$($accepted.X),$($accepted.Y)"; Dpi = $dpi
+                    Attempts = $attempt; ClientSize = $size; PageTargets = $pages; Target = 'confirm-scan'
+                    Confirmed = $true
+                }
+            }
+            $attempt++
+            Start-Sleep -Milliseconds $PollMilliseconds
+            continue
+        }
+
         $layout = Wait-ClientLayoutReady -Window $window -TimeoutSeconds 60
         if (-not $layout.Ready) {
             Start-Sleep -Milliseconds $PollMilliseconds
@@ -462,7 +534,7 @@ function Wait-ClientExamEntry {
         # A failed check adds one more step: a confirm dialog. Press it and wait for the
         # page instead of clicking the entry button again (dimmed behind the dialog, the click would be lost).
         if ($attempt -ge 1) {
-            $confirm = Confirm-ClientExamEntry -Window $window -TimeoutSeconds 8 -ScreenshotPrefix $ScreenshotPrefix
+            $confirm = Confirm-ClientExamEntry -Window $window -TimeoutSeconds 8 -ScreenshotPrefix $ScreenshotPrefix -ProcessId $clientProcess.Id
             if ($confirm.Clicked) {
                 Write-Host "[real-client] confirm dialog accepted via=$($confirm.Via) point=$($confirm.X),$($confirm.Y)"
                 $confirmDeadline = (Get-Date).AddSeconds(20)
