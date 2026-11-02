@@ -122,7 +122,20 @@ test('仓库内兜底安装包与清单一致', () => {
   assert.equal(manifest.file, `wechat-ime-v${manifest.version}.exe`, '文件名必须与版本一致');
   const installer = resolveTestPath('tests', 'private-clients', manifest.file);
   assert.ok(existsSync(installer), '兜底安装包必须随仓库提供');
-  assert.equal(statSync(installer).size, manifest.size, '兜底安装包体积必须与清单一致');
+  // CI 默认不拉取 200MB 的 LFS 实体；此时文件内容是 LFS 指针，用指针里的 oid/size 校验清单即可。
+  const head = readFileSync(installer).subarray(0, 200).toString('utf8');
+  const pointer = /^version https:\/\/git-lfs\.github\.com\/spec\/v1/u.test(head);
+  if (pointer) {
+    const oid = /oid sha256:([0-9a-f]{64})/u.exec(head);
+    const size = /size (\d+)/u.exec(head);
+    assert.ok(oid, 'LFS 指针必须包含 oid sha256');
+    assert.ok(size, 'LFS 指针必须包含 size');
+    assert.equal(oid[1].toUpperCase(), manifest.sha256, 'LFS 指针的 oid 必须与清单 SHA256 一致');
+    assert.equal(Number(size[1]), manifest.size, 'LFS 指针的 size 必须与清单一致');
+  } else {
+    assert.equal(statSync(installer).size, manifest.size, '兜底安装包体积必须与清单一致');
+    assert.equal(readFileSync(installer).subarray(0, 2).toString('latin1'), 'MZ', '兜底安装包必须是可执行文件');
+  }
   const attributes = readFileSync(resolveTestPath('.gitattributes'), 'utf8');
   assert.match(attributes, /tests\/private-clients\/\*\.exe filter=lfs/u, '兜底安装包必须走 Git LFS');
 });

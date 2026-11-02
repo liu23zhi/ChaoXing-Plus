@@ -494,7 +494,10 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     '真实客户端注入必须跟随 discovery 结果在非 PR 事件运行');
   assert.doesNotMatch(workflow, /CI_PRIVATE_CLIENTS_ENABLED/u,
     '真实客户端矩阵不得再被未设置的仓库变量静默关闭');
-  assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
+  assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]chaoxing-exam-\*\.exe['"]/u,
+    'CI 必须只把考试客户端纳入矩阵（同目录还有微信输入法安装包）');
+  assert.match(workflow, /if \(\$clientFiles\.Count -eq 0\) \{ throw '私有客户端目录中没有 chaoxing-exam-\*\.exe' \}/u,
+    '缺少考试客户端时必须明确报错');
   assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
   assert.match(workflow, /REPOSITORY_VARS_JSON:\s*\$\{\{\s*toJSON\(vars\)\s*\}\}/u,
     '发现步骤必须从 vars context 获取数据库 Base64 变量');
