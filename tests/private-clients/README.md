@@ -1,3 +1,17 @@
+## 微信输入法兜底安装包
+
+`wechat-ime-v3.0.2.22.exe`（208 MB，Git LFS）是 CI 准备桌面环境时的兜底输入法安装包，配套的
+`wechat-ime.json` 记录版本、体积、SHA256、来源 URL 与签名主体。
+
+- 依据：客户端只按“IMM 描述非空”识别输入法（`GetKeyboardLayoutList` + `ImmGetDescriptionW`），
+  没有厂商白名单，所以第三方输入法可以替代缺失的 zh-CN 语言包。
+- 安装顺序：仓库内安装包 → `winget install Tencent.WeType` → 按 winget-pkgs 清单解析最新版本从官方
+  地址下载。三层都带超时，失败只记录不中断。
+- 校验：运行前必须同时满足 `Authenticode Status=Valid`、签名主体含 `Tencent`、SHA256 与
+  `wechat-ime.json` 一致，任一不满足即拒绝执行。
+- 本地实测：卸载后用该文件 `/s` 静默安装约 45 秒，`HKLM\SOFTWARE\Microsoft\CTF\TIP\
+  {86598FB9-66A2-463E-B9C2-AEB906D477AD}\LanguageProfile\0x00000804\{607FDF85-...}` 变为
+  `Enable=1 / Description=WeType`。
 # 私有客户端注入夹具
 
 此目录只用于私有仓库的 GitHub Actions 真实客户端注入测试。EXE 由 Git LFS 管理，不能复制到公共仓库、发布包或测试日志。CI 会递归查找此目录下的所有 `.exe`，并按文件名版本自动生成客户端矩阵。
