@@ -349,8 +349,12 @@ function Test-SogouInstallerFile {
     }
 }
 
+# The installer may register itself with a Chinese display name, so a DisplayName-only match would miss it
+# and the job would reinstall every run. Three independent signals are checked instead: the uninstall entry
+# (name, install location or uninstall command containing "sogou"), the legacy IMM keyboard-layout key, and
+# the install directory.
 function Get-SogouInputState {
-    $state = [pscustomobject]@{ Installed = $false; InstallDir = ''; Version = '' }
+    $state = [pscustomobject]@{ Installed = $false; InstallDir = ''; Version = ''; Source = '' }
     foreach ($root in @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -359,17 +363,37 @@ function Get-SogouInputState {
         foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
             $values = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
             if (-not $values) { continue }
-            if ([string]$values.DisplayName -match 'Sogou|sogou') {
-                $state.Installed = $true
-                $state.Version = [string]$values.DisplayVersion
-                $state.InstallDir = [string]$values.InstallLocation
-                return $state
-            }
+            $haystack = "$($values.DisplayName) $($values.InstallLocation) $($values.UninstallString)"
+            if ($haystack -notmatch 'sogou') { continue }
+            $state.Installed = $true
+            $state.Version = [string]$values.DisplayVersion
+            $state.InstallDir = [string]$values.InstallLocation
+            $state.Source = 'uninstall-entry'
+            return $state
         }
     }
-    foreach ($candidate in @((Join-Path ${env:ProgramFiles(x86)} 'SogouInput'), (Join-Path ${env:ProgramFiles} 'SogouInput'))) {
+    $layouts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts'
+    if (Test-Path -LiteralPath $layouts) {
+        foreach ($key in @(Get-ChildItem -LiteralPath $layouts -ErrorAction SilentlyContinue)) {
+            $values = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+            if (-not $values) { continue }
+            $haystack = "$($values.'IME file') $($values.'Layout Text') $($values.'Layout Display Name')"
+            if ($haystack -notmatch 'sogou') { continue }
+            $state.Installed = $true
+            $state.Source = 'imm-layout'
+            return $state
+        }
+    }
+    foreach ($candidate in @(
+        (Join-Path ${env:ProgramFiles(x86)} 'SogouInput'),
+        (Join-Path ${env:ProgramFiles} 'SogouInput'),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'SogouInput' } else { '' })
+    )) {
+        if (-not $candidate) { continue }
         if (Test-Path -LiteralPath $candidate -PathType Container) {
+            $state.Installed = $true
             $state.InstallDir = $candidate
+            $state.Source = 'install-dir'
             break
         }
     }
@@ -412,7 +436,7 @@ function Install-SogouInputMethod {
     try {
         $state = Get-SogouInputState
         if ($state.Installed) {
-            Write-Step "input: Sogou Pinyin already installed (version=$($state.Version) dir=$($state.InstallDir))"
+            Write-Step "input: Sogou Pinyin already installed (version=$($state.Version) dir=$($state.InstallDir) source=$($state.Source))"
             return
         }
         if ($DryRun) { Write-Step 'input: dry run, Sogou Pinyin not installed'; return }

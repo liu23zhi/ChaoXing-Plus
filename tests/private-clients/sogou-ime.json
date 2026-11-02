@@ -7,5 +7,7 @@
   "source": "https://ime.gtimg.com/pc/build/_sogou_pinyin_16.9.0.5523_0.exe",
   "signer": "CN=\"Beijing Sogou Technology Development Co., Ltd.\"",
   "silentSwitch": "/S",
+  "silentSwitchVerified": "2026-11-02 在虚拟机实测 sogou-ime-v16.9.0.5523.exe /S 可静默安装（用户执行，CI 侧未在本机运行安装包）",
+  "detection": "uninstall-entry(DisplayName/InstallLocation/UninstallString 含 sogou) | imm-layout(HKLM\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts 含 sogou) | install-dir(Program Files (x86)\\SogouInput 等)",
   "note": "CI fallback installer. scripts/ci/prepare-windows-real-client-environment.ps1 prefers this file, verifies the SHA256 and the Sogou Authenticode signature before running it with /S; when it is missing the script falls back to winget (Sogou.SogouInput) and then to the newest release resolved from the winget-pkgs manifest."
 }

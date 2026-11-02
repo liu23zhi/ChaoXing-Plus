@@ -146,4 +146,11 @@ test('仓库内搜狗安装包与清单一致，且优先使用', () => {
   assert.match(source, /sogou-ime-v\*\.exe/u, '按文件名约定查找');
   assert.match(source, /function Test-SogouInstallerFile/u, '执行前必须校验签名与哈希');
   assert.match(source, /unexpected signer/u, '签名主体不含 Sogou 时必须拒绝');
+  // 安装器可能用中文 DisplayName 注册，只看名字会重复安装：三条独立信号都要在。
+  assert.match(source, /Source = 'uninstall-entry'/u, '必须识别卸载表项');
+  assert.match(source, /Control\\Keyboard Layouts/u, '必须识别 IMM 键盘布局注册');
+  assert.match(source, /Source = 'install-dir'/u, '必须识别安装目录');
+  assert.match(source, /UninstallString/u, '卸载命令含 sogou 也应识别');
+  assert.equal(typeof manifest.silentSwitchVerified, 'string', '清单必须记录 /S 的实测结论');
+  assert.match(manifest.silentSwitchVerified, /虚拟机/u, '必须注明是虚拟机实测');
 });
