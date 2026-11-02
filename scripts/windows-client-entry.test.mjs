@@ -13,56 +13,56 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function run(script) {
-  const result = spawnSync('powershell.exe', [
-    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
-  ], { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
-  if (result.error) throw result.error;
-  return result;
-}
+// Coordinates measured against the real client: 1200x700 client area -> (412,78); at 150% DPI the
+// window is 1800x1050 and the same logical point lands on (618,117).
+const expectedPoints = [
+  { width: 1200, height: 700, point: '412,78' },
+  { width: 1800, height: 1050, point: '618,117' },
+  { width: 2400, height: 1400, point: '824,156' }
+];
 
-function runJson(body) {
-  const result = run([
+let pendingResults;
+
+// A single PowerShell process covers every probe: the unit job also runs real Chromium suites at
+// concurrency 2, so one spawn per assertion only adds scheduling noise.
+function results() {
+  if (pendingResults) return pendingResults;
+  const missing = resolveTestPath('.tmp-tests-not-a-client', 'CXExam.exe');
+  const script = [
     "$ErrorActionPreference = 'Stop'",
     '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)',
     `. ${psQuote(entryScript)}`,
-    body
-  ].join('\n'));
+    '$points = foreach ($size in @(@(1200, 700), @(1800, 1050), @(2400, 1400))) {'
+      + ' $point = Get-ClientEntryPoint -Width $size[0] -Height $size[1]; "$($point.X),$($point.Y)" }',
+    "try { Get-ClientEntryPoint -Width 0 -Height 700 | Out-Null; $invalid = 'NO_ERROR' } catch { $invalid = $_.Exception.Message }",
+    `$entry = Wait-ClientExamEntry -ClientPath ${psQuote(missing)} -TimeoutSeconds 1 -PollMilliseconds 200`,
+    '@{ points = @($points); invalid = $invalid; missing = @{ Clicked = $entry.Clicked; Reason = $entry.Reason; ProcessId = $entry.ProcessId } } | ConvertTo-Json -Compress -Depth 4'
+  ].join('\n');
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script
+  ], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.error) throw result.error;
   const line = String(result.stdout)
     .split(/\r?\n/u)
     .map((value) => value.trim())
     .filter((value) => value.startsWith('{'))
     .pop();
-  return { result, json: line ? JSON.parse(line) : undefined };
+  assert.ok(line, `脚本必须输出探针结果: ${result.stdout}${result.stderr}`);
+  pendingResults = { result, json: JSON.parse(line) };
+  return pendingResults;
 }
 
 test('进入考试按钮坐标由客户区尺寸换算，与 DPI 无关', { skip: windowsOnly }, () => {
-  const cases = [
-    { width: 1200, height: 700, x: 412, y: 78 },
-    { width: 1800, height: 1050, x: 618, y: 117 },
-    { width: 2400, height: 1400, x: 824, y: 156 }
-  ];
-  for (const item of cases) {
-    const { result, json } = runJson(`(Get-ClientEntryPoint -Width ${item.width} -Height ${item.height}) | ConvertTo-Json -Compress`);
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(json, { X: item.x, Y: item.y }, `${item.width}x${item.height} 的按钮坐标必须与实测一致`);
-  }
-
-  const invalid = run([
-    "$ErrorActionPreference = 'Stop'",
-    `. ${psQuote(entryScript)}`,
-    "try { Get-ClientEntryPoint -Width 0 -Height 700; 'NO_ERROR' } catch { 'ERROR: ' + $_.Exception.Message }"
-  ].join('\n'));
-  assert.match(invalid.stdout, /Client area must be positive/u, '非法尺寸必须失败关闭');
+  const { result, json } = results();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(json.points, expectedPoints.map((item) => item.point),
+    '按钮坐标必须与实测的 1200x700 / 1800x1050 / 2400x1400 换算结果一致');
+  assert.match(json.invalid, /Client area must be positive/u, '非法尺寸必须失败关闭');
 });
 
 test('找不到客户端检查窗口时返回明确原因，不误报点击成功', { skip: windowsOnly }, () => {
-  const missing = resolveTestPath('.tmp-tests-not-a-client', 'CXExam.exe');
-  const { result, json } = runJson(`(Wait-ClientExamEntry -ClientPath ${psQuote(missing)} -TimeoutSeconds 1 -PollMilliseconds 200) | ConvertTo-Json -Compress`);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(json.Clicked, false);
-  assert.equal(json.Reason, 'entry-window-not-found');
-  assert.equal(json.ProcessId, 0);
+  const { json } = results();
+  assert.deepEqual(json.missing, { Clicked: false, Reason: 'entry-window-not-found', ProcessId: 0 });
 });
 
 test('注入脚本在报告校验前自动点击进入考试，并接受客户端提前退出', async () => {
@@ -72,7 +72,7 @@ test('注入脚本在报告校验前自动点击进入考试，并接受客户�
   assert.match(script, /\$stage = 'enter-exam'/u, '进入考试必须是可报告的独立阶段');
   assert.match(script, /'--duration', '120000'/u, '运行时必须给检查窗口和页面加载留出足够时间');
   assert.match(script, /\$report\.stopReason -notin @\('duration', 'client-exit'\)/u,
-    '客户端被关闭或被杀掉后仍应接受完整报告');
+    '客户端被关闭或杀掉后仍应接受完整报告');
   assert.match(script, /entry click=\$\(\$entry\.Reason\)/u, 'pageSessions 为 0 时必须报告进入考试点击结果');
   assert.doesNotMatch(script, /stopReason -ne 'duration'/u, '不得再要求客户端必须自然跑到时长结束');
 });

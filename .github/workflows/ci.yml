@@ -85,7 +85,7 @@ jobs:
     permissions:
       contents: read
     needs: windows-build
-    if: ${{ needs.windows-build.result == 'success' && github.event_name != 'pull_request' && vars.CI_PRIVATE_CLIENTS_ENABLED == 'true' }}
+    if: ${{ needs.windows-build.result == 'success' && github.event_name != 'pull_request' }}
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
@@ -389,7 +389,7 @@ jobs:
     permissions:
       contents: read
     needs: [windows-build, windows-real-client-discovery]
-    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' && vars.CI_PRIVATE_CLIENTS_ENABLED == 'true' }}
+    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:

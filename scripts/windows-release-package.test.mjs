@@ -486,10 +486,12 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /真实客户端自动发现注入矩阵/u, 'CI 摘要必须记录自动发现的真实客户端矩阵');
   assert.match(workflow, /matrix:/u, '真实客户端注入必须使用矩阵');
   assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
-  assert.match(workflow, /github\.event_name != 'pull_request'[\s\S]*vars\.CI_PRIVATE_CLIENTS_ENABLED == 'true'/u,
-    '私有客户端 discovery 必须在显式启用且非 PR 事件时运行');
-  assert.match(workflow, /windows-real-client:[\s\S]*?vars\.CI_PRIVATE_CLIENTS_ENABLED == 'true'/u,
-    '真实客户端注入必须在显式启用且非 PR 事件时运行');
+  assert.match(workflow, /if: \$\{\{ needs\.windows-build\.result == 'success' && github\.event_name != 'pull_request' \}\}/u,
+    '私有客户端 discovery 必须只在非 PR 事件运行，且不得再依赖额外的启用变量（否则整组静默跳过）');
+  assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-real-client-discovery\.result == 'success' && github\.event_name != 'pull_request'/u,
+    '真实客户端注入必须跟随 discovery 结果在非 PR 事件运行');
+  assert.doesNotMatch(workflow, /CI_PRIVATE_CLIENTS_ENABLED/u,
+    '真实客户端矩阵不得再被未设置的仓库变量静默关闭');
   assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
   assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
   assert.match(workflow, /REPOSITORY_VARS_JSON:\s*\$\{\{\s*toJSON\(vars\)\s*\}\}/u,

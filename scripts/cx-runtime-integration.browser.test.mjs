@@ -143,7 +143,9 @@ async function openPage(t, { withTask = false, existingPage } = {}) {
     void request.abort();
   });
   await page.goto(courseUrl);
-  await page.waitForSelector('#panel-common-work-results');
+  // The first panel mount waits for the whole bundled runtime to boot in a cold Chromium profile;
+  // on a shared CI runner that regularly needs more than the 12s default (observed 12s+ stalls).
+  await page.waitForSelector('#panel-common-work-results', { timeout: 25000 });
   return { page, searched, requests, logs };
 }
 
@@ -168,7 +170,7 @@ async function expectButton(page, text) {
   assert.deepEqual(state, { text, disabled: false, visible: true });
 }
 
-test('complete extension bundle keeps an available panel control and isolates pause by browser tab', { timeout: 30000 }, async (t) => {
+test('complete extension bundle keeps an available panel control and isolates pause by browser tab', { timeout: 60000 }, async (t) => {
   const { page } = await openPage(t);
   await expectButton(page, '暂停答题');
   await (await pauseButton(page)).evaluate((element) => element.click());
@@ -186,7 +188,7 @@ test('complete extension bundle keeps an available panel control and isolates pa
   await expectButton(separateTab, '继续答题');
 });
 
-test('complete course runtime resumes after one panel continue click following manual refusal', { timeout: 35000 }, async (t) => {
+test('complete course runtime resumes after one panel continue click following manual refusal', { timeout: 60000 }, async (t) => {
   const { page, searched, requests, logs } = await openPage(t, { withTask: true });
   await expectButton(page, '暂停答题');
   await page.waitForFunction(() => Array.from(document.querySelectorAll('.swal2-cancel'))
