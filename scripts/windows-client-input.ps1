@@ -20,6 +20,7 @@ public class CXInputState {
     [DllImport("user32.dll")] public static extern IntPtr ActivateKeyboardLayout(IntPtr layout, uint flags);
     [DllImport("user32.dll")] public static extern bool UnloadKeyboardLayout(IntPtr layout);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadKeyboardLayoutW(string klid, uint flags);
+    [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(uint action, uint param, ref IntPtr value, uint winIni);
     [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint threadId);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 
@@ -60,6 +61,21 @@ public class CXInputState {
         if (string.IsNullOrEmpty(klid)) return false;
         return LoadKeyboardLayoutW(klid, 0) != IntPtr.Zero;
     }
+
+    // The client calls SystemParametersInfoW(SPI_SETDEFAULTINPUTLANG, ..., SPIF_UPDATEINIFILE), which
+    // rewrites the user's default input language. Snapshot and restore it explicitly.
+    public static string DefaultInputLanguage() {
+        IntPtr value = IntPtr.Zero;
+        if (!SystemParametersInfoW(0x0059, 0, ref value, 0)) return string.Empty;
+        return "0x" + value.ToInt64().ToString("X8");
+    }
+
+    public static bool SetDefaultInputLanguage(string handle) {
+        if (string.IsNullOrEmpty(handle)) return false;
+        long raw = Convert.ToInt64(handle.Substring(2), 16);
+        IntPtr value = new IntPtr(raw);
+        return SystemParametersInfoW(0x005A, 0, ref value, 3);
+    }
 }
 '@
 
@@ -82,6 +98,7 @@ function Get-InputState {
         Substitutes = Get-RegistryInputKeys -Path 'HKCU:\Keyboard Layout\Substitutes'
         LayoutHandles = @([CXInputState]::LayoutHandles())
         ActiveLayout = [CXInputState]::ActiveLayout()
+        DefaultInputLanguage = [CXInputState]::DefaultInputLanguage()
         Languages = @()
         LanguageEntries = @()
         CurrentLanguage = ''
@@ -119,6 +136,7 @@ function Compare-InputState {
     if ((([string[]]$Before.LayoutHandles) -join ',') -ne (([string[]]$After.LayoutHandles) -join ',')) { $changes += 'layouts' }
     if ((([string[]]$Before.Languages) -join ',') -ne (([string[]]$After.Languages) -join ',')) { $changes += 'languages' }
     if ($Before.ActiveLayout -ne $After.ActiveLayout) { $changes += 'active-layout' }
+    if ($Before.DefaultInputLanguage -ne $After.DefaultInputLanguage) { $changes += 'default-input-language' }
     return @($changes)
 }
 
@@ -178,6 +196,11 @@ function Restore-InputState {
         }
     }
 
+    try {
+        if ($State.DefaultInputLanguage -and ([CXInputState]::DefaultInputLanguage() -ne $State.DefaultInputLanguage)) {
+            if ([CXInputState]::SetDefaultInputLanguage($State.DefaultInputLanguage)) { $restored += 'default-input-language' }
+        }
+    } catch { }
     try {
         if ($State.ActiveLayout -and ([CXInputState]::ActiveLayout() -ne $State.ActiveLayout)) {
             if ([CXInputState]::Activate($State.ActiveLayout)) { $restored += 'active-layout' }

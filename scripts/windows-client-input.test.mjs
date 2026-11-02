@@ -40,6 +40,7 @@ test('输入法状态可采集，且未变化时恢复是空操作', { skip: win
   assert.ok(Array.isArray(json.before.LayoutHandles) && json.before.LayoutHandles.length >= 1,
     '必须能列出已加载的键盘布局');
   assert.match(json.before.ActiveLayout, /^0x[0-9A-F]{8}$/u, '必须记录当前激活布局句柄');
+  assert.match(json.before.DefaultInputLanguage ?? '', /^0x[0-9A-F]{8}$/u, '必须记录系统默认输入语言（客户端会用 SPI_SETDEFAULTINPUTLANG 改它）');
   assert.deepEqual(json.diff, [], '同一状态连续采集不应出现差异');
   assert.deepEqual(json.restored, [], '状态未变化时恢复必须是空操作');
 });
@@ -57,6 +58,8 @@ test('注入脚本在运行前后快照并恢复输入法', async () => {
   // 客户端导入 LoadKeyboardLayoutW/UnloadKeyboardLayout 并在退出时留下自载布局，恢复必须卸载多余布局。
   assert.match(helper, /Unload/u, '恢复时需要卸载客户端自载的布局');
   assert.match(helper, /KlidFromHkl/u, '恢复时要把缺失的布局重新载入');
+  assert.match(helper, /SPI_SETDEFAULTINPUTLANG|0x005A/u, '必须能恢复系统默认输入语言');
+  assert.match(helper, /SystemParametersInfoW\(0x0059/u, '必须快照系统默认输入语言');
   assert.match(helper, /New-WinUserLanguageList -Language \$entry\.Tag/u,
     'New-WinUserLanguageList 只接受单个语言，必须逐个构造');
   assert.doesNotMatch(helper, /New-WinUserLanguageList -Language \$tags/u,
