@@ -478,6 +478,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: real-client-${{ matrix.client }}-${{ matrix.database }}
+          # Store the files as-is: artifact packaging must not run another compression pass over the
+          # PNG frames (level 0 keeps the bytes identical to what the runner wrote).
+          compression-level: 0
           path: |
             ${{ runner.temp }}/cx-real-client-*.png
             ${{ runner.temp }}/cx-real-client-*.json

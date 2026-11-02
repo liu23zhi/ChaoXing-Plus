@@ -99,6 +99,21 @@ function Save-RunArtifacts {
     [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 100)
 }
 
+# Hash manifest written last: every artifact of this case can be verified byte for byte after download.
+function Save-ArtifactManifest {
+    param([string] $CaseName)
+    $target = $env:RUNNER_TEMP
+    if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { return }
+    try {
+        $lines = foreach ($file in @(Get-ChildItem -LiteralPath $target -File -Filter "cx-real-client-$CaseName-*" | Sort-Object Name)) {
+            if ($file.Name -like '*-sha256.txt') { continue }
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+        }
+        if ($lines) { [IO.File]::WriteAllLines((Join-Path $target "cx-real-client-$CaseName-sha256.txt"), @($lines)) }
+    } catch { }
+}
+
 function Write-HostDiagnostics {
   foreach ($entry in @(@{ Label = 'stdout'; Path = $stdoutPath }, @{ Label = 'stderr'; Path = $stderrPath })) {
     if (-not (Test-Path -LiteralPath $entry.Path -PathType Leaf)) { continue }
@@ -238,5 +253,6 @@ try {
   # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
   $shell = Repair-ShellDesktop -Force
   Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
+  Save-ArtifactManifest -CaseName $CaseName
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }

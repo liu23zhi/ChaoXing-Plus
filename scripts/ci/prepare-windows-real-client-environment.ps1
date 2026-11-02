@@ -13,13 +13,15 @@
 
 [CmdletBinding()]
 param(
-  [int] $MinWidth = 1600,
-  [int] $MinHeight = 900,
+  [int] $MinWidth = 1920,
+  [int] $MinHeight = 1080,
   [int] $CapabilityTimeoutSeconds = 180,
   [int] $CameraTimeoutSeconds = 300,
+  [int] $DpiScalePercent = 150,
   [switch] $SkipCamera,
   [switch] $SkipInputMethod,
   [switch] $SkipResolution,
+  [switch] $TryDpiScaling,
   [switch] $DryRun
 )
 
@@ -286,7 +288,53 @@ function Add-VirtualCamera {
   }
 }
 
+# The client draws its check window at the 1200x700 design size scaled by the system DPI: 96 DPI gives a
+# 1200x700 window, 150% gives 1800x1050 (what a local high-DPI machine shows). Raising LogPixels only
+# reaches newly started processes after a new sign-in, so this is opt-in and always verified afterwards.
+function Set-SystemDpiScaling {
+  $desktop = 'HKCU:\Control Panel\Desktop'
+  $wanted = [int][Math]::Round(96 * $DpiScalePercent / 100)
+  try {
+    $current = (Get-ItemProperty -LiteralPath $desktop -Name LogPixels -ErrorAction SilentlyContinue).LogPixels
+    Write-Step "dpi: LogPixels before = $current (wanted $wanted for $DpiScalePercent percent)"
+    if ($DryRun) { Write-Step 'dpi: dry run, not changed'; return }
+    Set-ItemProperty -LiteralPath $desktop -Name 'LogPixels' -Value $wanted -Type DWord
+    Set-ItemProperty -LiteralPath $desktop -Name 'Win8DpiScaling' -Value 1 -Type DWord
+    foreach ($process in @(Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+      try { Stop-Process -Id $process.Id -Force -ErrorAction Stop } catch { }
+    }
+    Start-Sleep -Seconds 5
+  } catch {
+    Write-Step "dpi: change failed - $($_.Exception.Message)"
+    return
+  }
+  $probe = @'
+using System;
+using System.Runtime.InteropServices;
+public class CXDpiProbe {
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr handle);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr handle, IntPtr dc);
+    [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int index);
+    public static int SystemDpi() {
+        IntPtr dc = GetDC(IntPtr.Zero);
+        if (dc == IntPtr.Zero) return 0;
+        int value = GetDeviceCaps(dc, 88);
+        ReleaseDC(IntPtr.Zero, dc);
+        return value;
+    }
+}
+'@
+  try {
+    Add-Type -TypeDefinition $probe -ErrorAction SilentlyContinue
+    $effective = [CXDpiProbe]::SystemDpi()
+    Write-Step "dpi: effective SystemDpi after change = $effective (target $wanted needs a new sign-in)"
+  } catch {
+    Write-Step "dpi: probe failed - $($_.Exception.Message)"
+  }
+}
+
 if (-not $SkipResolution) { Set-DesktopResolution }
+if ($TryDpiScaling) { Set-SystemDpiScaling }
 if (-not $SkipInputMethod) { Add-ChineseInputMethod }
 if (-not $SkipCamera) { Add-VirtualCamera }
 
