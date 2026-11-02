@@ -1,8 +1,8 @@
-# Print (and optionally verify) the WeChat IME installer that the CI preparation step would use.
+# Print (and optionally verify) the Sogou Pinyin installer that the CI preparation step would use.
 #
-#   pwsh -File scripts/ci/verify-wetype-resolver.ps1
-#   pwsh -File scripts/ci/verify-wetype-resolver.ps1 -NoWinget   # exercise the manifest branch
-#   pwsh -File scripts/ci/verify-wetype-resolver.ps1 -Download   # also download and check the SHA256
+#   pwsh -File scripts/ci/verify-sogou-resolver.ps1
+#   pwsh -File scripts/ci/verify-sogou-resolver.ps1 -NoWinget   # exercise the manifest branch
+#   pwsh -File scripts/ci/verify-sogou-resolver.ps1 -Download   # also download and check the SHA256
 #
 # Keep this file pure ASCII.
 
@@ -26,12 +26,10 @@ if ($NoWinget) {
 }
 
 Write-Host "winget available = $([bool](Get-Command winget.exe -ErrorAction SilentlyContinue))"
-$state = Get-WeChatInputMethodState
-Write-Host "installed        = $($state.Installed) (dir='$($state.InstallDir)' binaries=$($state.FilesFound))"
-$bundled = Get-BundledWeChatInstaller
-Write-Host "bundled installer= $(if ($bundled) { $bundled } else { '<none>' })"
+$state = Get-SogouInputState
+Write-Host "installed        = $($state.Installed) (version='$($state.Version)' dir='$($state.InstallDir)')"
 
-$installer = Resolve-WeChatInputMethodInstaller
+$installer = Resolve-SogouInputInstaller
 Write-Host "resolved version = $($installer.Version)"
 Write-Host "resolved url     = $($installer.Url)"
 Write-Host "silent switch    = $($installer.Silent)"
@@ -46,7 +44,7 @@ try {
 }
 
 if ($Download) {
-  $target = Join-Path $env:TEMP ('WeTypeSetup-' + $installer.Version + '.exe')
+  $target = Join-Path $env:TEMP ('sogou_pinyin_' + $installer.Version + '.exe')
   if (-not (Test-Path -LiteralPath $target)) {
     Invoke-WebRequest -Uri $installer.Url -OutFile $target -UseBasicParsing -TimeoutSec 900
   }
@@ -54,6 +52,6 @@ if ($Download) {
   $signature = Get-AuthenticodeSignature -LiteralPath $target
   Write-Host "downloaded       = $([math]::Round((Get-Item -LiteralPath $target).Length / 1MB, 2)) MB -> $target"
   Write-Host "sha256           = $actual"
-  Write-Host "sha256 matches   = $($installer.Sha256 -and $actual -eq $installer.Sha256.ToUpperInvariant())"
+  Write-Host "sha256 matches   = $($installer.Sha256 -and $actual -eq $installer.Sha256)"
   Write-Host "signature        = $($signature.Status) / $($signature.SignerCertificate.Subject.Split(',')[0])"
 }

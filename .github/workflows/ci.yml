@@ -104,7 +104,7 @@ jobs:
             throw "私有客户端目录不存在: $clientDirectory"
           }
           # Only the exam client fixtures belong to the matrix. The same directory also carries the
-          # bundled input-method installer (wechat-ime-v*.exe), which has no client version to parse.
+          # bundled tool installers that carry no client version to parse.
           $clientFiles = @(Get-ChildItem -LiteralPath $clientDirectory -Filter 'chaoxing-exam-*.exe' -File -Recurse | Sort-Object FullName)
           if ($clientFiles.Count -eq 0) { throw '私有客户端目录中没有 chaoxing-exam-*.exe' }
 

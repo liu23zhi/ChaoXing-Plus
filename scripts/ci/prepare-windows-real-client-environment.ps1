@@ -4,10 +4,11 @@
 # two items by default:
 #   * resolution - the default 1024x768 desktop clips the client's 1200x700 check window;
 #   * camera and input method - "no camera detected" and "no supported input method detected".
-# This script raises the resolution, installs Microsoft's own Pinyin and Wubi input methods and starts a
-# virtual camera. No third-party input method is installed. Every step is bounded and best effort: the
-# injection step still reports the real outcome through its screenshots and report, so a failed
-# preparation is visible instead of silent - and a hanging Windows component cannot eat the job timeout.
+# This script raises the resolution, registers Microsoft Pinyin/Wubi when the zh-CN payload exists, installs
+# Sogou Pinyin (the client's input method check needs a non-empty ImmGetDescriptionW, which TSF-only IMEs do
+# not provide) and starts a virtual camera. Every step is bounded and best effort: the injection step still
+# reports the real outcome through its screenshots and report, so a failed preparation is visible instead of
+# silent - and a hanging Windows component cannot eat the job timeout.
 #
 # Keep this file pure ASCII.
 
@@ -18,11 +19,11 @@ param(
   [int] $CapabilityTimeoutSeconds = 180,
   [int] $CameraTimeoutSeconds = 300,
   [int] $DpiScalePercent = 150,
-  [string] $WeChatImeInstaller = '',
   [switch] $SkipCamera,
   [switch] $SkipInputMethod,
   [switch] $SkipResolution,
-  [switch] $SkipWeChatInputMethod,
+  [string] $SogouImeInstaller = '',
+  [switch] $SkipSogouInputMethod,
   [switch] $TryDpiScaling,
   [switch] $DryRun
 )
@@ -290,117 +291,12 @@ function Add-VirtualCamera {
   }
 }
 
-# The client accepts any IMM input method (it enumerates keyboard layouts and keeps those whose
-# ImmGetDescriptionW is non-empty), so a third-party IME works where the zh-CN language payload is
-# missing. The installer URL is never hardcoded: it is resolved from the community-maintained winget
-# manifest for the newest release, so a version bump cannot break the job.
-# A language profile alone is not proof of a working install: the TIP key outlives the uninstaller for a
-# while, and running the setup again while the product is present opens the uninstaller GUI instead of
-# installing. Both signals are required, plus the binary on disk.
-function Get-WeChatInputMethodState {
-    $state = [pscustomobject]@{ Installed = $false; Profile = ''; Tip = ''; InstallDir = ''; FilesFound = $false }
-    foreach ($candidate in @((Join-Path ${env:ProgramFiles} 'Tencent\WeType'), (Join-Path ${env:ProgramFiles(x86)} 'Tencent\WeType'))) {
-        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
-        $state.InstallDir = $candidate
-        if (@(Get-ChildItem -LiteralPath $candidate -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
-            $state.FilesFound = $true
-        }
-        break
-    }
-    $tipRoot = 'HKLM:\SOFTWARE\Microsoft\CTF\TIP'
-    if (-not (Test-Path -LiteralPath $tipRoot)) { return $state }
-    foreach ($tip in @(Get-ChildItem -LiteralPath $tipRoot -ErrorAction SilentlyContinue)) {
-        $profileRoot = Join-Path $tip.PSPath 'LanguageProfile\0x00000804'
-        if (-not (Test-Path -LiteralPath $profileRoot)) { continue }
-        foreach ($profile in @(Get-ChildItem -LiteralPath $profileRoot -ErrorAction SilentlyContinue)) {
-            $values = Get-ItemProperty -LiteralPath $profile.PSPath -ErrorAction SilentlyContinue
-            if (-not $values) { continue }
-            if ([string]$values.Description -match 'WeType') {
-                $state.Profile = $profile.PSChildName
-                $state.Tip = [string]$values.Description
-                $state.Installed = (([int]$values.Enable -eq 1) -and $state.FilesFound)
-                return $state
-            }
-        }
-    }
-    return $state
-}
-
-# Remove a half-uninstalled copy through the product's own uninstaller so the setup does not open its
-# uninstall window again.
-function Remove-WeChatInputMethodLeftovers {
-    param([string] $InstallDir)
-    if (-not $InstallDir -or -not (Test-Path -LiteralPath $InstallDir)) { return }
-    $uninstaller = @(Get-ChildItem -LiteralPath $InstallDir -Filter '*nstall*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)
-    if ($uninstaller.Count -gt 0) {
-        Write-Step "input: running leftover uninstaller $($uninstaller[0].FullName) /S"
-        $null = Invoke-Bounded -Label 'input: WeType uninstall /S' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-            $process = Start-Process -FilePath $using:uninstaller[0].FullName -ArgumentList '/S' -PassThru -Wait
-            "uninstaller exit $($process.ExitCode)"
-        }
-    }
-    Start-Sleep -Seconds 3
-    if (Test-Path -LiteralPath $InstallDir) {
-        Write-Step "input: removing leftover directory $InstallDir"
-        Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Resolve-WeChatInputMethodInstaller {
-    # The download URL is never hardcoded: the version comes from winget (or from the community-maintained
-    # winget-pkgs manifest when winget is unavailable) and the official endpoint keeps a fixed shape:
-    #   https://download.z.weixin.qq.com/app/win/WeTypeSetup_<version>.exe
-    $version = ''
-    $sha = ''
-    $silent = '/s'
-    if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
-        try {
-            $show = (& winget.exe show --id Tencent.WeType -e 2>$null) -join "`n"
-            $match = [regex]::Match($show, 'Version:\s*([0-9][0-9.]*)')
-            if ($match.Success) { $version = $match.Groups[1].Value }
-        } catch { }
-    }
-    if (-not $version) {
-        try {
-            $headers = @{ 'User-Agent' = 'chaoxing-plus-ci' }
-            $api = 'https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/t/Tencent/WeType'
-            $rows = @(Invoke-RestMethod -Uri $api -Headers $headers -TimeoutSec 30)
-            $versions = @($rows | ForEach-Object { $_.name } | Where-Object { $_ -match '^[0-9][0-9.]*$' })
-            if ($versions.Count -gt 0) { $version = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1 }
-        } catch { Write-Step "input: winget-pkgs lookup failed - $($_.Exception.Message)" }
-    }
-    if (-not $version) {
-        # Final fallback: the version recorded next to the bundled installer, so a rate-limited GitHub API
-        # cannot break the job while the download endpoint is still reachable.
-        $fixtureRoot = Get-FixtureRoot
-        $fixtureManifest = if ($fixtureRoot) { Join-Path $fixtureRoot 'wechat-ime.json' } else { '' }
-        if ($fixtureManifest -and (Test-Path -LiteralPath $fixtureManifest)) {
-            try {
-                $manifest = Get-Content -LiteralPath $fixtureManifest -Raw | ConvertFrom-Json
-                if ($manifest.version) {
-                    $version = [string]$manifest.version
-                    Write-Step "input: using the bundled manifest version $version (winget and winget-pkgs unavailable)"
-                }
-            } catch { }
-        }
-    }
-    if (-not $version) { throw 'cannot determine the newest WeType version' }
-    $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/t/Tencent/WeType/$version/Tencent.WeType.installer.yaml"
-    try {
-        $yaml = (Invoke-WebRequest -Uri $yamlUrl -UseBasicParsing -TimeoutSec 30).Content
-        $shaMatch = [regex]::Match($yaml, 'InstallerSha256:\s*([0-9A-Fa-f]{64})')
-        if ($shaMatch.Success) { $sha = $shaMatch.Groups[1].Value.ToUpperInvariant() }
-        $silentMatch = [regex]::Match($yaml, 'Silent:\s*(\S+)')
-        if ($silentMatch.Success) { $silent = $silentMatch.Groups[1].Value }
-    } catch { Write-Step "input: manifest metadata unavailable for $version (continuing without SHA256)" }
-
-    $url = "https://download.z.weixin.qq.com/app/win/WeTypeSetup_$version.exe"
-    Write-Step "input: WeType version $version from winget/manifest, sha256=$(if ($sha) { $sha } else { '<unknown>' })"
-    return [pscustomobject]@{ Version = $version; Url = $url; Sha256 = $sha; Silent = $silent }
-}
-
-# The repository carries one known-good installer so the job still works when winget and the vendor CDN
-# are both unreachable. tests/private-clients/wechat-ime.json records the SHA256 of that exact file.
+# The client only accepts input methods whose ImmGetDescriptionW is non-empty (IG5: FUN_004a6b30 drops
+# layouts with an empty description). TSF-only IMEs, including Microsoft Pinyin, do not provide one, so
+# such a machine still fails the check; Sogou Pinyin registers an IMM layer and is what a real passing
+# machine has installed.
+# No version is hardcoded: winget installs it, and the fallback derives the official URL from the
+# community-maintained winget manifest (nullsoft installer, silent switch /S).
 # $PSScriptRoot is empty when a function is re-used through Invoke-Expression or an interactive session,
 # so walk up from every plausible starting point until tests/private-clients is found.
 function Get-FixtureRoot {
@@ -422,26 +318,28 @@ function Get-FixtureRoot {
     return ''
 }
 
-function Get-BundledWeChatInstaller {
+# The repository carries one known-good installer so the job still works when winget and the vendor CDN are
+# both unreachable. tests/private-clients/sogou-ime.json records the SHA256 of that exact file.
+function Get-BundledSogouInstaller {
     $candidates = @()
-    if ($WeChatImeInstaller) { $candidates += $WeChatImeInstaller }
+    if ($SogouImeInstaller) { $candidates += $SogouImeInstaller }
     $fixtureRoot = Get-FixtureRoot
-    if (-not $fixtureRoot) { Write-Step 'input: fixture root not found; bundled WeChat installer unavailable' }
+    if (-not $fixtureRoot) { Write-Step 'input: fixture root not found; bundled Sogou installer unavailable' }
     if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) {
-        $candidates += @(Get-ChildItem -LiteralPath $fixtureRoot -Filter 'wechat-ime-v*.exe' -File -ErrorAction SilentlyContinue |
+        $candidates += @(Get-ChildItem -LiteralPath $fixtureRoot -Filter 'sogou-ime-v*.exe' -File -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending | Select-Object -ExpandProperty FullName)
     }
     return ($candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1)
 }
 
-function Test-WeChatInstallerFile {
+function Test-SogouInstallerFile {
     param([string] $Path)
     $result = [pscustomobject]@{ Ok = $false; Reason = ''; Sha256 = ''; Signer = '' }
     try {
         $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
         $result.Signer = [string]$signature.SignerCertificate.Subject
         if ($signature.Status -ne 'Valid') { $result.Reason = "signature status $($signature.Status)"; return $result }
-        if ($result.Signer -notmatch 'Tencent') { $result.Reason = "unexpected signer: $($result.Signer)"; return $result }
+        if ($result.Signer -notmatch 'Sogou') { $result.Reason = "unexpected signer: $($result.Signer)"; return $result }
         $result.Sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
         $result.Ok = $true
         return $result
@@ -451,33 +349,83 @@ function Test-WeChatInstallerFile {
     }
 }
 
-function Install-WeChatInputMethod {
+function Get-SogouInputState {
+    $state = [pscustomobject]@{ Installed = $false; InstallDir = ''; Version = '' }
+    foreach ($root in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+            $values = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+            if (-not $values) { continue }
+            if ([string]$values.DisplayName -match 'Sogou|sogou') {
+                $state.Installed = $true
+                $state.Version = [string]$values.DisplayVersion
+                $state.InstallDir = [string]$values.InstallLocation
+                return $state
+            }
+        }
+    }
+    foreach ($candidate in @((Join-Path ${env:ProgramFiles(x86)} 'SogouInput'), (Join-Path ${env:ProgramFiles} 'SogouInput'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            $state.InstallDir = $candidate
+            break
+        }
+    }
+    return $state
+}
+
+function Resolve-SogouInputInstaller {
+    $version = ''
+    $sha = ''
+    if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+        try {
+            $show = (& winget.exe show --id Sogou.SogouInput -e 2>$null) -join "`n"
+            $match = [regex]::Match($show, 'Version:\s*([0-9][0-9.]*)')
+            if ($match.Success) { $version = $match.Groups[1].Value }
+        } catch { }
+    }
+    if (-not $version) {
+        try {
+            $headers = @{ 'User-Agent' = 'chaoxing-plus-ci' }
+            $api = 'https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/s/Sogou/SogouInput'
+            $rows = @(Invoke-RestMethod -Uri $api -Headers $headers -TimeoutSec 30)
+            $versions = @($rows | ForEach-Object { $_.name } | Where-Object { $_ -match '^[0-9][0-9.]*$' })
+            if ($versions.Count -gt 0) { $version = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1 }
+        } catch { Write-Step "input: sogou manifest lookup failed - $($_.Exception.Message)" }
+    }
+    if (-not $version) { throw 'cannot determine the newest Sogou Pinyin version' }
+    $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/s/Sogou/SogouInput/$version/Sogou.SogouInput.installer.yaml"
     try {
-        $state = Get-WeChatInputMethodState
+        $yaml = (Invoke-WebRequest -Uri $yamlUrl -UseBasicParsing -TimeoutSec 30).Content
+        $shaMatch = [regex]::Match($yaml, 'InstallerSha256:\s*([0-9A-Fa-f]{64})')
+        if ($shaMatch.Success) { $sha = $shaMatch.Groups[1].Value.ToUpperInvariant() }
+    } catch { Write-Step "input: sogou manifest metadata unavailable for $version (continuing without SHA256)" }
+    # The vendor endpoint keeps a stable shape, so only the version has to be resolved.
+    $url = "https://ime.gtimg.com/pc/build/_sogou_pinyin_$($version)_0.exe"
+    Write-Step "input: Sogou Pinyin version $version, sha256=$(if ($sha) { $sha } else { '<unknown>' })"
+    return [pscustomobject]@{ Version = $version; Url = $url; Sha256 = $sha; Silent = '/S' }
+}
+
+function Install-SogouInputMethod {
+    try {
+        $state = Get-SogouInputState
         if ($state.Installed) {
-            Write-Step "input: WeChat IME already installed (profile=$($state.Profile) description=$($state.Tip))"
+            Write-Step "input: Sogou Pinyin already installed (version=$($state.Version) dir=$($state.InstallDir))"
             return
         }
-        if ($DryRun) { Write-Step 'input: dry run, WeChat IME not installed'; return }
-
-        # A leftover copy would make the setup open its uninstaller window instead of installing.
-        if ($state.InstallDir -and -not $state.FilesFound) {
-            Write-Step "input: leftover directory without binaries ($($state.InstallDir)); cleaning up before install"
-            Remove-WeChatInputMethodLeftovers -InstallDir $state.InstallDir
-        } elseif ($state.FilesFound -and -not $state.Installed) {
-            Write-Step "input: half-uninstalled copy found in $($state.InstallDir); removing it before install"
-            Remove-WeChatInputMethodLeftovers -InstallDir $state.InstallDir
-        }
+        if ($DryRun) { Write-Step 'input: dry run, Sogou Pinyin not installed'; return }
 
         # 1) bundled installer from the repository: no network needed, hash pinned in the fixture manifest.
-        $bundled = Get-BundledWeChatInstaller
+        $bundled = Get-BundledSogouInstaller
         if ($bundled) {
-            $verified = Test-WeChatInstallerFile -Path $bundled
+            $verified = Test-SogouInstallerFile -Path $bundled
             if (-not $verified.Ok) {
-                Write-Step "input: bundled installer rejected ($($verified.Reason)): $bundled"
+                Write-Step "input: bundled Sogou installer rejected ($($verified.Reason)): $bundled"
             } else {
                 $expected = ''
-                $manifestPath = Join-Path (Split-Path $bundled -Parent) 'wechat-ime.json'
+                $manifestPath = Join-Path (Split-Path $bundled -Parent) 'sogou-ime.json'
                 if (Test-Path -LiteralPath $manifestPath) {
                     try {
                         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -485,19 +433,19 @@ function Install-WeChatInputMethod {
                     } catch { }
                 }
                 if ($expected -and $expected.ToUpperInvariant() -ne $verified.Sha256.ToUpperInvariant()) {
-                    Write-Step "input: bundled installer hash mismatch (have $($verified.Sha256), manifest $expected)"
+                    Write-Step "input: bundled Sogou installer hash mismatch (have $($verified.Sha256), manifest $expected)"
                 } else {
-                    Write-Step "input: using bundled installer $([IO.Path]::GetFileName($bundled)) ($([math]::Round((Get-Item -LiteralPath $bundled).Length / 1MB, 1)) MB, sha256 $($verified.Sha256))"
-                    $runBundled = Invoke-Bounded -Label 'input: bundled WeTypeSetup /s' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-                        $process = Start-Process -FilePath $using:bundled -ArgumentList '/s' -PassThru -Wait
+                    Write-Step "input: using bundled Sogou installer $([IO.Path]::GetFileName($bundled)) ($([math]::Round((Get-Item -LiteralPath $bundled).Length / 1MB, 1)) MB, sha256 $($verified.Sha256))"
+                    $runBundled = Invoke-Bounded -Label 'input: bundled Sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
+                        $process = Start-Process -FilePath $using:bundled -ArgumentList '/S' -PassThru -Wait
                         "installer exit $($process.ExitCode)"
                     }
-                    $state = Get-WeChatInputMethodState
+                    $state = Get-SogouInputState
                     if ($state.Installed) {
-                        Write-Step "input: WeChat IME installed from the bundled installer (profile=$($state.Profile) description=$($state.Tip))"
+                        Write-Step "input: Sogou Pinyin installed from the bundled installer (version=$($state.Version))"
                         return
                     }
-                    Write-Step "input: bundled installer did not register the IME (ok=$($runBundled.Ok) timedOut=$($runBundled.TimedOut)); trying winget"
+                    Write-Step "input: bundled installer did not install Sogou Pinyin (ok=$($runBundled.Ok) timedOut=$($runBundled.TimedOut)); trying winget"
                 }
             }
         }
@@ -505,20 +453,20 @@ function Install-WeChatInputMethod {
         # 2) winget: version-agnostic, but needs the package source to be reachable.
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
         if ($winget) {
-            $install = Invoke-Bounded -Label 'input: winget install Tencent.WeType' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-                & winget.exe install --id Tencent.WeType -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 4
+            $install = Invoke-Bounded -Label 'input: winget install Sogou.SogouInput' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
+                & winget.exe install --id Sogou.SogouInput -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 4
             }
-            $state = Get-WeChatInputMethodState
+            $state = Get-SogouInputState
             if ($state.Installed) {
-                Write-Step "input: WeChat IME installed through winget (profile=$($state.Profile) description=$($state.Tip))"
+                Write-Step "input: Sogou Pinyin installed through winget (version=$($state.Version))"
                 return
             }
-            Write-Step "input: winget path did not register the IME (ok=$($install.Ok) timedOut=$($install.TimedOut)); trying the manifest installer"
+            Write-Step "input: winget path did not install Sogou Pinyin (ok=$($install.Ok) timedOut=$($install.TimedOut)); trying the manifest installer"
         }
 
         # 3) resolve the current release and download it directly from the vendor endpoint.
-        $installer = Resolve-WeChatInputMethodInstaller
-        $target = Join-Path $env:TEMP ("WeTypeSetup-" + $installer.Version + '.exe')
+        $installer = Resolve-SogouInputInstaller
+        $target = Join-Path $env:TEMP ("sogou_pinyin_" + $installer.Version + '.exe')
         Write-Step "input: downloading $($installer.Url)"
         try {
             Invoke-WebRequest -Uri $installer.Url -OutFile $target -UseBasicParsing -TimeoutSec $CapabilityTimeoutSeconds
@@ -526,11 +474,9 @@ function Install-WeChatInputMethod {
             Write-Step "input: download failed - $($_.Exception.Message)"
             return
         }
-        $bytes = (Get-Item -LiteralPath $target).Length
-        Write-Step "input: downloaded $bytes bytes"
         if ($installer.Sha256) {
             $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
-            if ($actual -ne $installer.Sha256.ToUpperInvariant()) {
+            if ($actual -ne $installer.Sha256) {
                 Write-Step "input: SHA256 mismatch ($actual) - refusing to run the installer"
                 return
             }
@@ -539,18 +485,18 @@ function Install-WeChatInputMethod {
         $signature = Get-AuthenticodeSignature -LiteralPath $target -ErrorAction SilentlyContinue
         if ($signature) { Write-Step "input: signature status=$($signature.Status) signer=$($signature.SignerCertificate.Subject)" }
 
-        $run = Invoke-Bounded -Label "input: WeTypeSetup $($installer.Silent)" -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
+        $run = Invoke-Bounded -Label 'input: sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
             $process = Start-Process -FilePath $using:target -ArgumentList $using:installer.Silent -PassThru -Wait
             "installer exit $($process.ExitCode)"
         }
-        $state = Get-WeChatInputMethodState
+        $state = Get-SogouInputState
         if ($state.Installed) {
-            Write-Step "input: WeChat IME installed from the manifest installer (profile=$($state.Profile) description=$($state.Tip))"
+            Write-Step "input: Sogou Pinyin installed from the manifest installer (version=$($state.Version))"
         } else {
-            Write-Step "input: WeChat IME still not registered (installerOk=$($run.Ok) timedOut=$($run.TimedOut))"
+            Write-Step "input: Sogou Pinyin still not installed (installerOk=$($run.Ok) timedOut=$($run.TimedOut))"
         }
     } catch {
-        Write-Step "input: WeChat IME installation failed - $($_.Exception.Message)"
+        Write-Step "input: Sogou Pinyin installation failed - $($_.Exception.Message)"
     }
 }
 
@@ -603,7 +549,7 @@ if (-not $SkipResolution) { Set-DesktopResolution }
 if ($TryDpiScaling) { Set-SystemDpiScaling }
 if (-not $SkipInputMethod) {
   Add-ChineseInputMethod
-  if (-not $SkipWeChatInputMethod) { Install-WeChatInputMethod }
+  if (-not $SkipSogouInputMethod) { Install-SogouInputMethod }
 }
 if (-not $SkipCamera) { Add-VirtualCamera }
 

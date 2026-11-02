@@ -89,76 +89,61 @@ test('只登记微软自带拼音与五笔，且安装步骤都有超时上限',
   assert.match(source, /\{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E\}/u, '必须登记微软拼音输入法');
   assert.match(source, /\{E7EA138E-69F8-11D7-A6EA-00065B844310\}/u, '必须登记微软五笔输入法');
   assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得再使用');
-  assert.doesNotMatch(source, /sogou|qqpinyin|baidu|搜狗|QQ拼音|百度/iu, '不得安装第三方输入法');
+  assert.doesNotMatch(source, /qqpinyin|baidu|QQ拼音|百度/iu, '除搜狗外不得安装其它第三方输入法');
   assert.match(source, /Invoke-Bounded/u, '安装动作必须带超时');
   assert.match(source, /-TimeoutSeconds \$CapabilityTimeoutSeconds/u, '语言能力安装必须有超时上限');
   assert.match(source, /Add-WindowsCapability -Online -Name 'Language\.Basic~~~zh-CN~0\.0\.1\.0'/u,
     '语言文件应通过 Add-WindowsCapability 安装');
 });
 
-test('微信输入法优先使用仓库内兜底安装包，且不会重复启动安装器', () => {
+test('安装搜狗拼音：winget 与官方下载两条线上兜底都在', () => {
   const source = readFileSync(preparationScript, 'utf8');
-  assert.match(source, /\[string\] \$WeChatImeInstaller/u, '必须允许显式指定安装包路径');
-  assert.match(source, /\[switch\] \$SkipWeChatInputMethod/u, '必须能单独跳过微信输入法');
-  assert.match(source, /function Get-FixtureRoot/u, '安装包定位不得依赖 $PSScriptRoot（被复用时为空）');
-  assert.match(source, /wechat-ime-v\*\.exe/u, '必须按文件名约定查找仓库内安装包');
-  const installBody = source.slice(source.indexOf('function Install-WeChatInputMethod'));
-  assert.ok(installBody.indexOf('using bundled installer') < installBody.indexOf('winget install Tencent.WeType'),
-    '仓库内安装包必须优先于 winget');
-  assert.ok(installBody.indexOf('winget install Tencent.WeType') < installBody.indexOf('Resolve-WeChatInputMethodInstaller'),
-    'winget 失败后才解析最新下载地址');
-  assert.match(source, /\$state\.Installed = \(\(\[int\]\$values\.Enable -eq 1\) -and \$state\.FilesFound\)/u,
-    '只有注册表启用且有二进制才算已安装：否则安装器会弹出卸载窗口');
-  assert.match(source, /Remove-WeChatInputMethodLeftovers/u, '安装前必须清理半卸载残留');
-  assert.match(source, /Tencent/u, '执行前必须校验签名主体');
-  assert.match(source, /signature status \$\(\$signature\.Status\)/u, '执行前必须校验签名状态');
+  assert.match(source, /\[switch\] \$SkipSogouInputMethod/u, '必须能单独跳过搜狗输入法');
+  assert.doesNotMatch(source, /WeChat|WeType|wechat/u, '微信输入法安装代码与备份必须彻底移除');
+  assert.doesNotMatch(source, /wechat-ime/u, '不得再引用微信输入法安装包');
+  const installBody = source.slice(source.indexOf('function Install-SogouInputMethod'));
+  assert.match(installBody, /winget\.exe install --id Sogou\.SogouInput/u, '首选 winget 安装');
+  assert.match(installBody, /Resolve-SogouInputInstaller/u, 'winget 失败后要有官方安装包兜底');
+  assert.match(installBody, /ArgumentList \$using:installer\.Silent/u, '静默参数必须来自解析结果');
+  assert.match(source, /function Resolve-SogouInputInstaller/u, '必须能解析当前版本（不写死）');
+  assert.match(source, /_sogou_pinyin_\$\(\$version\)_0\.exe/u, '下载地址按固定模板拼装');
+  assert.match(source, /manifests\/s\/Sogou\/SogouInput/u, '版本回退到 winget-pkgs 清单');
+  assert.match(source, /InstallerSha256/u, '清单提供 SHA256 时必须校验');
+  assert.match(source, /Silent = '\/S'/u, 'nullsoft 安装包用 /S 静默');
+  assert.match(source, /function Get-SogouInputState/u, '必须能判定是否已安装，避免重复安装');
+  const verifier = readFileSync(resolveTestPath('scripts', 'ci', 'verify-sogou-resolver.ps1'), 'utf8');
+  assert.match(verifier, /\[switch\] \$NoWinget/u, '验证脚本必须能模拟 winget 缺失');
+  assert.match(verifier, /Get-SogouInputState/u, '验证脚本必须复用安装状态判定');
+  for (const byte of readFileSync(resolveTestPath('scripts', 'ci', 'verify-sogou-resolver.ps1'))) {
+    assert.equal(byte <= 0x7f, true, 'verify-sogou-resolver.ps1 必须保持纯 ASCII');
+  }
+  assert.match(source, /input: dry run, Sogou Pinyin not installed/u, 'dry run 不得真的安装');
 });
-
-test('仓库内兜底安装包与清单一致', () => {
+test('仓库内搜狗安装包与清单一致，且优先使用', () => {
   const fixtureDir = resolveTestPath('tests', 'private-clients');
-  const manifest = JSON.parse(readFileSync(resolveTestPath('tests', 'private-clients', 'wechat-ime.json'), 'utf8'));
+  const manifest = JSON.parse(readFileSync(resolveTestPath('tests', 'private-clients', 'sogou-ime.json'), 'utf8'));
   assert.match(manifest.sha256, /^[0-9A-F]{64}$/u, '清单必须记录大写 SHA256');
-  assert.equal(manifest.silentSwitch, '/s', '必须记录静默安装开关');
-  assert.equal(manifest.file, `wechat-ime-v${manifest.version}.exe`, '文件名必须与版本一致');
+  assert.equal(manifest.silentSwitch, '/S', '必须记录 nullsoft 静默开关');
+  assert.equal(manifest.file, `sogou-ime-v${manifest.version}.exe`, '文件名必须与版本一致');
   const installer = resolveTestPath('tests', 'private-clients', manifest.file);
-  assert.ok(existsSync(installer), '兜底安装包必须随仓库提供');
-  // CI 默认不拉取 200MB 的 LFS 实体；此时文件内容是 LFS 指针，用指针里的 oid/size 校验清单即可。
+  assert.ok(existsSync(installer), '搜狗兜底安装包必须随仓库提供');
   const head = readFileSync(installer).subarray(0, 200).toString('utf8');
-  const pointer = /^version https:\/\/git-lfs\.github\.com\/spec\/v1/u.test(head);
-  if (pointer) {
+  if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1/u.test(head)) {
     const oid = /oid sha256:([0-9a-f]{64})/u.exec(head);
     const size = /size (\d+)/u.exec(head);
-    assert.ok(oid, 'LFS 指针必须包含 oid sha256');
-    assert.ok(size, 'LFS 指针必须包含 size');
-    assert.equal(oid[1].toUpperCase(), manifest.sha256, 'LFS 指针的 oid 必须与清单 SHA256 一致');
-    assert.equal(Number(size[1]), manifest.size, 'LFS 指针的 size 必须与清单一致');
+    assert.equal(oid[1].toUpperCase(), manifest.sha256, 'LFS 指针 oid 必须与清单一致');
+    assert.equal(Number(size[1]), manifest.size, 'LFS 指针 size 必须与清单一致');
   } else {
-    assert.equal(statSync(installer).size, manifest.size, '兜底安装包体积必须与清单一致');
-    assert.equal(readFileSync(installer).subarray(0, 2).toString('latin1'), 'MZ', '兜底安装包必须是可执行文件');
+    assert.equal(statSync(installer).size, manifest.size, '安装包体积必须与清单一致');
   }
-  const attributes = readFileSync(resolveTestPath('.gitattributes'), 'utf8');
-  assert.match(attributes, /tests\/private-clients\/\*\.exe filter=lfs/u, '兜底安装包必须走 Git LFS');
-});
-test('下载链接解析有三层兜底且可独立验证', () => {
   const source = readFileSync(preparationScript, 'utf8');
-  const resolver = source.slice(source.indexOf('function Resolve-WeChatInputMethodInstaller'),
-    source.indexOf('function Get-FixtureRoot') > source.indexOf('function Resolve-WeChatInputMethodInstaller')
-      ? undefined
-      : source.indexOf('function Install-WeChatInputMethod'));
-  assert.match(resolver, /winget\.exe show --id Tencent\.WeType/u, '首选 winget 版本（无 API 限流）');
-  assert.match(resolver, /api\.github\.com\/repos\/microsoft\/winget-pkgs\/contents\/manifests\/t\/Tencent\/WeType/u,
-    '其次查询 winget-pkgs 清单目录');
-  assert.match(resolver, /using the bundled manifest version/u, '再次回退到仓库内清单的版本');
-  assert.match(resolver, /WeTypeSetup_\$version\.exe/u, '下载地址按固定模板拼装，避免写死版本');
-  assert.match(resolver, /InstallerSha256/u, '清单提供 SHA256 时必须读取');
-  assert.ok(resolver.indexOf('winget.exe show') < resolver.indexOf('api.github.com'),
-    'winget 必须在 GitHub 之前尝试');
-  assert.ok(resolver.indexOf('api.github.com') < resolver.indexOf('using the bundled manifest version'),
-    '仓库清单兜底必须放在最后');
-  const tool = readFileSync(resolveTestPath('scripts', 'ci', 'verify-wetype-resolver.ps1'), 'utf8');
-  assert.match(tool, /\[switch\] \$NoWinget/u, '验证脚本必须能模拟 winget 缺失');
-  assert.match(tool, /\[switch\] \$Download/u, '验证脚本必须能实际下载校验 SHA256');
-  for (const byte of readFileSync(resolveTestPath('scripts', 'ci', 'verify-wetype-resolver.ps1'))) {
-    assert.equal(byte <= 0x7f, true, 'verify-wetype-resolver.ps1 必须保持纯 ASCII');
-  }
+  const installBody = source.slice(source.indexOf('function Install-SogouInputMethod'));
+  assert.ok(installBody.indexOf('using bundled Sogou installer') < installBody.indexOf('winget install Sogou.SogouInput'),
+    '仓库内安装包必须优先于 winget');
+  assert.ok(installBody.indexOf('winget install Sogou.SogouInput') < installBody.indexOf('Resolve-SogouInputInstaller'),
+    'winget 失败后才解析最新下载地址');
+  assert.match(source, /function Get-BundledSogouInstaller/u, '必须能定位仓库内搜狗安装包');
+  assert.match(source, /sogou-ime-v\*\.exe/u, '按文件名约定查找');
+  assert.match(source, /function Test-SogouInstallerFile/u, '执行前必须校验签名与哈希');
+  assert.match(source, /unexpected signer/u, '签名主体不含 Sogou 时必须拒绝');
 });

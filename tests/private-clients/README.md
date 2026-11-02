@@ -1,38 +1,27 @@
-### 验证下载链接解析
-
-```powershell
-# 打印当前会用的安装包（版本/URL/SHA256/可达性）
-pwsh -File scripts/ci/verify-wetype-resolver.ps1
-# 模拟 winget 缺失，验证 winget-pkgs 清单分支
-pwsh -File scripts/ci/verify-wetype-resolver.ps1 -NoWinget
-# 实际下载并按清单 SHA256 与签名校验
-pwsh -File scripts/ci/verify-wetype-resolver.ps1 -Download
-```
-
-三层解析顺序：`winget show`（不含 API 限流）→ winget-pkgs 清单目录 → 仓库内 `wechat-ime.json` 的版本；
-下载地址统一按 `https://download.z.weixin.qq.com/app/win/WeTypeSetup_<version>.exe` 拼装，版本变化无需改代码。
-## 微信输入法兜底安装包
-
-`wechat-ime-v3.0.2.22.exe`（208 MB，Git LFS）是 CI 准备桌面环境时的兜底输入法安装包，配套的
-`wechat-ime.json` 记录版本、体积、SHA256、来源 URL 与签名主体。
-
-- 依据：客户端只按“IMM 描述非空”识别输入法（`GetKeyboardLayoutList` + `ImmGetDescriptionW`），
-  没有厂商白名单，所以第三方输入法可以替代缺失的 zh-CN 语言包。
-- 安装顺序：仓库内安装包 → `winget install Tencent.WeType` → 按 winget-pkgs 清单解析最新版本从官方
-  地址下载。三层都带超时，失败只记录不中断。
-- 校验：运行前必须同时满足 `Authenticode Status=Valid`、签名主体含 `Tencent`、SHA256 与
-  `wechat-ime.json` 一致，任一不满足即拒绝执行。
-- 本地实测：卸载后用该文件 `/s` 静默安装约 45 秒，`HKLM\SOFTWARE\Microsoft\CTF\TIP\
-  {86598FB9-66A2-463E-B9C2-AEB906D477AD}\LanguageProfile\0x00000804\{607FDF85-...}` 变为
-  `Enable=1 / Description=WeType`。
 # 私有客户端注入夹具
 
-此目录只用于私有仓库的 GitHub Actions 真实客户端注入测试。EXE 由 Git LFS 管理，不能复制到公共仓库、发布包或测试日志。CI 会递归查找此目录下的所有 `.exe`，并按文件名版本自动生成客户端矩阵。
+此目录只用于私有仓库的 GitHub Actions 真实客户端注入测试。EXE 由 Git LFS 管理，不能复制到公共仓库、发布包或测试日志。CI 只把 `chaoxing-exam-*.exe` 纳入矩阵（同目录下的其它工具安装包会被忽略）。
+
 
 | 文件名版本 | 注入通道 |
 | --- | --- |
 | `chaoxing-exam-v4.1.4.*.exe` | `cdp-port` |
 | `chaoxing-exam-v4.3.*.exe` | `dll-proxy` |
+
+## 搜狗输入法兜底安装包
+
+`sogou-ime-v16.9.0.5523.exe`（213.7 MB，Git LFS）是 CI 准备桌面环境时的兜底输入法安装包，配套的
+`sogou-ime.json` 记录版本、体积、SHA256、来源 URL、签名主体与静默开关。
+
+- 依据：客户端按 `ImmGetDescriptionW` 是否为空筛选输入法（IG5：`FUN_004a6b30`），纯 TSF 的微软拼音
+  不满足；搜狗拼音注册了 IMM 层，真实可过检。
+- 安装顺序：仓库内安装包 → `winget install Sogou.SogouInput -e --silent` → 从 winget-pkgs 清单
+  (`manifests/s/Sogou/SogouInput`) 解析当前版本，按固定模板 `https://ime.gtimg.com/pc/build/_sogou_pinyin_<version>_0.exe`
+  下载。三层都带超时，失败只记录不中断。
+- 校验：仓库内安装包执行前必须同时满足 `Authenticode Status=Valid`、签名主体含 `Sogou`、SHA256 与
+  `sogou-ime.json` 一致；下载路径同样校验清单里的 SHA256 与签名。
+- 版本自动解析：`winget show` → winget-pkgs 目录 → 仓库内清单，不写死版本号。
+- 手动核对链接（不安装）：`pwsh -File scripts/ci/verify-sogou-resolver.ps1 [-NoWinget] [-Download]`。
 
 私有客户端测试在非 PR 事件（`push` / `workflow_dispatch`）自动运行，不再依赖额外的启用变量——缺少数据库变量时 discovery 会直接报错，而不是静默跳过。CI 会自动发现所有非空的 `Examination_Client_Database_*` GitHub Actions 变量，并与 `tests/private-clients/` 下每个客户端 EXE 组合。变量值必须是 `UserExamInfo.db` 的 Base64 文本（换行与空白会被忽略）；注入脚本解码后直接把字节写入解压出的 `CXExam.exe` 同目录，文件名固定为 `UserExamInfo.db`，不做任何解压。旧的 `enabled` 标记和 ZIP 载荷会在发现或注入阶段直接报错。测试结束时删除独立临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。
 
@@ -56,7 +45,7 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 **托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也没有摄像头，客户端自检必然拦截。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
-注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、只登记微软自带拼音与五笔（不使用任何第三方输入法；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`，所有安装动作都带超时）、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，没有这三项时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
+注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、登记微软拼音/五笔（仅当镜像带 zh-CN 载荷时；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`），并安装搜狗拼音（客户端只接受 `ImmGetDescriptionW` 非空的输入法，纯 TSF 的微软拼音不满足），所有安装动作都带超时、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，这两项缺失时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。
 

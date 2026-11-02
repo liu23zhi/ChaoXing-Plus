@@ -1,0 +1,11 @@
+{
+  "name": "搜狗拼音输入法 (Sogou Pinyin)",
+  "file": "sogou-ime-v16.9.0.5523.exe",
+  "version": "16.9.0.5523",
+  "size": 224080264,
+  "sha256": "B7CD6BD32A522213C4B58F958F9B6349E9F95923ADA64D7EBC8BA7FB879DDBB3",
+  "source": "https://ime.gtimg.com/pc/build/_sogou_pinyin_16.9.0.5523_0.exe",
+  "signer": "CN=\"Beijing Sogou Technology Development Co., Ltd.\"",
+  "silentSwitch": "/S",
+  "note": "CI fallback installer. scripts/ci/prepare-windows-real-client-environment.ps1 prefers this file, verifies the SHA256 and the Sogou Authenticode signature before running it with /S; when it is missing the script falls back to winget (Sogou.SogouInput) and then to the newest release resolved from the winget-pkgs manifest."
+}
