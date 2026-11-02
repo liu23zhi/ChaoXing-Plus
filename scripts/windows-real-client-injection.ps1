@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-diagnostics.ps1')
+. (Join-Path $PSScriptRoot 'windows-client-input.ps1')
 $tempRoot = Join-Path $env:RUNNER_TEMP ("cx-real-client-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $tempRoot 'package'
 $reportPath = Join-Path $tempRoot 'report.json'
@@ -81,7 +82,7 @@ function Stop-StartedHost([string] $HostPath, [datetime] $StartedAt) {
   if ($stopped -gt 0) { Write-Host "[real-client] stopped $stopped leftover host process(es)" }
 }
 
-function Save-FailureArtifacts {
+function Save-RunArtifacts {
     param([string] $CaseName)
     $target = $env:RUNNER_TEMP
     if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { return }
@@ -122,6 +123,11 @@ try {
     try { (Get-DesktopEnvironment) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $environmentPath -Encoding utf8 } catch { }
     [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-start.png") -ScalePercent 50)
   }
+  $inputState = Get-InputState
+  if ($env:RUNNER_TEMP) {
+    try { $inputState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-input-before.json") -Encoding utf8 } catch { }
+  }
+  Write-Host "[real-client] input before: layouts=$((@($inputState.LayoutHandles)) -join ',') active=$($inputState.ActiveLayout) preload=$((($inputState.Preload.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '))"
   if (-not (Test-Path -LiteralPath $ClientInstaller -PathType Leaf)) { throw "Client fixture is missing: $ClientInstaller" }
   if (-not (Test-Path -LiteralPath $NativeHost -PathType Leaf)) { throw "Native host is missing: $NativeHost" }
   New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
@@ -207,14 +213,28 @@ try {
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {
   Write-Host "[real-client] FAILED case=$CaseName stage=$stage type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
-  Save-FailureArtifacts -CaseName $CaseName
+  Save-RunArtifacts -CaseName $CaseName
   if (-not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) { Write-Host "[real-client] stack=$($_.ScriptStackTrace)" }
   Write-HostDiagnostics
   throw
 } finally {
+  # Always keep the evidence bundle (screenshots, environment, report, host logs) for CI upload.
+  Save-RunArtifacts -CaseName $CaseName
   Stop-ClientProcess $clientPath
   Stop-OwnedProcess $hostProcess
   Stop-StartedHost $NativeHost $runStarted
+  # The client switches keyboard layouts for its own window; put the operator's input state back.
+  try {
+    $inputAfter = Get-InputState
+    $inputChanges = Compare-InputState -Before $inputState -After $inputAfter
+    $restoredInput = Restore-InputState -State $inputState
+    if ($env:RUNNER_TEMP) {
+      try { $inputAfter | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-input-after.json") -Encoding utf8 } catch { }
+    }
+    Write-Host "[real-client] input changed=$($inputChanges -join ',') restored=$($restoredInput -join ',') active=$($inputAfter.ActiveLayout)"
+  } catch {
+    Write-Host "[real-client] input restore failed: $($_.Exception.Message)"
+  }
   # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
   $shell = Repair-ShellDesktop -Force
   Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"

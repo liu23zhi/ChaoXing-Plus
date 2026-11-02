@@ -75,8 +75,8 @@ test('注入脚本在报告校验前自动点击进入考试，并接受客户�
     'pageSessions 为 0 时必须报告点击重试次数与页面数');
   assert.match(script, /windows=\$\(\[CXClientEntry\]::WindowClasses/u,
     '进入考试日志必须带上客户端窗口类列表，用于区分点击失败与被客户端自检拦截');
-  assert.match(script, /Save-FailureArtifacts -CaseName \$CaseName/u,
-    '失败时必须保留截图/报告/宿主日志供 CI 上传');
+  assert.match(script, /Save-RunArtifacts -CaseName \$CaseName/u,
+    '成功与失败都必须保留截图/报告/宿主日志供 CI 上传');
   assert.doesNotMatch(script, /stopReason -ne 'duration'/u, '不得再要求客户端必须自然跑到时长结束');
 });
 

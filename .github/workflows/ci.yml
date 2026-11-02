@@ -442,6 +442,13 @@ jobs:
           if (-not (Get-Command 7z.exe -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles '7-Zip\7z.exe'))) {
             choco install 7zip --no-progress -y
           }
+      - name: 准备桌面环境（分辨率 / 输入法 / 虚拟摄像头）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'cx-real-client-prep.log'
+          ./scripts/ci/prepare-windows-real-client-environment.ps1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { Write-Host "desktop preparation exited $LASTEXITCODE; the injection report still decides the result" }
       - name: 执行真实客户端注入
         shell: pwsh
         env:
@@ -466,11 +473,11 @@ jobs:
             -DatabaseBase64 $compactDb `
             -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
             -CaseName '${{ matrix.client }}-${{ matrix.database }}'
-      - name: 上传失败现场
-        if: failure()
+      - name: 上传注入现场（成功与失败都保留）
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-client-failure-${{ matrix.client }}-${{ matrix.database }}
+          name: real-client-${{ matrix.client }}-${{ matrix.database }}
           path: |
             ${{ runner.temp }}/cx-real-client-*.png
             ${{ runner.temp }}/cx-real-client-*.json
