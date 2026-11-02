@@ -53,8 +53,19 @@ test('注入脚本在运行前后快照并恢复输入法', async () => {
   assert.match(script, /input changed=\$\(\$inputChanges -join ','\) restored=\$\(\$restoredInput -join ','\)/u,
     '必须记录输入法是否被改动以及恢复结果');
   assert.match(script, /Save-RunArtifacts -CaseName \$CaseName/u, '成功与失败都要保留现场');
+  const helper = readFileSync(inputScript, 'utf8');
   // 客户端导入 LoadKeyboardLayoutW/UnloadKeyboardLayout 并在退出时留下自载布局，恢复必须卸载多余布局。
-  assert.match(readFileSync(inputScript, 'utf8'), /Unload/u, '恢复时需要卸载客户端自载的布局');
+  assert.match(helper, /Unload/u, '恢复时需要卸载客户端自载的布局');
+  assert.match(helper, /KlidFromHkl/u, '恢复时要把缺失的布局重新载入');
+  assert.match(helper, /New-WinUserLanguageList -Language \$entry\.Tag/u,
+    'New-WinUserLanguageList 只接受单个语言，必须逐个构造');
+  assert.doesNotMatch(helper, /New-WinUserLanguageList -Language \$tags/u,
+    '传数组会得到空列表，调用 Set-WinUserLanguageList 会清空全部语言');
+  assert.match(helper, /refusing to clear the configured languages/u, '语言列表为空时必须拒绝写入');
+  const restoreBody = helper.slice(helper.indexOf('function Restore-InputState'));
+  assert.ok(restoreBody.indexOf('Set-WinUserLanguageList -LanguageList $list') > 0, '恢复分支必须写回语言列表');
+  assert.ok(restoreBody.indexOf('Set-WinUserLanguageList -LanguageList $list') < restoreBody.indexOf("foreach ($name in @('Preload', 'Substitutes'))"),
+    '必须先恢复语言列表再写注册表：Set-WinUserLanguageList 会重写 Preload');
 });
 
 test('CI 桌面环境准备脚本可在无副作用模式下运行', () => {

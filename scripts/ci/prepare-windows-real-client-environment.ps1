@@ -15,7 +15,7 @@
 param(
   [int] $MinWidth = 1600,
   [int] $MinHeight = 900,
-  [int] $CapabilityTimeoutSeconds = 420,
+  [int] $CapabilityTimeoutSeconds = 180,
   [int] $CameraTimeoutSeconds = 300,
   [switch] $SkipCamera,
   [switch] $SkipInputMethod,
@@ -48,11 +48,21 @@ function Invoke-Bounded {
     Write-Step "$Label : dry run, skipped"
     return [pscustomobject]@{ Ok = $false; TimedOut = $false; Output = @() }
   }
+  Write-Step "$Label : starting (timeout ${TimeoutSeconds}s)"
   $job = Start-Job -ScriptBlock $Action
   try {
-    $finished = Wait-Job -Job $job -Timeout $TimeoutSeconds
-    if (-not $finished) {
-      Write-Step "$Label : timed out after ${TimeoutSeconds}s"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $nextHeartbeat = (Get-Date).AddSeconds(15)
+    while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Seconds 3
+      if ((Get-Date) -ge $nextHeartbeat) {
+        $elapsed = [int]((Get-Date) - ($deadline.AddSeconds(-$TimeoutSeconds))).TotalSeconds
+        Write-Step "$Label : still running after ${elapsed}s (state $($job.State))"
+        $nextHeartbeat = (Get-Date).AddSeconds(15)
+      }
+    }
+    if ($job.State -eq 'Running') {
+      Write-Step "$Label : timed out after ${TimeoutSeconds}s; stopping"
       Stop-Job -Job $job -ErrorAction SilentlyContinue
       return [pscustomobject]@{ Ok = $false; TimedOut = $true; Output = @() }
     }
@@ -145,19 +155,50 @@ function Set-DesktopResolution {
   }
 }
 
+function Get-LanguageCapabilityState {
+  try {
+    $capability = Get-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0' -ErrorAction Stop
+    if (-not $capability) { return 'Unknown' }
+    return [string]$capability.State
+  } catch {
+    Write-Step "input: cannot query Language.Basic~~~zh-CN - $($_.Exception.Message)"
+    return 'Unknown'
+  }
+}
+
 function Test-LanguageInstalled {
-  $capability = Get-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0' -ErrorAction SilentlyContinue
-  return ($capability -and $capability.State -eq 'Installed')
+  return ((Get-LanguageCapabilityState) -eq 'Installed')
 }
 
 function Install-ChineseLanguageFiles {
+  if ($DryRun) { Write-Step 'input: dry run, language capability untouched'; return $false }
   if (Test-LanguageInstalled) { Write-Step 'input: zh-CN language files already installed'; return $true }
+  $state = Get-LanguageCapabilityState
+  Write-Step "input: Language.Basic~~~zh-CN state = $state"
+  try {
+    $zh = @(Get-WindowsCapability -Online | Where-Object { $_.Name -like '*zh-CN*' } |
+      Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.State)" })
+    Write-Step "input: zh-CN capabilities = $(($zh -join ', '))"
+  } catch { }
+  if ($state -eq 'NotPresent') {
+    Write-Step 'input: this image has no zh-CN payload (State=NotPresent); skipping the download instead of waiting for a timeout'
+    return $false
+  }
   $result = Invoke-Bounded -Label 'input: Add-WindowsCapability Language.Basic~~~zh-CN' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
     Add-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0' -ErrorAction Stop | Out-Null
     'capability added'
   }
   if (Test-LanguageInstalled) { Write-Step 'input: zh-CN language files installed'; return $true }
-  Write-Step "input: zh-CN language files still missing (timedOut=$($result.TimedOut))"
+
+  # Second attempt through DISM, which reports its own progress and fails faster than the cmdlet.
+  $dism = Invoke-Bounded -Label 'input: dism Add-Capability Language.Basic~~~zh-CN' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
+    $output = & dism.exe /Online /Add-Capability /CapabilityName:'Language.Basic~~~zh-CN~0.0.1.0' /Quiet /NoRestart 2>&1
+    $code = $LASTEXITCODE
+    $output | Select-Object -Last 3
+    "dism exit $code"
+  }
+  if (Test-LanguageInstalled) { Write-Step 'input: zh-CN language files installed (dism)'; return $true }
+  Write-Step "input: zh-CN language files still missing (cmdlet timedOut=$($result.TimedOut), dismOk=$($dism.Ok))"
   return $false
 }
 

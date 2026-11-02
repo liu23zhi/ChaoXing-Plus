@@ -19,6 +19,7 @@ public class CXInputState {
     [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint threadId);
     [DllImport("user32.dll")] public static extern IntPtr ActivateKeyboardLayout(IntPtr layout, uint flags);
     [DllImport("user32.dll")] public static extern bool UnloadKeyboardLayout(IntPtr layout);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadKeyboardLayoutW(string klid, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint threadId);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 
@@ -47,6 +48,18 @@ public class CXInputState {
         long value = Convert.ToInt64(handle.Substring(2), 16);
         return UnloadKeyboardLayout(new IntPtr(value));
     }
+
+    // HKL 0x04090409 -> KLID 00000409: the low word identifies the layout.
+    public static string KlidFromHkl(string handle) {
+        if (string.IsNullOrEmpty(handle)) return string.Empty;
+        long value = Convert.ToInt64(handle.Substring(2), 16);
+        return (value & 0xFFFF).ToString("X8");
+    }
+
+    public static bool Load(string klid) {
+        if (string.IsNullOrEmpty(klid)) return false;
+        return LoadKeyboardLayoutW(klid, 0) != IntPtr.Zero;
+    }
 }
 '@
 
@@ -70,11 +83,18 @@ function Get-InputState {
         LayoutHandles = @([CXInputState]::LayoutHandles())
         ActiveLayout = [CXInputState]::ActiveLayout()
         Languages = @()
+        LanguageEntries = @()
         CurrentLanguage = ''
     }
     try {
         if (Get-Command Get-WinUserLanguageList -ErrorAction SilentlyContinue) {
-            $state.Languages = @(Get-WinUserLanguageList | ForEach-Object { $tips = @($_.InputMethodTips | Sort-Object); "$($_.LanguageTag):" + ($tips -join ",") })
+            $entries = @()
+            foreach ($item in Get-WinUserLanguageList) {
+                $tips = @($item.InputMethodTips | Sort-Object)
+                $entries += [pscustomobject]@{ Tag = [string]$item.LanguageTag; Tips = @($tips) }
+                $state.Languages += "$($item.LanguageTag):" + ($tips -join ',')
+            }
+            $state.LanguageEntries = @($entries)
             if ($state.Languages.Count -gt 0) { $state.CurrentLanguage = [string]$state.Languages[0] }
         }
     } catch { }
@@ -85,13 +105,15 @@ function Compare-InputState {
     param($Before, $After)
     $changes = @()
     foreach ($name in @('Preload', 'Substitutes')) {
-        $before = $Before.$name
-        $after = $After.$name
-        $beforeKeys = @($before.Keys | Sort-Object)
-        $afterKeys = @($after.Keys | Sort-Object)
+        # Note: PowerShell is case-insensitive, so these must not be called $before/$after - that would
+        # overwrite the $Before/$After parameters and silently disable the checks below.
+        $leftSide = $Before.$name
+        $rightSide = $After.$name
+        $beforeKeys = @($leftSide.Keys | Sort-Object)
+        $afterKeys = @($rightSide.Keys | Sort-Object)
         if (($beforeKeys -join ',') -ne ($afterKeys -join ',')) { $changes += "$name-keys"; continue }
         foreach ($key in $beforeKeys) {
-            if ([string]$before[$key] -ne [string]$after[$key]) { $changes += "$name[$key]" }
+            if ([string]$leftSide[$key] -ne [string]$rightSide[$key]) { $changes += "$name[$key]" }
         }
     }
     if ((([string[]]$Before.LayoutHandles) -join ',') -ne (([string[]]$After.LayoutHandles) -join ',')) { $changes += 'layouts' }
@@ -105,6 +127,36 @@ function Restore-InputState {
         [Parameter(Mandatory = $true)] $State
     )
     $restored = @()
+
+    # Languages first: Set-WinUserLanguageList rewrites HKCU\Keyboard Layout\Preload from scratch, so the
+    # registry snapshot has to be written back afterwards or the restore is silently reverted.
+    try {
+        $entries = @($State.LanguageEntries)
+        if ($entries.Count -gt 0 -and (Get-Command Set-WinUserLanguageList -ErrorAction SilentlyContinue)) {
+            $now = @(Get-WinUserLanguageList | ForEach-Object { $tips = @($_.InputMethodTips | Sort-Object); "$($_.LanguageTag):" + ($tips -join ',') })
+            if (($now -join ',') -ne ((([string[]]$State.Languages)) -join ',')) {
+                # New-WinUserLanguageList only accepts one language per call on this build; passing an
+                # array silently yields an empty list, and an empty list clears every language.
+                $list = New-Object 'System.Collections.Generic.List[Microsoft.InternationalSettings.Commands.WinUserLanguage]'
+                foreach ($entry in $entries) {
+                    $single = New-WinUserLanguageList -Language $entry.Tag
+                    if (-not $single -or $single.Count -eq 0) { continue }
+                    $item = $single[0]
+                    if (@($entry.Tips).Count -gt 0) {
+                        $item.InputMethodTips.Clear()
+                        foreach ($tip in @($entry.Tips)) { $item.InputMethodTips.Add([string]$tip) }
+                    }
+                    $list.Add($item)
+                }
+                if ($list.Count -eq 0) { throw 'rebuilt language list is empty; refusing to clear the configured languages' }
+                Set-WinUserLanguageList -LanguageList $list -Force -ErrorAction Stop
+                $restored += 'languages'
+            }
+        }
+    } catch {
+        Write-Host "[real-client] input restore failed for languages: $($_.Exception.Message)"
+    }
+
     foreach ($name in @('Preload', 'Substitutes')) {
         $path = "HKCU:\Keyboard Layout\$name"
         $wanted = $State.$name
@@ -125,29 +177,27 @@ function Restore-InputState {
             Write-Host "[real-client] input restore failed for ${name}: $($_.Exception.Message)"
         }
     }
-    try {
-        if ($State.Languages.Count -gt 0 -and (Get-Command Set-WinUserLanguageList -ErrorAction SilentlyContinue)) {
-            $now = @(Get-WinUserLanguageList | ForEach-Object { $tips = @($_.InputMethodTips | Sort-Object); "$($_.LanguageTag):" + ($tips -join ",") })
-            if (($now -join ',') -ne ((([string[]]$State.Languages)) -join ',')) {
-                $list = New-WinUserLanguageList -Language ($State.Languages[0].Split(':')[0])
-                Set-WinUserLanguageList -LanguageList $list -Force -ErrorAction Stop
-                $restored += 'languages'
-            }
-        }
-    } catch {
-        Write-Host "[real-client] input restore failed for languages: $($_.Exception.Message)"
-    }
+
     try {
         if ($State.ActiveLayout -and ([CXInputState]::ActiveLayout() -ne $State.ActiveLayout)) {
             if ([CXInputState]::Activate($State.ActiveLayout)) { $restored += 'active-layout' }
         }
     } catch { }
-    # The client can load a layout of its own (LoadKeyboardLayout) and leave it behind when killed.
+
+    # The client can load a layout of its own (LoadKeyboardLayout) and leave it behind when killed, and
+    # restoring the language list can drop a layout that was loaded before the run. Put both right.
     try {
         $keep = @([string[]]$State.LayoutHandles)
-        foreach ($handle in @([CXInputState]::LayoutHandles())) {
+        $current = @([CXInputState]::LayoutHandles())
+        foreach ($handle in $current) {
             if ($keep -contains $handle) { continue }
             if ([CXInputState]::Unload($handle)) { $restored += "unloaded:$handle" }
+        }
+        $present = @([CXInputState]::LayoutHandles())
+        foreach ($handle in $keep) {
+            if ($present -contains $handle) { continue }
+            $klid = [CXInputState]::KlidFromHkl($handle)
+            if ([CXInputState]::Load($klid)) { $restored += "loaded:$handle" }
         }
     } catch { }
     return @($restored)
