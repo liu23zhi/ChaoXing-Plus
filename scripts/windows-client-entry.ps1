@@ -34,6 +34,8 @@ public class CXClientEntry {
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessageW(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern int GetWindowTextW(IntPtr handle, StringBuilder text, int cap);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr param);
     public delegate bool EnumWindowsProc(IntPtr handle, IntPtr param);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
@@ -52,6 +54,27 @@ public class CXClientEntry {
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    // "class|visible|WxH" per window: enough to see what the client shows when nothing matches.
+    public static string WindowSummary(uint processId) {
+        System.Text.StringBuilder summary = new System.Text.StringBuilder();
+        EnumWindows((handle, parameter) => {
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            if (owner != processId) return true;
+            StringBuilder name = new StringBuilder(128);
+            GetClassNameW(handle, name, 128);
+            string value = name.ToString();
+            if (value.Length == 0) return true;
+            RECT rect;
+            GetWindowRect(handle, out rect);
+            if (summary.Length > 0) summary.Append(';');
+            summary.Append(value).Append('|').Append(IsWindowVisible(handle) ? 1 : 0).Append('|')
+                .Append(rect.Right - rect.Left).Append('x').Append(rect.Bottom - rect.Top);
+            return true;
+        }, IntPtr.Zero);
+        return summary.ToString();
     }
 
     public static string WindowClasses(uint processId) {
@@ -307,6 +330,21 @@ function Get-ClientDialogWindow {
         $checkWidth = $checkRect.Right - $checkRect.Left
         $checkHeight = $checkRect.Bottom - $checkRect.Top
     }
+    # The modal dialog is the foreground window while it is up; matching it this way does not depend on the
+    # registered class name surviving EnumWindows filtering.
+    $foreground = [CXClientEntry]::GetForegroundWindow()
+    if ($foreground -ne [IntPtr]::Zero -and $foreground -ne $CheckWindow) {
+        $owner = [uint32]0
+        [void][CXClientEntry]::GetWindowThreadProcessId($foreground, [ref]$owner)
+        if ($owner -eq [uint32]$ProcessId) {
+            $rect = New-Object CXClientEntry+RECT
+            if ([CXClientEntry]::GetWindowRect($foreground, [ref]$rect)) {
+                $width = $rect.Right - $rect.Left
+                $height = $rect.Bottom - $rect.Top
+                if ($width -ge 200 -and $height -ge 100) { return $foreground }
+            }
+        }
+    }
     foreach ($className in @('WebHintUI', 'ExamCheckHintUI', '#32770')) {
         $handle = [CXClientEntry]::Find([uint32]$ProcessId, $className)
         if ($handle -eq [IntPtr]::Zero -or $handle -eq $CheckWindow) { continue }
@@ -552,6 +590,12 @@ function Wait-ClientExamEntry {
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name "2-after-click-$attempt" -ScalePercent 50
         }
         $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
+        if ($pages -lt 1 -and $attempt -le 2) {
+            $foreground = [CXClientEntry]::GetForegroundWindow()
+            $foregroundClass = New-Object System.Text.StringBuilder 128
+            [void][CXClientEntry]::GetWindowTextW($foreground, $foregroundClass, 128)
+            Write-Host "[real-client] windows after attempt=$attempt foreground=0x$($foreground.ToInt64().ToString('X')) list=$([CXClientEntry]::WindowSummary([uint32]$clientProcess.Id))"
+        }
         if ($pages -gt 0) {
             return [pscustomobject]@{
                 Clicked = $true; Reason = 'entry-page-detected'; Window = [int64]$window; ProcessId = $clientProcess.Id
