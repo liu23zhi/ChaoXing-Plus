@@ -13,13 +13,9 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-// Coordinates measured against the real client: 1200x700 client area -> (412,78); at 150% DPI the
-// window is 1800x1050 and the same logical point lands on (618,117).
-const expectedPoints = [
-  { width: 1200, height: 700, point: '412,78' },
-  { width: 1800, height: 1050, point: '618,117' },
-  { width: 2400, height: 1400, point: '824,156' }
-];
+// Duilib clips its 1200x700 design layout instead of rescaling it, so the button keeps (412,78) and only
+// the window DPI changes it: 150% DPI (the local client) lands on (618,117).
+const expectedPoints = ['412,78', '618,117', '824,156'];
 
 let pendingResults;
 
@@ -32,9 +28,8 @@ function results() {
     "$ErrorActionPreference = 'Stop'",
     '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)',
     `. ${psQuote(entryScript)}`,
-    '$points = foreach ($size in @(@(1200, 700), @(1800, 1050), @(2400, 1400))) {'
-      + ' $point = Get-ClientEntryPoint -Width $size[0] -Height $size[1]; "$($point.X),$($point.Y)" }',
-    "try { Get-ClientEntryPoint -Width 0 -Height 700 | Out-Null; $invalid = 'NO_ERROR' } catch { $invalid = $_.Exception.Message }",
+    '$points = foreach ($dpi in @(96, 144, 192)) { $point = Get-ClientEntryPoint -Dpi $dpi; "$($point.X),$($point.Y)" }',
+    "try { Get-ClientEntryPoint -Dpi 10 | Out-Null; $invalid = 'NO_ERROR' } catch { $invalid = $_.Exception.Message }",
     `$entry = Wait-ClientExamEntry -ClientPath ${psQuote(missing)} -TimeoutSeconds 1 -PollMilliseconds 200`,
     '@{ points = @($points); invalid = $invalid; missing = @{ Clicked = $entry.Clicked; Reason = $entry.Reason; ProcessId = $entry.ProcessId } } | ConvertTo-Json -Compress -Depth 4'
   ].join('\n');
@@ -52,12 +47,12 @@ function results() {
   return pendingResults;
 }
 
-test('进入考试按钮坐标由客户区尺寸换算，与 DPI 无关', { skip: windowsOnly }, () => {
+test('进入考试按钮坐标按窗口 DPI 换算，与当前客户区尺寸无关', { skip: windowsOnly }, () => {
   const { result, json } = results();
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(json.points, expectedPoints.map((item) => item.point),
-    '按钮坐标必须与实测的 1200x700 / 1800x1050 / 2400x1400 换算结果一致');
-  assert.match(json.invalid, /Client area must be positive/u, '非法尺寸必须失败关闭');
+  assert.deepEqual(json.points, expectedPoints,
+    '按钮坐标必须按 96/144/192 DPI 换算，与实测的 (412,78) / (618,117) 一致');
+  assert.match(json.invalid, /Unsupported window DPI/u, '非法 DPI 必须失败关闭');
 });
 
 test('找不到客户端检查窗口时返回明确原因，不误报点击成功', { skip: windowsOnly }, () => {
@@ -83,4 +78,7 @@ test('进入考试助手保持纯 ASCII 且不发送重复点击', () => {
   const text = bytes.toString('utf8');
   assert.equal((text.match(/PostMessageW\(\$window, 0x0201/gu) ?? []).length, 1, '只允许发送一次按下消息，避免打开多个页面');
   assert.doesNotMatch(text, /mouse_event|SetCursorPos|SendInput/u, '不得使用会被 UIPI 或 DPI 影响的整屏输入');
+  assert.match(text, /Wait-ClientLayoutReady/u, '必须等 Duilib 布局完成再点击，否则会点到 137x36 的初始窗口');
+  assert.match(text, /GetDpiForWindow/u, '按钮坐标必须按窗口 DPI 换算，不能按客户区比例');
+  assert.doesNotMatch(text, /0\.34333|0\.11143/u, '不得再用客户区比例推算按钮坐标');
 });

@@ -119,14 +119,14 @@ try {
     throw "Native host did not write a report for $CaseName (exit $($hostProcess.ExitCode))"
   }
   $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-  Write-Host "[real-client] report success=$($report.success) ownershipVerified=$($report.ownershipVerified) pageSessions=$($report.pageSessions) bootstraps=$($report.bootstraps) bundles=$($report.bundles) stopReason=$($report.stopReason)"
+  Write-Host "[real-client] report success=$($report.success) ownershipVerified=$($report.ownershipVerified) pageSessions=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) stopReason=$($report.stopReason)"
 
   $stage = 'validate-report'
   if (-not $report.success) { throw "Injection report is not successful for $CaseName" }
   if (-not $report.ownershipVerified) { throw "Client ownership was not verified for $CaseName" }
-  if ([int]$report.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: the client never left its native check window (entry click=$($entry.Reason))" }
-  if ([int]$report.bootstraps -lt 1) { throw "No bootstrap was injected for $CaseName" }
-  if ([int]$report.bundles -lt 1) { throw "No bundle was injected for $CaseName" }
+  if ([int]$report.totals.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: the client never left its native check window (entry click=$($entry.Reason))" }
+  if ([int]$report.totals.bootstraps -lt 1) { throw "No bootstrap was injected for $CaseName" }
+  if ([int]$report.totals.bundles -lt 1) { throw "No bundle was injected for $CaseName" }
   # The run ends either when the duration elapses or when the client is closed/killed first; both
   # leave a complete report, so the counters above are what actually prove the injection.
   if ($report.stopReason -notin @('duration', 'client-exit')) { throw "Unexpected stop reason for ${CaseName}: $($report.stopReason)" }

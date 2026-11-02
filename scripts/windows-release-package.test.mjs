@@ -479,6 +479,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /'scripts\/windows-native-browser-session\.test\.mjs'/u, 'CI 必须在交互环境覆盖 Chrome 与 Edge 可见窗口清理');
   assert.match(workflow, /\$testFiles\.Count -eq 0/u, '全量单元测试清单为空时必须失败');
   assert.match(workflow, /\$files\.Count -eq 0/u, '浏览器测试清单为空时必须失败');
+  assert.match(workflow, /Select-String -LiteralPath \$_\.FullName -Pattern 'puppeteer/u,
+    '浏览器作业必须按实际是否启动 puppeteer 收集用例，单元作业只跑非浏览器用例');
   assert.match(workflow, /name: 发布目录 Node 入口回归/u, 'CI 必须在发布目录生成后补跑 Node 入口回归');
   assert.match(workflow, /scripts\/windows-node-exe\.test\.mjs/u, 'CI 必须补跑发布目录图标与 Node 入口测试');
   assert.match(workflow, /needs: \[windows-build, windows-unit, windows-pause, windows-window, windows-browser\]/u, 'CI 只有全部 Windows 验证成功后才能生成发布包');
@@ -537,6 +539,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(entryScript, /PostMessageW\(\$window, 0x0201/u, '进入考试必须通过窗口消息点击');
   assert.match(injectionScript, /stopReason -notin @\('duration', 'client-exit'\)/u,
     '客户端被关闭或杀掉后仍应接受完整报告');
+  assert.match(injectionScript, /\$report\.totals\.pageSessions/u,
+    '宿主报告的计数位于 totals 下，校验必须读取 totals.*（顶层没有 pageSessions）');
   assert.match(workflow, /RedirectStandardOutput \$stdoutPath[\s\S]*?RedirectStandardError \$stderrPath/u, '真实客户端回归必须捕获宿主标准输出与错误输出');
   assert.match(workflow, /\[real-client\] FAILED case=\$CaseName stage=\$stage/u, '真实客户端失败必须报告具体阶段');
   assert.match(workflow, /Write-HostDiagnostics/u, '真实客户端回归必须输出截断且脱敏的宿主日志');

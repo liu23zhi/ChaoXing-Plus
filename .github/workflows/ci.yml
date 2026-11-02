@@ -180,7 +180,7 @@ jobs:
       - name: 准备 Windows 测试环境
         shell: pwsh
         run: ./scripts/ci/prepare-windows-test-environment.ps1 -RequireBrowsers
-      - name: 单元测试（不含隔离暂停与可见窗口）
+      - name: 单元测试（不含浏览器、隔离暂停与可见窗口）
         shell: pwsh
         run: |
           $excluded = @(
@@ -192,7 +192,15 @@ jobs:
             'windows-native-adapter.test.mjs',
             'windows-native-browser-session.test.mjs'
           )
-          $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File | Where-Object { $excluded -notcontains $_.Name } | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          # 启动真实 Chromium 的用例挪到浏览器作业串行执行：并发的浏览器与原生用例曾把
+          # page.goto / waitForSelector 的默认超时拖爆（相邻两次运行各失败一个用例）。
+          $browserDriven = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File |
+            Where-Object { $excluded -notcontains $_.Name -and (Select-String -LiteralPath $_.FullName -Pattern 'puppeteer\.launch\(' -Quiet) } |
+            Select-Object -ExpandProperty Name)
+          Write-Host "移交浏览器作业的用例: $($browserDriven.Count)"
+          $testFiles = @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File |
+            Where-Object { $excluded -notcontains $_.Name -and $browserDriven -notcontains $_.Name } |
+            Sort-Object Name | Select-Object -ExpandProperty FullName)
           if ($testFiles.Count -eq 0) { throw '单元测试清单为空' }
           Write-Host "单元测试文件数: $($testFiles.Count)"
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-unit-tests.tap'
@@ -313,6 +321,19 @@ jobs:
         shell: pwsh
         run: |
           $files = @(Get-ChildItem -LiteralPath scripts -Filter '*.browser.mjs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          # 单元作业只保留不启动浏览器的用例；这里按实际是否调用 puppeteer.launch 收集，避免漏测。
+          $handledElsewhere = @(
+            'tab-answer-pause.test.mjs',
+            'windows-selection-window.test.mjs',
+            'windows-scan-progress-window.test.mjs',
+            'windows-native-selection.test.mjs',
+            'windows-native-home.test.mjs',
+            'windows-native-adapter.test.mjs',
+            'windows-native-browser-session.test.mjs'
+          )
+          $files += @(Get-ChildItem -LiteralPath scripts -Filter '*.test.mjs' -File |
+            Where-Object { $handledElsewhere -notcontains $_.Name -and (Select-String -LiteralPath $_.FullName -Pattern 'puppeteer\.launch\(' -Quiet) } |
+            Sort-Object Name | Select-Object -ExpandProperty FullName)
           if ($files.Count -eq 0) { throw '浏览器测试清单为空' }
           Write-Host "浏览器测试文件数: $($files.Count)"
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-browser-tests.tap'
