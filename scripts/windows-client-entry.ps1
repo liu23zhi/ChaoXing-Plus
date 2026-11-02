@@ -225,9 +225,14 @@ function Get-WindowScanBuffer {
         $data = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $buffer = New-Object byte[] ($data.Stride * $CropHeight)
         [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
+        # Scan() subtracts its offsets from the hit point, so the crop origin has to be subtracted here to
+        # end up ADDING it back; the caption delta converts window coordinates to client coordinates.
         return [pscustomobject]@{
             Buffer = $buffer; Stride = $data.Stride; Width = $CropWidth; Height = $CropHeight
-            OffsetX = $CropLeft + ($origin.X - $windowRect.Left); OffsetY = $CropTop + ($origin.Y - $windowRect.Top)
+            OffsetX = ($origin.X - $windowRect.Left) - $CropLeft
+            OffsetY = ($origin.Y - $windowRect.Top) - $CropTop
+            CropLeft = $CropLeft
+            CropTop = $CropTop
         }
     } catch {
         return $null

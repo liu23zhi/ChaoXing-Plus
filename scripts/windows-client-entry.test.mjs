@@ -293,3 +293,30 @@ if ($found.Length -eq 0) { 'DIALOG=absent' } else { "DIALOG=$($found[0] + $cropL
   const [x, y] = match[1].trim().split(',').map(Number);
   assert.ok(Math.abs(x - 668) <= 12 && Math.abs(y - 448) <= 12, `弹窗内确定按钮位置异常: ${x},${y}`);
 });
+test('裁剪扫描的命中点换算回客户区坐标（不允许负值）', () => {
+  // CI 现场曾出现 point=-50,30：Scan 返回的偏差被重复减去。这里直接验证换算公式。
+  const harness = String.raw`
+$entry = '` + entryScript.replace(/'/g, "''") + String.raw`'
+$text = Get-Content -LiteralPath $entry -Raw
+ =  -split '\\r?\\n'
+# 只取 Get-WindowScanBuffer 里 OffsetX/OffsetY 的两处表达式，避免加载整个脚本
+$offsets = $lines | Where-Object { $_ -match 'OffsetX = |OffsetY = ' }
+$offsets | ForEach-Object { $_.Trim() }
+# 复刻换算：client = cropCenter + cropLeft - captionDelta
+function Convert-Point($x, $y, $cropLeft, $cropTop, $captionX, $captionY) {
+  return "$($x - ($captionX - $cropLeft)),$($y - ($captionY - $cropTop))"
+}
+"FULL=$((Convert-Point 611 78 0 0 0 0))"
+"CROP=$((Convert-Point 310 240 360 210 0 0))"
+`;
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness],
+    { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  if (result.error?.code === 'ENOENT') return;
+  assert.equal(result.status, 0, result.stderr);
+  const source = readFileSync(entryScript, 'utf8');
+  assert.match(source, /OffsetX = \(\$origin\.X - \$windowRect\.Left\) - \$CropLeft/u,
+    '偏移量必须减去裁剪原点（Scan 内部会再减一次，等价于加回去）');
+  assert.match(source, /OffsetY = \(\$origin\.Y - \$windowRect\.Top\) - \$CropTop/u, '纵向同理');
+  assert.match(result.stdout, /FULL=611,78/u, '整窗扫描的换算不能改变原有结果');
+  assert.match(result.stdout, /CROP=670,450/u, '裁剪扫描必须换算回客户区正坐标');
+});
