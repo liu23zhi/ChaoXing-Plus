@@ -5,9 +5,8 @@ param(
   [Parameter(Mandatory = $true)] [string] $DatabaseBase64,
   [Parameter(Mandatory = $true)] [string] $NativeHost,
   [Parameter(Mandatory = $true)] [string] $CaseName,
-  # Hosted runner images have no zh-CN language payload and no camera, so the client's own environment
-  # check blocks entry before any CEF page exists. With this switch such a run reports BLOCKED instead of
-  # FAILED; a genuine injection failure (page appeared but nothing was injected) still fails.
+  # Local debugging only: with this switch an environment-blocked run exits 0 after reporting
+  # REAL_CLIENT_INJECTION_BLOCKED. CI never passes it - a run without a page session must fail.
   [switch] $AllowEnvironmentBlocked
 )
 
@@ -95,12 +94,36 @@ function Save-RunArtifacts {
         try { Copy-Item -LiteralPath $entry.Source -Destination (Join-Path $target "cx-real-client-$CaseName-$($entry.Name)") -Force } catch { }
     }
     if ($clientDirectory) {
+        $saved = Join-Path $target "cx-real-client-$CaseName-client-debug.log"
         $debugLog = Join-Path $clientDirectory 'debug.log'
-        if (Test-Path -LiteralPath $debugLog -PathType Leaf) {
-            try { Copy-Item -LiteralPath $debugLog -Destination (Join-Path $target "cx-real-client-$CaseName-client-debug.log") -Force } catch { }
+        $liveSize = 0
+        if (Test-Path -LiteralPath $debugLog -PathType Leaf) { $liveSize = (Get-Item -LiteralPath $debugLog).Length }
+        # Keep the snapshot taken while the client was alive: the host truncates debug.log on stop.
+        if ($liveSize -gt 0 -or -not (Test-Path -LiteralPath $saved)) {
+            if (Test-Path -LiteralPath $debugLog -PathType Leaf) {
+                try { Copy-Item -LiteralPath $debugLog -Destination $saved -Force } catch { }
+            }
         }
     }
     [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 100)
+}
+
+# The host truncates the client's debug.log during its own shutdown, so the only way to keep it is to
+# snapshot while the client is still running (and again whenever it grows).
+function Update-ClientDebugSnapshot {
+    param([string] $CaseName)
+    $target = $env:RUNNER_TEMP
+    if (-not $target -or -not $clientDirectory) { return }
+    $source = Join-Path $clientDirectory 'debug.log'
+    try {
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+        $info = Get-Item -LiteralPath $source
+        if ($info.Length -le 0) { return }
+        if ($script:lastDebugSize -eq $info.Length) { return }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $target "cx-real-client-$CaseName-client-debug.log") -Force
+        $script:lastDebugSize = $info.Length
+        Write-Host "[real-client] client debug.log snapshot at $($info.Length) bytes"
+    } catch { }
 }
 
 # Hash manifest written last: every artifact of this case can be verified byte for byte after download.
@@ -180,17 +203,22 @@ try {
     '--no-diagnose',
     '--stop-client-on-exit'
   )
+  # The client writes debug.log and the host truncates it on shutdown, which can happen before the entry
+  # phase even starts (a rejected database makes the client exit in seconds). Watch it from the moment the
+  # host starts, in a background job, so the content survives the truncation.
   $stage = 'start-native-host'
   Write-Host "[real-client] stage=$stage host=$NativeHost client=$($client.FullName)"
   $hostProcess = Start-Process -FilePath $NativeHost -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
   Write-Host "[real-client] native host started pid=$($hostProcess.Id)"
+  $debugCase = $CaseName
+  $debugHeartbeat = { Update-ClientDebugSnapshot -CaseName $debugCase }.GetNewClosure()
 
   # The client parks on its native check window and only builds the CEF page after the button is
   # pressed; without this click the host has no page to inject and the report stays at pageSessions=0.
   $stage = 'enter-exam'
   $entryPrefix = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName" } else { "" }
-  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90 -ScreenshotPrefix $entryPrefix
+  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90 -ScreenshotPrefix $entryPrefix -Heartbeat $debugHeartbeat
   if ($entry.Reason -eq 'entry-window-not-found') {
     Write-Host '[real-client] exam entry window was not found within 90s; continuing to collect the report'
   } else {
@@ -205,8 +233,16 @@ try {
     Stop-ClientProcess $clientPath
   }
 
+  Update-ClientDebugSnapshot -CaseName $CaseName
+
   $stage = 'wait-native-host'
-  if (-not $hostProcess.WaitForExit(300000)) {
+  $hostDeadline = (Get-Date).AddSeconds(300)
+  while (-not $hostProcess.HasExited -and (Get-Date) -lt $hostDeadline) {
+    Update-ClientDebugSnapshot -CaseName $CaseName
+    Start-Sleep -Seconds 5
+  }
+  Update-ClientDebugSnapshot -CaseName $CaseName
+  if (-not $hostProcess.HasExited) {
     Stop-OwnedProcess $hostProcess
     throw "Native host timed out for $CaseName"
   }
@@ -225,10 +261,15 @@ try {
     $windowClasses = [string]$entry.Windows
     $hintShown = $windowClasses -match 'ExamCheckHintUI'
     $noPage = [int]$report.totals.pageSessions -lt 1
-    if ($AllowEnvironmentBlocked -and $hintShown -and $noPage) {
+    if ($hintShown -and $noPage) {
+      # The client never left its check window, so nothing was injected. This is a failure: the job must
+      # not look green when no page session exists.
       $blockedByEnvironment = $true
+      $message = "REAL_CLIENT_INJECTION_BLOCKED $CaseName reason=environment-check client=$($entry.ClientSize) pages=$($entry.PageTargets)"
       Write-Host "[real-client] client refused to enter the exam: its environment check failed (camera / input method); windows=$windowClasses"
-      Write-Host "REAL_CLIENT_INJECTION_BLOCKED $CaseName reason=environment-check client=$($entry.ClientSize) pages=$($entry.PageTargets)"
+      Write-Host $message
+      Write-Host "::error::$message"
+      if (-not $AllowEnvironmentBlocked) { throw "$message (no page session, nothing was injected)" }
     } else {
       throw "Injection report is not successful for $CaseName"
     }
@@ -272,6 +313,11 @@ try {
     Write-Host "[real-client] input restore failed: $($_.Exception.Message)"
   }
   # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
+  if (Test-Path -LiteralPath $debugSnapshot) {
+    Write-Host "[real-client] client debug.log captured: $((Get-Item -LiteralPath $debugSnapshot).Length) bytes"
+  } else {
+    Write-Host '[real-client] client debug.log not collected (client never wrote it or it was empty)'
+  }
   $shell = Repair-ShellDesktop -Force
   Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
   Save-ArtifactManifest -CaseName $CaseName

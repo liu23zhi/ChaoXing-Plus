@@ -289,17 +289,32 @@ function Find-ClientConfirmButton {
 
 # The dialog is its own window (class ExamCheckHintUI) drawn over the check window, so a click posted to
 # ExamCheckUI never reaches it - the CI frame showed the dialog unchanged after the posted click.
+# The client also owns a 0x0 "#32770" helper window titled FYWebExamSystem, so a class match alone is not
+# a dialog: require a real visible window that is neither the check window nor degenerate.
 function Get-ClientDialogWindow {
     param(
         [Parameter(Mandatory = $true)] [IntPtr] $CheckWindow,
         [int] $ProcessId = 0
     )
     if (-not $ProcessId) { return [IntPtr]::Zero }
+    $checkRect = New-Object CXClientEntry+RECT
+    $checkWidth = 0
+    $checkHeight = 0
+    if ([CXClientEntry]::GetWindowRect($CheckWindow, [ref]$checkRect)) {
+        $checkWidth = $checkRect.Right - $checkRect.Left
+        $checkHeight = $checkRect.Bottom - $checkRect.Top
+    }
     foreach ($className in @('ExamCheckHintUI', '#32770')) {
         $handle = [CXClientEntry]::Find([uint32]$ProcessId, $className)
-        if ($handle -ne [IntPtr]::Zero -and $handle -ne $CheckWindow -and [CXClientEntry]::IsWindowVisible($handle)) {
-            return $handle
-        }
+        if ($handle -eq [IntPtr]::Zero -or $handle -eq $CheckWindow) { continue }
+        if (-not [CXClientEntry]::IsWindowVisible($handle)) { continue }
+        $rect = New-Object CXClientEntry+RECT
+        if (-not [CXClientEntry]::GetWindowRect($handle, [ref]$rect)) { continue }
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        if ($width -lt 200 -or $height -lt 100) { continue }
+        if ($checkWidth -gt 0 -and $checkHeight -gt 0 -and $width -ge $checkWidth -and $height -ge $checkHeight) { continue }
+        return $handle
     }
     return [IntPtr]::Zero
 }
@@ -327,15 +342,13 @@ function Confirm-ClientExamEntry {
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
+        # No dialog window means no confirm step: scanning the check page would hit its blue controls
+        # (the camera "run" button) and click into the wrong place.
         $dialog = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
-        if ($dialog -ne [IntPtr]::Zero) {
-            $target = $dialog
-            # The dialog window only contains the dialog, so nearly the whole client area can be scanned.
-            $button = Find-ClientConfirmButton -Window $dialog -Left 0.02 -Top 0.10 -Width 0.96 -Height 0.85
-        } else {
-            $target = $Window
-            $button = Find-ClientConfirmButton -Window $Window
-        }
+        if ($dialog -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0; Via = 'none' } }
+        $target = $dialog
+        # The dialog window only contains the dialog, so nearly the whole client area can be scanned.
+        $button = Find-ClientConfirmButton -Window $dialog -Left 0.02 -Top 0.10 -Width 0.96 -Height 0.85
         if ($button.State -eq 'found') {
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $target
             [void][CXClientEntry]::SetForegroundWindow($target)
@@ -350,16 +363,20 @@ function Confirm-ClientExamEntry {
             }
             $dialog = [IntPtr]::Zero
         }
-        if ($button.State -eq 'unavailable') { break }
+        if ($button.State -eq 'unavailable') {
+            Start-Sleep -Milliseconds $PollMilliseconds
+            continue
+        }
         Start-Sleep -Milliseconds $PollMilliseconds
     }
-    # Last resort: the confirm button carries focus, so Enter accepts the dialog as well.
+    # Last resort: the confirm button carries focus, so Enter accepts the dialog as well - but only when a
+    # dialog window is actually present, otherwise Enter would go to the check page behind it.
     $dialog = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
-    $target = if ($dialog -ne [IntPtr]::Zero) { $dialog } else { $Window }
-    Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-keyboard' -Window $target
-    [void][CXClientEntry]::PostMessageW($target, 0x0100, [IntPtr]0x0D, [IntPtr]0)
+    if ($dialog -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0; Via = 'none' } }
+    Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-keyboard' -Window $dialog
+    [void][CXClientEntry]::PostMessageW($dialog, 0x0100, [IntPtr]0x0D, [IntPtr]0)
     Start-Sleep -Milliseconds 80
-    [void][CXClientEntry]::PostMessageW($target, 0x0101, [IntPtr]0x0D, [IntPtr]0)
+    [void][CXClientEntry]::PostMessageW($dialog, 0x0101, [IntPtr]0x0D, [IntPtr]0)
     Start-Sleep -Seconds 2
     $after = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
     if ($after -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $true; X = 0; Y = 0; Via = 'keyboard' } }
@@ -423,7 +440,10 @@ function Wait-ClientExamEntry {
         [int] $PollMilliseconds = 500,
         [int] $Attempts = 6,
         [int] $SettleSeconds = 10,
-        [string] $ScreenshotPrefix = ''
+        [string] $ScreenshotPrefix = '',
+        # Invoked on every loop iteration: lets the caller snapshot files that the client deletes on exit
+        # (its debug.log) while the client is still alive.
+        [scriptblock] $Heartbeat = $null
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $attempt = 0
@@ -435,6 +455,7 @@ function Wait-ClientExamEntry {
     $target = ''
     $preClickSaved = $false
     while ($attempt -lt $Attempts -and (Get-Date) -lt $deadline) {
+        if ($Heartbeat) { try { & $Heartbeat } catch { } }
         if (-not $clientProcess) {
             foreach ($candidate in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ClientPath)) -ErrorAction SilentlyContinue)) {
                 $path = $null

@@ -81,9 +81,12 @@ test('注入脚本在报告校验前自动点击进入考试，并接受客户�
   assert.doesNotMatch(script, /stopReason -ne 'duration'/u, '不得再要求客户端必须自然跑到时长结束');
 });
 
-test('客户端自检拦截时报告 BLOCKED 而不是 FAILED', async () => {
+test('客户端自检拦截时默认失败，BLOCKED 只能显式豁免', async () => {
   const script = await readFile(injectionScript, 'utf8');
-  assert.match(script, /\[switch\] \$AllowEnvironmentBlocked/u, '必须提供环境阻塞的开关');
+  assert.match(script, /\[switch\] \$AllowEnvironmentBlocked/u, '保留本地调试开关');
+  assert.match(script, /if \(-not \$AllowEnvironmentBlocked\) \{ throw "\$message/u,
+    '默认必须抛错：没有页面会话就是失败，不能显示成功');
+  assert.match(script, /::error::\$message/u, '必须输出 GitHub 错误注解');
   assert.match(script, /REAL_CLIENT_INJECTION_BLOCKED/u, '被客户端自检拦截时要打印 BLOCKED 结论');
   assert.match(script, /\$hintShown = \$windowClasses -match 'ExamCheckHintUI'/u,
     '必须用 ExamCheckHintUI 判定是自检拦截，而不是注入失败');
@@ -201,6 +204,11 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.match(script, /dialog-window/u, '确认点击必须走弹窗窗口（检查窗口收不到）');
   assert.match(script, /\$stillOpen = \(Get-ClientDialogWindow/u, '点完必须确认弹窗真的消失');
   assert.match(script, /confirm dialog handled clicked=/u, '必须记录弹窗处理结果');
+  assert.match(script, /if \(\$dialog -eq \[IntPtr\]::Zero\) \{ return \[pscustomobject\]@\{ Clicked = \$false; X = 0; Y = 0; Via = 'none' \} \}/u,
+    '没有弹窗窗口时不得扫描检查页（会把摄像头的运行按钮当成确定）');
+  assert.match(script, /if \(\$width -lt 200 -or \$height -lt 100\) \{ continue \}/u,
+    '必须排除客户端自带的 0x0 #32770 帮助窗口');
+  assert.match(script, /if \(\$dialogWindow -ne \[IntPtr\]::Zero\) \{/u, '主循环只在检测到弹窗时才处理弹窗');
   const confirmBody = script.slice(script.indexOf('function Confirm-ClientExamEntry'));
   assert.ok(confirmBody.indexOf('Get-ClientDialogWindow') < confirmBody.indexOf('Find-ClientConfirmButton'),
     '必须先定位弹窗窗口再扫描按钮');
