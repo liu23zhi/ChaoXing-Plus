@@ -369,6 +369,21 @@ function Resolve-WeChatInputMethodInstaller {
             if ($versions.Count -gt 0) { $version = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1 }
         } catch { Write-Step "input: winget-pkgs lookup failed - $($_.Exception.Message)" }
     }
+    if (-not $version) {
+        # Final fallback: the version recorded next to the bundled installer, so a rate-limited GitHub API
+        # cannot break the job while the download endpoint is still reachable.
+        $fixtureRoot = Get-FixtureRoot
+        $fixtureManifest = if ($fixtureRoot) { Join-Path $fixtureRoot 'wechat-ime.json' } else { '' }
+        if ($fixtureManifest -and (Test-Path -LiteralPath $fixtureManifest)) {
+            try {
+                $manifest = Get-Content -LiteralPath $fixtureManifest -Raw | ConvertFrom-Json
+                if ($manifest.version) {
+                    $version = [string]$manifest.version
+                    Write-Step "input: using the bundled manifest version $version (winget and winget-pkgs unavailable)"
+                }
+            } catch { }
+        }
+    }
     if (-not $version) { throw 'cannot determine the newest WeType version' }
     $yamlUrl = "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/t/Tencent/WeType/$version/Tencent.WeType.installer.yaml"
     try {

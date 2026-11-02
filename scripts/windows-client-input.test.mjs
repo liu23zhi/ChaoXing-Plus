@@ -139,3 +139,26 @@ test('仓库内兜底安装包与清单一致', () => {
   const attributes = readFileSync(resolveTestPath('.gitattributes'), 'utf8');
   assert.match(attributes, /tests\/private-clients\/\*\.exe filter=lfs/u, '兜底安装包必须走 Git LFS');
 });
+test('下载链接解析有三层兜底且可独立验证', () => {
+  const source = readFileSync(preparationScript, 'utf8');
+  const resolver = source.slice(source.indexOf('function Resolve-WeChatInputMethodInstaller'),
+    source.indexOf('function Get-FixtureRoot') > source.indexOf('function Resolve-WeChatInputMethodInstaller')
+      ? undefined
+      : source.indexOf('function Install-WeChatInputMethod'));
+  assert.match(resolver, /winget\.exe show --id Tencent\.WeType/u, '首选 winget 版本（无 API 限流）');
+  assert.match(resolver, /api\.github\.com\/repos\/microsoft\/winget-pkgs\/contents\/manifests\/t\/Tencent\/WeType/u,
+    '其次查询 winget-pkgs 清单目录');
+  assert.match(resolver, /using the bundled manifest version/u, '再次回退到仓库内清单的版本');
+  assert.match(resolver, /WeTypeSetup_\$version\.exe/u, '下载地址按固定模板拼装，避免写死版本');
+  assert.match(resolver, /InstallerSha256/u, '清单提供 SHA256 时必须读取');
+  assert.ok(resolver.indexOf('winget.exe show') < resolver.indexOf('api.github.com'),
+    'winget 必须在 GitHub 之前尝试');
+  assert.ok(resolver.indexOf('api.github.com') < resolver.indexOf('using the bundled manifest version'),
+    '仓库清单兜底必须放在最后');
+  const tool = readFileSync(resolveTestPath('scripts', 'ci', 'verify-wetype-resolver.ps1'), 'utf8');
+  assert.match(tool, /\[switch\] \$NoWinget/u, '验证脚本必须能模拟 winget 缺失');
+  assert.match(tool, /\[switch\] \$Download/u, '验证脚本必须能实际下载校验 SHA256');
+  for (const byte of readFileSync(resolveTestPath('scripts', 'ci', 'verify-wetype-resolver.ps1'))) {
+    assert.equal(byte <= 0x7f, true, 'verify-wetype-resolver.ps1 必须保持纯 ASCII');
+  }
+});

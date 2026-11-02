@@ -1,3 +1,16 @@
+### 验证下载链接解析
+
+```powershell
+# 打印当前会用的安装包（版本/URL/SHA256/可达性）
+pwsh -File scripts/ci/verify-wetype-resolver.ps1
+# 模拟 winget 缺失，验证 winget-pkgs 清单分支
+pwsh -File scripts/ci/verify-wetype-resolver.ps1 -NoWinget
+# 实际下载并按清单 SHA256 与签名校验
+pwsh -File scripts/ci/verify-wetype-resolver.ps1 -Download
+```
+
+三层解析顺序：`winget show`（不含 API 限流）→ winget-pkgs 清单目录 → 仓库内 `wechat-ime.json` 的版本；
+下载地址统一按 `https://download.z.weixin.qq.com/app/win/WeTypeSetup_<version>.exe` 拼装，版本变化无需改代码。
 ## 微信输入法兜底安装包
 
 `wechat-ime-v3.0.2.22.exe`（208 MB，Git LFS）是 CI 准备桌面环境时的兜底输入法安装包，配套的
