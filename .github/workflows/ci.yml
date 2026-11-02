@@ -111,14 +111,16 @@ jobs:
             $match = [regex]::Match([string]$property.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
             $value = [string]$property.Value
             if ($match.Success -and -not [string]::IsNullOrWhiteSpace($value)) {
-              if ($value -cne 'enabled') {
-                throw "变量 $($property.Name) 只能设置为 enabled 标记；数据库载荷必须放入同名 Actions Secret"
+              $compactValue = $value -replace '\s', ''
+              if ($compactValue -ceq 'enabled') {
+                throw "变量 $($property.Name) 仍是旧的 enabled 标记；请把 UserExamInfo.db 的 Base64 文本写入该变量"
               }
+              Write-Output "::add-mask::$compactValue"
               [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value }
             }
           }
           $databaseVars = @($databaseVars)
-          if ($databaseVars.Count -eq 0) { throw '没有配置非空的 Examination_Client_Database_* 变量' }
+          if ($databaseVars.Count -eq 0) { throw '没有配置非空的 Examination_Client_Database_* Base64 变量' }
 
           $entries = foreach ($clientFile in $clientFiles) {
             $fileName = [IO.Path]::GetFileNameWithoutExtension($clientFile.Name)
@@ -141,14 +143,13 @@ jobs:
                 inject_mode = $injectMode
                 database = $databaseVar.Suffix
                 database_var = $databaseVar.Name
-                database_secret = $databaseVar.Name
               }
             }
           }
           $matrix = [ordered]@{ include = @($entries) } | ConvertTo-Json -Compress -Depth 5
           [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "matrix=$matrix`n", [Text.UTF8Encoding]::new($false))
           Write-Host "发现 $($clientFiles.Count) 个客户端、$($databaseVars.Count) 个数据库变量，生成 $($entries.Count) 个注入用例"
-          $databaseVars | ForEach-Object { Write-Host "数据库标记 $($_.Name)" }
+          $databaseVars | ForEach-Object { Write-Host "数据库 Base64 变量 $($_.Name) 已发现并掩码" }
 
   windows-unit:
     name: Windows 单元与原生测试
@@ -421,21 +422,20 @@ jobs:
         shell: pwsh
         env:
           DATABASE_VARIABLE_NAME: ${{ matrix.database_var }}
-          DATABASE_SECRET_NAME: ${{ matrix.database_secret }}
-          DATABASE_BASE64: ${{ secrets[matrix.database_secret] }}
+          DATABASE_BASE64: ${{ vars[matrix.database_var] }}
         run: |
           if ($env:DATABASE_VARIABLE_NAME -notmatch '^Examination_Client_Database_.+$') {
             throw "数据库变量名格式错误: $env:DATABASE_VARIABLE_NAME"
           }
-          if ($env:DATABASE_SECRET_NAME -cne $env:DATABASE_VARIABLE_NAME) {
-            throw "数据库 Secret 名称与发现的变量名不匹配: $env:DATABASE_VARIABLE_NAME"
-          }
           $db = [string]$env:DATABASE_BASE64
-          if ([string]::IsNullOrWhiteSpace($db)) { throw "缺少同名 Actions Secret: $env:DATABASE_SECRET_NAME" }
+          if ([string]::IsNullOrWhiteSpace($db)) { throw "数据库 Base64 变量为空: $env:DATABASE_VARIABLE_NAME" }
           $compactDb = $db -replace '\s', ''
-          if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "同名 Actions Secret 为空: $env:DATABASE_SECRET_NAME" }
+          if ([string]::IsNullOrWhiteSpace($compactDb)) { throw "数据库 Base64 变量为空: $env:DATABASE_VARIABLE_NAME" }
+          if (($compactDb.Length % 4) -ne 0 -or $compactDb -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
+            throw "变量 $env:DATABASE_VARIABLE_NAME 必须是 UserExamInfo.db 的 Base64 文本；不再接受 enabled 标记或 ZIP 载荷"
+          }
           Write-Output "::add-mask::$compactDb"
-          Write-Host "读取 Secret $env:DATABASE_SECRET_NAME（载荷已掩码），开始真实客户端注入"
+          Write-Host "读取数据库变量 $env:DATABASE_VARIABLE_NAME（Base64 $($compactDb.Length) 字符，已掩码），解码为 UserExamInfo.db 并写入 CXExam.exe 同目录"
           ./scripts/windows-real-client-injection.ps1 `
             -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
             -InjectMode '${{ matrix.inject_mode }}' `

@@ -8,10 +8,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-client-database.ps1')
+. (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
 $tempRoot = Join-Path $env:RUNNER_TEMP ("cx-real-client-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $tempRoot 'package'
-$databaseRoot = Join-Path $tempRoot 'database'
-$databaseZip = Join-Path $tempRoot 'database.zip'
 $reportPath = Join-Path $tempRoot 'report.json'
 $stdoutPath = Join-Path $tempRoot 'native-host.stdout.log'
 $stderrPath = Join-Path $tempRoot 'native-host.stderr.log'
@@ -61,7 +61,7 @@ try {
   Write-Host "[real-client] case=$CaseName mode=$InjectMode stage=validate-inputs"
   if (-not (Test-Path -LiteralPath $ClientInstaller -PathType Leaf)) { throw "Client fixture is missing: $ClientInstaller" }
   if (-not (Test-Path -LiteralPath $NativeHost -PathType Leaf)) { throw "Native host is missing: $NativeHost" }
-  New-Item -ItemType Directory -Path $packageRoot, $databaseRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 
   $stage = 'find-7zip'
   $sevenZip = Find-SevenZip
@@ -77,33 +77,16 @@ try {
   $clientDirectory = $client.DirectoryName
   Write-Host "[real-client] extracted client=$($client.FullName) bytes=$($client.Length)"
 
-  $stage = 'decode-database'
-  $base64 = ($DatabaseBase64 -replace '\s', '')
-  if ([string]::IsNullOrWhiteSpace($base64)) { throw 'Database variable is empty' }
-  $databaseBytes = [Convert]::FromBase64String($base64)
-  if ($databaseBytes.Length -lt 4 -or $databaseBytes[0] -ne 0x50 -or $databaseBytes[1] -ne 0x4b) {
-    throw 'Database payload is not a ZIP payload. Store Base64 of a ZIP containing exactly one non-empty UserExamInfo.db in the same-named GitHub Secret.'
-  }
-  [IO.File]::WriteAllBytes($databaseZip, $databaseBytes)
-  Write-Host "[real-client] database archive decoded bytes=$((Get-Item -LiteralPath $databaseZip).Length)"
-  Write-Host '[real-client] database archive signature=PK'
-
-  $stage = 'extract-database'
-  Expand-Archive -LiteralPath $databaseZip -DestinationPath $databaseRoot -Force
-  $databases = @(Get-ChildItem -LiteralPath $databaseRoot -Filter 'UserExamInfo.db' -Recurse -File)
-  if ($databases.Count -ne 1) { throw "Expected exactly one UserExamInfo.db in database archive, found $($databases.Count)" }
-  if ($databases[0].Length -le 0) { throw 'Decoded UserExamInfo.db is empty' }
-  Write-Host "[real-client] database file matched=$($databases[0].FullName) bytes=$($databases[0].Length)"
-
   $stage = 'install-database'
-  Copy-Item -LiteralPath $databases[0].FullName -Destination (Join-Path $clientDirectory 'UserExamInfo.db') -Force
-  Write-Host "[real-client] database copied into client directory"
+  $base64 = ($DatabaseBase64 -replace '\s', '')
+  $database = Install-ClientDatabase -ClientDirectory $clientDirectory -Base64 $base64
+  Write-Host "[real-client] database file matched=$($database.Path) bytes=$($database.Bytes) sqlite=$($database.Sqlite)"
 
   $arguments = @(
     '--inject-mode', $InjectMode,
     '--client', $client.FullName,
     '--report', $reportPath,
-    '--duration', '30000',
+    '--duration', '120000',
     '--no-log',
     '--no-diagnose',
     '--stop-client-on-exit'
@@ -114,8 +97,18 @@ try {
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
   Write-Host "[real-client] native host started pid=$($hostProcess.Id)"
 
+  # The client parks on its native check window and only builds the CEF page after the button is
+  # pressed; without this click the host has no page to inject and the report stays at pageSessions=0.
+  $stage = 'enter-exam'
+  $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 120
+  if ($entry.Reason -eq 'entry-window-not-found') {
+    Write-Host "[real-client] exam entry window was not found within 120s; continuing to collect the report"
+  } else {
+    Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) clicked=$($entry.Clicked) reason=$($entry.Reason)"
+  }
+
   $stage = 'wait-native-host'
-  if (-not $hostProcess.WaitForExit(60000)) {
+  if (-not $hostProcess.WaitForExit(300000)) {
     Stop-OwnedProcess $hostProcess
     throw "Native host timed out for $CaseName"
   }
@@ -131,10 +124,12 @@ try {
   $stage = 'validate-report'
   if (-not $report.success) { throw "Injection report is not successful for $CaseName" }
   if (-not $report.ownershipVerified) { throw "Client ownership was not verified for $CaseName" }
-  if ([int]$report.pageSessions -lt 1) { throw "No page session was injected for $CaseName" }
+  if ([int]$report.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: the client never left its native check window (entry click=$($entry.Reason))" }
   if ([int]$report.bootstraps -lt 1) { throw "No bootstrap was injected for $CaseName" }
   if ([int]$report.bundles -lt 1) { throw "No bundle was injected for $CaseName" }
-  if ($report.stopReason -ne 'duration') { throw "Unexpected stop reason for ${CaseName}: $($report.stopReason)" }
+  # The run ends either when the duration elapses or when the client is closed/killed first; both
+  # leave a complete report, so the counters above are what actually prove the injection.
+  if ($report.stopReason -notin @('duration', 'client-exit')) { throw "Unexpected stop reason for ${CaseName}: $($report.stopReason)" }
   Write-HostDiagnostics
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {

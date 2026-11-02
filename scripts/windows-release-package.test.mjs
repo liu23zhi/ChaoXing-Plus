@@ -493,15 +493,13 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]\*\.exe['"]/u, 'CI 必须扫描私有客户端目录中的 EXE');
   assert.match(workflow, /Examination_Client_Database_/u, 'CI 必须自动发现数据库变量');
   assert.match(workflow, /REPOSITORY_VARS_JSON:\s*\$\{\{\s*toJSON\(vars\)\s*\}\}/u,
-    '发现步骤必须从 vars context 获取数据库变量名标记');
+    '发现步骤必须从 vars context 获取数据库 Base64 变量');
   assert.match(workflow, /repositoryVars\s*=\s*\$env:REPOSITORY_VARS_JSON\s*\|\s*ConvertFrom-Json/u,
     '发现步骤必须解析 vars context 并只输出变量名');
-  assert.match(workflow, /database_secret\s*=\s*\$databaseVar\.Name/u,
-    '矩阵必须将发现的数据库变量名映射为同名 Secret');
-  assert.match(workflow, /DATABASE_BASE64:\s*\$\{\{\s*secrets\[matrix\.database_secret\]\s*\}\}/u,
-    '真实客户端 job 必须从同名 Secret 读取数据库载荷');
-  assert.match(workflow, /\$value\s+-cne\s+'enabled'/u,
-    '仓库变量只能使用 enabled 标记，不能承载数据库载荷');
+  assert.match(workflow, /DATABASE_BASE64:\s*\$\{\{\s*vars\[matrix\.database_var\]\s*\}\}/u,
+    '真实客户端 job 必须直接从发现的仓库变量读取 Base64 数据库载荷');
+  assert.match(workflow, /Write-Output\s+"::add-mask::\$compactValue"/u,
+    '发现步骤必须掩码 Base64 变量值');
   assert.doesNotMatch(workflow, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN/u,
     '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据');
   assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');
@@ -512,9 +510,29 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.doesNotMatch(workflow, /database:\s*II\s*$/mu, '真实客户端矩阵不得硬编码数据库 II');
   assert.match(workflow, /tests\/private-clients/u, '真实客户端必须来自私有测试目录');
   assert.match(workflow, /lfs: true/u, '客户端测试必须拉取 Git LFS 资产');
-  assert.match(workflow, /Expand-Archive/u, '真实客户端测试必须解压数据库 ZIP');
-  assert.match(workflow, /not a ZIP payload[\s\S]*UserExamInfo\.db/u,
-    '数据库解码后必须在解压前校验 ZIP 格式并给出配置提示');
+  assert.match(workflow, /仍是旧的 enabled 标记/u, '发现步骤必须拒绝旧的 enabled 标记变量');
+  assert.match(workflow, /必须是 UserExamInfo\.db 的 Base64 文本/u, '注入步骤必须校验变量载荷是 Base64 文本');
+  const injectionScript = await fs.readFile(path.join(root, 'scripts', 'windows-real-client-injection.ps1'), 'utf8');
+  assert.match(injectionScript, /Install-ClientDatabase -ClientDirectory \$clientDirectory -Base64 \$base64/u,
+    '数据库 Base64 必须交给安装助手写入客户端目录');
+  assert.doesNotMatch(injectionScript, /Expand-Archive|database\.zip/u,
+    '数据库载荷不应再按 ZIP 解压');
+  const databaseScript = await fs.readFile(path.join(root, 'scripts', 'windows-client-database.ps1'), 'utf8');
+  assert.match(databaseScript, /Join-Path \$ClientDirectory 'UserExamInfo\.db'/u,
+    '数据库文件名必须是 CXExam.exe 同目录的 UserExamInfo.db');
+  assert.match(databaseScript, /\[IO\.File\]::WriteAllBytes\(\$databasePath, \$bytes\)/u,
+    '数据库 Base64 必须解码后直接写成文件');
+  assert.doesNotMatch(databaseScript, /Expand-Archive|ZipFile|Compress-Archive/u,
+    '数据库载荷不得再按压缩包处理');
+  const entryScript = await fs.readFile(path.join(root, 'scripts', 'windows-client-entry.ps1'), 'utf8');
+  assert.match(injectionScript, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-entry\.ps1'\)/u,
+    '注入脚本必须 dot-source 进入考试助手');
+  assert.match(injectionScript, /Wait-ClientExamEntry -ClientPath \$client\.FullName/u,
+    '注入脚本必须在客户端检查窗口出现后点击进入考试，否则没有可注入的 CEF 页面');
+  assert.match(entryScript, /GetClientRect/u, '进入考试坐标必须按客户区尺寸换算，不能写死屏幕坐标');
+  assert.match(entryScript, /PostMessageW\(\$window, 0x0201/u, '进入考试必须通过窗口消息点击');
+  assert.match(injectionScript, /stopReason -notin @\('duration', 'client-exit'\)/u,
+    '客户端被关闭或杀掉后仍应接受完整报告');
   assert.match(workflow, /RedirectStandardOutput \$stdoutPath[\s\S]*?RedirectStandardError \$stderrPath/u, '真实客户端回归必须捕获宿主标准输出与错误输出');
   assert.match(workflow, /\[real-client\] FAILED case=\$CaseName stage=\$stage/u, '真实客户端失败必须报告具体阶段');
   assert.match(workflow, /Write-HostDiagnostics/u, '真实客户端回归必须输出截断且脱敏的宿主日志');

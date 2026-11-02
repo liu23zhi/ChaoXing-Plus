@@ -113,7 +113,7 @@ static DWORD WINAPI inspect_window(LPVOID unused) {
     return 0;
 }
 void WinMainCRTStartup(void) {
-    static WCHAR dpiText[16]; DWORD i, started; HANDLE inspector; MSG message; BOOL accepted, sawQuit = FALSE;
+    static WCHAR dpiText[16]; DWORD i, started, elapsed; char info[128]; HANDLE inspector; MSG message; BOOL accepted, sawQuit = FALSE;
     GetEnvironmentVariableW(L"CX_ADAPTER_TEST_BASE", config.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP);
     GetEnvironmentVariableW(L"CX_ACCOUNT_TEST_SCENARIO", scenario, 64);
     if (!lstrcmpW(scenario, L"invalid-login-url")) lstrcpyW(config.adapterBaseUrl, L"javascript:alert(1)");
@@ -124,7 +124,13 @@ void WinMainCRTStartup(void) {
     WaitForSingleObject(inspector, INFINITE); CloseHandle(inspector);
     if (!lstrcmpW(scenario, L"accept")) check(accepted && !lstrcmpW(config.apiKey, L"tk_mock-existing"), "verified API key applies only on success");
     else check(!accepted && !config.apiKey[0], "cancel or quit does not apply credentials");
-    if (lstrcmpW(scenario, L"cancel") && lstrcmpW(scenario, L"invalid-login-url")) check(GetTickCount() - started >= 200, "modal cleanup joins pending network worker");
+    elapsed = GetTickCount() - started;
+    wsprintfA(info, "INFO scenario elapsed=%lu ms", (unsigned long)elapsed); out(info); out("\r\n");
+    /* Only accept/close/quit start the deliberately delayed API key verification request, so only
+       those scenarios can prove that the modal joins the in-flight network worker. The CAPTCHA
+       scenarios never queue that request and their wall clock time is not evidence of anything. */
+    if (!lstrcmpW(scenario, L"accept") || !lstrcmpW(scenario, L"close") || !lstrcmpW(scenario, L"quit"))
+        check(elapsed >= 200, "modal cleanup joins pending network worker");
     if (!lstrcmpW(scenario, L"quit")) {
         while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) if (message.message == WM_QUIT) { sawQuit = TRUE; break; }
         check(sawQuit, "modal loop reposts WM_QUIT");
