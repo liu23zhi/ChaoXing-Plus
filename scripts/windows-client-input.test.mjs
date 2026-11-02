@@ -62,10 +62,22 @@ test('CI 桌面环境准备脚本可在无副作用模式下运行', () => {
   for (const byte of bytes) assert.equal(byte <= 0x7f, true, 'prepare-windows-real-client-environment.ps1 必须保持纯 ASCII');
   const result = spawnSync('pwsh', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', preparationScript, '-SkipResolution', '-SkipInputMethod', '-SkipCamera'
+    '-File', preparationScript, '-DryRun', '-SkipResolution', '-SkipCamera'
   ], { encoding: 'utf8', windowsHide: true, timeout: 180_000 });
   if (result.error?.code === 'ENOENT') return;
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\[desktop-prep\]/u, '必须输出准备日志');
-  assert.doesNotMatch(result.stdout, /camera: installing/u, '跳过开关不得真的安装摄像头驱动');
+  assert.doesNotMatch(result.stdout, /camera: choco install/u, '跳过开关不得真的安装摄像头驱动');
+});
+
+test('只登记微软自带拼音与五笔，且安装步骤都有超时上限', () => {
+  const source = readFileSync(preparationScript, 'utf8');
+  assert.match(source, /\{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E\}/u, '必须登记微软拼音输入法');
+  assert.match(source, /\{E7EA138E-69F8-11D7-A6EA-00065B844310\}/u, '必须登记微软五笔输入法');
+  assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得再使用');
+  assert.doesNotMatch(source, /sogou|qqpinyin|baidu|搜狗|QQ拼音|百度/iu, '不得安装第三方输入法');
+  assert.match(source, /Invoke-Bounded/u, '安装动作必须带超时');
+  assert.match(source, /-TimeoutSeconds \$CapabilityTimeoutSeconds/u, '语言能力安装必须有超时上限');
+  assert.match(source, /Add-WindowsCapability -Online -Name 'Language\.Basic~~~zh-CN~0\.0\.1\.0'/u,
+    '语言文件应通过 Add-WindowsCapability 安装');
 });

@@ -27,7 +27,7 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 失败现场会落盘到 `RUNNER_TEMP` 并由 CI 作为 artifact 上传（`real-client-failure-<客户端>-<数据库>`）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：出现 `ExamCheckHintUI` 说明被客户端自检拦截，出现 `Chrome_WidgetWin_0` 说明 CEF 页面已就绪。
 
-注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、安装中文输入法、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，没有这三项时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
+注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、只登记微软自带拼音与五笔（不使用任何第三方输入法；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`，所有安装动作都带超时）、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，没有这三项时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。
 
