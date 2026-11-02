@@ -502,6 +502,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     '真实客户端 job 必须直接从发现的仓库变量读取 Base64 数据库载荷');
   assert.match(workflow, /Write-Output\s+"::add-mask::\$compactValue"/u,
     '发现步骤必须掩码 Base64 变量值');
+  assert.match(workflow, /\$databaseVars = @\(\)[\s\S]*?\$databaseVars \+= \[pscustomobject\]/u,
+    '发现步骤必须显式收集变量对象；Write-Output 掩码命令不能混入矩阵，否则会生成空数据库名的用例');
   assert.doesNotMatch(workflow, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN/u,
     '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据');
   assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');

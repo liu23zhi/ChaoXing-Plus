@@ -107,7 +107,11 @@ jobs:
           if ($clientFiles.Count -eq 0) { throw '私有客户端目录中没有 EXE' }
 
           $repositoryVars = $env:REPOSITORY_VARS_JSON | ConvertFrom-Json
-          $databaseVars = foreach ($property in $repositoryVars.PSObject.Properties) {
+          # Collect explicitly: a bare `$databaseVars = foreach (...) { Write-Output ...; $object }`
+          # would swallow the ::add-mask:: workflow command into the variable and emit matrix rows
+          # with an empty database name.
+          $databaseVars = @()
+          foreach ($property in $repositoryVars.PSObject.Properties) {
             $match = [regex]::Match([string]$property.Name, '^Examination_Client_Database_(.+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
             $value = [string]$property.Value
             if ($match.Success -and -not [string]::IsNullOrWhiteSpace($value)) {
@@ -116,10 +120,9 @@ jobs:
                 throw "变量 $($property.Name) 仍是旧的 enabled 标记；请把 UserExamInfo.db 的 Base64 文本写入该变量"
               }
               Write-Output "::add-mask::$compactValue"
-              [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value }
+              $databaseVars += [pscustomobject]@{ Name = [string]$property.Name; Suffix = $match.Groups[1].Value }
             }
           }
-          $databaseVars = @($databaseVars)
           if ($databaseVars.Count -eq 0) { throw '没有配置非空的 Examination_Client_Database_* Base64 变量' }
 
           $entries = foreach ($clientFile in $clientFiles) {
