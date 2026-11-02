@@ -206,6 +206,7 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.match(script, /dialog-window/u, '确认点击必须走弹窗窗口（检查窗口收不到）');
   assert.match(script, /\$stillOpen = \(Get-ClientDialogWindow/u, '点完必须确认弹窗真的消失');
   assert.match(script, /confirm dialog handled clicked=/u, '必须记录弹窗处理结果');
+  assert.match(script, /attempt=\$\(\$attempt \+ 1\) target=/u, '每次尝试都要打印目标点、DPI、弹窗与页面数');
   assert.match(script, /if \(\$dialog -eq \[IntPtr\]::Zero\) \{ return \[pscustomobject\]@\{ Clicked = \$false; X = 0; Y = 0; Via = 'none' \} \}/u,
     '没有弹窗窗口时不得扫描检查页（会把摄像头的运行按钮当成确定）');
   assert.match(script, /if \(\$width -lt 200 -or \$height -lt 100\) \{ continue \}/u,

@@ -291,6 +291,57 @@ function Add-VirtualCamera {
   }
 }
 
+# The client decides "input method detected" from ImmGetDescriptionW, so the same value is logged here: an
+# empty description for every layout means the check will fail no matter how many IMEs are installed.
+function Get-ImmInputMethodProbe {
+    $source = @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public class CXImmProbe {
+    [DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int count, IntPtr[] layouts);
+    [DllImport("imm32.dll", CharSet = CharSet.Unicode)] public static extern int ImmGetDescriptionW(IntPtr layout, StringBuilder text, int cap);
+
+    public static string[] Describe() {
+        int count = GetKeyboardLayoutList(0, null);
+        if (count <= 0) return new string[0];
+        IntPtr[] layouts = new IntPtr[count];
+        int read = GetKeyboardLayoutList(count, layouts);
+        List<string> result = new List<string>();
+        for (int i = 0; i < read; i++) {
+            StringBuilder text = new StringBuilder(512);
+            int length = ImmGetDescriptionW(layouts[i], text, 512);
+            string description = length > 0 ? text.ToString() : "<empty>";
+            result.Add("0x" + layouts[i].ToInt64().ToString("X8") + "=" + description);
+        }
+        return result.ToArray();
+    }
+}
+'@
+    try {
+        Add-Type -TypeDefinition $source -ErrorAction Stop
+        return @([CXImmProbe]::Describe())
+    } catch {
+        return @("probe-failed: $($_.Exception.Message)")
+    }
+}
+
+function Get-InputMethodSummary {
+    $descriptions = @(Get-ImmInputMethodProbe)
+    $layouts = @()
+    try { $layouts = @([CXInputState]::LayoutHandles()) } catch { }
+    $languages = @()
+    try { $languages = @(Get-WinUserLanguageList | ForEach-Object { [string](@($_.LanguageTag)[0]) }) } catch { }
+    return [pscustomobject]@{
+        Layouts = $layouts
+        ImmDescriptions = $descriptions
+        Languages = $languages
+        Sogou = (Get-SogouInputState)
+    }
+}
+
 # The client only accepts input methods whose ImmGetDescriptionW is non-empty (IG5: FUN_004a6b30 drops
 # layouts with an empty description). TSF-only IMEs, including Microsoft Pinyin, do not provide one, so
 # such a machine still fails the check; Sogou Pinyin registers an IMM layer and is what a real passing
@@ -467,6 +518,7 @@ function Install-SogouInputMethod {
                     $state = Get-SogouInputState
                     if ($state.Installed) {
                         Write-Step "input: Sogou Pinyin installed from the bundled installer (version=$($state.Version))"
+                        foreach ($line in @(Get-ImmInputMethodProbe)) { Write-Step "input: imm after install $line" }
                         return
                     }
                     Write-Step "input: bundled installer did not install Sogou Pinyin (ok=$($runBundled.Ok) timedOut=$($runBundled.TimedOut)); trying winget"
@@ -584,4 +636,35 @@ try {
 } catch { }
 if (Get-Command Get-WinUserLanguageList -ErrorAction SilentlyContinue) {
   Write-Step "input: final languages = $((Get-WinUserLanguageList | ForEach-Object { $_.LanguageTag }) -join ',')"
+}
+
+# Everything the next diagnosis needs, both on the console and as an artifact: the client's own acceptance
+# rule is ImmGetDescriptionW, so its value per layout is the single most useful line here.
+try {
+  $summary = Get-InputMethodSummary
+  foreach ($line in @($summary.ImmDescriptions)) { Write-Step "input: imm $line" }
+  Write-Step "input: layouts = $(@($summary.Layouts) -join ',')"
+  Write-Step "input: sogou installed=$($summary.Sogou.Installed) version='$($summary.Sogou.Version)' source='$($summary.Sogou.Source)'"
+  if ($env:RUNNER_TEMP) {
+    $screenSize = ''
+    try {
+      Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+      $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+      if ($bounds) { $screenSize = "$($bounds.Width)x$($bounds.Height)" }
+    } catch { }
+    $payload = [pscustomobject]@{
+      capturedAt = (Get-Date).ToString('o')
+      screen = $screenSize
+      layouts = @($summary.Layouts)
+      immDescriptions = @($summary.ImmDescriptions)
+      languages = @($summary.Languages)
+      sogou = $summary.Sogou
+      dryRun = [bool]$DryRun
+    }
+    $summaryPath = Join-Path $env:RUNNER_TEMP 'cx-real-client-prep-summary.json'
+    $payload | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+    Write-Step "summary: $summaryPath"
+  }
+} catch {
+  Write-Step "summary: failed - $($_.Exception.Message)"
 }

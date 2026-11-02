@@ -216,6 +216,8 @@ try {
   # host starts, in a background job, so the content survives the truncation.
   $stage = 'start-native-host'
   Write-Host "[real-client] stage=$stage host=$NativeHost client=$($client.FullName)"
+  $maskedArguments = @($arguments | ForEach-Object { if ($_ -is [string] -and $_.Length -gt 40) { $_.Substring(0, 12) + '...(' + $_.Length + ' chars)' } else { $_ } })
+  Write-Host "[real-client] host arguments: $($maskedArguments -join ' ')"
   $hostProcess = Start-Process -FilePath $NativeHost -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
   Write-Host "[real-client] native host started pid=$($hostProcess.Id)"
@@ -233,6 +235,24 @@ try {
     Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) dpi=$($entry.Dpi) client=$($entry.ClientSize) attempts=$($entry.Attempts) pages=$($entry.PageTargets) clicked=$($entry.Clicked) reason=$($entry.Reason) windows=$([CXClientEntry]::WindowClasses([uint32]$entry.ProcessId))"
   }
 
+  if ($env:RUNNER_TEMP) {
+    try {
+      [pscustomobject]@{
+        reason = $entry.Reason
+        attempts = $entry.Attempts
+        point = $entry.Point
+        target = $entry.Target
+        dpi = $entry.Dpi
+        clientSize = $entry.ClientSize
+        pages = $entry.PageTargets
+        clicked = $entry.Clicked
+        confirmed = $entry.Confirmed
+        windows = $(if ($entry.PSObject.Properties['Windows']) { $entry.Windows } else { '' })
+        confirm = $(if ($entry.PSObject.Properties['ConfirmVia']) { $entry.ConfirmVia } else { '' })
+        capturedAt = (Get-Date).ToString('o')
+      } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-entry.json") -Encoding UTF8
+    } catch { }
+  }
   if ($entry.PageTargets -lt 1) {
     # Without a CEF page the host cannot inject anything; close the client now so the run ends with a
     # complete report instead of holding the client open for the whole duration.
@@ -328,6 +348,7 @@ try {
   }
   $shell = Repair-ShellDesktop -Force
   Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
+  Write-Host "[real-client] summary case=$CaseName stage=$stage stopReason=$($report.stopReason) success=$($report.success) pages=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) errors=$($report.totals.errors) probe=$($report.endpointProbe.lastReason)/$($report.endpointProbe.attempts) entry=$($entry.Reason)"
   Save-ArtifactManifest -CaseName $CaseName
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }

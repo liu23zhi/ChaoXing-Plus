@@ -151,6 +151,9 @@ test('仓库内搜狗安装包与清单一致，且优先使用', () => {
   assert.match(source, /Control\\Keyboard Layouts/u, '必须识别 IMM 键盘布局注册');
   assert.match(source, /Source = 'install-dir'/u, '必须识别安装目录');
   assert.match(source, /UninstallString/u, '卸载命令含 sogou 也应识别');
+  assert.match(source, /function Get-ImmInputMethodProbe/u, '必须记录客户端判定输入法所用的 ImmGetDescriptionW');
+  assert.match(source, /cx-real-client-prep-summary\.json/u, '准备阶段必须写出可下载的摘要');
+  assert.match(source, /input: imm \$line/u, '必须逐条打印每个布局的 IMM 描述');
   assert.equal(typeof manifest.silentSwitchVerified, 'string', '清单必须记录 /S 的实测结论');
   assert.match(manifest.silentSwitchVerified, /虚拟机/u, '必须注明是虚拟机实测');
 });

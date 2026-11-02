@@ -572,6 +572,7 @@ function Wait-ClientExamEntry {
             $preClickSaved = $true
         }
 
+        Write-Host "[real-client] attempt=$($attempt + 1) target=$target point=$clickX,$clickY dpi=$dpi client=$size dialog=$($dialogWindow -ne [IntPtr]::Zero) pages=$((Get-ClientPageTargetCount -ProcessId $clientProcess.Id))"
         $lParam = [IntPtr](($clickY -shl 16) -bor ($clickX -band 0xFFFF))
         [void][CXClientEntry]::PostMessageW($window, 0x0200, [IntPtr]::Zero, $lParam)
         Start-Sleep -Milliseconds 120
