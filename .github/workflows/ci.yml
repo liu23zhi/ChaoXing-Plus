@@ -414,7 +414,12 @@ jobs:
       contents: read
     needs: [windows-build, windows-real-client-discovery]
     if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
-    runs-on: windows-latest
+    # Point this at a machine that can satisfy the client's environment check (camera + zh-CN input
+    # method) by setting the repository variable REAL_CLIENT_RUNNER, e.g.
+    #   ["self-hosted","windows","cx-exam"]
+    # The default hosted runner has no zh-CN language payload and no camera, so the client refuses to
+    # enter the exam there and the run reports BLOCKED instead of FAILED.
+    runs-on: ${{ fromJSON(vars.REAL_CLIENT_RUNNER || '"windows-latest"') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -472,7 +477,8 @@ jobs:
             -InjectMode '${{ matrix.inject_mode }}' `
             -DatabaseBase64 $compactDb `
             -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
-            -CaseName '${{ matrix.client }}-${{ matrix.database }}'
+            -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
+            -AllowEnvironmentBlocked
       - name: 上传注入现场（成功与失败都保留）
         if: always()
         uses: actions/upload-artifact@v4

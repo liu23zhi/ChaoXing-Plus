@@ -4,7 +4,11 @@ param(
   [Parameter(Mandatory = $true)] [ValidateSet('cdp-port', 'dll-proxy')] [string] $InjectMode,
   [Parameter(Mandatory = $true)] [string] $DatabaseBase64,
   [Parameter(Mandatory = $true)] [string] $NativeHost,
-  [Parameter(Mandatory = $true)] [string] $CaseName
+  [Parameter(Mandatory = $true)] [string] $CaseName,
+  # Hosted runner images have no zh-CN language payload and no camera, so the client's own environment
+  # check blocks entry before any CEF page exists. With this switch such a run reports BLOCKED instead of
+  # FAILED; a genuine injection failure (page appeared but nothing was injected) still fails.
+  [switch] $AllowEnvironmentBlocked
 )
 
 $ErrorActionPreference = 'Stop'
@@ -216,7 +220,24 @@ try {
   Write-Host "[real-client] report success=$($report.success) ownershipVerified=$($report.ownershipVerified) pageSessions=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) stopReason=$($report.stopReason)"
 
   $stage = 'validate-report'
-  if (-not $report.success) { throw "Injection report is not successful for $CaseName" }
+  $blockedByEnvironment = $false
+  if (-not $report.success) {
+    $windowClasses = [string]$entry.Windows
+    $hintShown = $windowClasses -match 'ExamCheckHintUI'
+    $noPage = [int]$report.totals.pageSessions -lt 1
+    if ($AllowEnvironmentBlocked -and $hintShown -and $noPage) {
+      $blockedByEnvironment = $true
+      Write-Host "[real-client] client refused to enter the exam: its environment check failed (camera / input method); windows=$windowClasses"
+      Write-Host "REAL_CLIENT_INJECTION_BLOCKED $CaseName reason=environment-check client=$($entry.ClientSize) pages=$($entry.PageTargets)"
+    } else {
+      throw "Injection report is not successful for $CaseName"
+    }
+  }
+  if ($blockedByEnvironment) {
+    Write-HostDiagnostics
+    Write-Host "REAL_CLIENT_INJECTION_BLOCKED $CaseName (no injection attempted: the client never left its check window)"
+    return
+  }
   if (-not $report.ownershipVerified) { throw "Client ownership was not verified for $CaseName" }
   if ([int]$report.totals.pageSessions -lt 1) { throw "No page session was injected for ${CaseName}: entry reason=$($entry.Reason) attempts=$($entry.Attempts) pageTargets=$($entry.PageTargets) client=$($entry.ClientSize) windows=$($entry.Windows)" }
   if ([int]$report.totals.bootstraps -lt 1) { throw "No bootstrap was injected for $CaseName" }

@@ -27,6 +27,8 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 现场会落盘到 `RUNNER_TEMP` 并由 CI 以 `compression-level: 0` 原样打包上传（artifact 名 `real-client-<客户端>-<数据库>`，成功与失败都上传；PNG 不再被二次压缩，下载后可用 `cx-real-client-<case>-sha256.txt` 里的 SHA256 逐字节校验）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：出现 `ExamCheckHintUI` 说明被客户端自检拦截，出现 `Chrome_WidgetWin_0` 说明 CEF 页面已就绪。
 
+**托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也没有摄像头，客户端自检必然拦截。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
+
 注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、只登记微软自带拼音与五笔（不使用任何第三方输入法；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`，所有安装动作都带超时）、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，没有这三项时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。

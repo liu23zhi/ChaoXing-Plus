@@ -80,6 +80,18 @@ test('注入脚本在报告校验前自动点击进入考试，并接受客户�
   assert.doesNotMatch(script, /stopReason -ne 'duration'/u, '不得再要求客户端必须自然跑到时长结束');
 });
 
+test('客户端自检拦截时报告 BLOCKED 而不是 FAILED', async () => {
+  const script = await readFile(injectionScript, 'utf8');
+  assert.match(script, /\[switch\] \$AllowEnvironmentBlocked/u, '必须提供环境阻塞的开关');
+  assert.match(script, /REAL_CLIENT_INJECTION_BLOCKED/u, '被客户端自检拦截时要打印 BLOCKED 结论');
+  assert.match(script, /\$hintShown = \$windowClasses -match 'ExamCheckHintUI'/u,
+    '必须用 ExamCheckHintUI 判定是自检拦截，而不是注入失败');
+  assert.match(script, /\[int\]\$report\.totals\.pageSessions -lt 1/u, '只有在完全没有页面时才算环境阻塞');
+  assert.match(script, /if \(\$blockedByEnvironment\) \{/u, '环境阻塞必须跳过后续注入计数校验');
+  assert.doesNotMatch(script, /AllowEnvironmentBlocked[^\n]*\n[^\n]*throw "Injection report is not successful/u,
+    '开关不得把真正的注入失败也当成阻塞');
+});
+
 test('注入脚本无论成功失败都关闭客户端与残留宿主', async () => {
   const script = await readFile(injectionScript, 'utf8');
   assert.match(script, /function Stop-ClientProcess/u, '必须有按路径兜底关闭客户端的清理函数');
