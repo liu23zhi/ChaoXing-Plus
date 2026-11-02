@@ -199,7 +199,9 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.match(script, /overlap \* 100 >= \(long\)span \* 60/u, '圆角按钮需要按重叠判定连续性');
   assert.match(script, /Via = 'keyboard'/u, '扫描找不到按钮时必须有键盘兜底');
   assert.match(script, /function Get-ClientDialogWindow/u, '弹窗是独立窗口，必须先定位它');
-  assert.match(script, /'ExamCheckHintUI', '#32770'/u, '必须按客户端弹窗类名查找');
+  assert.match(script, /'WebHintUI', 'ExamCheckHintUI', '#32770'/u,
+    'IG5 证实确认弹窗的窗口类是 WebHintUI（ExamCheckHintUI 是检查页自带提示）');
+  assert.match(script, /ec_sure_btn/u, '注释里必须记录皮肤控件名，便于后续维护');
   assert.match(script, /function Invoke-WindowClick/u, '点击必须发到目标窗口自身');
   assert.match(script, /dialog-window/u, '确认点击必须走弹窗窗口（检查窗口收不到）');
   assert.match(script, /\$stillOpen = \(Get-ClientDialogWindow/u, '点完必须确认弹窗真的消失');

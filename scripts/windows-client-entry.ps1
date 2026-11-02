@@ -289,6 +289,9 @@ function Find-ClientConfirmButton {
 
 # The dialog is its own window (class ExamCheckHintUI) drawn over the check window, so a click posted to
 # ExamCheckUI never reaches it - the CI frame showed the dialog unchanged after the posted click.
+# IG5: the confirm dialog is created by FUN_004c52f0 as a modal CWindowWnd with class "WebHintUI" from the
+# ExamCheckHintUI.xml skin (buttons ec_sure_btn / ec_cancle_btn), and ShowModal blocks the check window's
+# message loop - posted clicks to ExamCheckUI are therefore never dispatched while it is open.
 # The client also owns a 0x0 "#32770" helper window titled FYWebExamSystem, so a class match alone is not
 # a dialog: require a real visible window that is neither the check window nor degenerate.
 function Get-ClientDialogWindow {
@@ -304,7 +307,7 @@ function Get-ClientDialogWindow {
         $checkWidth = $checkRect.Right - $checkRect.Left
         $checkHeight = $checkRect.Bottom - $checkRect.Top
     }
-    foreach ($className in @('ExamCheckHintUI', '#32770')) {
+    foreach ($className in @('WebHintUI', 'ExamCheckHintUI', '#32770')) {
         $handle = [CXClientEntry]::Find([uint32]$ProcessId, $className)
         if ($handle -eq [IntPtr]::Zero -or $handle -eq $CheckWindow) { continue }
         if (-not [CXClientEntry]::IsWindowVisible($handle)) { continue }
