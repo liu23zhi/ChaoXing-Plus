@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$script:snapshotSizes = @{}
 . (Join-Path $PSScriptRoot 'windows-client-database.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
@@ -94,14 +95,16 @@ function Save-RunArtifacts {
         try { Copy-Item -LiteralPath $entry.Source -Destination (Join-Path $target "cx-real-client-$CaseName-$($entry.Name)") -Force } catch { }
     }
     if ($clientDirectory) {
-        $saved = Join-Path $target "cx-real-client-$CaseName-client-debug.log"
-        $debugLog = Join-Path $clientDirectory 'debug.log'
-        $liveSize = 0
-        if (Test-Path -LiteralPath $debugLog -PathType Leaf) { $liveSize = (Get-Item -LiteralPath $debugLog).Length }
-        # Keep the snapshot taken while the client was alive: the host truncates debug.log on stop.
-        if ($liveSize -gt 0 -or -not (Test-Path -LiteralPath $saved)) {
-            if (Test-Path -LiteralPath $debugLog -PathType Leaf) {
-                try { Copy-Item -LiteralPath $debugLog -Destination $saved -Force } catch { }
+        foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+            $saved = Join-Path $target "cx-real-client-$CaseName-$($item.Suffix)"
+            $live = Join-Path $clientDirectory $item.Source
+            $liveSize = 0
+            if (Test-Path -LiteralPath $live -PathType Leaf) { $liveSize = (Get-Item -LiteralPath $live).Length }
+            # Keep the snapshot taken while the client was alive: the host truncates these files on stop.
+            if ($liveSize -gt 0 -or -not (Test-Path -LiteralPath $saved)) {
+                if (Test-Path -LiteralPath $live -PathType Leaf) {
+                    try { Copy-Item -LiteralPath $live -Destination $saved -Force } catch { }
+                }
             }
         }
     }
@@ -110,20 +113,25 @@ function Save-RunArtifacts {
 
 # The host truncates the client's debug.log during its own shutdown, so the only way to keep it is to
 # snapshot while the client is still running (and again whenever it grows).
+# The client writes debug.log (CEF messages) and input.txt (the input methods it enumerated) next to its
+# exe, and the host truncates both on shutdown, so they are copied while the client is still alive.
 function Update-ClientDebugSnapshot {
     param([string] $CaseName)
     $target = $env:RUNNER_TEMP
     if (-not $target -or -not $clientDirectory) { return }
-    $source = Join-Path $clientDirectory 'debug.log'
-    try {
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
-        $info = Get-Item -LiteralPath $source
-        if ($info.Length -le 0) { return }
-        if ($script:lastDebugSize -eq $info.Length) { return }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $target "cx-real-client-$CaseName-client-debug.log") -Force
-        $script:lastDebugSize = $info.Length
-        Write-Host "[real-client] client debug.log snapshot at $($info.Length) bytes"
-    } catch { }
+    foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+        try {
+            $source = Join-Path $clientDirectory $item.Source
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
+            $info = Get-Item -LiteralPath $source
+            if ($info.Length -le 0) { continue }
+            $key = "last-$($item.Suffix)"
+            if ($script:snapshotSizes[$key] -eq $info.Length) { continue }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $target "cx-real-client-$CaseName-$($item.Suffix)") -Force
+            $script:snapshotSizes[$key] = $info.Length
+            Write-Host "[real-client] $($item.Source) snapshot at $($info.Length) bytes"
+        } catch { }
+    }
 }
 
 # Hash manifest written last: every artifact of this case can be verified byte for byte after download.

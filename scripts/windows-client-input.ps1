@@ -92,6 +92,18 @@ function Get-RegistryInputKeys {
     return $result
 }
 
+# Stable, comparable view of the configured languages: one tag per entry, sorted tips, sorted entries.
+# Windows may return the same list in a different order between calls, and LanguageTag can be a collection.
+function Get-LanguageEntries {
+    $entries = @()
+    foreach ($item in Get-WinUserLanguageList) {
+        $tips = @($item.InputMethodTips | Sort-Object)
+        $tag = [string](@($item.LanguageTag)[0])
+        $entries += [pscustomobject]@{ Tag = $tag; Tips = @($tips) }
+    }
+    return @($entries | Sort-Object -Property Tag, { ($_.Tips -join ',') })
+}
+
 function Get-InputState {
     $state = [ordered]@{
         Preload = Get-RegistryInputKeys -Path 'HKCU:\Keyboard Layout\Preload'
@@ -105,13 +117,9 @@ function Get-InputState {
     }
     try {
         if (Get-Command Get-WinUserLanguageList -ErrorAction SilentlyContinue) {
-            $entries = @()
-            foreach ($item in Get-WinUserLanguageList) {
-                $tips = @($item.InputMethodTips | Sort-Object)
-                $entries += [pscustomobject]@{ Tag = [string]$item.LanguageTag; Tips = @($tips) }
-                $state.Languages += "$($item.LanguageTag):" + ($tips -join ',')
-            }
+            $entries = @(Get-LanguageEntries)
             $state.LanguageEntries = @($entries)
+            $state.Languages = @($entries | ForEach-Object { "$($_.Tag):" + (@($_.Tips) -join ',') })
             if ($state.Languages.Count -gt 0) { $state.CurrentLanguage = [string]$state.Languages[0] }
         }
     } catch { }
@@ -133,8 +141,8 @@ function Compare-InputState {
             if ([string]$leftSide[$key] -ne [string]$rightSide[$key]) { $changes += "$name[$key]" }
         }
     }
-    if ((([string[]]$Before.LayoutHandles) -join ',') -ne (([string[]]$After.LayoutHandles) -join ',')) { $changes += 'layouts' }
-    if ((([string[]]$Before.Languages) -join ',') -ne (([string[]]$After.Languages) -join ',')) { $changes += 'languages' }
+    if ((([string[]]$Before.LayoutHandles | Sort-Object) -join ',') -ne (([string[]]$After.LayoutHandles | Sort-Object) -join ',')) { $changes += 'layouts' }
+    if ((([string[]]$Before.Languages | Sort-Object) -join ',') -ne (([string[]]$After.Languages | Sort-Object) -join ',')) { $changes += 'languages' }
     if ($Before.ActiveLayout -ne $After.ActiveLayout) { $changes += 'active-layout' }
     if ($Before.DefaultInputLanguage -ne $After.DefaultInputLanguage) { $changes += 'default-input-language' }
     return @($changes)
@@ -151,7 +159,7 @@ function Restore-InputState {
     try {
         $entries = @($State.LanguageEntries)
         if ($entries.Count -gt 0 -and (Get-Command Set-WinUserLanguageList -ErrorAction SilentlyContinue)) {
-            $now = @(Get-WinUserLanguageList | ForEach-Object { $tips = @($_.InputMethodTips | Sort-Object); "$($_.LanguageTag):" + ($tips -join ',') })
+            $now = @(Get-LanguageEntries | ForEach-Object { "$($_.Tag):" + (@($_.Tips) -join ',') })
             if (($now -join ',') -ne ((([string[]]$State.Languages)) -join ',')) {
                 # New-WinUserLanguageList only accepts one language per call on this build; passing an
                 # array silently yields an empty list, and an empty list clears every language.
