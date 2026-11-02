@@ -492,6 +492,7 @@ jobs:
             ${{ runner.temp }}/cx-real-client-*.png
             ${{ runner.temp }}/cx-real-client-*.json
             ${{ runner.temp }}/cx-real-client-*.log
+            ${{ runner.temp }}/cx-real-client-*.txt
           if-no-files-found: warn
           retention-days: 7
 

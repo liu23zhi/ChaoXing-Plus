@@ -6,6 +6,8 @@
 #define BS_COMMAND_CAP 65536
 #define BS_REPLY_CAP (1024UL * 1024UL)
 #define BS_TOKEN_CAP 8192
+#define BS_STARTUP_TIMEOUT 30000
+#define BS_COMMAND_TIMEOUT 15000
 
 struct CX_BROWSER_SESSION {
     HANDLE process;
@@ -21,6 +23,7 @@ struct CX_BROWSER_SESSION {
     WCHAR extensionId[64];
     char *receive;
     BOOL cleaned;
+    BOOL handshakeReady;
 };
 
 static void bs_error(WCHAR *out, DWORD cap, const WCHAR *message) {
@@ -152,11 +155,11 @@ static BOOL bs_wait_job_empty(CX_BROWSER_SESSION *s, DWORD timeout) {
     }
 }
 
-static BOOL bs_read(CX_BROWSER_SESSION *s, DWORD wanted, char **reply, WCHAR *error, DWORD cap) {
+static BOOL bs_read(CX_BROWSER_SESSION *s, DWORD wanted, DWORD timeout, char **reply, WCHAR *error, DWORD cap) {
     DWORD started = GetTickCount(), available, got, i;
     JT *tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BS_TOKEN_CAP * sizeof(JT));
     if (!tokens) return FALSE;
-    while ((DWORD)(GetTickCount() - started) < 15000) {
+    while ((DWORD)(GetTickCount() - started) < timeout) {
         for (i = 0; i < s->received; ++i) if (!s->receive[i]) {
             int count = jparse(s->receive, (int)i, tokens, BS_TOKEN_CAP);
             BOOL matching = count > 0 && jint(s->receive, tokens, jkey(s->receive, tokens, 0, "id"), -1) == (int)wanted;
@@ -186,7 +189,7 @@ static BOOL bs_read(CX_BROWSER_SESSION *s, DWORD wanted, char **reply, WCHAR *er
     HeapFree(GetProcessHeap(), 0, tokens); if (error && cap && !error[0]) bs_error(error, cap, L"等待浏览器扩展调试响应超时。"); return FALSE;
 }
 
-static BOOL bs_command(CX_BROWSER_SESSION *s, const char *method, const char *params, const char *sessionId, char **reply, WCHAR *error, DWORD cap) {
+static BOOL bs_command_wait(CX_BROWSER_SESSION *s, const char *method, const char *params, const char *sessionId, DWORD timeout, char **reply, WCHAR *error, DWORD cap) {
     char *command; DWORD at = 0, id = ++s->nextId, written, n; WCHAR idWide[24]; char idText[24]; BOOL result;
     if (reply) *reply = NULL;
     command = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BS_COMMAND_CAP * 2); if (!command) return FALSE;
@@ -197,8 +200,21 @@ static BOOL bs_command(CX_BROWSER_SESSION *s, const char *method, const char *pa
     n = at + 1;
     if (result) result = WriteFile(s->writePipe, command, n, &written, NULL) && written == n;
     SecureZeroMemory(command, BS_COMMAND_CAP * 2); HeapFree(GetProcessHeap(), 0, command);
-    if (!result) { bs_error(error, cap, L"无法发送浏览器扩展调试请求。"); return FALSE; }
-    return bs_read(s, id, reply, error, cap);
+    if (!result) bs_error(error, cap, L"无法发送浏览器扩展调试请求。");
+    else result = bs_read(s, id, timeout, reply, error, cap);
+    if (!result && error && cap) {
+        WCHAR detail[1024], methodWide[128]; DWORD position;
+        lstrcpynW(detail, error, 1024);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, method, -1, methodWide, 128)) {
+            error[0] = 0; position = bs_add(error, cap, 0, L"["); position = bs_add(error, cap, position, methodWide);
+            position = bs_add(error, cap, position, L"] "); bs_add(error, cap, position, detail);
+        }
+    }
+    return result;
+}
+
+static BOOL bs_command(CX_BROWSER_SESSION *s, const char *method, const char *params, const char *sessionId, char **reply, WCHAR *error, DWORD cap) {
+    return bs_command_wait(s, method, params, sessionId, BS_COMMAND_TIMEOUT, reply, error, cap);
 }
 
 static BOOL bs_reply_string(const char *reply, const char *key, char *out, DWORD cap) {
@@ -301,7 +317,10 @@ BOOL cx_browser_start(const CX_BROWSER_OPTIONS *options, CX_BROWSER_SESSION **se
     s = (CX_BROWSER_SESSION *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*s)); if (!s) return FALSE;
     s->receive = (char *)HeapAlloc(GetProcessHeap(), 0, BS_REPLY_CAP); params = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BS_COMMAND_CAP * 2);
     if (!s->receive || !params || !bs_prepare(s, options, error, errorCapacity) || !bs_launch(s, options, error, errorCapacity)) goto done;
-    if (!bs_command(s, "Browser.getVersion", NULL, NULL, &reply, error, errorCapacity)) goto done; HeapFree(GetProcessHeap(), 0, reply); reply = NULL;
+    /* A fresh installed browser needs a longer first protocol handshake than
+       an already running page command. Keep one deadline and never relaunch. */
+    if (!bs_command_wait(s, "Browser.getVersion", NULL, NULL, BS_STARTUP_TIMEOUT, &reply, error, errorCapacity)) goto done;
+    s->handshakeReady = TRUE; HeapFree(GetProcessHeap(), 0, reply); reply = NULL;
     at = 0; if (!bs_text_add(params, BS_COMMAND_CAP * 2, &at, "{\"path\":") || !bs_wquote(params, BS_COMMAND_CAP * 2, &at, s->extension) || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, "}")) goto done;
     if (!bs_command(s, "Extensions.loadUnpacked", params, NULL, &reply, error, errorCapacity) || !bs_reply_string(reply, "id", extensionId, sizeof(extensionId))) goto done;
     { WCHAR loadedId[64]; if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, extensionId, -1, loadedId, 64) || lstrcmpW(loadedId, s->extensionId) != 0) { bs_error(error, errorCapacity, L"浏览器加载的扩展标识与签名身份不一致。"); goto done; } }
@@ -339,7 +358,7 @@ BOOL cx_browser_poll(CX_BROWSER_SESSION *s, BOOL *running, WCHAR *error, DWORD e
 BOOL cx_browser_close(CX_BROWSER_SESSION *s, WCHAR *error, DWORD errorCapacity) {
     char *reply = NULL;
     if (!s) return TRUE;
-    if (s->process && WaitForSingleObject(s->process, 0) == WAIT_TIMEOUT && s->writePipe && s->readPipe) { (void)bs_command(s, "Browser.close", NULL, NULL, &reply, NULL, 0); if (reply) HeapFree(GetProcessHeap(), 0, reply); }
+    if (s->handshakeReady && s->process && WaitForSingleObject(s->process, 0) == WAIT_TIMEOUT && s->writePipe && s->readPipe) { (void)bs_command(s, "Browser.close", NULL, NULL, &reply, NULL, 0); if (reply) HeapFree(GetProcessHeap(), 0, reply); }
     if (!bs_wait_job_empty(s, 3000)) {
         if (s->job) TerminateJobObject(s->job, 0);
         if (!bs_wait_job_empty(s, 5000)) { bs_error(error, errorCapacity, L"无法等待临时浏览器进程组退出。"); return FALSE; }

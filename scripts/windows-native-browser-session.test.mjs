@@ -7,6 +7,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { deflateRawSync, constants as zlib } from 'node:zlib';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const nativeExe = process.env.CX_NATIVE_BROWSER_SESSION_EXE;
 const nativeAvailable = process.platform === 'win32' && !!nativeExe && existsSync(nativeExe);
@@ -77,9 +78,9 @@ function entries(extra = []) {
   return [{ name: 'manifest.json', bytes: manifest() }, { name: 'popup.html', bytes: '<!doctype html><title>Session fixture</title>' }, ...extra];
 }
 
-function run(args, timeout = 45_000) {
+function run(args, timeout = 45_000, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(nativeExe, args, { windowsHide: true });
+    const child = spawn(nativeExe, args, { windowsHide: true, env: { ...process.env, ...env } });
     let stdout = '', stderr = '';
     child.stdout.on('data', value => { stdout += value; });
     child.stderr.on('data', value => { stderr += value; });
@@ -88,6 +89,29 @@ function run(args, timeout = 45_000) {
     child.once('close', code => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
   });
 }
+
+test('native browser startup allows a cold first response beyond the normal command timeout', { skip: !nativeAvailable, timeout: 50_000 }, async () => {
+  const directory = createTestDirectory('browser-cold-start'), source = signer(), packageFile = path.join(directory, 'fixture.crx');
+  await writeFile(packageFile, source.package(entries()));
+  const result = await run([nativeExe, packageFile, '--expected-id', source.id, '--startup-probe'], 45_000, {
+    CX_BROWSER_SESSION_FIXTURE_ID: source.id, CX_BROWSER_SESSION_FIXTURE_DELAY_MS: '16000'
+  });
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS delayed-startup cleaned/);
+});
+
+test('native browser startup keeps a total deadline and names the failed command', { skip: !nativeAvailable, timeout: 50_000 }, async () => {
+  const directory = createTestDirectory('browser-start-deadline'), source = signer(), packageFile = path.join(directory, 'fixture.crx');
+  await writeFile(packageFile, source.package(entries()));
+  const started = Date.now();
+  const result = await run([nativeExe, packageFile, '--expected-id', source.id, '--startup-probe'], 45_000, {
+    CX_BROWSER_SESSION_FIXTURE_ID: source.id, CX_BROWSER_SESSION_FIXTURE_DELAY_MS: '60000'
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /Browser\.getVersion/);
+  assert.ok(elapsed >= 30_000 && elapsed < 38_000, `startup must expire once: ${elapsed}ms`);
+});
 
 test('native CRX verifier authenticates the full package without writing files', { skip: !nativeAvailable, timeout: 90_000 }, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cx-crx-verify-'));

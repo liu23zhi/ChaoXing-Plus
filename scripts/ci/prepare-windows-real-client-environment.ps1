@@ -293,7 +293,8 @@ function Add-VirtualCamera {
 
 # The client decides "input method detected" from ImmGetDescriptionW, so the same value is logged here: an
 # empty description for every layout means the check will fail no matter how many IMEs are installed.
-function Get-ImmInputMethodProbe {
+function Initialize-ImmInputMethodProbe {
+    if ('CXImmProbe' -as [type]) { return }
     $source = @'
 using System;
 using System.Text;
@@ -302,7 +303,13 @@ using System.Runtime.InteropServices;
 
 public class CXImmProbe {
     [DllImport("user32.dll")] public static extern int GetKeyboardLayoutList(int count, IntPtr[] layouts);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadKeyboardLayoutW(string klid, uint flags);
     [DllImport("imm32.dll", CharSet = CharSet.Unicode)] public static extern int ImmGetDescriptionW(IntPtr layout, StringBuilder text, int cap);
+
+    public static string Load(string klid) {
+        IntPtr layout = LoadKeyboardLayoutW(klid, 0);
+        return layout == IntPtr.Zero ? string.Empty : "0x" + layout.ToInt64().ToString("X8");
+    }
 
     public static string[] Describe() {
         int count = GetKeyboardLayoutList(0, null);
@@ -320,12 +327,89 @@ public class CXImmProbe {
     }
 }
 '@
+    Add-Type -TypeDefinition $source -ErrorAction Stop
+}
+
+function Get-ImmInputMethodProbe {
     try {
-        Add-Type -TypeDefinition $source -ErrorAction Stop
+        Initialize-ImmInputMethodProbe
         return @([CXImmProbe]::Describe())
     } catch {
         return @("probe-failed: $($_.Exception.Message)")
     }
+}
+
+function Test-ImmInputMethodReady {
+    param([string[]] $Descriptions, [string] $Handle = '')
+    foreach ($line in @($Descriptions)) {
+        if ($line -notmatch '^(0x[0-9a-fA-F]{8,16})=(.+)$') { continue }
+        if ($Handle -and $Matches[1] -ne $Handle) { continue }
+        $description = $Matches[2].Trim()
+        if ($description -and $description -ne '<empty>') { return $true }
+    }
+    return $false
+}
+
+function Get-RegisteredSogouImmLayouts {
+    $root = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts'
+    if (-not (Test-Path -LiteralPath $root)) { return @() }
+    $result = @()
+    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+        $klid = [string]$key.PSChildName
+        if ($klid -notmatch '^[0-9a-fA-F]{8}$') { continue }
+        $values = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        if (-not $values -or [string]$values.'IME file' -notmatch '\.ime$') { continue }
+        $identity = "$($values.'IME file') $($values.'Layout Text') $($values.'Layout Display Name')"
+        if ($identity -notmatch 'sogou') { continue }
+        $result += $klid.ToUpperInvariant()
+    }
+    return @($result | Sort-Object -Unique)
+}
+
+function Import-ImmInputMethodLayout {
+    param([string] $Klid)
+    if ($Klid -notmatch '^[0-9a-fA-F]{8}$') { throw 'invalid registered IMM layout identifier' }
+    Initialize-ImmInputMethodProbe
+    return [CXImmProbe]::Load($Klid)
+}
+
+# Installation is independent from IMM readiness. Load only actual Sogou registrations, then enumerate
+# again: Windows can return the default HKL or ignore loading from a process without keyboard focus.
+# No registry values, default input language or keyboard API results are fabricated here.
+function Enable-SogouImmInputMethod {
+    $state = [pscustomobject]@{ Prepared = $false; Reason = ''; Candidates = @(); Attempts = @(); ImmDescriptions = @(Get-ImmInputMethodProbe) }
+    if (Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions) {
+        $state.Prepared = $true
+        $state.Reason = 'already-ready'
+        return $state
+    }
+    try { $state.Candidates = @(Get-RegisteredSogouImmLayouts) }
+    catch {
+        $state.Reason = 'registry-probe-failed'
+        Write-Step "input: prepared=false reason=$($state.Reason) error=$($_.Exception.Message)"
+        return $state
+    }
+    if ($DryRun) { $state.Reason = 'dry-run' }
+    elseif (-not $state.Candidates.Count) { $state.Reason = 'no-registered-sogou-imm-layout' }
+    else {
+        $state.Reason = 'registered-sogou-imm-not-ready'
+        foreach ($klid in $state.Candidates) {
+            $attempt = [pscustomobject]@{ Klid = $klid; Handle = ''; Ready = $false; Error = '' }
+            try {
+                $attempt.Handle = [string](Import-ImmInputMethodLayout -Klid $klid)
+                $state.ImmDescriptions = @(Get-ImmInputMethodProbe)
+                # A fallback to a default layout is not evidence that this registered IME loaded.
+                if ($attempt.Handle -match '^0x[0-9a-fA-F]{8,16}$' -and $attempt.Handle.EndsWith($klid, [StringComparison]::OrdinalIgnoreCase)) {
+                    $attempt.Ready = Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions -Handle $attempt.Handle
+                }
+            } catch { $attempt.Error = $_.Exception.Message }
+            $state.Attempts += $attempt
+            Write-Step "input: IMM load klid=$klid handle='$($attempt.Handle)' ready=$($attempt.Ready) error='$($attempt.Error)'"
+            if ($attempt.Ready) { $state.Prepared = $true; $state.Reason = 'registered-sogou-imm-loaded'; break }
+        }
+    }
+    Write-Step "input: prepared=$($state.Prepared) reason=$($state.Reason) registeredSogouLayouts=$($state.Candidates -join ',')"
+    return $state
 }
 
 function Get-InputMethodSummary {
@@ -339,13 +423,15 @@ function Get-InputMethodSummary {
         ImmDescriptions = $descriptions
         Languages = $languages
         Sogou = (Get-SogouInputState)
+        Prepared = (Test-ImmInputMethodReady -Descriptions $descriptions)
+        ImmPreparation = $script:SogouImmPreparation
     }
 }
 
 # The client only accepts input methods whose ImmGetDescriptionW is non-empty (IG5: FUN_004a6b30 drops
 # layouts with an empty description). TSF-only IMEs, including Microsoft Pinyin, do not provide one, so
-# such a machine still fails the check; Sogou Pinyin registers an IMM layer and is what a real passing
-# machine has installed.
+# such a machine still fails the check. Sogou's registered IMM layer must be loaded and verified; an
+# installation directory or uninstall entry alone does not mean the client can enumerate an IME.
 # No version is hardcoded: winget installs it, and the fallback derives the official URL from the
 # community-maintained winget manifest (nullsoft installer, silent switch /S).
 # $PSScriptRoot is empty when a function is re-used through Invoke-Expression or an interactive session,
@@ -625,7 +711,10 @@ if (-not $SkipResolution) { Set-DesktopResolution }
 if ($TryDpiScaling) { Set-SystemDpiScaling }
 if (-not $SkipInputMethod) {
   Add-ChineseInputMethod
-  if (-not $SkipSogouInputMethod) { Install-SogouInputMethod }
+  if (-not $SkipSogouInputMethod) {
+    Install-SogouInputMethod
+    $script:SogouImmPreparation = Enable-SogouImmInputMethod
+  }
 }
 if (-not $SkipCamera) { Add-VirtualCamera }
 
@@ -645,6 +734,7 @@ try {
   foreach ($line in @($summary.ImmDescriptions)) { Write-Step "input: imm $line" }
   Write-Step "input: layouts = $(@($summary.Layouts) -join ',')"
   Write-Step "input: sogou installed=$($summary.Sogou.Installed) version='$($summary.Sogou.Version)' source='$($summary.Sogou.Source)'"
+  Write-Step "input: prepared=$($summary.Prepared) (requires an enumerated non-empty IMM description)"
   if ($env:RUNNER_TEMP) {
     $screenSize = ''
     try {
@@ -659,6 +749,8 @@ try {
       immDescriptions = @($summary.ImmDescriptions)
       languages = @($summary.Languages)
       sogou = $summary.Sogou
+      prepared = [bool]$summary.Prepared
+      immPreparation = $summary.ImmPreparation
       dryRun = [bool]$DryRun
     }
     $summaryPath = Join-Path $env:RUNNER_TEMP 'cx-real-client-prep-summary.json'

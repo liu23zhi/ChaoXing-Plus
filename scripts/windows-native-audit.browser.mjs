@@ -203,7 +203,10 @@ function assertErrorTotals(report, text, { capture = true, reconnect = false, in
       `only the single serial task interrupted by the controlled disconnect may fail: ${diagnostic}\n${text}`);
     for (const line of lines.filter((line) => /\[warn\]\s+\[(?:bootstrap|bundle)\]\s+Injection failed/u.test(line))) {
       const failedAt = Date.parse(line.split(' ')[0]);
-      assert.ok(failedAt >= interruptedAt && failedAt <= restoredAt,
+      // GetSystemTime in the native logger can trail Node's Date.now by one
+      // Windows clock tick. Only the cross-clock lower bound needs this margin;
+      // failure and recovery timestamps both come from the same native clock.
+      assert.ok(failedAt >= interruptedAt - 16 && failedAt <= restoredAt,
         `an injection failure outside the controlled disconnect interval is unexpected: ${JSON.stringify({ interruptedAt, restoredAt })}\n${text}`);
     }
   }

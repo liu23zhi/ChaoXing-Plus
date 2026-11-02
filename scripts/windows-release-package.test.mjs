@@ -548,6 +548,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /\[real-client\] FAILED case=\$CaseName stage=\$stage/u, '真实客户端失败必须报告具体阶段');
   assert.match(workflow, /Write-HostDiagnostics/u, '真实客户端回归必须输出截断且脱敏的宿主日志');
   assert.match(workflow, /actions\/upload-artifact@v4/u);
+  assert.match(workflow, /\$\{\{ runner\.temp \}\}\/cx-real-client-\*\.txt/u,
+    '真实客户端的 input.txt 与 SHA256 清单必须随现场 artifact 上传');
   assert.match(workflow, /prepare-windows-test-environment\.ps1/u, 'native compiled test paths must be prepared in each runner');
   assert.match(workflow, /发布目录复制后入口自检/u);
   assert.match(workflow, /Start-Process .*chaoxing_plus\.exe.*--self-check/us, 'CI must self-check the packaged native host');

@@ -19,6 +19,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Collections.Generic;
 
 public class CXClientEntry {
     public delegate bool EnumProc(IntPtr handle, IntPtr parameter);
@@ -54,6 +55,23 @@ public class CXClientEntry {
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    public static IntPtr[] FindAll(uint processId, string className) {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows((handle, parameter) => {
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            if (owner == processId && WindowClass(handle) == className) found.Add(handle);
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    public static string WindowClass(IntPtr handle) {
+        StringBuilder name = new StringBuilder(128);
+        GetClassNameW(handle, name, 128);
+        return name.ToString();
     }
 
     // "class|visible|WxH" per window: enough to see what the client shows when nothing matches.
@@ -279,9 +297,9 @@ function Find-ExamEntryButton {
     }
 }
 
-# A failed check ("check failed") still allows entry, but the client first shows
-# "some features may be affected, enter anyway?" with a blue confirm button. The dialog is drawn in the same
-# window, so the button is located by scanning the dialog band and clicking it.
+# A failed check first shows "some features may be affected, enter anyway?". Small dialog windows can
+# be scanned nearly fully; a desktop-sized ExamCheckHintUI also contains the dimmed check page, so only
+# its central dialog band is safe to scan (the header's blue entry button remains detectable underneath).
 function Find-ClientConfirmButton {
     param(
         [Parameter(Mandatory = $true)] [IntPtr] $Window,
@@ -310,11 +328,10 @@ function Find-ClientConfirmButton {
     }
 }
 
-# The dialog is its own window (class ExamCheckHintUI) drawn over the check window, so a click posted to
-# ExamCheckUI never reaches it - the CI frame showed the dialog unchanged after the posted click.
-# IG5: the confirm dialog is created by FUN_004c52f0 as a modal CWindowWnd with class "WebHintUI" from the
-# ExamCheckHintUI.xml skin (buttons ec_sure_btn / ec_cancle_btn), and ShowModal blocks the check window's
-# message loop - posted clicks to ExamCheckUI are therefore never dispatched while it is open.
+# The modal window can be a small WebHintUI (skin buttons ec_sure_btn / ec_cancle_btn) or a desktop-sized
+# ExamCheckHintUI containing the dimmed background and central dialog, as captured in the v4.3.0.4 run.
+# Post to that actual window, never to ExamCheckUI behind it. Foreground ownership alone is insufficient:
+# tooltips and other client windows must not be treated as confirmation dialogs.
 # The client also owns a 0x0 "#32770" helper window titled FYWebExamSystem, so a class match alone is not
 # a dialog: require a real visible window that is neither the check window nor degenerate.
 function Get-ClientDialogWindow {
@@ -323,30 +340,16 @@ function Get-ClientDialogWindow {
         [int] $ProcessId = 0
     )
     if (-not $ProcessId) { return [IntPtr]::Zero }
-    $checkRect = New-Object CXClientEntry+RECT
-    $checkWidth = 0
-    $checkHeight = 0
-    if ([CXClientEntry]::GetWindowRect($CheckWindow, [ref]$checkRect)) {
-        $checkWidth = $checkRect.Right - $checkRect.Left
-        $checkHeight = $checkRect.Bottom - $checkRect.Top
-    }
-    # The modal dialog is the foreground window while it is up; matching it this way does not depend on the
-    # registered class name surviving EnumWindows filtering.
+    $classes = @('WebHintUI', 'ExamCheckHintUI', '#32770')
+    $candidates = @()
     $foreground = [CXClientEntry]::GetForegroundWindow()
-    if ($foreground -ne [IntPtr]::Zero -and $foreground -ne $CheckWindow) {
+    if ($foreground -ne [IntPtr]::Zero -and $classes -contains [CXClientEntry]::WindowClass($foreground)) {
         $owner = [uint32]0
         [void][CXClientEntry]::GetWindowThreadProcessId($foreground, [ref]$owner)
-        if ($owner -eq [uint32]$ProcessId) {
-            $rect = New-Object CXClientEntry+RECT
-            if ([CXClientEntry]::GetWindowRect($foreground, [ref]$rect)) {
-                $width = $rect.Right - $rect.Left
-                $height = $rect.Bottom - $rect.Top
-                if ($width -ge 200 -and $height -ge 100) { return $foreground }
-            }
-        }
+        if ($owner -eq [uint32]$ProcessId) { $candidates += $foreground }
     }
-    foreach ($className in @('WebHintUI', 'ExamCheckHintUI', '#32770')) {
-        $handle = [CXClientEntry]::Find([uint32]$ProcessId, $className)
+    foreach ($className in $classes) { $candidates += @([CXClientEntry]::FindAll([uint32]$ProcessId, $className)) }
+    foreach ($handle in $candidates) {
         if ($handle -eq [IntPtr]::Zero -or $handle -eq $CheckWindow) { continue }
         if (-not [CXClientEntry]::IsWindowVisible($handle)) { continue }
         $rect = New-Object CXClientEntry+RECT
@@ -354,7 +357,6 @@ function Get-ClientDialogWindow {
         $width = $rect.Right - $rect.Left
         $height = $rect.Bottom - $rect.Top
         if ($width -lt 200 -or $height -lt 100) { continue }
-        if ($checkWidth -gt 0 -and $checkHeight -gt 0 -and $width -ge $checkWidth -and $height -ge $checkHeight) { continue }
         return $handle
     }
     return [IntPtr]::Zero
@@ -364,11 +366,12 @@ function Get-ClientDialogWindow {
 function Invoke-WindowClick {
     param([Parameter(Mandatory = $true)] [IntPtr] $Window, [int] $X, [int] $Y)
     $lParam = [IntPtr](($Y -shl 16) -bor ($X -band 0xFFFF))
-    [void][CXClientEntry]::PostMessageW($Window, 0x0200, [IntPtr]::Zero, $lParam)
+    $moved = [CXClientEntry]::PostMessageW($Window, 0x0200, [IntPtr]::Zero, $lParam)
     Start-Sleep -Milliseconds 120
-    [void][CXClientEntry]::PostMessageW($Window, 0x0201, [IntPtr]1, $lParam)
+    $pressed = [CXClientEntry]::PostMessageW($Window, 0x0201, [IntPtr]1, $lParam)
     Start-Sleep -Milliseconds 90
-    [void][CXClientEntry]::PostMessageW($Window, 0x0202, [IntPtr]::Zero, $lParam)
+    $released = [CXClientEntry]::PostMessageW($Window, 0x0202, [IntPtr]::Zero, $lParam)
+    return ($moved -and $pressed -and $released)
 }
 
 # Fallback click: accept the "some features may be affected, enter anyway?" dialog so the client creates
@@ -388,14 +391,29 @@ function Confirm-ClientExamEntry {
         $dialog = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
         if ($dialog -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0; Via = 'none' } }
         $target = $dialog
-        # The dialog window only contains the dialog, so nearly the whole client area can be scanned.
-        $button = Find-ClientConfirmButton -Window $dialog -Left 0.02 -Top 0.10 -Width 0.96 -Height 0.85
+        # CopyFromScreen reads visible pixels, so raise the owned window before scanning, not after
+        # choosing a point from an unrelated window that happened to cover it.
+        [void][CXClientEntry]::SetForegroundWindow($target)
+        Start-Sleep -Milliseconds 250
+        $dialogRect = New-Object CXClientEntry+RECT
+        $checkRect = New-Object CXClientEntry+RECT
+        if (-not [CXClientEntry]::GetClientRect($dialog, [ref]$dialogRect) -or
+            -not [CXClientEntry]::GetClientRect($Window, [ref]$checkRect)) {
+            return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0; Via = 'window-unavailable' }
+        }
+        $overlay = $dialogRect.Right -ge $checkRect.Right -and $dialogRect.Bottom -ge $checkRect.Bottom
+        if ($overlay) {
+            $button = Find-ClientConfirmButton -Window $dialog
+        } else {
+            $button = Find-ClientConfirmButton -Window $dialog -Left 0.02 -Top 0.10 -Width 0.96 -Height 0.85
+        }
         if ($button.State -eq 'found') {
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $target
-            [void][CXClientEntry]::SetForegroundWindow($target)
-            Start-Sleep -Milliseconds 250
             $via = if ($dialog -ne [IntPtr]::Zero) { 'dialog-window' } else { 'check-window' }
-            Invoke-WindowClick -Window $target -X $button.X -Y $button.Y
+            Write-Host "[real-client] confirm window=0x$($target.ToInt64().ToString('X')) class=$([CXClientEntry]::WindowClass($target)) size=$($dialogRect.Right)x$($dialogRect.Bottom) overlay=$overlay point=$($button.X),$($button.Y)"
+            if (-not (Invoke-WindowClick -Window $target -X $button.X -Y $button.Y)) {
+                return [pscustomobject]@{ Clicked = $false; X = $button.X; Y = $button.Y; Via = 'window-message-failed' }
+            }
             Start-Sleep -Seconds 2
             $stillOpen = (Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId) -ne [IntPtr]::Zero
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $target
@@ -546,6 +564,8 @@ function Wait-ClientExamEntry {
         $size = "$($layout.Width)x$($layout.Height)"
         $dpi = [CXClientEntry]::WindowDpi($window)
 
+        [void][CXClientEntry]::SetForegroundWindow($window)
+        Start-Sleep -Milliseconds 300
         $button = Find-ExamEntryButton -Window $window
         if ($button.State -eq 'absent') {
             # Still probing the environment: the button is not rendered yet, a click would be lost.
@@ -566,8 +586,6 @@ function Wait-ClientExamEntry {
         # Frame 1: the button is on screen and still untouched. Raise the window first so the capture is
         # not a crop of whatever happens to be on top.
         if (-not $preClickSaved) {
-            [void][CXClientEntry]::SetForegroundWindow($window)
-            Start-Sleep -Milliseconds 300
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '1-before-click' -Window $window
             $preClickSaved = $true
         }

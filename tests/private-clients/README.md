@@ -14,7 +14,7 @@
 `sogou-ime.json` 记录版本、体积、SHA256、来源 URL、签名主体与静默开关。
 
 - 依据：客户端按 `ImmGetDescriptionW` 是否为空筛选输入法（IG5：`FUN_004a6b30`），纯 TSF 的微软拼音
-  不满足；搜狗拼音注册了 IMM 层，真实可过检。
+  不满足。安装后需从实际注册的搜狗 IMM 布局读取 KLID、加载并读回非空描述；安装目录或卸载表项不能代替就绪证据。`cx-real-client-prep-summary.json` 的 `prepared` / `immPreparation` 分别记录实际就绪结果与逐次加载诊断。
 - 安装顺序：仓库内安装包 → `winget install Sogou.SogouInput -e --silent` → 从 winget-pkgs 清单
   (`manifests/s/Sogou/SogouInput`) 解析当前版本，按固定模板 `https://ime.gtimg.com/pc/build/_sogou_pinyin_<version>_0.exe`
   下载。三层都带超时，失败只记录不中断。
@@ -37,16 +37,18 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 发现日志只输出变量名；变量值在发现阶段登记为日志掩码，注入步骤再次登记掩码后才交给脚本。
 
-进入考试需要自动点击：客户端启动后停在原生检查窗口（窗口类 `ExamCheckUI`，按钮「进入考试」），**在它被点击之前不会创建任何 CEF 页面**，宿主也就没有可注入的上下文（`pageSessions` 恒为 0）。客户端二进制里没有可用的自定义命令行开关（全量字符串里只有 `--StartFragment`/`--EndFragment`/`--PO` 三处 HTML 标记），所以注入脚本 `scripts/windows-real-client-injection.ps1` 会在宿主启动后调用 `scripts/windows-client-entry.ps1`，按客户区尺寸换算按钮位置并 `PostMessage` 点击。该点击要求与客户端同完整性级别：GitHub Windows runner 与由它启动的宿主都是高完整性进程，本机手动运行时需用同一个提权上下文执行。
+进入考试需要自动点击：客户端启动后停在原生检查窗口（窗口类 `ExamCheckUI`，按钮「进入考试」），**在它被点击之前不会创建任何 CEF 页面**，宿主也就没有可注入的上下文（`pageSessions` 恒为 0）。客户端二进制里没有可用的自定义命令行开关（全量字符串里只有 `--StartFragment`/`--EndFragment`/`--PO` 三处 HTML 标记），所以注入脚本 `scripts/windows-real-client-injection.ps1` 会在宿主启动后调用 `scripts/windows-client-entry.ps1`，先置前检查窗口，再扫描可见按钮并用 `PostMessage` 点击。按钮兜底坐标按窗口 DPI 换算，不能按客户区尺寸缩放。该点击要求与客户端同完整性级别：GitHub Windows runner 与由它启动的宿主都是高完整性进程，本机手动运行时需用同一个提权上下文执行。
 
 报告校验要求 `success`、`ownershipVerified`、`totals.pageSessions/bootstraps/bundles ≥ 1`；`stopReason` 允许 `duration`（跑满时长）或 `client-exit`（客户端先被关闭或杀掉，宿主仍会写出完整报告）。没有出现 CEF 页面时脚本会提前关闭客户端再取报告，不会把它挂到时长结束。
 
-现场会落盘到 `RUNNER_TEMP` 并由 CI 以 `compression-level: 0` 原样打包上传（artifact 名 `real-client-<客户端>-<数据库>`，成功与失败都上传；PNG 不再被二次压缩，下载后可用 `cx-real-client-<case>-sha256.txt` 里的 SHA256 逐字节校验）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：出现 `ExamCheckHintUI` 说明被客户端自检拦截，出现 `Chrome_WidgetWin_0` 说明 CEF 页面已就绪。
+现场会落盘到 `RUNNER_TEMP` 并由 CI 以 `compression-level: 0` 原样打包上传（artifact 名 `real-client-<客户端>-<数据库>`，成功与失败都上传；PNG 不再被二次压缩，下载后可用 `cx-real-client-<case>-sha256.txt` 里的 SHA256 逐字节校验）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log` / `input.txt`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：`ExamCheckHintUI` 表示出现了检查提示；`Chrome_WidgetWin_0` 也可能只是未加载页面的隐藏窗口，不能代替 `/json/list` 与报告中的页面会话证据。
 
-**托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也没有摄像头，客户端自检必然拦截。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
+**托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也通常没有摄像头，可能停在客户端检查提示。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
-注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、登记微软拼音/五笔（仅当镜像带 zh-CN 载荷时；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`），并安装搜狗拼音（客户端只接受 `ImmGetDescriptionW` 非空的输入法，纯 TSF 的微软拼音不满足），所有安装动作都带超时、并在缺失时用 OBS 虚拟摄像头补齐设备。宿主 runner 默认"检测未通过：未检测到摄像头 / 未检测到支持的输入法"，这两项缺失时客户端不会创建任何 CEF 页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
+注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、登记微软拼音/五笔（仅当镜像带 zh-CN 载荷时；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`），并安装搜狗拼音（客户端只接受 `ImmGetDescriptionW` 非空的输入法，纯 TSF 的微软拼音不满足），所有安装动作都带超时、并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。
 
 清理阶段除了关掉客户端与残留宿主，还会调用 `scripts/windows-client-shell.ps1` 检查资源管理器：客户端退出后任务栏（`Shell_TrayWnd`）可能不再出现，此时脚本会重启 Explorer；没有交互式桌面（CI runner 的服务会话）时直接跳过，日志会打印 `shell repair action=...`。
+
+相关回归：`node --test --test-concurrency=4 scripts/windows-client-entry.test.mjs scripts/windows-client-dialog.test.mjs scripts/windows-client-input.test.mjs scripts/windows-client-ime-readiness.test.mjs scripts/windows-real-client-cleanup.test.mjs`。窗口夹具与现场图片扫描只验证自动化辅助流程，不代表真实客户端进入课程或考试页面验收。

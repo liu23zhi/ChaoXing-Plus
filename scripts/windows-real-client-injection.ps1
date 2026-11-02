@@ -24,6 +24,10 @@ $stdoutPath = Join-Path $tempRoot 'native-host.stdout.log'
 $stderrPath = Join-Path $tempRoot 'native-host.stderr.log'
 $hostProcess = $null
 $clientPath = ''
+$clientDirectory = ''
+$inputState = $null
+$entry = $null
+$report = $null
 $runStarted = Get-Date
 $base64 = ''
 $stage = 'initialize'
@@ -146,7 +150,9 @@ function Save-ArtifactManifest {
             "$hash  $($file.Name)"
         }
         if ($lines) { [IO.File]::WriteAllLines((Join-Path $target "cx-real-client-$CaseName-sha256.txt"), @($lines)) }
-    } catch { }
+    } catch {
+        Write-Host "[real-client] artifact manifest failed: $($_.Exception.Message)"
+    }
 }
 
 function Write-HostDiagnostics {
@@ -318,13 +324,17 @@ try {
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {
   Write-Host "[real-client] FAILED case=$CaseName stage=$stage type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
-  Save-RunArtifacts -CaseName $CaseName
+  try { Save-RunArtifacts -CaseName $CaseName } catch {
+    Write-Host "[real-client] artifact collection failed: $($_.Exception.Message)"
+  }
   if (-not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) { Write-Host "[real-client] stack=$($_.ScriptStackTrace)" }
   Write-HostDiagnostics
   throw
 } finally {
   # Always keep the evidence bundle (screenshots, environment, report, host logs) for CI upload.
-  Save-RunArtifacts -CaseName $CaseName
+  try { Save-RunArtifacts -CaseName $CaseName } catch {
+    Write-Host "[real-client] artifact collection failed: $($_.Exception.Message)"
+  }
   Stop-ClientProcess $clientPath
   Stop-OwnedProcess $hostProcess
   Stop-StartedHost $NativeHost $runStarted
@@ -340,14 +350,27 @@ try {
   } catch {
     Write-Host "[real-client] input restore failed: $($_.Exception.Message)"
   }
-  # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
-  if (Test-Path -LiteralPath $debugSnapshot) {
-    Write-Host "[real-client] client debug.log captured: $((Get-Item -LiteralPath $debugSnapshot).Length) bytes"
-  } else {
-    Write-Host '[real-client] client debug.log not collected (client never wrote it or it was empty)'
+  # Use the same fixed artifact paths as the live snapshot collector. An early failure may never have
+  # created either file, and reporting missing evidence must not interrupt the remaining cleanup.
+  foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+    try {
+      $snapshot = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-$($item.Suffix)" } else { '' }
+      if ($snapshot -and (Test-Path -LiteralPath $snapshot -PathType Leaf)) {
+        Write-Host "[real-client] client $($item.Source) captured: $((Get-Item -LiteralPath $snapshot).Length) bytes"
+      } else {
+        Write-Host "[real-client] client $($item.Source) not collected (client never wrote it or it was empty)"
+      }
+    } catch {
+      Write-Host "[real-client] client $($item.Source) snapshot status unavailable: $($_.Exception.Message)"
+    }
   }
-  $shell = Repair-ShellDesktop -Force
-  Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
+  # Closing the client can leave Explorer alive without its taskbar; restore the shell before returning.
+  try {
+    $shell = Repair-ShellDesktop -Force
+    Write-Host "[real-client] shell repair action=$($shell.Action) restarted=$($shell.Restarted) tray=$($shell.Tray) owner=$($shell.OwnerPid) old=$($shell.OldPids) manualStart=$($shell.ManualStart) forced=$($shell.Forced)"
+  } catch {
+    Write-Host "[real-client] shell repair failed: $($_.Exception.Message)"
+  }
   Write-Host "[real-client] summary case=$CaseName stage=$stage stopReason=$($report.stopReason) success=$($report.success) pages=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) errors=$($report.totals.errors) probe=$($report.endpointProbe.lastReason)/$($report.endpointProbe.attempts) entry=$($entry.Reason)"
   Save-ArtifactManifest -CaseName $CaseName
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
