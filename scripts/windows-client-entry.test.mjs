@@ -4,9 +4,10 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolveTestPath } from './test-helpers/temp-directory.mjs';
-
 const entryScript = resolveTestPath('scripts', 'windows-client-entry.ps1');
 const injectionScript = resolveTestPath('scripts', 'windows-real-client-injection.ps1');
+const fixtureBefore = resolveTestPath('tests', 'fixtures', 'real-client', 'check-failed-1-before-click.png');
+const fixtureAfter = resolveTestPath('tests', 'fixtures', 'real-client', 'check-failed-2-after-click.png');
 const windowsOnly = process.platform === 'win32' ? undefined : '仅在 Windows 上执行原生窗口辅助脚本';
 
 function psQuote(value) {
@@ -119,4 +120,129 @@ test('进入考试助手保持纯 ASCII 且不发送重复点击', () => {
   assert.match(text, /entry-page-detected/u, '必须区分"页面已出现"和"点了但没反应"');
   assert.match(text, /-Attempts 6|Attempts = 6/u, '检查页探测期间点击会被丢弃，必须允许重试');
   assert.doesNotMatch(text, /0\.34333|0\.11143/u, '不得再用客户区比例推算按钮坐标');
+});
+
+test('圆角弹窗按钮可被扫描命中，普通页面不会误判', () => {
+  const harness = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$entry = '` + entryScript.replace(/'/g, "''") + String.raw`'
+$text = Get-Content -LiteralPath $entry -Raw
+$start = $text.IndexOf('public class CXExamEntryScan')
+$begin = $text.LastIndexOf("@'", $start) + 2
+$end = $text.IndexOf("'@", $start)
+Add-Type -TypeDefinition $text.Substring($begin, $end - $begin)
+
+function Scan-Bitmap($bmp) {
+  $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
+  $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $buffer = New-Object byte[] ($data.Stride * $bmp.Height)
+  [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
+  $found = [CXExamEntryScan]::Scan($buffer, $data.Stride, $bmp.Width, $bmp.Height, 0, 0)
+  $bmp.UnlockBits($data)
+  return $found
+}
+
+# 1) 圆角蓝色确定按钮（模拟客户端弹窗），位于裁剪带内
+$bmp = New-Object System.Drawing.Bitmap 480, 315
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.Clear([System.Drawing.Color]::White)
+$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+$brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 102, 150, 255))
+$path = New-Object System.Drawing.Drawing2D.GraphicsPath
+$radius = 16
+$rect = New-Object System.Drawing.Rectangle 250, 230, 122, 33
+$d = $radius * 2
+$path.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
+$path.AddArc($rect.Right - $d, $rect.Y, $d, $d, 270, 90)
+$path.AddArc($rect.Right - $d, $rect.Bottom - $d, $d, $d, 0, 90)
+$path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
+$path.CloseFigure()
+$g.FillPath($brush, $path)
+$g.Dispose()
+$hit = Scan-Bitmap $bmp
+$bmp.Dispose()
+if ($hit.Length -eq 0) { 'PILL=absent' } else { "PILL=found $($hit[0]),$($hit[1])" }
+
+# 2) 纯白页面不得命中
+$blank = New-Object System.Drawing.Bitmap 480, 315
+$g2 = [System.Drawing.Graphics]::FromImage($blank)
+$g2.Clear([System.Drawing.Color]::White)
+$g2.Dispose()
+$miss = Scan-Bitmap $blank
+$blank.Dispose()
+if ($miss.Length -eq 0) { 'BLANK=absent' } else { "BLANK=found $($miss[0]),$($miss[1])" }
+`;
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness],
+    { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.error?.code === 'ENOENT') return;
+  assert.equal(result.status, 0, result.stderr);
+  const pill = /PILL=(absent|found \d+,\d+)/u.exec(result.stdout);
+  assert.ok(pill, `扫描器必须输出结果: ${result.stdout}${result.stderr}`);
+  assert.notEqual(pill[1], 'absent', '圆角蓝色按钮必须被识别');
+  const [x, y] = pill[1].replace('found ', '').split(',').map(Number);
+  assert.ok(Math.abs(x - 311) <= 6, `按钮 X 应接近 311，实际 ${x}`);
+  assert.ok(Math.abs(y - 246) <= 6, `按钮 Y 应接近 246，实际 ${y}`);
+  assert.match(result.stdout, /BLANK=absent/u, '空白页面不得误判出按钮');
+});
+test('检测未通过时点掉确认弹窗再等页面', async () => {
+  const script = await readFile(entryScript, 'utf8');
+  assert.match(script, /function Find-ClientConfirmButton/u, '必须能在弹窗区域定位确认按钮');
+  assert.match(script, /function Confirm-ClientExamEntry/u, '必须提供确认弹窗的兜底点击');
+  assert.match(script, /entry-page-detected-after-confirm/u, '确认后出现页面要有独立原因');
+  assert.match(script, /3-confirm-dialog/u, '点确认前必须留帧');
+  assert.match(script, /4-after-confirm/u, '点确认后必须留帧');
+  assert.match(script, /CropLeft \$cropLeft -CropTop \$cropTop/u, '确认按钮扫描必须限制在弹窗区域');
+  assert.match(script, /overlap \* 100 >= \(long\)span \* 60/u, '圆角按钮需要按重叠判定连续性');
+  assert.match(script, /Via = 'keyboard'/u, '扫描找不到按钮时必须有键盘兜底');
+});
+test('真实 CI 帧：检测未通过弹窗的确定按钮能被定位', () => {
+  const harness = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$entry = '` + entryScript.replace(/'/g, "''") + String.raw`'
+$text = Get-Content -LiteralPath $entry -Raw
+$start = $text.IndexOf('public class CXExamEntryScan')
+$begin = $text.LastIndexOf("@'", $start) + 2
+$end = $text.IndexOf("'@", $start)
+Add-Type -TypeDefinition $text.Substring($begin, $end - $begin)
+
+function Scan-Crop([string]$Path, [double]$left, [double]$top, [double]$width, [double]$height) {
+  $bmp = [System.Drawing.Bitmap]::FromFile($Path)
+  $cropLeft = [int]($bmp.Width * $left); $cropTop = [int]($bmp.Height * $top)
+  $cropWidth = [int]($bmp.Width * $width); $cropHeight = [int]($bmp.Height * $height)
+  $rect = New-Object System.Drawing.Rectangle $cropLeft, $cropTop, $cropWidth, $cropHeight
+  $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $buffer = New-Object byte[] ($data.Stride * $cropHeight)
+  [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
+  $found = [CXExamEntryScan]::Scan($buffer, $data.Stride, $cropWidth, $cropHeight, 0, 0)
+  $bmp.UnlockBits($data)
+  $bmp.Dispose()
+  if ($found.Length -eq 0) { return 'absent' }
+  return "$($found[0] + $cropLeft),$($found[1] + $cropTop)"
+}
+
+# 与 Find-ClientConfirmButton 一致的裁剪带：30%..70% 宽、30%..75% 高
+"BEFORE_CONFIRM=$(Scan-Crop '` + fixtureBefore.replace(/'/g, "''") + String.raw`' 0.30 0.30 0.40 0.45)"
+"AFTER_CONFIRM=$(Scan-Crop '` + fixtureAfter.replace(/'/g, "''") + String.raw`' 0.30 0.30 0.40 0.45)"
+"BEFORE_ENTRY=$(Scan-Crop '` + fixtureBefore.replace(/'/g, "''") + String.raw`' 0.0 0.0 1.0 1.0)"
+"AFTER_ENTRY=$(Scan-Crop '` + fixtureAfter.replace(/'/g, "''") + String.raw`' 0.0 0.0 1.0 1.0)"
+`;
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness],
+    { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (result.error?.code === 'ENOENT') return;
+  assert.equal(result.status, 0, result.stderr);
+  const pick = (name) => {
+    const match = new RegExp(`${name}=([^\\r\\n]+)`, 'u').exec(result.stdout);
+    assert.ok(match, `缺少 ${name}: ${result.stdout}${result.stderr}`);
+    return match[1].trim();
+  };
+  assert.equal(pick('BEFORE_CONFIRM'), 'absent', '未点进入考试时不得出现确认按钮');
+  const after = pick('AFTER_CONFIRM');
+  assert.notEqual(after, 'absent', '检测未通过的确认弹窗必须能被识别');
+  const [confirmX, confirmY] = after.split(',').map(Number);
+  assert.ok(Math.abs(confirmX - 668) <= 12, `确定按钮 X 应接近 668，实际 ${confirmX}`);
+  assert.ok(Math.abs(confirmY - 448) <= 12, `确定按钮 Y 应接近 448，实际 ${confirmY}`);
+  const [entryX, entryY] = pick('BEFORE_ENTRY').split(',').map(Number);
+  assert.ok(Math.abs(entryX - 601) <= 20 && Math.abs(entryY - 78) <= 20, `进入考试按钮位置异常: ${entryX},${entryY}`);
 });

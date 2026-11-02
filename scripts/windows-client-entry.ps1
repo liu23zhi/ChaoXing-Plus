@@ -139,9 +139,10 @@ public class CXExamEntryScan {
             if (segmentStart >= 0 && (bestStart < 0 || segmentEnd - segmentStart > bestEnd - bestStart)) { bestStart = segmentStart; bestEnd = segmentEnd; bestBlue = segmentBlue; }
             int span = bestStart < 0 ? 0 : bestEnd - bestStart + 1;
             bool candidate = bestStart >= 0 && span >= 40 && span <= 350 && (long)bestBlue * 100 >= (long)span * 40;
-            bool continues = candidate && currentRows > 0
-                && Math.Abs(bestStart - currentX0) <= 6
-                && Math.Abs(bestEnd - currentX1) <= 6;
+            // A rounded pill (the modal confirm button) narrows by more than 6 px on its first and last
+            // rows, so continuity is judged by horizontal overlap instead of start/end alignment.
+            int overlap = currentRows > 0 ? Math.Min(bestEnd, currentX1) - Math.Max(bestStart, currentX0) + 1 : 0;
+            bool continues = candidate && currentRows > 0 && overlap > 0 && (long)overlap * 100 >= (long)span * 60;
             if (!continues) {
                 if (currentRows > bestRows) { bestRows = currentRows; bestY0 = currentY0; bestY1 = y - 1; bestX0 = currentX0; bestX1 = currentX1; }
                 currentRows = 0;
@@ -180,17 +181,35 @@ function Get-ClientEntryPoint {
     }
 }
 
-function Find-ExamEntryButton {
-    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+# Capture the window (optionally one crop rectangle, in window coordinates) and return raw scan input.
+function Get-WindowScanBuffer {
+    param(
+        [Parameter(Mandatory = $true)] [IntPtr] $Window,
+        [int] $CropLeft = 0,
+        [int] $CropTop = 0,
+        [int] $CropWidth = 0,
+        [int] $CropHeight = 0
+    )
     $windowRect = New-Object CXClientEntry+RECT
-    if (-not [CXClientEntry]::GetWindowRect($Window, [ref]$windowRect)) { return [pscustomobject]@{ State = 'unavailable' } }
+    if (-not [CXClientEntry]::GetWindowRect($Window, [ref]$windowRect)) { return $null }
     $origin = New-Object CXClientEntry+POINT
     $origin.X = 0
     $origin.Y = 0
-    if (-not [CXClientEntry]::ClientToScreen($Window, [ref]$origin)) { return [pscustomobject]@{ State = 'unavailable' } }
+    if (-not [CXClientEntry]::ClientToScreen($Window, [ref]$origin)) { return $null }
     $width = $windowRect.Right - $windowRect.Left
     $height = $windowRect.Bottom - $windowRect.Top
-    if ($width -le 0 -or $height -le 0 -or $width -gt 5000 -or $height -gt 5000) { return [pscustomobject]@{ State = 'unavailable' } }
+    if ($width -le 0 -or $height -le 0 -or $width -gt 5000 -or $height -gt 5000) { return $null }
+    if ($CropWidth -gt 0 -and $CropHeight -gt 0) {
+        $CropLeft = [Math]::Max(0, [Math]::Min($CropLeft, $width - 1))
+        $CropTop = [Math]::Max(0, [Math]::Min($CropTop, $height - 1))
+        $CropWidth = [Math]::Min($CropWidth, $width - $CropLeft)
+        $CropHeight = [Math]::Min($CropHeight, $height - $CropTop)
+    } else {
+        $CropLeft = 0
+        $CropTop = 0
+        $CropWidth = $width
+        $CropHeight = $height
+    }
     $bitmap = $null
     $graphics = $null
     $data = $null
@@ -199,20 +218,96 @@ function Find-ExamEntryButton {
         $bitmap = New-Object System.Drawing.Bitmap $width, $height
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $graphics.CopyFromScreen($windowRect.Left, $windowRect.Top, 0, 0, (New-Object System.Drawing.Size $width, $height))
-        $rect = New-Object System.Drawing.Rectangle 0, 0, $width, $height
+        $rect = New-Object System.Drawing.Rectangle $CropLeft, $CropTop, $CropWidth, $CropHeight
         $data = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-        $buffer = New-Object byte[] ($data.Stride * $height)
+        $buffer = New-Object byte[] ($data.Stride * $CropHeight)
         [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buffer, 0, $buffer.Length)
-        $found = [CXExamEntryScan]::Scan($buffer, $data.Stride, $width, $height, $origin.X - $windowRect.Left, $origin.Y - $windowRect.Top)
-        if ($null -eq $found -or $found.Length -eq 0) { return [pscustomobject]@{ State = 'absent' } }
-        return [pscustomobject]@{ State = 'found'; X = $found[0]; Y = $found[1] }
+        return [pscustomobject]@{
+            Buffer = $buffer; Stride = $data.Stride; Width = $CropWidth; Height = $CropHeight
+            OffsetX = $CropLeft + ($origin.X - $windowRect.Left); OffsetY = $CropTop + ($origin.Y - $windowRect.Top)
+        }
     } catch {
-        return [pscustomobject]@{ State = 'unavailable' }
+        return $null
     } finally {
         if ($data -and $bitmap) { $bitmap.UnlockBits($data) }
         if ($graphics) { $graphics.Dispose() }
         if ($bitmap) { $bitmap.Dispose() }
     }
+}
+
+function Find-ExamEntryButton {
+    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+    $scan = Get-WindowScanBuffer -Window $Window
+    if (-not $scan) { return [pscustomobject]@{ State = 'unavailable' } }
+    try {
+        $found = [CXExamEntryScan]::Scan($scan.Buffer, $scan.Stride, $scan.Width, $scan.Height, $scan.OffsetX, $scan.OffsetY)
+        if ($null -eq $found -or $found.Length -eq 0) { return [pscustomobject]@{ State = 'absent' } }
+        return [pscustomobject]@{ State = 'found'; X = $found[0]; Y = $found[1] }
+    } catch {
+        return [pscustomobject]@{ State = 'unavailable' }
+    }
+}
+
+# A failed check ("check failed") still allows entry, but the client first shows
+# "some features may be affected, enter anyway?" with a blue confirm button. The dialog is drawn in the same
+# window, so the button is located by scanning the dialog band and clicking it.
+function Find-ClientConfirmButton {
+    param([Parameter(Mandatory = $true)] [IntPtr] $Window)
+    $rect = New-Object CXClientEntry+RECT
+    if (-not [CXClientEntry]::GetClientRect($Window, [ref]$rect)) { return [pscustomobject]@{ State = 'unavailable' } }
+    if ($rect.Right -le 0 -or $rect.Bottom -le 0) { return [pscustomobject]@{ State = 'unavailable' } }
+    $cropLeft = [int]($rect.Right * 0.30)
+    $cropTop = [int]($rect.Bottom * 0.30)
+    $cropWidth = [int]($rect.Right * 0.40)
+    $cropHeight = [int]($rect.Bottom * 0.45)
+    $scan = Get-WindowScanBuffer -Window $Window -CropLeft $cropLeft -CropTop $cropTop -CropWidth $cropWidth -CropHeight $cropHeight
+    if (-not $scan) { return [pscustomobject]@{ State = 'unavailable' } }
+    try {
+        $found = [CXExamEntryScan]::Scan($scan.Buffer, $scan.Stride, $scan.Width, $scan.Height, $scan.OffsetX, $scan.OffsetY)
+        if ($null -eq $found -or $found.Length -eq 0) { return [pscustomobject]@{ State = 'absent' } }
+        return [pscustomobject]@{ State = 'found'; X = $found[0]; Y = $found[1] }
+    } catch {
+        return [pscustomobject]@{ State = 'unavailable' }
+    }
+}
+
+# Fallback click: press the confirm button on the "still enter the exam?" dialog so the client proceeds to its
+# CEF page even when one check item failed.
+function Confirm-ClientExamEntry {
+    param(
+        [Parameter(Mandatory = $true)] [IntPtr] $Window,
+        [int] $TimeoutSeconds = 8,
+        [int] $PollMilliseconds = 400,
+        [string] $ScreenshotPrefix = ''
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $button = Find-ClientConfirmButton -Window $Window
+        if ($button.State -eq 'found') {
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $Window
+            $lParam = [IntPtr](($button.Y -shl 16) -bor ($button.X -band 0xFFFF))
+            [void][CXClientEntry]::PostMessageW($Window, 0x0200, [IntPtr]::Zero, $lParam)
+            Start-Sleep -Milliseconds 120
+            [void][CXClientEntry]::PostMessageW($Window, 0x0201, [IntPtr]1, $lParam)
+            Start-Sleep -Milliseconds 90
+            [void][CXClientEntry]::PostMessageW($Window, 0x0202, [IntPtr]::Zero, $lParam)
+            Start-Sleep -Seconds 2
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $Window
+            return [pscustomobject]@{ Clicked = $true; X = $button.X; Y = $button.Y; Via = 'scan' }
+        }
+        if ($button.State -eq 'unavailable') { break }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    # Last resort: the confirm button carries focus, so Enter accepts the dialog as well. This covers a
+    # dialog drawn with a different palette that the blue scan cannot find.
+    Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-keyboard' -Window $Window
+    [void][CXClientEntry]::PostMessageW($Window, 0x0100, [IntPtr]0x0D, [IntPtr]0)
+    Start-Sleep -Milliseconds 80
+    [void][CXClientEntry]::PostMessageW($Window, 0x0101, [IntPtr]0x0D, [IntPtr]0)
+    Start-Sleep -Seconds 2
+    $after = Find-ClientConfirmButton -Window $Window
+    if ($after.State -eq 'absent') { return [pscustomobject]@{ Clicked = $true; X = 0; Y = 0; Via = 'keyboard' } }
+    return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0 }
 }
 
 # The window is created before Duilib lays it out; a click at that moment lands on a 137x36 client area.
@@ -360,6 +455,30 @@ function Wait-ClientExamEntry {
             return [pscustomobject]@{
                 Clicked = $true; Reason = 'entry-page-detected'; Window = [int64]$window; ProcessId = $clientProcess.Id
                 Point = $point; Dpi = $dpi; Attempts = $attempt; ClientSize = $size; PageTargets = $pages; Target = $target
+                Confirmed = $false
+            }
+        }
+
+        # A failed check adds one more step: a confirm dialog. Press it and wait for the
+        # page instead of clicking the entry button again (dimmed behind the dialog, the click would be lost).
+        if ($attempt -ge 1) {
+            $confirm = Confirm-ClientExamEntry -Window $window -TimeoutSeconds 8 -ScreenshotPrefix $ScreenshotPrefix
+            if ($confirm.Clicked) {
+                Write-Host "[real-client] confirm dialog accepted via=$($confirm.Via) point=$($confirm.X),$($confirm.Y)"
+                $confirmDeadline = (Get-Date).AddSeconds(20)
+                while ((Get-Date) -lt $confirmDeadline) {
+                    $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
+                    if ($pages -gt 0) {
+                        return [pscustomobject]@{
+                            Clicked = $true; Reason = 'entry-page-detected-after-confirm'; Window = [int64]$window
+                            ProcessId = $clientProcess.Id; Point = "$($confirm.X),$($confirm.Y)"; Dpi = $dpi
+                            Attempts = $attempt; ClientSize = $size; PageTargets = $pages; Target = 'confirm-scan'
+                            Confirmed = $true
+                        }
+                    }
+                    if ([CXClientEntry]::Find([uint32]$clientProcess.Id, 'ExamCheckUI') -eq [IntPtr]::Zero) { break }
+                    Start-Sleep -Milliseconds 700
+                }
             }
         }
     }

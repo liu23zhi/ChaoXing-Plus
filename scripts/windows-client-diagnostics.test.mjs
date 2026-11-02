@@ -52,8 +52,11 @@ test('桌面环境与截图能被采集，坐标与缩放可用', { skip: window
     assert.equal(json.full.Width, json.environment.VirtualScreen.Width, '整幅截图宽度必须等于虚拟屏幕宽度');
     assert.ok(readFileSync(shot).length > 0);
     assert.equal(json.half.Width, Math.max(1, Math.round(json.full.Width / 2)), '50% 缩放必须生效');
+    assert.equal(json.half.Height, Math.max(1, Math.round(json.full.Height / 2)), '50% 缩放必须同时缩放高度');
     assert.ok(readFileSync(scaled).length > 0);
-    assert.ok(readFileSync(scaled).length < readFileSync(shot).length, '缩放后的文件必须更小');
+    // 文件体积不能作为缩放证据：纯色桌面缩放后可能更大（PNG 无损压缩对均匀色块更有效）。
+    // 像素尺寸才是可靠判据，体积只在排除极端情况时做上限检查。
+    assert.ok(readFileSync(scaled).length < readFileSync(shot).length * 4, '缩放后的文件体积不应远超原图');
   }
 });
 
