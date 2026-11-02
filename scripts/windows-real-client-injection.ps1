@@ -96,7 +96,7 @@ function Save-RunArtifacts {
             try { Copy-Item -LiteralPath $debugLog -Destination (Join-Path $target "cx-real-client-$CaseName-client-debug.log") -Force } catch { }
         }
     }
-    [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 50)
+    [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 100)
 }
 
 function Write-HostDiagnostics {
@@ -121,7 +121,7 @@ try {
   if ($env:RUNNER_TEMP -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
     $environmentPath = Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-environment.json"
     try { (Get-DesktopEnvironment) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $environmentPath -Encoding utf8 } catch { }
-    [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-start.png") -ScalePercent 50)
+    [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-start.png") -ScalePercent 100)
   }
   $inputState = Get-InputState
   if ($env:RUNNER_TEMP) {

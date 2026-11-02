@@ -17,6 +17,8 @@ public class CXClientDiag {
     [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint threadId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetUserObjectInformationW(IntPtr handle, int index, StringBuilder info, int length, out int needed);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle, out RECT rect);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr handle);
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr handle, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int index);
@@ -79,6 +81,32 @@ function Get-DesktopEnvironment {
         Monitors = $monitors
         Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         OsVersion = [Environment]::OSVersion.VersionString
+    }
+}
+
+# Capture one window instead of the whole desktop: the check page text stays readable even on a small
+# runner desktop, and the resulting artifact is focused on what the client actually shows.
+function Save-WindowScreenshot {
+    param(
+        [Parameter(Mandatory = $true)] [IntPtr] $Window,
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    try {
+        $rect = New-Object CXClientDiag+RECT
+        if (-not [CXClientDiag]::GetWindowRect($Window, [ref]$rect)) { return $null }
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        if ($width -le 0 -or $height -le 0 -or $width -gt 5000 -or $height -gt 5000) { return $null }
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $bitmap = New-Object System.Drawing.Bitmap $width, $height
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, (New-Object System.Drawing.Size $width, $height))
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+        $graphics.Dispose()
+        $bitmap.Dispose()
+        return [pscustomobject]@{ Path = $Path; Width = $width; Height = $height; Bytes = (Get-Item -LiteralPath $Path).Length }
+    } catch {
+        return $null
     }
 }
 

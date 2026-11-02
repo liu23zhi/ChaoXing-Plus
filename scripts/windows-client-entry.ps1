@@ -32,6 +32,7 @@ public class CXClientEntry {
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr handle, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessageW(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     public delegate uint DpiForWindow(IntPtr handle);
@@ -250,10 +251,16 @@ function Get-ClientPageTargetCount {
 }
 
 function Save-EntryFrame {
-    param([string] $Prefix, [string] $Name)
+    param([string] $Prefix, [string] $Name, [int] $ScalePercent = 100, [IntPtr] $Window = [IntPtr]::Zero)
     if (-not $Prefix) { return }
-    if (-not (Get-Command Save-DesktopScreenshot -ErrorAction SilentlyContinue)) { return }
-    [void](Save-DesktopScreenshot -Path "$Prefix-$Name.png" -ScalePercent 50)
+    # Prefer a window capture: readable text even on a small runner desktop.
+    if ($Window -ne [IntPtr]::Zero -and (Get-Command Save-WindowScreenshot -ErrorAction SilentlyContinue)) {
+        $shot = Save-WindowScreenshot -Window $Window -Path "$Prefix-$Name.png"
+        if ($shot) { return }
+    }
+    if (Get-Command Save-DesktopScreenshot -ErrorAction SilentlyContinue) {
+        [void](Save-DesktopScreenshot -Path "$Prefix-$Name.png" -ScalePercent $ScalePercent)
+    }
 }
 
 # Click the button as soon as it is actually on screen, prove that a CEF page appeared, and retry until it
@@ -322,9 +329,12 @@ function Wait-ClientExamEntry {
             $target = 'design-point'
         }
         $point = "$clickX,$clickY"
-        # Frame 1: the button is on screen and still untouched.
+        # Frame 1: the button is on screen and still untouched. Raise the window first so the capture is
+        # not a crop of whatever happens to be on top.
         if (-not $preClickSaved) {
-            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '1-before-click'
+            [void][CXClientEntry]::SetForegroundWindow($window)
+            Start-Sleep -Milliseconds 300
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '1-before-click' -Window $window
             $preClickSaved = $true
         }
 
@@ -338,8 +348,13 @@ function Wait-ClientExamEntry {
 
         Start-Sleep -Seconds $SettleSeconds
         # Frame 2: right after the click, before the client is closed.
-        $frameName = if ($attempt -eq 1) { '2-after-click' } else { "2-after-click-$attempt" }
-        Save-EntryFrame -Prefix $ScreenshotPrefix -Name $frameName
+        if ($attempt -eq 1) {
+            # Key frame: full resolution so the check result / login page is readable.
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '2-after-click' -ScalePercent 100 -Window $window
+        } else {
+            # Follow-up attempts are usually identical; keep them small.
+            Save-EntryFrame -Prefix $ScreenshotPrefix -Name "2-after-click-$attempt" -ScalePercent 50
+        }
         $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
         if ($pages -gt 0) {
             return [pscustomobject]@{
