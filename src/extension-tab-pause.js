@@ -14,15 +14,15 @@
     try {
       session.get(storageKey(tabId), (result) => {
         const failed = Boolean(chrome.runtime.lastError);
-        const paused = failed || result?.[storageKey(tabId)] === true;
+        const paused = !failed && result?.[storageKey(tabId)] === true;
         values.set(tabId, paused);
         durability.set(tabId, !failed);
         resolve(paused);
       });
     } catch {
-      values.set(tabId, true);
+      values.set(tabId, false);
       durability.set(tabId, false);
-      resolve(true);
+      resolve(false);
     }
   });
   const write = (tabId, paused) => new Promise((resolve) => {
@@ -62,9 +62,10 @@
       respond({ kind, paused, durable: durability.get(tabId) === true,
         tabIdentity: String(tabId), requestId: message.requestId });
     }).catch(() => {
-      values.set(tabId, true);
+      const paused = message.operation === 'write' ? message.paused : false;
+      values.set(tabId, paused);
       durability.set(tabId, false);
-      respond({ kind, paused: true, durable: false, tabIdentity: String(tabId), requestId: message.requestId });
+      respond({ kind, paused, durable: false, tabIdentity: String(tabId), requestId: message.requestId });
     });
     queues.set(tabId, work);
     void work.finally(() => { if (queues.get(tabId) === work) queues.delete(tabId); });

@@ -33,12 +33,19 @@ export type QuestionTypes = 'single' | 'multiple' | 'completion' | 'judgement' |
 
 export type AnswerMatchMode = 'exact' | 'similar';
 
+export interface QuestionSearchIdentity {
+	type?: string;
+	options: string[];
+}
+
 /** 答题器上下文 */
 export interface WorkContext<E> {
 	root: HTMLElement;
 	elements: SearchedElements<E, HTMLElement[]>;
 	searchInfos: SearchInformation[];
 	type: QuestionTypes;
+	/** 查题时的题型和有序选项快照 */
+	searchIdentity?: QuestionSearchIdentity;
 	waitForContinue?: () => Promise<void>;
 	/** 答案分隔符 */
 	answerSeparators?: string[];
@@ -79,6 +86,8 @@ export interface SimplifyWorkResult {
 	question: string;
 	/** 题目类型 */
 	type: QuestionTypes;
+	/** 查题时的题型和有序选项快照，用于隔离缓存 */
+	searchIdentity?: QuestionSearchIdentity;
 	/** 答题错误信息 */
 	error?: string;
 	/** 是否完成 */

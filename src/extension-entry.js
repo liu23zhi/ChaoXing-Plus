@@ -40,6 +40,10 @@
     root.setAttribute('data-chaoxing-plus-tab-pause-ready', message.durable === true ? 'extension' : 'memory');
     document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
   };
+  const markTabPauseUnavailable = () => {
+    root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
+    document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+  };
   if (chrome.runtime.onMessage?.addListener) {
     chrome.runtime.onMessage.addListener((message, sender) => {
       if (sender.id === chrome.runtime.id && pendingPauseRequests.size === 0) applyTabPause(message);
@@ -71,9 +75,7 @@
     if (!chrome.runtime.sendMessage) { resolve(); return; }
     const requestId = `init:${Date.now()}:${Math.random()}`;
     const timer = setTimeout(() => {
-      root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
-      root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
-      document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+      markTabPauseUnavailable();
       resolve();
     }, 2000);
     try {
@@ -81,18 +83,12 @@
         void chrome.runtime.lastError;
         clearTimeout(timer);
         if (response?.requestId === requestId) applyTabPause(response);
-        else {
-          root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
-          root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
-          document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
-        }
+        else markTabPauseUnavailable();
         resolve();
       });
     } catch {
       clearTimeout(timer);
-      root.setAttribute('data-chaoxing-plus-tab-paused', 'true');
-      root.setAttribute('data-chaoxing-plus-tab-pause-ready', 'unavailable');
-      document.dispatchEvent(new Event('chaoxing-plus:tab-pause-change'));
+      markTabPauseUnavailable();
       resolve();
     }
   });

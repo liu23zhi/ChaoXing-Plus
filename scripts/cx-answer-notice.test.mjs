@@ -40,13 +40,15 @@ async function createRuntime(responses, action = 'pause', modalConfirmResponses 
       'manualAnswerRequiredMessage', 'aiFallbackNoAnswerMessage', 'hasAnyResolvedSearchResults', 'appendAIFallbackSearchInfos',
       'notifyManualAnswerRequired', 'notifyTikuAdapterInsufficientBalance', 'requestTikuAdapterBalanceRecovery', 'allowTikuAdapterRetryAfterBalanceRecovery', 'trackTikuAdapterWorker', 'untrackTikuAdapterWorker', 'stopTikuAdapterWorkers', 'continueTikuAdapterWorkers', 'tikuAdapterBalanceRecoveryState', 'defaultUnfinishedQuestionRetryAttempts', 'getUnfinishedQuestionRetryAttempts',
       'retryUnfinishedChapterQuestionAtIndex', 'retryUnfinishedChapterQuestions',
-      'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions'
+      'retryUnfinishedWorkOrExamQuestionAtIndex', 'retryUnfinishedWorkOrExamQuestions', 'queryWorkOrExamQuestionRoots'
     ]),
     await declarations('src/projects/cx.ts', ['waitForTikuAdapterBalanceRecovery'])
   ].join('\n');
   const globals = {
     setTimeout, clearTimeout, setInterval, clearInterval,
     AbortController,
+    assertInitialAnswerRun() {},
+    waitForInitialAnswerRun: async (task) => task,
     domSearchAll: () => ({ title: [{}], options: [{}] }),
     AnswerWrapperHandlerConfig: { timeout_seconds: 1 },
     getStoredTikuAdapterConfig: () => ({}),

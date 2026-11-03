@@ -21,7 +21,7 @@ test('cx registers runtime stop continue and retry controls with the common work
   assert.equal(source.includes('if (tikuAdapterBalanceRecoveryState.paused)'), true);
   assert.equal(source.includes('void requestTikuAdapterBalanceRecovery();'), true);
   assert.equal(source.includes('workResultsMethods().refresh?.();'), true);
-  assert.equal(source.includes('retryQuestion: async (index) =>'), true);
+  assert.equal(source.includes('retryQuestion: async (index, resetAnswer) =>'), true);
   assert.equal(source.includes('canRetryQuestion: (index) => Boolean(roots[index]) && !taskBusy && !uploadInProgress && !tikuAdapterBalanceRecoveryState.paused'), true);
   assert.equal(source.includes('canRetryQuestion: (index) =>'), true);
   assert.equal(source.match(/if \(!\(await allowTikuAdapterRetryAfterBalanceRecovery\(\)\)\)/g)?.length, 3);
@@ -91,7 +91,7 @@ test('cx keeps cache modes separate and only forces a fresh answer for mismatche
   assert.equal(source.includes('skipCache: shouldSkipCacheForAutomaticRetry(latestResult)'), true);
   assert.equal(source.includes('shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])'), true);
   assert.equal(source.includes('skipCache: Boolean(workerOptions.skipCache)'), true);
-  assert.equal(source.split("searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')").length - 1, 2);
+  assert.equal(source.split("searchInCaches(title, provider, deepThinking ? 'deep' : 'normal', cacheIdentity)").length - 1, 2);
 });
 
 test('cx syncs manual-answer state back into the common result entries', async () => {
@@ -120,7 +120,7 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   assert.equal(source.includes("confirmButtonText: '立即自动答题'"), true);
   assert.equal(source.includes("cancelButtonText: '手动答题'"), true);
   assert.equal(source.includes("worker.emit('stop')"), true);
-  assert.equal(source.includes('await confirmBeforeAutoAnswer(worker, decisionKey ? {'), true);
+  assert.equal(source.includes('await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker, decisionKey ? {'), true);
   assert.equal(source.includes('JSON.stringify([chapterTaskContext.scope, chapterTaskContext.tabKey, chapterTaskJobId])'), true);
   assert.equal(source.includes('return result.finish ? result : runRandomChoiceFallback('), false);
   assert.equal(source.includes(': ((await runRandomChoiceFallback('), true);

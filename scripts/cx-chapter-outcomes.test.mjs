@@ -53,17 +53,34 @@ test('disabled real chapter job reports a resumable block instead of a missing j
   assert.equal(result.blocked?.reason, 'disabled');
 });
 
-async function uploadFixture({ autoSubmit = true, actions = {}, expired = false, current = true, retakePrompts = [] } = {}) {
+async function uploadFixture({ autoSubmit = true, actions = {}, expired = false, current = true, retakePrompts = [], holdSubmission = false } = {}) {
   const source = await readFile('src/projects/cx.ts', 'utf8');
-  const begin = source.indexOf('let chapterFinished = false;');
-  const end = source.indexOf('\n    } finally {', begin);
-  assert.ok(begin > 0 && end > begin);
+  const ast = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
+  let uploadStatements;
+  const findUploadBlock = (node) => {
+    if (ts.isBlock(node)) {
+      const begin = node.statements.findIndex((statement) => ts.isVariableStatement(statement)
+        && statement.declarationList.declarations.some((declaration) => declaration.name.getText(ast) === 'chapterFinished'));
+      if (begin !== -1) uploadStatements = node.statements.slice(begin);
+    }
+    ts.forEachChild(node, findUploadBlock);
+  };
+  findUploadBlock(ast);
+  assert.ok(uploadStatements?.length, 'the real chapter upload block must be available');
   const doc = { querySelector: (selector) => selector.startsWith('form ') ? { value: 'job-1' } : null };
   const originalAlert = () => {};
   const frameWindow = { document: doc, alert: originalAlert, ...actions };
   frameWindow.parent = frameWindow;
   const frame = { getAttribute: (name) => name === 'jobid' ? 'job-1' : null };
   let cacheWrites = 0;
+  let cancelled = false;
+  let retryWorkers = 0;
+  let retryStarts = 0;
+  let releaseSubmission;
+  let announceSubmission;
+  const submissionPending = new Promise((resolve) => { releaseSubmission = resolve; });
+  const submissionStarted = new Promise((resolve) => { announceSubmission = resolve; });
+  const assertInitialAnswerRun = () => { if (cancelled) throw new Error('本轮答题已清空。'); };
   const phases = [];
   const confirmation = { document: doc, ownerWindow: frameWindow, popup: {} };
   const context = vm.createContext({
@@ -71,6 +88,8 @@ async function uploadFixture({ autoSubmit = true, actions = {}, expired = false,
     upload: 'submit', retryableResults: [], cacheableResults: [], deepThinking: false,
     allowStaticExpiryFallback: true, chapterActionCorrelationId: '',
     uploadInProgress: false, sleep: async () => {}, waitForTikuAdapterBalanceRecovery: async () => {},
+    assertInitialAnswerRun,
+    waitForInitialAnswerRun: async (task) => { assertInitialAnswerRun(); const result = await task; assertInitialAnswerRun(); return result; },
     worker: { uploadHandler: async ({ callback }) => callback(100, true), emit() {} },
     isWindowsAutoSubmitEnabled: () => autoSubmit,
     isChapterTestExpired: () => false,
@@ -83,20 +102,26 @@ async function uploadFixture({ autoSubmit = true, actions = {}, expired = false,
     invokeChapterActionWithExpiryCapture: async (_window, _doc, action, _wait, options) => {
       phases.push(options?.phase || 'save');
       await action();
+      if (holdSubmission && options?.phase === 'submit') {
+        announceSubmission();
+        await submissionPending;
+      }
       return expired;
     },
     detectChapterRetakePrompt: () => retakePrompts.shift() ?? false,
     showTopCenterNotice() {}, clearChapterRetakePrompt() {}, notifyManualAnswerRequired() {},
-    createChapterWorker: () => ({ doWork: async () => [] }), roots: [], logDebug() {},
+    createChapterWorker: () => { retryWorkers++; return { doWork: async () => { retryStarts++; return []; } }; }, roots: [], logDebug() {},
     appsMethods: () => ({ addQuestionCacheFromWorkResult: () => cacheWrites++ }),
     $console: { info() {}, warn() {} }, $message: { info() {}, success() {}, warn() {} }
   });
-  const body = source.slice(begin, end);
+  const body = uploadStatements.map((statement) => statement.getText(ast)).join('\n');
   const code = ts.transpileModule(`async function run() { ${body} }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText;
   vm.runInContext(code, context);
-  return { run: () => context.run(), cacheWrites: () => cacheWrites, phases, frameWindow, originalAlert };
+  return { run: () => context.run(), cacheWrites: () => cacheWrites, phases, frameWindow, originalAlert,
+    cancel() { cancelled = true; }, releaseSubmission, submissionStarted,
+    retryWorkers: () => retryWorkers, retryStarts: () => retryStarts };
 }
 
 test('the actual upload callback cannot complete or cache a chapter with no submit functions', async () => {
@@ -168,5 +193,22 @@ for (const stillRequiresRetake of [true, false]) {
     assert.equal(outcome.disposition, stillRequiresRetake ? 'retryable-failure' : 'completed');
     assert.equal(fixture.cacheWrites(), 0);
     assert.deepEqual(fixture.phases, ['open-confirmation', 'submit', 'open-confirmation', 'submit']);
+  });
+}
+
+for (const retakeRequired of [true, false]) {
+  test(`clearing during pending submit ignores a late ${retakeRequired ? 'retake' : 'success'} response`, async () => {
+    const fixture = await uploadFixture({ holdSubmission: true,
+      actions: { btnBlueSubmit() {}, submitCheckTimes() {} }, retakePrompts: [retakeRequired] });
+    const outcome = fixture.run().catch((error) => error);
+    await fixture.submissionStarted;
+    fixture.cancel();
+    fixture.releaseSubmission();
+    const result = await outcome;
+    assert.equal(fixture.retryWorkers(), 0, 'a cancelled submission must not create an AI retry worker');
+    assert.equal(fixture.retryStarts(), 0, 'a cancelled submission must not start AI retry work');
+    assert.equal(fixture.cacheWrites(), 0, 'a cancelled submission must not publish stale answer caches');
+    assert.match(result.message ?? '', /本轮答题已清空/);
+    assert.deepEqual(fixture.phases, ['open-confirmation', 'submit']);
   });
 }

@@ -42,6 +42,8 @@ import {
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
 import { resolveManualAnswerState } from './cx-manual-state.js';
+import { resetCxQuestionAnswers } from './cx-answer-reset.js';
+import { createCxAnswerRunScope } from './cx-answer-run-scope.js';
 import { observeChapterSubmission } from './cx-chapter-submission.js';
 import { dismissChapterSubmissionDialog, submitChapterSubmissionConfirmation } from './cx-chapter-dialog.js';
 import { createChapterConfirmationSession } from './cx-chapter-confirmation.js';
@@ -916,6 +918,18 @@ const defaultWorkOptions: CommonWorkOptions = {
 };
 
 const questionTypeInputSelector = 'input[id^="answertype"],input[name^="answertype"],input[name^="type"],input[id^="type"]';
+
+// Current work/exam pages use singleQuesId while older pages use questionLi.
+// Prefer the current template so nested legacy wrappers cannot duplicate a question.
+function queryWorkOrExamQuestionRoots(doc: ParentNode = document): HTMLElement[] {
+  const currentRoots = Array.from(doc.querySelectorAll<HTMLElement>('.singleQuesId'));
+  return currentRoots.length > 0 ? currentRoots : Array.from(doc.querySelectorAll<HTMLElement>('.questionLi'));
+}
+
+function getWorkOrExamQuestionSelector(doc: ParentNode = document): '.singleQuesId' | '.questionLi' {
+  return doc.querySelector('.singleQuesId') ? '.singleQuesId' : '.questionLi';
+}
+
 const siblingSubTaskRefreshDelayMs = 10000;
 let debugSequence = 0;
 const debugLogThrottleKey = '__chaoxing_plus_debug_log_throttle__';
@@ -1904,8 +1918,17 @@ function renderMethods() {
 
 function appsMethods() {
   return (CommonProject.scripts.apps.methods?.call({} as any) ?? {}) as {
-    searchAnswerInCaches?: <T>(title: string, provider: () => Promise<T>, mode?: 'normal' | 'deep') => Promise<T>;
-    addQuestionCacheFromWorkResult?: (result: unknown, mode?: 'normal' | 'deep') => void;
+    searchAnswerInCaches?: <T>(
+      title: string,
+      provider: () => Promise<T>,
+      mode?: 'normal' | 'deep',
+      identity?: { type?: string; options?: string[] | string }
+    ) => Promise<T>;
+    addQuestionCacheFromWorkResult?: (
+      result: unknown,
+      mode?: 'normal' | 'deep',
+      identity?: { type?: string; options?: string[] | string }
+    ) => void;
   };
 }
 
@@ -1924,8 +1947,11 @@ function workResultsMethods() {
       isStopped: () => boolean;
       stop: () => void;
       continuate: () => void;
-      retryQuestion: (index: number) => Promise<SimplifyWorkResult | undefined>;
+      retryQuestion: (index: number, resetAnswer?: boolean) => Promise<SimplifyWorkResult | undefined>;
       canRetryQuestion?: (index: number) => boolean;
+      clearAnswers?: () => void | Promise<void>;
+      prepareReset?: () => void | Promise<void>;
+      getQuestions?: () => SimplifyWorkResult[];
     }) => void;
     clearRuntimeControls?: () => void;
     createWorkResultsPanel?: () => HTMLElement;
@@ -4824,6 +4850,17 @@ const JobRunner = {
     };
 
     const authorizeManualAnswer = createWindowsManualAnswerGateController([frameDocument, document]);
+    const answerRun = createCxAnswerRunScope();
+    const initialAnswerRun = answerRun.capture();
+    const assertInitialAnswerRun = () => {
+      if (!answerRun.isCurrent(initialAnswerRun)) throw new Error('本轮答题已清空。');
+    };
+    const waitForInitialAnswerRun = async <T>(task: Promise<T>): Promise<T> => {
+      assertInitialAnswerRun();
+      const result = await answerRun.wait(task);
+      assertInitialAnswerRun();
+      return result;
+    };
 
     const deduplicateSearchRequest = createSearchRequestDeduplicator<SearchInformation[]>();
     const createChapterWorker = (
@@ -4835,7 +4872,7 @@ const JobRunner = {
         suppressWorkResultsPanelUpdate?: boolean;
       } = {}
     ) =>
-      trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
+      answerRun.track(trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
         root: questionRoots,
         elements: {
           title: '.Zy_TItle .clearfix',
@@ -4853,12 +4890,16 @@ const JobRunner = {
             throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
           }
 
+          const questionType = resolveChapterQuestionType(ctx.root, elements);
+          const optionTexts =
+            questionType === 'completion'
+              ? []
+              : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText);
+          const optionsText = optionTexts.join('\n');
+          const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts };
+          ctx.searchIdentity = cacheIdentity;
+
           const provider = async () => {
-            const questionType = resolveChapterQuestionType(ctx.root, elements);
-            const optionsText =
-              questionType === 'completion'
-                ? ''
-                : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
             const request = async () => {
               await sleep((period ?? 3) * 1000);
               const baseInfos = workerOptions.forceAIFallbackOnly
@@ -4891,7 +4932,7 @@ const JobRunner = {
 
           const searchInCaches = appsMethods().searchAnswerInCaches;
           return searchInCaches && !workerOptions.skipCache
-            ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
+            ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal', cacheIdentity)
             : provider();
         },
         work: async (ctx) => {
@@ -5043,7 +5084,7 @@ const JobRunner = {
             });
           }
         }
-      })));
+      }))));
 
     const cacheableResults: SimplifyWorkResult[] = [];
     const worker = createChapterWorker(roots, {
@@ -5051,12 +5092,16 @@ const JobRunner = {
         cacheableResults.push(result);
       }
     });
-    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    const clearRuntimeControls = () => { if (answerRun.isCurrent(initialAnswerRun)) workResultsMethods().clearRuntimeControls?.(); };
     let taskBusy = true;
     let uploadInProgress = false;
 
     workResultsMethods().setRuntimeControls?.({
       ownerDocument: frameDocument,
+      prepareReset: () => { answerRun.cancel(); taskBusy = false; uploadInProgress = false; },
+      getQuestions: () => roots.map((root) => ({ question: chapterTestTaskQuestionTitleTransform(Array.from(root.querySelectorAll<HTMLElement>('.Zy_TItle .clearfix'))),
+        type: normalizeResultQuestionType(resolveAnswerSearchType(root)), requested: false, resolved: false, searchInfos: [] })),
+      clearAnswers: () => resetCxQuestionAnswers(roots),
       isRunning: () => worker.isRunning || taskBusy || uploadInProgress || tikuAdapterBalanceRecoveryState.paused,
       isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => { worker.isStop = true; worker.emit('stop'); },
@@ -5069,7 +5114,8 @@ const JobRunner = {
         worker.emit('continuate');
       },
       canRetryQuestion: (index) => Boolean(roots[index]) && !taskBusy && !uploadInProgress && !tikuAdapterBalanceRecoveryState.paused,
-      retryQuestion: async (index) => {
+      retryQuestion: async (index, resetAnswer) => {
+        const retryRun = answerRun.capture();
         const root = roots[index];
         if (!root) {
           return undefined;
@@ -5078,6 +5124,8 @@ const JobRunner = {
         if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
           return undefined;
         }
+        if (!answerRun.isCurrent(retryRun)) return undefined;
+        if (resetAnswer) resetCxQuestionAnswers([root]);
 
         resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
         workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
@@ -5095,7 +5143,8 @@ const JobRunner = {
           suppressWorkResultsPanelUpdate: true,
           skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
         });
-        const retriedResults = await retryWorker.doWork();
+        const retriedResults = await answerRun.wait(retryWorker.doWork());
+        if (!answerRun.isCurrent(retryRun)) return undefined;
         notifyManualAnswerRequired(retriedResults);
         logDebug('info', '动作节点诊断：单题重答完成', {
           index,
@@ -5115,6 +5164,7 @@ const JobRunner = {
       index: number,
       initialResult: Awaited<ReturnType<typeof worker.doWork>>[number]
     ) {
+      assertInitialAnswerRun();
       const root = roots[index];
       if (!root) {
         return initialResult;
@@ -5123,7 +5173,7 @@ const JobRunner = {
       let latestResult = initialResult;
       const maxAttempts = getUnfinishedQuestionRetryAttempts();
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
         if (tikuAdapterBalanceRecoveryState.paused) break;
         logDebug('info', '动作节点诊断：未完成单题自动重试', {
           index,
@@ -5140,7 +5190,7 @@ const JobRunner = {
             suppressWorkResultsPanelUpdate: true,
             skipCache: shouldSkipCacheForAutomaticRetry(latestResult)
           });
-          const retriedResults = await retryWorker.doWork();
+          const retriedResults = await waitForInitialAnswerRun(retryWorker.doWork());
           const retried = retriedResults[0];
           if (retried) {
             latestResult = retried;
@@ -5159,6 +5209,7 @@ const JobRunner = {
             break;
           }
         } catch (err) {
+          assertInitialAnswerRun();
           latestResult.error = (err as Error).message || String(err);
         }
       }
@@ -5174,7 +5225,7 @@ const JobRunner = {
       if (typeof isWindowsManualAnswerMode === 'function' && isWindowsManualAnswerMode()) return results;
       const retryableResults = results.slice();
       for (let index = 0; index < retryableResults.length; index++) {
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
         const result = retryableResults[index];
         if (result.result?.finish) {
           continue;
@@ -5191,19 +5242,22 @@ const JobRunner = {
     const decisionKey = allowStaticExpiryFallback
       ? JSON.stringify([chapterTaskContext.scope, chapterTaskContext.tabKey, chapterTaskJobId])
       : undefined;
-    const confirmed = await confirmBeforeAutoAnswer(worker, decisionKey ? {
+    const confirmed = await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker, decisionKey ? {
       scope: { courseId: decisionCourseId, classId: decisionClassId },
       key: decisionKey
-    } : undefined);
+    } : undefined)).catch((error) => {
+      if (!answerRun.isCurrent(initialAnswerRun)) return false;
+      throw error;
+    });
     if (!confirmed) {
       clearRuntimeControls();
       return { finished: false, manual: true };
     }
 
     try {
-      const results = await worker.doWork();
+      const results = await waitForInitialAnswerRun(worker.doWork());
         const retryableResults = await retryUnfinishedChapterQuestions(results);
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
         notifyManualAnswerRequired(retryableResults);
         workResultsMethods().refresh?.();
         if (isWindowsManualAnswerMode()) {
@@ -5220,8 +5274,8 @@ const JobRunner = {
         uploadInProgress = true;
         $console.info(msg);
         $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
-        await sleep(stopSecondWhenFinish * 1000);
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(sleep(stopSecondWhenFinish * 1000));
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
 
         if (!allowStaticExpiryFallback && isChapterTestExpired(frameDocument)) {
           $console.warn('章节测试已截止，不能作答，已跳过答题和提交。');
@@ -5260,6 +5314,7 @@ const JobRunner = {
         let confirmationSession: ReturnType<typeof createChapterConfirmationSession> | undefined;
         const isSubmissionComplete = () => confirmedSubmission || frameDocument.querySelector('.testTit_status_complete') !== null;
         const checkChapterTask = () => {
+          assertInitialAnswerRun();
           const currentJobId = formValue('form #jobid,form input[name="jobid"]')
             || frame.getAttribute('jobid') || (() => {
               try { const data = JSON.parse(frame.getAttribute('data') || '{}'); return String(data.jobid || data._jobid || ''); }
@@ -5381,6 +5436,7 @@ const JobRunner = {
             }, undefined, { correlationId: chapterActionCorrelationId });
             const submissionDeadline = { expiresAt: Date.now() + 30000 };
             const expiredAfterSubmit = await performChapterAction('open-confirmation', submissionDeadline);
+            assertInitialAnswerRun();
             if (expiredAfterSubmit) {
               chapterExpired = true;
               chapterTerminalExpired = true;
@@ -5389,6 +5445,7 @@ const JobRunner = {
               return;
             }
             const expiredAfterConfirm = await performChapterAction('submit', submissionDeadline);
+            assertInitialAnswerRun();
             if (expiredAfterConfirm) {
               chapterExpired = true;
               chapterTerminalExpired = true;
@@ -5403,9 +5460,11 @@ const JobRunner = {
               $message.warn({ content: msg, duration: 0 });
               $console.warn(msg);
               clearChapterRetakePrompt();
+              assertInitialAnswerRun();
               const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });
               if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue(frameDocument);
-              const retryResults = await aiRetryWorker.doWork();
+              assertInitialAnswerRun();
+              const retryResults = await waitForInitialAnswerRun(aiRetryWorker.doWork());
               await waitForTikuAdapterBalanceRecovery();
               notifyManualAnswerRequired(retryResults);
               logDebug('info', '动作节点诊断：AI 二次改答完成', {
@@ -5433,6 +5492,7 @@ const JobRunner = {
                     }
                     const retrySubmissionDeadline = { expiresAt: Date.now() + 30000 };
                     const expiredAfterSubmit = await performChapterAction('open-confirmation', retrySubmissionDeadline);
+                    assertInitialAnswerRun();
                     if (expiredAfterSubmit) {
                       chapterExpired = true;
                       chapterTerminalExpired = true;
@@ -5441,6 +5501,7 @@ const JobRunner = {
                       return;
                     }
                     const expiredAfterConfirm = await performChapterAction('submit', retrySubmissionDeadline);
+                    assertInitialAnswerRun();
                     if (expiredAfterConfirm) {
                       chapterExpired = true;
                       chapterTerminalExpired = true;
@@ -5492,6 +5553,9 @@ const JobRunner = {
           staticExpired: chapterStaticExpired,
           terminalExpired: chapterTerminalExpired
         };
+    } catch (error) {
+      if (answerRun.isCurrent(initialAnswerRun)) throw error;
+      return { finished: false, manual: true };
     } finally {
       uploadInProgress = false;
       taskBusy = false;
@@ -5595,6 +5659,17 @@ function workOrExam(
     jobName: preview_mode ? `${type}-preview` : `${type}-step-by-step`
   });
   const authorizeManualAnswer = createWindowsManualAnswerGateController([document]);
+  const answerRun = createCxAnswerRunScope();
+  const initialAnswerRun = answerRun.capture();
+  const assertInitialAnswerRun = () => {
+    if (!answerRun.isCurrent(initialAnswerRun)) throw new Error('本轮答题已清空。');
+  };
+  const waitForInitialAnswerRun = async <T>(task: Promise<T>): Promise<T> => {
+    assertInitialAnswerRun();
+    const result = await answerRun.wait(task);
+    assertInitialAnswerRun();
+    return result;
+  };
   $message.info(`开始${type === 'work' ? '作业' : '考试'}`);
 
   if (preview_mode) {
@@ -5602,6 +5677,7 @@ function workOrExam(
   }
 
   const workOrExamTitleSelector = getWorkOrExamTitleSelector(preview_mode);
+  const workOrExamQuestionSelector = getWorkOrExamQuestionSelector(document);
   const workOrExamQuestionTitleTransform = (titles: (HTMLElement | undefined)[]) =>
     transformWorkOrExamQuestionTitle(titles, redundanceWordsText);
 
@@ -5934,6 +6010,7 @@ function workOrExam(
   }
 
   async function submitWorkOrExamPage(pageType: typeof type) {
+    if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
     const runtimeCandidate = findWorkOrExamRuntimeWindow(['btnBlueSubmit', 'submitCheckTimes']);
     const runtimeWindow = runtimeCandidate.window;
     const runtimeWindowSource = runtimeCandidate.source;
@@ -5962,7 +6039,7 @@ function workOrExam(
 
     if (hasBtnBlueSubmit) {
       const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document,
-        () => runtimeWindow.btnBlueSubmit(), 3000, {
+        () => { if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun(); return runtimeWindow.btnBlueSubmit(); }, 3000, {
           phase: 'open-confirmation', isConfirmationReady, isCompleted,
           onSubmitted: () => { confirmedSubmission = true; }
         });
@@ -5971,6 +6048,7 @@ function workOrExam(
       invoked = true;
     } else {
       const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document, () => {
+        if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
         const firstFallbackSubmit = clickWorkOrExamActionButton('submit');
         fallbackSubmitClicked = firstFallbackSubmit.clicked;
         firstFallbackSubmitTarget = firstFallbackSubmit.target;
@@ -5984,15 +6062,17 @@ function workOrExam(
     }
 
     if (!confirmedSubmission && !isCompleted()) {
+      if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
       if (hasSubmitCheckTimes) {
         if (!isConfirmationReady()) throw new Error('作业/考试提交确认入口尚未就绪，已取消本次提交。');
         const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document,
-          () => runtimeWindow.submitCheckTimes(), 3000);
+          () => { if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun(); return runtimeWindow.submitCheckTimes(); }, 3000);
         if (expired) return;
         confirmSubmitInvoked = true;
         invoked = true;
       } else {
         const expired = await invokeChapterActionWithExpiryCapture(runtimeWindow, runtimeWindow.document, () => {
+          if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
           const confirmationFallback = clickWorkOrExamSubmitConfirmButton();
           const confirmationFallbackSubmit = confirmationFallback;
           fallbackConfirmClicked = confirmationFallbackSubmit.clicked;
@@ -6022,6 +6102,7 @@ function workOrExam(
   }
 
   async function saveWorkOrExamPage(pageType: typeof type) {
+    if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
     const runtimeCandidate = findWorkOrExamRuntimeWindow(['noSubmit']);
     const runtimeWindow = runtimeCandidate.window;
     const runtimeWindowSource = runtimeCandidate.source;
@@ -6053,7 +6134,7 @@ function workOrExam(
       retainForBalanceRecovery?: boolean;
     } = {}
   ) =>
-    trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
+    answerRun.track(trackTikuAdapterWorker(authorizeManualAnswer(new OCSWorker({
       root: questionRoots,
       elements: {
         title: (root) => Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector)).filter((element) => Boolean(element.textContent?.trim())),
@@ -6076,12 +6157,16 @@ function workOrExam(
           throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
         }
 
+        const questionType = resolveAnswerSearchType(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document);
+        const optionTexts =
+          questionType === 'completion'
+            ? []
+            : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText);
+        const optionsText = optionTexts.join('\n');
+        const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts };
+        ctx.searchIdentity = cacheIdentity;
+
         const provider = async () => {
-          const questionType = resolveAnswerSearchType(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.questionLi') ?? document);
-          const optionsText =
-            ctx.type === 'completion'
-              ? ''
-              : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText).join('\n');
           const request = async () => {
             await sleep((period ?? 3) * 1000);
             const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
@@ -6112,12 +6197,12 @@ function workOrExam(
 
         const searchInCaches = appsMethods().searchAnswerInCaches;
         return searchInCaches && !workerOptions.skipCache
-          ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal')
+          ? searchInCaches(title, provider, deepThinking ? 'deep' : 'normal', cacheIdentity)
           : provider();
       },
       work: async (ctx) => {
         const { elements, searchInfos } = ctx;
-        const questionType = resolveQuestionTypeForWork(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.questionLi') ?? document, {
+        const questionType = resolveQuestionTypeForWork(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document, {
           elements: { options: elements.options as HTMLElement[] }
         });
 
@@ -6232,7 +6317,7 @@ function workOrExam(
           workResultsMethods().setResults?.(simplified);
           workResultsMethods().updateWorkStateByResults?.(res);
 
-          const currentRoot = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'))[currentIndex];
+          const currentRoot = queryWorkOrExamQuestionRoots()[currentIndex];
           const questionType = currentRoot ? resolveAnswerSearchType(currentRoot) : undefined;
           const inferredType = currentRoot ? resolveQuestionTypeForWork(currentRoot, {
             elements: { options: Array.from(currentRoot.querySelectorAll<HTMLElement>('.Py-mian1 .clearfix > div')) }
@@ -6269,9 +6354,9 @@ function workOrExam(
 
         workResultsMethods().appendResults?.(simplified);
       }
-    })), workerOptions.retainForBalanceRecovery === true);
+    })), workerOptions.retainForBalanceRecovery === true));
 
-  const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });
+  const worker = createWorkOrExamWorker(workOrExamQuestionSelector, { retainForBalanceRecovery: !preview_mode });
 
   async function retryUnfinishedWorkOrExamQuestionAtIndex(
     index: number,
@@ -6279,10 +6364,11 @@ function workOrExam(
     total: number,
     initialResult: Awaited<ReturnType<typeof worker.doWork>>[number]
   ) {
+    assertInitialAnswerRun();
     let latestResult = initialResult;
     const maxAttempts = getUnfinishedQuestionRetryAttempts();
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      await waitForTikuAdapterBalanceRecovery();
+      await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
       if (tikuAdapterBalanceRecoveryState.paused) break;
       logDebug('info', '动作节点诊断：未完成单题自动重试', {
         index,
@@ -6299,7 +6385,7 @@ function workOrExam(
           suppressWorkResultsPanelUpdate: true,
           skipCache: shouldSkipCacheForAutomaticRetry(latestResult)
         });
-        const retriedResults = await retryWorker.doWork();
+        const retriedResults = await waitForInitialAnswerRun(retryWorker.doWork());
         const retried = retriedResults[0];
         if (retried) {
           latestResult = retried;
@@ -6317,6 +6403,7 @@ function workOrExam(
           break;
         }
       } catch (err) {
+        assertInitialAnswerRun();
         latestResult.error = (err as Error).message || String(err);
       }
     }
@@ -6329,11 +6416,12 @@ function workOrExam(
   }
 
   async function retryUnfinishedWorkOrExamQuestions(results: Awaited<ReturnType<typeof worker.doWork>>) {
+    assertInitialAnswerRun();
     if (typeof isWindowsManualAnswerMode === 'function' && isWindowsManualAnswerMode()) return results;
-    const liveRoots = Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
+    const liveRoots = queryWorkOrExamQuestionRoots();
     const retryableResults = results.slice();
     for (let index = 0; index < retryableResults.length; index++) {
-      await waitForTikuAdapterBalanceRecovery();
+      await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
       const result = retryableResults[index];
       if (result.result?.finish) {
         continue;
@@ -6350,7 +6438,8 @@ function workOrExam(
   }
 
   async function uploadWorkOrExamResults(results: Awaited<ReturnType<typeof worker.doWork>>) {
-    await waitForTikuAdapterBalanceRecovery();
+    assertInitialAnswerRun();
+    await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
     if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
     const autoSubmitEnabled = isWindowsAutoSubmitEnabled();
     const shouldAllowSubmitForPage = upload === 'submit'
@@ -6361,8 +6450,8 @@ function workOrExam(
     const msg = `答题完成，将等待 ${stopSecondWhenFinish} 秒后进行保存或提交。`;
     $console.info(msg);
     $message.info({ content: msg, duration: stopSecondWhenFinish * 1000 });
-    await sleep(stopSecondWhenFinish * 1000);
-    await waitForTikuAdapterBalanceRecovery();
+    await waitForInitialAnswerRun(sleep(stopSecondWhenFinish * 1000));
+    await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
     if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
 
     logDebug('info', '动作节点诊断：作业/考试准备提交或保存', {
@@ -6398,8 +6487,8 @@ function workOrExam(
           uploadable,
           shouldSubmit
         }, undefined, { correlationId: workExamCorrelationId });
-        await sleep(3000);
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(sleep(3000));
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
 
         if (shouldSubmit) {
           if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
@@ -6413,14 +6502,18 @@ function workOrExam(
   }
 
   if (preview_mode) {
-    const liveRoots = () => Array.from(document.querySelectorAll<HTMLElement>('.questionLi'));
-    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    const liveRoots = () => queryWorkOrExamQuestionRoots();
+    const clearRuntimeControls = () => { if (answerRun.isCurrent(initialAnswerRun)) workResultsMethods().clearRuntimeControls?.(); };
     let taskBusy = true;
     let uploadInProgress = false;
     let retryInFlight = false;
 
     workResultsMethods().setRuntimeControls?.({
       ownerDocument: document,
+      prepareReset: () => { answerRun.cancel(); taskBusy = false; uploadInProgress = false; retryInFlight = false; },
+      getQuestions: () => liveRoots().map((root) => ({ question: workOrExamQuestionTitleTransform(Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector))),
+        type: normalizeResultQuestionType(resolveAnswerSearchType(root)), requested: false, resolved: false, searchInfos: [] })),
+      clearAnswers: () => resetCxQuestionAnswers(liveRoots()),
       isRunning: () => worker.isRunning || taskBusy || uploadInProgress || tikuAdapterBalanceRecoveryState.paused,
       isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => { worker.isStop = true; worker.emit('stop'); },
@@ -6433,7 +6526,8 @@ function workOrExam(
         worker.emit('continuate');
       },
       canRetryQuestion: (index) => Boolean(liveRoots()[index]) && !taskBusy && !uploadInProgress && !retryInFlight && !tikuAdapterBalanceRecoveryState.paused,
-      retryQuestion: async (index) => {
+      retryQuestion: async (index, resetAnswer) => {
+        const retryRun = answerRun.capture();
         if (retryInFlight) {
           return undefined;
         }
@@ -6447,6 +6541,8 @@ function workOrExam(
           if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
             return undefined;
           }
+          if (!answerRun.isCurrent(retryRun)) return undefined;
+          if (resetAnswer) resetCxQuestionAnswers([root]);
 
           resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
           workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
@@ -6460,7 +6556,8 @@ function workOrExam(
             suppressWorkResultsPanelUpdate: true,
             skipCache: shouldSkipCacheForManualRetry(workResultsMethods().getResults?.()?.[index])
           });
-          const retriedResults = await retryWorker.doWork();
+          const retriedResults = await answerRun.wait(retryWorker.doWork());
+          if (!answerRun.isCurrent(retryRun)) return undefined;
           notifyManualAnswerRequired(retriedResults);
           logDebug('info', '动作节点诊断：单题重答完成', {
             index,
@@ -6474,14 +6571,14 @@ function workOrExam(
             retrying: false
           };
         } finally {
-          retryInFlight = false;
+          if (answerRun.isCurrent(retryRun)) retryInFlight = false;
         }
       }
     });
 
     worker.on('close', clearRuntimeControls);
     void (async () => {
-      const confirmed = isWindowsHostRuntime() ? await confirmBeforeAutoAnswer(worker) : true;
+      const confirmed = isWindowsHostRuntime() ? await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker)) : true;
       if (!confirmed) {
         clearRuntimeControls();
         return;
@@ -6493,9 +6590,9 @@ function workOrExam(
         questionCount: liveRoots().length
       }, undefined, { correlationId: workExamCorrelationId });
       try {
-        const results = await worker.doWork();
+        const results = await waitForInitialAnswerRun(worker.doWork());
         const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
         notifyManualAnswerRequired(retryableResults);
         workResultsMethods().refresh?.();
         if (isWindowsManualAnswerMode()) {
@@ -6516,21 +6613,25 @@ function workOrExam(
         }
         worker.emit('done');
       } catch (err) {
+        if (!answerRun.isCurrent(initialAnswerRun)) return;
         console.error(err);
         $message.error('答题程序发生错误 : ' + ((err as Error).message || String(err)));
       }
-    })().finally(() => {
+    })().catch((error) => {
+      if (answerRun.isCurrent(initialAnswerRun)) $message.error('答题程序发生错误 : ' + ((error as Error).message || String(error)));
+    }).finally(() => {
       taskBusy = false;
       workResultsMethods().refresh?.();
     });
   } else {
     const getNextBtn = () => document.querySelector('[onclick="getTheNextQuestion(1)"]') as HTMLElement | null;
-    const clearRuntimeControls = () => workResultsMethods().clearRuntimeControls?.();
+    const clearRuntimeControls = () => { if (answerRun.isCurrent(initialAnswerRun)) workResultsMethods().clearRuntimeControls?.(); };
     let stepwiseCurrentIndex = 0;
     let stepwiseTaskActive = true;
     let stepwiseUploadInProgress = false;
     let stepwiseRetryInFlight = false;
     let stepwiseNavigationLost = false;
+    let bulkResetQuestions: SimplifyWorkResult[] | undefined;
 
     const getStepwiseResults = () => workResultsMethods().getResults?.() ?? [];
     const getStepwiseQuestionTitle = (root: HTMLElement | null) => root
@@ -6538,7 +6639,7 @@ function workOrExam(
       : '';
     const resolveStepwiseCurrentIndex = (results: SimplifyWorkResult[]) => {
       const boundedIndex = Math.min(Math.max(stepwiseCurrentIndex, 0), Math.max(results.length - 1, 0));
-      const currentTitle = getStepwiseQuestionTitle(document.querySelector<HTMLElement>('.questionLi'));
+      const currentTitle = getStepwiseQuestionTitle(queryWorkOrExamQuestionRoots()[0] ?? null);
       if (!currentTitle || results[boundedIndex]?.question === currentTitle) {
         stepwiseCurrentIndex = boundedIndex;
         return stepwiseCurrentIndex;
@@ -6560,7 +6661,7 @@ function workOrExam(
 
     const validateStepwisePage = (results: SimplifyWorkResult[], index: number) => {
       const expectedTitle = results[index]?.question;
-      const actualTitle = getStepwiseQuestionTitle(document.querySelector<HTMLElement>('.questionLi'));
+      const actualTitle = getStepwiseQuestionTitle(queryWorkOrExamQuestionRoots()[0] ?? null);
       if (expectedTitle && actualTitle && expectedTitle !== actualTitle) {
         stepwiseNavigationLost = true;
         return false;
@@ -6568,7 +6669,9 @@ function workOrExam(
       return true;
     };
 
-    const retryStepwiseQuestion = async (index: number) => {
+    const retryStepwiseQuestion = async (index: number, clearOnly = false, resetAnswer = false) => {
+      const retryRun = answerRun.capture();
+      const assertRetryRun = () => { if (!answerRun.isCurrent(retryRun)) throw new Error('本次重答已清空。'); };
       if (stepwiseRetryInFlight || stepwiseNavigationLost) {
         return undefined;
       }
@@ -6586,26 +6689,37 @@ function workOrExam(
 
       try {
         while (stepwiseCurrentIndex !== index) {
+          assertRetryRun();
+          if (typeof waitForTabAnswerContinue === 'function') await answerRun.wait(waitForTabAnswerContinue());
+          assertRetryRun();
           if (!navigateWorkOrExamQuestion(direction)) {
             throw new Error('未找到作业/考试题目切换控件，无法定位待重答题目。');
           }
-          await sleep(1000);
           stepwiseCurrentIndex += direction;
           moved++;
+          await answerRun.wait(sleep(1000));
+          assertRetryRun();
           if (!validateStepwisePage(results, stepwiseCurrentIndex)) {
             throw new Error('切换后题目与重答结果不匹配，已取消本次重答。');
           }
         }
 
-        const root = document.querySelector<HTMLElement>('.questionLi');
+        const root = queryWorkOrExamQuestionRoots()[0] ?? null;
         const currentTitle = getStepwiseQuestionTitle(root);
         if (!root || (currentTitle && initialResult.question && currentTitle !== initialResult.question)) {
           throw new Error('切换后题目与重答结果不匹配，已取消本次重答。');
         }
 
+        if (clearOnly) {
+          await resetCxQuestionAnswers([root]);
+          return undefined;
+        }
+
         if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
           return undefined;
         }
+        assertRetryRun();
+        if (resetAnswer) resetCxQuestionAnswers([root]);
 
         resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());
         workResultsMethods().patchResult?.(index, { retrying: true, error: undefined, manual: false });
@@ -6613,7 +6727,8 @@ function workOrExam(
           suppressWorkResultsPanelUpdate: true,
           skipCache: shouldSkipCacheForManualRetry(initialResult)
         });
-        const retriedResults = await retryWorker.doWork();
+        const retriedResults = await answerRun.wait(retryWorker.doWork());
+        assertRetryRun();
         notifyManualAnswerRequired(retriedResults);
         const retried = simplifyWorkResult(retriedResults, workOrExamQuestionTitleTransform)[0];
         if (!retried) {
@@ -6626,19 +6741,25 @@ function workOrExam(
           manual: false,
           retrying: false
         };
-        workResultsMethods().patchResult?.(index, result);
         return result;
       } finally {
+        if (!answerRun.isCurrent(retryRun)) return undefined;
         let restored = true;
         while (moved > 0) {
+          assertRetryRun();
+          if (typeof waitForTabAnswerContinue === 'function') {
+            await answerRun.wait(waitForTabAnswerContinue());
+            assertRetryRun();
+          }
           const restoreDirection: -1 | 1 = direction === 1 ? -1 : 1;
           if (!navigateWorkOrExamQuestion(restoreDirection)) {
             restored = false;
             break;
           }
-          await sleep(1000);
           stepwiseCurrentIndex += restoreDirection;
           moved--;
+          await answerRun.wait(sleep(1000));
+          assertRetryRun();
           if (!validateStepwisePage(results, stepwiseCurrentIndex)) {
             restored = false;
             break;
@@ -6657,6 +6778,48 @@ function workOrExam(
 
     workResultsMethods().setRuntimeControls?.({
       ownerDocument: document,
+      prepareReset: () => { answerRun.cancel(); stepwiseTaskActive = false; stepwiseUploadInProgress = false; stepwiseRetryInFlight = false; },
+      getQuestions: () => bulkResetQuestions ?? getStepwiseResults().map(({ question, type, searchIdentity }) => ({
+        question, type, searchIdentity, requested: false, resolved: false, searchInfos: []
+      })),
+      clearAnswers: async () => {
+        const resetRun = answerRun.capture();
+        const assertResetRun = () => { if (!answerRun.isCurrent(resetRun)) throw new Error('清空作答已取消。'); };
+        const visited = [] as SimplifyWorkResult[];
+        stepwiseNavigationLost = false;
+        while (stepwiseCurrentIndex > 0) {
+          assertResetRun();
+          if (!navigateWorkOrExamQuestion(-1)) throw new Error('无法返回第一题，已停止清空重答。');
+          stepwiseCurrentIndex--;
+          await answerRun.wait(sleep(1000));
+          assertResetRun();
+        }
+        while (true) {
+          assertResetRun();
+          const root = queryWorkOrExamQuestionRoots()[0] ?? null;
+          if (!root) break;
+          resetCxQuestionAnswers([root]);
+          visited.push({
+            question: getStepwiseQuestionTitle(root), type: normalizeResultQuestionType(resolveAnswerSearchType(root)),
+            requested: false, resolved: false, searchInfos: []
+          });
+          const next = getNextBtn();
+          if (!next) break;
+          triggerSyntheticClick(next);
+          stepwiseCurrentIndex++;
+          await answerRun.wait(sleep(1000));
+          assertResetRun();
+        }
+        while (stepwiseCurrentIndex > 0) {
+          assertResetRun();
+          if (!navigateWorkOrExamQuestion(-1)) throw new Error('无法恢复第一题，已停止清空重答。');
+          stepwiseCurrentIndex--;
+          await answerRun.wait(sleep(1000));
+          assertResetRun();
+        }
+        bulkResetQuestions = visited;
+        stepwiseNavigationLost = false;
+      },
       isRunning: () => worker.isRunning || stepwiseTaskActive || stepwiseUploadInProgress || tikuAdapterBalanceRecoveryState.paused,
       isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => { worker.isStop = true; worker.emit('stop'); },
@@ -6669,24 +6832,24 @@ function workOrExam(
         worker.emit('continuate');
       },
       canRetryQuestion: (index) => Boolean(workResultsMethods().getResults?.()?.[index]) && !stepwiseTaskActive && !stepwiseUploadInProgress && !stepwiseRetryInFlight && !stepwiseNavigationLost && !tikuAdapterBalanceRecoveryState.paused,
-      retryQuestion: retryStepwiseQuestion
+      retryQuestion: (index, resetAnswer) => retryStepwiseQuestion(index, false, resetAnswer)
     });
     worker.on('close', clearRuntimeControls);
 
     void (async () => {
-      const confirmed = isWindowsHostRuntime() ? await confirmBeforeAutoAnswer(worker) : true;
+      const confirmed = isWindowsHostRuntime() ? await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker)) : true;
       if (!confirmed) return;
 
       logDebug('info', '动作节点诊断：开始逐题切换答题', {
         type,
         preview_mode,
-        questionCount: Array.from(document.querySelectorAll<HTMLElement>('.questionLi')).length
+        questionCount: queryWorkOrExamQuestionRoots().length
       }, undefined, { correlationId: workExamCorrelationId });
       const accumulatedResults = await collectStepwiseWorkResults({
-        runCurrentPage: () => worker.doWork({ enable_debug: false }),
-        hasCurrentPage: () => Boolean(document.querySelector<HTMLElement>('.questionLi')) && worker.isClose === false,
-        shouldContinue: () => !tikuAdapterBalanceRecoveryState.paused,
-        waitForContinue: waitForTikuAdapterBalanceRecovery,
+        runCurrentPage: () => waitForInitialAnswerRun(worker.doWork({ enable_debug: false })),
+        hasCurrentPage: () => queryWorkOrExamQuestionRoots().length > 0 && worker.isClose === false,
+        shouldContinue: () => answerRun.isCurrent(initialAnswerRun) && !tikuAdapterBalanceRecoveryState.paused,
+        waitForContinue: () => waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery()),
         getNextButton: getNextBtn,
         waitAfterPage: () => sleep(1000),
         onNextButton: (hasNext) => logDebug('info', '动作节点诊断：执行下一题切换', {
@@ -6695,48 +6858,52 @@ function workOrExam(
           hasNext
         }, undefined, { correlationId: workExamCorrelationId }),
         advancePage: async (next) => {
+          assertInitialAnswerRun();
           triggerSyntheticClick(next);
-          await sleep(1000);
+          stepwiseCurrentIndex++;
+          await waitForInitialAnswerRun(sleep(1000));
         }
       });
 
       const retryCount = accumulatedResults.length;
       stepwiseCurrentIndex = Math.max(retryCount - 1, 0);
       if (retryCount > 0) {
-        await waitForTikuAdapterBalanceRecovery();
+        await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
         let canRetryFromFirstPage = !tikuAdapterBalanceRecoveryState.paused;
         for (let index = retryCount - 1; index > 0; index--) {
-          await waitForTikuAdapterBalanceRecovery();
+          await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
           if (tikuAdapterBalanceRecoveryState.paused || !navigateWorkOrExamQuestion(-1)) {
             canRetryFromFirstPage = false;
             break;
           }
-          await sleep(1000);
           stepwiseCurrentIndex--;
+          await waitForInitialAnswerRun(sleep(1000));
         }
         if (canRetryFromFirstPage) {
           try {
             const retriedResults = await retryUnfinishedResultsInOrder(
               accumulatedResults,
               async (index, initialResult) => {
-                const root = document.querySelector<HTMLElement>('.questionLi');
+                const root = queryWorkOrExamQuestionRoots()[0] ?? null;
                 return root
                   ? retryUnfinishedWorkOrExamQuestionAtIndex(index, root, retryCount, initialResult)
                   : initialResult;
               },
               async () => {
+                assertInitialAnswerRun();
                 if (!navigateWorkOrExamQuestion(1)) {
                   throw new Error('未找到作业/考试下一题控件，无法继续未完成题重答。');
                 }
-                await sleep(1000);
                 stepwiseCurrentIndex++;
+                await waitForInitialAnswerRun(sleep(1000));
               },
               (result) => Boolean(result.result?.finish),
-              () => !tikuAdapterBalanceRecoveryState.paused,
-              waitForTikuAdapterBalanceRecovery
+              () => answerRun.isCurrent(initialAnswerRun) && !tikuAdapterBalanceRecoveryState.paused,
+              () => waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery())
             );
             accumulatedResults.splice(0, accumulatedResults.length, ...retriedResults);
           } catch (error) {
+            assertInitialAnswerRun();
             logDebug('warn', '动作节点诊断：分页未完成题重答中断', {
               error: error instanceof Error ? error.message : String(error),
               retryCount
@@ -6749,7 +6916,7 @@ function workOrExam(
         }
       }
 
-      await waitForTikuAdapterBalanceRecovery();
+      await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
       notifyManualAnswerRequired(accumulatedResults);
       workResultsMethods().refresh?.();
       if (isWindowsManualAnswerMode()) {
@@ -6764,7 +6931,9 @@ function workOrExam(
         stepwiseUploadInProgress = false;
       }
       worker.emit('done');
-    })().finally(() => {
+    })().catch((error) => {
+      if (answerRun.isCurrent(initialAnswerRun)) $message.error('答题程序发生错误 : ' + ((error as Error).message || String(error)));
+    }).finally(() => {
       stepwiseTaskActive = false;
       untrackTikuAdapterWorker(worker);
       workResultsMethods().refresh?.();
@@ -6826,7 +6995,7 @@ function getQuestionTypeInput(root: ParentNode): HTMLInputElement | undefined {
       return root;
     }
 
-    const scopedRoot = root.closest('.TiMu, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;
+    const scopedRoot = root.closest('.TiMu, .singleQuesId, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;
     for (const selector of prioritizedSelectors) {
       const prioritizedMatch = scopedRoot.querySelector<HTMLInputElement>(selector);
       if (prioritizedMatch?.value?.trim()) {

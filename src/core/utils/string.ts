@@ -3,19 +3,22 @@ export interface Rating {
   rating: number;
 }
 
-function tokenize(value: string): Set<string> {
-  return new Set(value.split('').filter(Boolean));
-}
-
 function similarity(a: string, b: string): number {
   if (!a && !b) return 1;
   if (!a || !b) return 0;
-
-  const setA = tokenize(a);
-  const setB = tokenize(b);
-  const intersection = [...setA].filter((token) => setB.has(token)).length;
-  const union = new Set([...setA, ...setB]).size;
-  return union === 0 ? 0 : intersection / union;
+  const left = Array.from(a);
+  const right = Array.from(b);
+  let previous = right.map((_, index) => index + 1);
+  previous.unshift(0);
+  for (let i = 1; i <= left.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= right.length; j++) {
+      row[j] = Math.min(row[j - 1] + 1, previous[j] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1));
+    }
+    previous = row;
+  }
+  return 1 - previous[right.length] / Math.max(left.length, right.length);
 }
 
 function findBestMatch(mainString: string, targetStrings: string[]): { bestMatch: Rating } {
@@ -38,8 +41,10 @@ export function clearString(str: string, ...exclude: string[]) {
 }
 
 export function answerSimilar(answers: string[], options: string[]): Rating[] {
-  const _answers = answers.map(removeRedundant).map((a) => clearString(a));
-  const _options = options.map(removeRedundant).map((o) => clearString(o));
+  // Keep signs, order, repetition and case: x+y, x-y, X and x may differ.
+  const normalize = (value: string) => removeRedundant(value).normalize('NFC').replace(/\s+/gu, ' ').trim();
+  const _answers = answers.map(normalize);
+  const _options = options.map(normalize);
 
   const similar =
     _answers.length !== 0
@@ -69,5 +74,5 @@ export function answerExactMatch(answers: string[], options: string[]): string[]
 }
 
 export function removeRedundant(str: string) {
-  return str?.trim().replace(/[A-Z]{1}[^A-Za-z0-9⺀-鿿]+([A-Za-z0-9⺀-鿿]+)/, '$1') || '';
+  return str?.trim().replace(/^[A-Z][.．、:：]\s*/u, '') || '';
 }

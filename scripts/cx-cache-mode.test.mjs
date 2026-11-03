@@ -11,7 +11,8 @@ async function loadCacheHarness(initial = [], { windowsNoDiskWrite = false } = {
   const parsed = ts.createSourceFile('common.ts', source, ts.ScriptTarget.Latest, true);
   const functionNames = new Set([
     'applyQuestionCaches', 'saveQuestionCaches', 'isLocalQuestionCacheEnabled',
-    'questionCacheMode', 'answerCacheKey',
+    'questionCacheMode', 'normalizeCacheText', 'normalizeQuestionCacheIdentity',
+    'questionCacheIdentityKey', 'answerCacheKey',
     'addQuestionCaches', 'questionCachesToSearchInfos', 'normalizeWorkResultsPayload',
     'resultToQuestionCaches'
   ]);
@@ -49,10 +50,10 @@ async function loadCacheHarness(initial = [], { windowsNoDiskWrite = false } = {
   return { state, answerCache, saved: () => saved, ...methodsUnderTest };
 }
 
-function completedResult(answer) {
+function completedResult(answer, question = '同一道题') {
   return [{
-    question: '同一道题',
-    searchInfos: [{ name: '题库', results: [['同一道题', answer, {}]] }]
+    question,
+    searchInfos: [{ name: '题库', results: [[question, answer, {}]] }]
   }];
 }
 
@@ -94,6 +95,89 @@ test('same answer from normal and deep searches retains two distinct cache entri
   assert.deepEqual(cache.saved().map(({ mode }) => mode), ['deep', undefined]);
 });
 
+test('identity cache requires the same type and ordered options', async () => {
+  const cache = await loadCacheHarness();
+  const identity = { type: 'single', options: ['A. 甲', 'B. 乙'] };
+  cache.addQuestionCacheFromWorkResult(completedResult('甲'), 'normal', identity);
+
+  let calls = 0;
+  const provider = async () => {
+    calls++;
+    return [{ name: '新结果', results: [{ question: '同一道题', answer: '提供方答案' }] }];
+  };
+
+  const same = await cache.searchAnswerInCaches('同一道题', provider, 'normal', {
+    type: 'single', options: ['A. 甲', 'B. 乙']
+  });
+  assert.equal(same[0].results[0].answer, '甲');
+
+  for (const differentIdentity of [
+    { type: 'multiple', options: ['A. 甲', 'B. 乙'] },
+    { type: 'single', options: ['A. 甲', 'C. 丙'] },
+    { type: 'single', options: ['B. 乙', 'A. 甲'] },
+    { type: 'single', options: ['a. 甲', 'B. 乙'] }
+  ]) {
+    const result = await cache.searchAnswerInCaches('同一道题', provider, 'normal', differentIdentity);
+    assert.equal(result[0].results[0].answer, '提供方答案');
+  }
+
+  assert.equal(calls, 4);
+});
+
+test('identity cache normalizes stem, type and option text while preserving option order', async () => {
+  const cache = await loadCacheHarness();
+  cache.addQuestionCacheFromWorkResult(completedResult('规范化答案', 'Ａ　同一道题'), 'normal', {
+    type: 'single', options: ['A. 选项一', 'B. 选项二']
+  });
+  let calls = 0;
+  const result = await cache.searchAnswerInCaches('A 同一道题', async () => {
+    calls++;
+    return [];
+  }, 'normal', {
+    type: ' SINGLE ', options: ['Ａ． 选项一', 'B.   选项二']
+  });
+
+  assert.equal(result[0].results[0].answer, '规范化答案');
+  assert.equal(calls, 0);
+  assert.deepEqual(cache.state.apps.localQuestionCaches[0].identity, {
+    title: 'A 同一道题', type: 'single', options: ['A. 选项一', 'B. 选项二']
+  });
+});
+
+test('identity lookup does not fall back to a legacy cache without identity', async () => {
+  const cache = await loadCacheHarness([{ title: '同一道题', answer: '旧缓存答案', from: '旧题库' }]);
+  let calls = 0;
+  const result = await cache.searchAnswerInCaches('同一道题', async () => {
+    calls++;
+    return [{ name: '当前结果', results: [{ question: '同一道题', answer: '当前答案' }] }];
+  }, 'normal', { type: 'single', options: ['A. 甲', 'B. 乙'] });
+
+  assert.equal(result[0].results[0].answer, '当前答案');
+  assert.equal(calls, 1);
+});
+
+test('identity records survive persistence without merging different option identities', async () => {
+  const firstPage = await loadCacheHarness();
+  firstPage.addQuestionCacheFromWorkResult(completedResult('相同答案'), 'normal', {
+    type: 'single', options: ['A. 甲', 'B. 乙']
+  });
+  firstPage.addQuestionCacheFromWorkResult(completedResult('相同答案'), 'normal', {
+    type: 'single', options: ['A. 甲', 'C. 丙']
+  });
+  const persisted = firstPage.saved();
+  assert.equal(persisted.length, 2);
+
+  const nextPage = await loadCacheHarness();
+  assert.equal(nextPage.applyQuestionCaches(persisted), true);
+  let calls = 0;
+  const result = await nextPage.searchAnswerInCaches('同一道题', async () => {
+    calls++;
+    return [];
+  }, 'normal', { type: 'single', options: ['A. 甲', 'C. 丙'] });
+  assert.equal(result[0].results[0].answer, '相同答案');
+  assert.equal(calls, 0);
+});
+
 test('Windows no-disk-write disables question cache reads, writes and hydration', async () => {
   const legacy = [{ title: '同一道题', answer: '旧普通答案', from: '题库' }];
   const cache = await loadCacheHarness(legacy, { windowsNoDiskWrite: true });
@@ -103,4 +187,35 @@ test('Windows no-disk-write disables question cache reads, writes and hydration'
   // 共享配置水合进来的旧缓存也要忽略并清空。
   assert.equal(cache.applyQuestionCaches(legacy), true);
   assert.deepEqual(cache.state.apps.localQuestionCaches, []);
+});
+
+test('batch writes persist each question search snapshot rather than an unset work type', async () => {
+  const cache = await loadCacheHarness();
+  const results = ['甲', '乙'].map((answer, index) => ({
+    ...completedResult(answer)[0],
+    type: undefined,
+    searchIdentity: { type: 'single', options: ['含\n换行的选项', index ? '丙' : '丁'] }
+  }));
+  cache.addQuestionCacheFromWorkResult(results);
+  const nextPage = await loadCacheHarness(cache.saved());
+  let calls = 0;
+  for (const [index, result] of results.entries()) {
+    const infos = await nextPage.searchAnswerInCaches(result.question, async () => { calls++; return []; },
+      'normal', result.searchIdentity);
+    assert.equal(infos[0].results[0].answer, index ? '乙' : '甲');
+  }
+  assert.equal(calls, 0);
+  assert.deepEqual(cache.saved().map((entry) => entry.identity.options), [
+    ['含 换行的选项', '丙'], ['含 换行的选项', '丁']
+  ]);
+});
+
+test('cache normalization preserves mathematical superscripts and letter case', async () => {
+  const cache = await loadCacheHarness();
+  cache.addQuestionCacheFromWorkResult(completedResult('公式答案', 'x²'), 'normal', { type: 'single', options: ['X', 'x'] });
+  let calls = 0;
+  const provider = async () => { calls++; return []; };
+  await cache.searchAnswerInCaches('x2', provider, 'normal', { type: 'single', options: ['X', 'x'] });
+  await cache.searchAnswerInCaches('x²', provider, 'normal', { type: 'single', options: ['x', 'x'] });
+  assert.equal(calls, 2);
 });

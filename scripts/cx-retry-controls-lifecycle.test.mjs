@@ -38,7 +38,7 @@ test('cx exposes retry controls for stepwise questions and tracks question navig
   assert.doesNotMatch(stepwise, /canRetryQuestion: \(\) => false/u);
   assert.doesNotMatch(stepwise, /retryQuestion: async \(\) => undefined/u);
   assert.match(stepwise, /canRetryQuestion: \(index\) =>/u);
-  assert.match(stepwise, /retryQuestion: retryStepwiseQuestion/u);
+  assert.match(stepwise, /retryQuestion: \(index, resetAnswer\) => retryStepwiseQuestion\(index, false, resetAnswer\)/u);
   assert.match(stepwise, /navigateWorkOrExamQuestion\(direction\)/u);
   assert.match(stepwise, /createWorkOrExamWorker\(\[root\], \{[\s\S]*?shouldSkipCacheForManualRetry\(initialResult\)/u);
   assert.match(stepwise, /stepwiseRetryInFlight = false/u);

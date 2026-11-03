@@ -52,6 +52,8 @@ before(async () => {
       const retryableResults = [], cacheableResults = [];
       const deepThinking = false, allowStaticExpiryFallback = true, chapterActionCorrelationId = '';
       let uploadInProgress = false;
+      const assertInitialAnswerRun = () => {};
+      const waitForInitialAnswerRun = async (task) => task;
       const waitForTikuAdapterBalanceRecovery = async () => {};
       const isWindowsAutoSubmitEnabled = () => true;
       const isChapterTestExpired = () => false;

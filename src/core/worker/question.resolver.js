@@ -3,8 +3,41 @@ import { answerSimilar, removeRedundant, clearString, answerExactMatch } from '.
 function nowrap(value, replacement = '') {
     return value.replace(/\s+/g, replacement);
 }
+/** Sort higher-confidence multi-choice candidates first. */
+export function compareSimilarResults(a, b) {
+    const aScore = a.similarCount * 100 + a.similarSum;
+    const bScore = b.similarCount * 100 + b.similarSum;
+    return bScore - aScore;
+}
+function readDisplayLabel(value) {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    const match = normalized.match(/^(?:(?:答案|选项|选择)(?:是|为)?\s*[:：]?\s*)?([A-Z])(?=$|[.。、,:：])/u);
+    return match?.[1];
+}
+/** Find an option by its visible label; Chaoxing data values may be remapped. */
+export function resolveOptionByDisplayLabel(options, answer) {
+    const label = readDisplayLabel(answer);
+    if (!label) {
+        return undefined;
+    }
+    const labels = options.map((option) => {
+        const optionRoot = option.closest?.('.answerBg, .clearfix');
+        const visibleLabel = optionRoot?.querySelector('.num_option, .option_label, [data-option-label]');
+        const explicitLabel = readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '');
+        return explicitLabel ?? readDisplayLabel(option.textContent || option.innerText);
+    });
+    if (!labels.some(Boolean)) {
+        return options[label.charCodeAt(0) - 65];
+    }
+    const matches = options.filter((_, index) => labels[index] === label);
+    return matches.length === 1 ? matches[0] : undefined;
+}
 /** 默认答案题目处理器 */
 export function createDefaultQuestionResolver(ctx) {
+    const apply = async (type, answer, option, handler) => {
+        await ctx.waitForContinue?.();
+        await handler(type, answer, option, ctx);
+    };
     return {
         async single(infos, options, handler) {
             const allAnswer = infos
@@ -13,19 +46,21 @@ export function createDefaultQuestionResolver(ctx) {
             const optionStrings = options.map((o) => removeRedundant(o.innerText));
             let ratings = [];
             if (ctx.answerMatchMode === 'similar') {
+                const exact = answerExactMatch(allAnswer, optionStrings);
+                if (exact.length === 1) {
+                    const index = optionStrings.indexOf(exact[0]);
+                    await apply('single', options[index].innerText, options[index], handler);
+                    return { finish: true };
+                }
                 ratings = answerSimilar(allAnswer, optionStrings);
-                let index = -1;
-                let max = 0;
-                let ans = '';
-                ratings.forEach((rating, i) => {
-                    if (rating.rating > max) {
-                        max = rating.rating;
-                        index = i;
-                        ans = rating.target;
-                    }
-                });
-                if (index !== -1 && max > 0.6) {
-                    await handler('single', ans, options[index], ctx);
+                const ranked = ratings
+                    .map((rating, index) => ({ rating, index }))
+                    .sort((a, b) => b.rating.rating - a.rating.rating || a.index - b.index);
+                const best = ranked[0];
+                const second = ranked[1];
+                const margin = best ? best.rating.rating - (second?.rating.rating ?? 0) : 0;
+                if (best && best.rating.rating >= 0.7 && (!second || margin >= 0.1)) {
+                    await apply('single', best.rating.target, options[best.index], handler);
                     return {
                         finish: true,
                         ratings: ratings.map((r) => r.rating)
@@ -35,8 +70,8 @@ export function createDefaultQuestionResolver(ctx) {
             else if (ctx.answerMatchMode === 'exact') {
                 const result = answerExactMatch(allAnswer, optionStrings);
                 const index = optionStrings.findIndex((option) => result.includes(option));
-                if (result.length) {
-                    await handler('single', options[index].innerText, options[index], ctx);
+                if (result.length === 1) {
+                    await apply('single', options[index].innerText, options[index], handler);
                     return {
                         finish: true
                     };
@@ -46,12 +81,12 @@ export function createDefaultQuestionResolver(ctx) {
                 for (const res of info.results) {
                     const ans = nowrap(res.answer, '').trim();
                     if (ans.length === 1 && /[A-Z]/.test(ans)) {
-                        const index = ans.charCodeAt(0) - 65;
-                        if (options[index] === undefined) {
+                        const option = resolveOptionByDisplayLabel(options, ans);
+                        if (option === undefined) {
                             continue;
                         }
-                        await handler('single', options[index].innerText, options[index], ctx);
-                        return { finish: true, option: options[index] };
+                        await apply('single', option.innerText, option, handler);
+                        return { finish: true, option };
                     }
                 }
             }
@@ -115,57 +150,55 @@ export function createDefaultQuestionResolver(ctx) {
                 const result = results[i];
                 const answers = splitAnswer(result.answer.trim(), ctx.answerSeparators);
                 if (ctx.answerMatchMode === 'similar') {
-                    const matchResult = { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
-                    for (const option of options) {
-                        const ans = answers.find((answer) => answer.includes(removeRedundant(option.textContent || option.innerText)));
-                        if (ans) {
-                            matchResult.options.push(option);
-                            matchResult.answers.push(ans);
-                            matchResult.ratings.push(1);
-                            matchResult.similarSum += 1;
-                            matchResult.similarCount += 1;
-                        }
-                    }
                     const ratingResult = { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
-                    const ratings = answerSimilar(answers, options.map((o) => removeRedundant(o.innerText)));
-                    for (let j = 0; j < ratings.length; j++) {
-                        const rating = ratings[j];
-                        if (rating.rating > 0.6) {
-                            ratingResult.options.push(options[j]);
-                            ratingResult.answers.push(ratings[j].target);
-                            ratingResult.ratings.push(ratings[j].rating);
-                            ratingResult.similarSum += rating.rating;
-                            ratingResult.similarCount += 1;
+                    let complete = answers.length > 0;
+                    for (const answer of answers) {
+                        const ranked = answerSimilar([answer], options.map((option) => option.innerText))
+                            .map((rating, index) => ({ ...rating, index }))
+                            .sort((a, b) => b.rating - a.rating || a.index - b.index);
+                        const best = ranked[0];
+                        const second = ranked[1];
+                        const uniqueExact = best?.rating === 1 && second?.rating !== 1;
+                        if (!best || (!uniqueExact && (best.rating < 0.7 || (second && best.rating - second.rating < 0.1)))) {
+                            complete = false;
+                            break;
+                        }
+                        const option = options[best.index];
+                        if (!ratingResult.options.includes(option)) {
+                            ratingResult.options.push(option);
+                            ratingResult.answers.push(answer);
+                            ratingResult.ratings.push(best.rating);
+                            ratingResult.similarSum += best.rating;
+                            ratingResult.similarCount++;
                         }
                     }
-                    const cappedMatchResult = limitSimilarResultToAnswerCount(matchResult, answers.length);
-                    const cappedRatingResult = limitSimilarResultToAnswerCount(ratingResult, answers.length);
-                    if (cappedMatchResult.similarSum > cappedRatingResult.similarSum) {
-                        similar_list[i] = cappedMatchResult;
-                    }
-                    else {
-                        similar_list[i] = cappedRatingResult;
-                    }
+                    similar_list[i] = complete ? limitSimilarResultToAnswerCount(ratingResult, answers.length)
+                        : { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
                 }
                 else if (ctx.answerMatchMode === 'exact') {
-                    exact_list[i] = answerExactMatch(answers, options.map((o) => removeRedundant(o.innerText)))
-                        .map((option) => options.find((o) => removeRedundant(o.innerText) === option))
-                        .filter(Boolean);
+                    const matched = [];
+                    let complete = answers.length > 0;
+                    for (const answer of answers) {
+                        const candidates = options.filter((option) => answerExactMatch([answer], [removeRedundant(option.innerText)]).length === 1);
+                        if (candidates.length !== 1) {
+                            complete = false;
+                            break;
+                        }
+                        if (!matched.includes(candidates[0]))
+                            matched.push(candidates[0]);
+                    }
+                    exact_list[i] = complete ? matched : [];
                 }
             }
             if (ctx.answerMatchMode === 'similar') {
                 const sorted_similar_list = similar_list
                     .filter((i) => i.similarCount !== 0)
                     .sort((a, b) => {
-                    const bsc = b.similarCount * 100;
-                    const asc = a.similarCount * 100;
-                    const bss = b.similarSum;
-                    const ass = a.similarSum;
-                    return bsc + bss - asc + ass;
+                    return compareSimilarResults(a, b);
                 });
                 if (sorted_similar_list[0]) {
                     for (let i = 0; i < sorted_similar_list[0].options.length; i++) {
-                        await handler('multiple', sorted_similar_list[0].answers[i], sorted_similar_list[0].options[i], ctx);
+                        await apply('multiple', sorted_similar_list[0].answers[i], sorted_similar_list[0].options[i], handler);
                     }
                     return { finish: true, sorted_similar_list, targetOptions, targetAnswers };
                 }
@@ -174,7 +207,7 @@ export function createDefaultQuestionResolver(ctx) {
                 const sorted_exact_list = exact_list.sort((a, b) => b.length - a.length);
                 if (sorted_exact_list[0]?.length) {
                     for (let i = 0; i < sorted_exact_list[0].length; i++) {
-                        await handler('multiple', sorted_exact_list[0][i].innerText, sorted_exact_list[0][i], ctx);
+                        await apply('multiple', sorted_exact_list[0][i].innerText, sorted_exact_list[0][i], handler);
                     }
                     return {
                         finish: true,
@@ -189,13 +222,15 @@ export function createDefaultQuestionResolver(ctx) {
                 const ans = nowrap(result.answer, '').trim();
                 const plainAnswer = resolvePlainAnswer(ans);
                 if (plainAnswer) {
-                    for (const char of ans) {
-                        const index = char.charCodeAt(0) - 65;
-                        if (options[index] === undefined) {
+                    const resolvedOptions = [...plainAnswer].map((char) => resolveOptionByDisplayLabel(options, char));
+                    if (resolvedOptions.some((option) => option === undefined))
+                        continue;
+                    for (const option of resolvedOptions) {
+                        if (option === undefined) {
                             continue;
                         }
-                        await handler('multiple', options[index].innerText, options[index], ctx);
-                        plainOptions.push(options[index]);
+                        await apply('multiple', option.innerText, option, handler);
+                        plainOptions.push(option);
                     }
                 }
             }
@@ -237,16 +272,17 @@ export function createDefaultQuestionResolver(ctx) {
                         const textShowIncorrect = matches(el.innerText, incorrectWords);
                         if (answerShowCorrect && textShowCorrect) {
                             option = el;
-                            await handler('judgement', answerShowCorrect, el, ctx);
+                            await apply('judgement', answerShowCorrect, el, handler);
                             break;
                         }
                         if (answerShowIncorrect && textShowIncorrect) {
                             option = el;
-                            await handler('judgement', answerShowIncorrect, el, ctx);
+                            await apply('judgement', answerShowIncorrect, el, handler);
                             break;
                         }
                     }
-                    return { finish: true, option };
+                    if (option)
+                        return { finish: true, option };
                 }
                 function matches(target, options) {
                     return options.some((option) => clearString(removeRedundant(option), '√', '×') === clearString(removeRedundant(target), '√', '×'));
@@ -264,12 +300,12 @@ export function createDefaultQuestionResolver(ctx) {
                     if (ans.length === options.length) {
                         for (let index = 0; index < options.length; index++) {
                             const element = options[index];
-                            await handler('completion', ans[index], element, ctx);
+                            await apply('completion', ans[index], element, handler);
                         }
                         return { finish: true };
                     }
                     else if (options.length === 1) {
-                        await handler('completion', ans.join(' '), options[0], ctx);
+                        await apply('completion', ans.join(' '), options[0], handler);
                         return { finish: true };
                     }
                     return { finish: false };

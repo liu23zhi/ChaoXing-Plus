@@ -116,3 +116,132 @@ test('multiple choice waits before applying the next option while paused', async
   assert.equal(result.finish, true);
   assert.deepEqual(selected, ['ABCDE', 'WXYZ']);
 });
+
+test('multiple choice ranking prefers the higher similarity sum when answer counts tie', async () => {
+  const mod = await loadResolverModule();
+
+  const higher = { similarCount: 1, similarSum: 0.95 };
+  const lower = { similarCount: 1, similarSum: 0.65 };
+
+  assert.ok(mod.compareSimilarResults(higher, lower) < 0);
+  assert.ok(mod.compareSimilarResults(lower, higher) > 0);
+});
+
+test('single choice maps a plain answer to the visible option label instead of array position', async () => {
+  const mod = await loadResolverModule();
+  const options = [createOption('C. third'), createOption('A. first'), createOption('B. second')];
+
+  assert.equal(mod.resolveOptionByDisplayLabel(options, 'A')?.innerText, 'A. first');
+  assert.equal(mod.resolveOptionByDisplayLabel(options, '答案：C')?.innerText, 'C. third');
+
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({
+    answerSeparators: ['#'],
+    answerMatchMode: 'similar',
+    elements: { options },
+    root: {},
+    searchInfos: [],
+    type: 'single'
+  }).single(
+    [{ name: 'fixture', results: [{ question: '题目', answer: 'A', extra_data: {} }] }],
+    options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['A. first']);
+});
+
+test('work and exam option mapping reads the visible label from its answerBg sibling', async () => {
+  const mod = await loadResolverModule();
+  const makeAnswerBgOption = (label, text) => {
+    const option = createOption(text);
+    const labelNode = createOption(label);
+    option.closest = (selector) => selector.includes('.answerBg')
+      ? { querySelector: (query) => query.includes('.num_option') ? labelNode : undefined }
+      : undefined;
+    return option;
+  };
+  const options = [makeAnswerBgOption('C', 'third'), makeAnswerBgOption('A', 'first'), makeAnswerBgOption('B', 'second')];
+  const selected = [];
+
+  const result = await mod.createDefaultQuestionResolver({
+    answerSeparators: ['#'],
+    answerMatchMode: 'exact',
+    elements: { options },
+    root: {},
+    searchInfos: [],
+    type: 'single'
+  }).single(
+    [{ name: 'fixture', results: [{ question: '题目', answer: 'A', extra_data: {} }] }],
+    options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['first']);
+});
+
+test('single choice does not apply an ambiguous similar match without a confidence margin', async () => {
+  const mod = await loadResolverModule();
+  const options = [createOption('alpha'), createOption('alph')];
+  const ctx = {
+    answerSeparators: ['#'],
+    answerMatchMode: 'similar',
+    elements: { options },
+    root: {},
+    searchInfos: [],
+    type: 'single'
+  };
+  const selected = [];
+
+  const result = await mod.createDefaultQuestionResolver(ctx).single(
+    [{ name: 'fixture', results: [{ question: '题目', answer: 'alphio', extra_data: {} }] }],
+    options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, false);
+  assert.deepEqual(selected, []);
+});
+
+for (const fixture of [
+  { name: 'formula signs', type: 'single', answer: 'x+y', options: ['x-y', 'z'], selected: [] },
+  { name: 'character order and repetition', type: 'single', answer: 'aba', options: ['aab', 'aba'], selected: ['aba'] },
+  { name: 'short substrings', type: 'multiple', answer: 'CAT', options: ['C', 'CATfish'], selected: [] },
+  { name: 'ambiguous multiple choices', type: 'multiple', answer: 'alphabeta00', options: ['alphabeta0x', 'alphabeta0y'], selected: [] },
+  { name: 'unique exact multiple choices beside similar options', type: 'multiple', answer: 'abcdefghijklmnop#somethingelse', options: ['abcdefghijklmnop', 'abcdefghijklmnoq', 'somethingelse'], selected: ['abcdefghijklmnop', 'somethingelse'] },
+  { name: 'missing judgement polarity option', type: 'judgement', answer: '正确', options: ['unknown'], selected: [] }
+]) {
+  test(`resolver preserves ${fixture.name}`, async () => {
+    const mod = await loadResolverModule();
+    const options = fixture.options.map(createOption);
+    const selected = [];
+    const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'similar', answerSeparators: ['#'] })[fixture.type](
+      [{ results: [{ answer: fixture.answer }] }], options, (_type, _answer, option) => selected.push(option.innerText));
+    assert.deepEqual(selected, fixture.selected);
+    assert.equal(result.finish, fixture.selected.length > 0);
+  });
+}
+
+test('letter mapping does not interpret English content as a label or bypass missing explicit labels', async () => {
+  const mod = await loadResolverModule();
+  assert.equal(mod.resolveOptionByDisplayLabel([createOption('Beta'), createOption('A variable')], 'A')?.innerText, 'Beta');
+  assert.equal(mod.resolveOptionByDisplayLabel([createOption('B. Beta'), createOption('C. Gamma')], 'A'), undefined);
+});
+
+test('exact mode rejects incomplete multiple answer groups and conflicting single answers', async () => {
+  const mod = await loadResolverModule();
+  for (const fixture of [
+    { type: 'multiple', answer: 'apple#unrelated', options: ['apple', 'banana'] },
+    { type: 'single', answer: 'apple#banana', options: ['apple', 'banana'] },
+    { type: 'multiple', answer: 'same', options: ['same', 'same'] }
+  ]) {
+    const selected = [];
+    const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] })[fixture.type](
+      [{ results: [{ answer: fixture.answer }] }], fixture.options.map(createOption),
+      (_type, _answer, option) => selected.push(option.innerText));
+    assert.equal(result.finish, false, fixture.answer);
+    assert.deepEqual(selected, [], fixture.answer);
+  }
+});

@@ -154,7 +154,7 @@ test('cx falls back from empty generic type inputs to nearby answertype inputs i
 
   assert.equal(source.includes("const currentValue = root.value?.trim() ?? '';"), true);
   assert.equal(source.includes("const isPrioritizedTypeInput = root.matches('input[id^=\"answertype\"],input[name^=\"answertype\"]');"), true);
-  assert.equal(source.includes("const scopedRoot = root.closest('.TiMu, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;"), true);
+  assert.equal(source.includes("const scopedRoot = root.closest('.TiMu, .singleQuesId, .questionLi') ?? root.parentElement ?? root.form ?? root.ownerDocument;"), true);
   assert.equal(source.includes('const prioritizedMatch = scopedRoot.querySelector<HTMLInputElement>(selector);'), true);
   assert.equal(source.includes('if (isPrioritizedTypeInput || currentValue) {'), true);
 });
@@ -563,7 +563,7 @@ test('cx retries chapter answers with AI fallback when submit popup says the sco
   assert.equal(source.includes("popupContent.includes('请重做')"), true);
   assert.equal(source.includes('const retakeRequired = detectChapterRetakePrompt();'), true);
   assert.equal(source.includes('const aiRetryWorker = createChapterWorker(roots, { forceAIFallbackOnly: true, skipCache: true });'), true);
-  assert.equal(source.includes('const retryResults = await aiRetryWorker.doWork();'), true);
+  assert.equal(source.includes('const retryResults = await waitForInitialAnswerRun(aiRetryWorker.doWork());'), true);
   assert.equal(source.includes('正在使用 AI 兜底答案尝试二次改答'), true);
 });
 

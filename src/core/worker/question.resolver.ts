@@ -6,6 +6,44 @@ function nowrap(value: string, replacement = ''): string {
   return value.replace(/\s+/g, replacement);
 }
 
+type SimilarResultScore = {
+  similarCount: number;
+  similarSum: number;
+};
+
+/** Sort higher-confidence multi-choice candidates first. */
+export function compareSimilarResults(a: SimilarResultScore, b: SimilarResultScore): number {
+  const aScore = a.similarCount * 100 + a.similarSum;
+  const bScore = b.similarCount * 100 + b.similarSum;
+  return bScore - aScore;
+}
+
+function readDisplayLabel(value: string): string | undefined {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  const match = normalized.match(/^(?:(?:答案|选项|选择)(?:是|为)?\s*[:：]?\s*)?([A-Z])(?=$|[.。、,:：])/u);
+  return match?.[1];
+}
+
+/** Find an option by its visible label; Chaoxing data values may be remapped. */
+export function resolveOptionByDisplayLabel(options: HTMLElement[], answer: string): HTMLElement | undefined {
+  const label = readDisplayLabel(answer);
+  if (!label) {
+    return undefined;
+  }
+
+  const labels = options.map((option) => {
+    const optionRoot = option.closest?.('.answerBg, .clearfix');
+    const visibleLabel = optionRoot?.querySelector<HTMLElement>('.num_option, .option_label, [data-option-label]');
+    const explicitLabel = readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '');
+    return explicitLabel ?? readDisplayLabel(option.textContent || option.innerText);
+  });
+  if (!labels.some(Boolean)) {
+    return options[label.charCodeAt(0) - 65];
+  }
+  const matches = options.filter((_, index) => labels[index] === label);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 /** 默认答案题目处理器 */
 export function createDefaultQuestionResolver<E>(
   ctx: WorkContext<E>
@@ -23,19 +61,21 @@ export function createDefaultQuestionResolver<E>(
       const optionStrings = options.map((o) => removeRedundant(o.innerText));
       let ratings: Rating[] = [];
       if (ctx.answerMatchMode === 'similar') {
+        const exact = answerExactMatch(allAnswer, optionStrings);
+        if (exact.length === 1) {
+          const index = optionStrings.indexOf(exact[0]);
+          await apply('single', options[index].innerText, options[index], handler);
+          return { finish: true };
+        }
         ratings = answerSimilar(allAnswer, optionStrings);
-        let index = -1;
-        let max = 0;
-        let ans = '';
-        ratings.forEach((rating, i) => {
-          if (rating.rating > max) {
-            max = rating.rating;
-            index = i;
-            ans = rating.target;
-          }
-        });
-        if (index !== -1 && max > 0.6) {
-          await apply('single', ans, options[index], handler);
+        const ranked = ratings
+          .map((rating, index) => ({ rating, index }))
+          .sort((a, b) => b.rating.rating - a.rating.rating || a.index - b.index);
+        const best = ranked[0];
+        const second = ranked[1];
+        const margin = best ? best.rating.rating - (second?.rating.rating ?? 0) : 0;
+        if (best && best.rating.rating >= 0.7 && (!second || margin >= 0.1)) {
+          await apply('single', best.rating.target, options[best.index], handler);
           return {
             finish: true,
             ratings: ratings.map((r) => r.rating)
@@ -44,7 +84,7 @@ export function createDefaultQuestionResolver<E>(
       } else if (ctx.answerMatchMode === 'exact') {
         const result = answerExactMatch(allAnswer, optionStrings);
         const index = optionStrings.findIndex((option) => result.includes(option));
-        if (result.length) {
+        if (result.length === 1) {
           await apply('single', options[index].innerText, options[index], handler);
           return {
             finish: true
@@ -56,12 +96,12 @@ export function createDefaultQuestionResolver<E>(
         for (const res of info.results) {
           const ans = nowrap(res.answer, '').trim();
           if (ans.length === 1 && /[A-Z]/.test(ans)) {
-            const index = ans.charCodeAt(0) - 65;
-            if (options[index] === undefined) {
+            const option = resolveOptionByDisplayLabel(options, ans);
+            if (option === undefined) {
               continue;
             }
-            await apply('single', options[index].innerText, options[index], handler);
-            return { finish: true, option: options[index] };
+            await apply('single', option.innerText, option, handler);
+            return { finish: true, option };
           }
         }
       }
@@ -143,50 +183,43 @@ export function createDefaultQuestionResolver<E>(
         const answers = splitAnswer(result.answer.trim(), ctx.answerSeparators);
 
         if (ctx.answerMatchMode === 'similar') {
-          const matchResult: SimilarResult = { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
-          for (const option of options) {
-            const ans = answers.find((answer) =>
-              answer.includes(removeRedundant(option.textContent || option.innerText))
-            );
-            if (ans) {
-              matchResult.options.push(option);
-              matchResult.answers.push(ans);
-              matchResult.ratings.push(1);
-              matchResult.similarSum += 1;
-              matchResult.similarCount += 1;
-            }
-          }
-
           const ratingResult: SimilarResult = { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
-          const ratings = answerSimilar(
-            answers,
-            options.map((o) => removeRedundant(o.innerText))
-          );
-          for (let j = 0; j < ratings.length; j++) {
-            const rating = ratings[j];
-            if (rating.rating > 0.6) {
-              ratingResult.options.push(options[j]);
-              ratingResult.answers.push(ratings[j].target);
-              ratingResult.ratings.push(ratings[j].rating);
-              ratingResult.similarSum += rating.rating;
-              ratingResult.similarCount += 1;
+          let complete = answers.length > 0;
+          for (const answer of answers) {
+            const ranked = answerSimilar([answer], options.map((option) => option.innerText))
+              .map((rating, index) => ({ ...rating, index }))
+              .sort((a, b) => b.rating - a.rating || a.index - b.index);
+            const best = ranked[0];
+            const second = ranked[1];
+            const uniqueExact = best?.rating === 1 && second?.rating !== 1;
+            if (!best || (!uniqueExact && (best.rating < 0.7 || (second && best.rating - second.rating < 0.1)))) {
+              complete = false;
+              break;
+            }
+            const option = options[best.index];
+            if (!ratingResult.options.includes(option)) {
+              ratingResult.options.push(option);
+              ratingResult.answers.push(answer);
+              ratingResult.ratings.push(best.rating);
+              ratingResult.similarSum += best.rating;
+              ratingResult.similarCount++;
             }
           }
-
-          const cappedMatchResult = limitSimilarResultToAnswerCount(matchResult, answers.length);
-          const cappedRatingResult = limitSimilarResultToAnswerCount(ratingResult, answers.length);
-          if (cappedMatchResult.similarSum > cappedRatingResult.similarSum) {
-            similar_list[i] = cappedMatchResult;
-          } else {
-            similar_list[i] = cappedRatingResult;
-          }
+          similar_list[i] = complete ? limitSimilarResultToAnswerCount(ratingResult, answers.length)
+            : { options: [], answers: [], ratings: [], similarSum: 0, similarCount: 0 };
         } else if (ctx.answerMatchMode === 'exact') {
-          exact_list[i] = answerExactMatch(
-            answers,
-            options.map((o) => removeRedundant(o.innerText))
-          )
-            .map((option) => options.find((o) => removeRedundant(o.innerText) === option))
-            .filter(Boolean) as HTMLElement[];
+          const matched: HTMLElement[] = [];
+          let complete = answers.length > 0;
+          for (const answer of answers) {
+            const candidates = options.filter((option) =>
+              answerExactMatch([answer], [removeRedundant(option.innerText)]).length === 1);
+            if (candidates.length !== 1) {
+              complete = false;
+              break;
+            }
+            if (!matched.includes(candidates[0])) matched.push(candidates[0]);
+          }
+          exact_list[i] = complete ? matched : [];
         }
       }
 
@@ -194,11 +227,7 @@ export function createDefaultQuestionResolver<E>(
         const sorted_similar_list = similar_list
           .filter((i) => i.similarCount !== 0)
           .sort((a, b) => {
-            const bsc = b.similarCount * 100;
-            const asc = a.similarCount * 100;
-            const bss = b.similarSum;
-            const ass = a.similarSum;
-            return bsc + bss - asc + ass;
+            return compareSimilarResults(a, b);
           });
 
         if (sorted_similar_list[0]) {
@@ -229,13 +258,14 @@ export function createDefaultQuestionResolver<E>(
         const ans = nowrap(result.answer, '').trim();
         const plainAnswer = resolvePlainAnswer(ans);
         if (plainAnswer) {
-          for (const char of ans) {
-            const index = char.charCodeAt(0) - 65;
-            if (options[index] === undefined) {
+          const resolvedOptions = [...plainAnswer].map((char) => resolveOptionByDisplayLabel(options, char));
+          if (resolvedOptions.some((option) => option === undefined)) continue;
+          for (const option of resolvedOptions as HTMLElement[]) {
+            if (option === undefined) {
               continue;
             }
-            await apply('multiple', options[index].innerText, options[index], handler);
-            plainOptions.push(options[index]);
+            await apply('multiple', option.innerText, option, handler);
+            plainOptions.push(option);
           }
         }
       }
@@ -290,7 +320,7 @@ export function createDefaultQuestionResolver<E>(
             }
           }
 
-          return { finish: true, option };
+          if (option) return { finish: true, option };
         }
 
         function matches(target: string, options: string[]) {

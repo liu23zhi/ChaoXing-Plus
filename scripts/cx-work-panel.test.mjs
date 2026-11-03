@@ -168,7 +168,7 @@ test('step-by-step collection stops before checking or advancing the next page w
 test('step-by-step worker stays balance-tracked through page runs and releases after the task', async () => {
   const source = await readCxSource();
 
-  assert.equal(source.includes("const worker = createWorkOrExamWorker('.questionLi', { retainForBalanceRecovery: !preview_mode });"), true);
+  assert.equal(source.includes("const worker = createWorkOrExamWorker(workOrExamQuestionSelector, { retainForBalanceRecovery: !preview_mode });"), true);
   assert.match(source, /stepwiseTaskActive = false;\s+untrackTikuAdapterWorker\(worker\);/u);
   assert.doesNotMatch(source, /untrackTikuAdapterWorker\(worker\);\s+clearRuntimeControls\(\);\s+\}\);/u);
 });
@@ -186,7 +186,7 @@ test('chapter, preview, and step-by-step results refresh after retries and befor
   assert.ok(previewRetry >= 0);
   assert.ok(stepRetry >= 0);
   assert.ok(chapterRefresh > chapterRetry);
-  assert.ok(chapterRefresh < source.indexOf('await sleep(stopSecondWhenFinish * 1000);', chapterRetry));
+  assert.ok(chapterRefresh < source.indexOf('await waitForInitialAnswerRun(sleep(stopSecondWhenFinish * 1000));', chapterRetry));
   assert.ok(previewRefresh > previewRetry);
   assert.ok(previewRefresh < source.indexOf('await uploadWorkOrExamResults(retryableResults);', previewRetry));
   assert.ok(stepRefresh > stepRetry);
@@ -196,10 +196,10 @@ test('chapter, preview, and step-by-step results refresh after retries and befor
 test('balance pause guards chapter, preview, and stepwise upload plus stepwise page navigation', async () => {
   const source = await readCxSource();
 
-  assert.match(source, /const retryableResults = await retryUnfinishedChapterQuestions\(results\);\s+await waitForTikuAdapterBalanceRecovery\(\);/u);
-  assert.match(source, /const retryableResults = await retryUnfinishedWorkOrExamQuestions\(results\);\s+await waitForTikuAdapterBalanceRecovery\(\);/u);
-  assert.match(source, /shouldContinue: \(\) => !tikuAdapterBalanceRecoveryState\.paused,/u);
-  assert.match(source, /waitForContinue: waitForTikuAdapterBalanceRecovery,/u);
+  assert.match(source, /const retryableResults = await retryUnfinishedChapterQuestions\(results\);\s+await waitForInitialAnswerRun\(waitForTikuAdapterBalanceRecovery\(\)\);/u);
+  assert.match(source, /const retryableResults = await retryUnfinishedWorkOrExamQuestions\(results\);\s+await waitForInitialAnswerRun\(waitForTikuAdapterBalanceRecovery\(\)\);/u);
+  assert.match(source, /shouldContinue: \(\) => (?:!tikuAdapterBalanceRecoveryState\.paused|answerRun\.isCurrent\(initialAnswerRun\) && !tikuAdapterBalanceRecoveryState\.paused),/u);
+  assert.match(source, /waitForContinue: \(\) => waitForInitialAnswerRun\(waitForTikuAdapterBalanceRecovery\(\)\),/u);
   assert.match(source, /await uploadWorkOrExamResults\(accumulatedResults\);/u);
   assert.match(source, /async function uploadWorkOrExamResults\(results:[\s\S]*?await waitForTikuAdapterBalanceRecovery\(\);/u);
 });
@@ -249,6 +249,8 @@ test('work and exam upload waits through a balance pause before upload and befor
       $message: { info() {}, success() {} },
       logDebug() {},
       workExamCorrelationId: '',
+      assertInitialAnswerRun: () => {},
+      waitForInitialAnswerRun: async (task) => task,
       submitWorkOrExamPage: async () => { submitCalls++; },
       saveWorkOrExamPage: async () => { saveCalls++; }
     });
@@ -290,7 +292,7 @@ test('workOrExam uses step-by-step exam selectors and ignores generic type distr
   assert.equal(source.includes("'.line_wid_half.fl,.line_wid_half.fr'"), true);
   assert.equal(source.includes('function resolveWorkOrExamQuestionTypeRoot('), true);
   assert.equal(source.includes("elements.type.find((element) => element.getAttribute('name')?.match(/type\\d+/))"), true);
-  assert.equal(source.includes('resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest(\'.questionLi\') ?? document'), true);
+  assert.equal(source.includes('resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest(\'.singleQuesId, .questionLi\') ?? document'), true);
 });
 
 test('work/exam title parsing keeps direct h4 question text in both modes', async () => {
@@ -362,11 +364,11 @@ test('workOrExam auto uploads work and exam results after answering', async () =
   assert.equal(source.includes('const shouldSubmit = shouldAllowSubmitForPage && uploadable;'), true);
   assert.equal(source.includes('submitWorkOrExamPage(type);'), true);
   assert.equal(source.includes('saveWorkOrExamPage(type);'), true);
-  assert.equal(source.includes('const results = await worker.doWork();'), true);
+  assert.equal(source.includes('const results = await waitForInitialAnswerRun(worker.doWork());'), true);
   assert.equal(source.includes('const retryableResults = await retryUnfinishedWorkOrExamQuestions(results);'), true);
   assert.equal(source.includes('await uploadWorkOrExamResults(retryableResults);'), true);
   assert.equal(source.includes('const accumulatedResults = await collectStepwiseWorkResults({'), true);
-  assert.equal(source.includes('runCurrentPage: () => worker.doWork({ enable_debug: false }),'), true);
+  assert.equal(source.includes('runCurrentPage: () => waitForInitialAnswerRun(worker.doWork({ enable_debug: false })),'), true);
   assert.equal(source.includes('await uploadWorkOrExamResults(accumulatedResults);'), true);
 });
 

@@ -113,6 +113,7 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
   test(`${factoryName} looks up answers by mode without changing skipCache`, async () => {
     for (const [deepThinking, skipCache] of [[false, false], [false, true], [true, false]]) {
       const cacheModes = [];
+      const cacheIdentities = [];
       const requests = [];
       const makeAnswerer = await loadAnswererFactory(factoryName, {
         chapterTestTaskQuestionTitleTransform: (titles) => titles[0].innerText,
@@ -135,8 +136,9 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
         deepThinking,
         aiFallbackFailureAction: 'skip',
         appsMethods: () => ({
-          searchAnswerInCaches: async (_title, provider, mode) => {
+          searchAnswerInCaches: async (_title, provider, mode, identity) => {
             cacheModes.push(mode);
+            cacheIdentities.push(identity);
             return mode === 'normal'
               ? [{ name: '本地缓存', results: [{ answer: 'cached' }] }]
               : provider();
@@ -148,6 +150,7 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
       const infos = await makeAnswerer({ skipCache })(elements, { root, type: 'single', elements });
       const shouldRequest = deepThinking || skipCache;
       assert.deepEqual(cacheModes, skipCache ? [] : [deepThinking ? 'deep' : 'normal']);
+      assert.deepEqual(cacheIdentities, skipCache ? [] : [{ type: 'single', options: ['A'] }]);
       assert.equal(requests.length, shouldRequest ? 1 : 0);
       assert.equal(infos[0].results[0].answer, shouldRequest ? 'fresh' : 'cached');
       if (shouldRequest) {

@@ -276,13 +276,13 @@ async function failingBackground({ readError = false, writeError = false } = {})
   }, { id: 'fixture-id', tab: { id: 8 } }, resolve));
 }
 
-test('background session read errors pause without claiming durable state', async () => {
+test('background session read errors do not invent a user pause', async () => {
   const request = await failingBackground({ readError: true });
   const result = await request('read');
-  assert.equal(result.paused, true);
+  assert.equal(result.paused, false);
   assert.equal(result.durable, false);
   assert.equal(result.tabIdentity, '8');
-  assert.equal((await request('read')).paused, true);
+  assert.equal((await request('read')).paused, false);
 });
 
 test('background session write errors retain memory pause without claiming durability', async () => {
@@ -295,10 +295,10 @@ test('background session write errors retain memory pause without claiming durab
   assert.equal(reread.durable, false);
 });
 
-test('synchronous session failures also preserve the safe memory state', async () => {
+test('synchronous session read failures do not invent a pause and explicit pauses remain in memory', async () => {
   const read = await failingBackground({ readError: 'throw' });
   const failedRead = await read('read');
-  assert.equal(failedRead.paused, true);
+  assert.equal(failedRead.paused, false);
   assert.equal(failedRead.durable, false);
   const write = await failingBackground({ writeError: 'throw' });
   assert.equal((await write('write', true)).paused, true);
@@ -306,6 +306,29 @@ test('synchronous session failures also preserve the safe memory state', async (
   assert.equal(continued.paused, false);
   assert.equal(continued.durable, false);
   assert.equal((await write('read')).paused, false);
+});
+
+test('content bootstrap does not pause when the pause hydration request times out', async (t) => {
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.setContent('<!doctype html><html><head></head><body></body></html>');
+  await page.evaluate(() => {
+    Object.defineProperty(window, 'chrome', { configurable: true, value: {
+      storage: { local: { get(_key, callback) { callback({}); } } },
+      runtime: { id: 'fixture-id', onMessage: { addListener() {} },
+        getURL() { return 'data:text/javascript,window.fixtureMainStarted=true'; },
+        sendMessage() {}
+      }
+    } });
+  });
+  await page.addScriptTag({ content: await readFile('src/extension-entry.js', 'utf8') });
+  await page.waitForFunction(() => window.fixtureMainStarted);
+  await page.addScriptTag({ content: `${pauseSource}\nwindow.pauseController = getTabAnswerPauseController();` });
+  assert.deepEqual(await page.evaluate(() => ({
+    paused: window.pauseController.isPaused(),
+    attribute: document.documentElement.getAttribute('data-chaoxing-plus-tab-paused'),
+    ready: document.documentElement.getAttribute('data-chaoxing-plus-tab-pause-ready')
+  })), { paused: false, attribute: null, ready: 'unavailable' });
 });
 
 test('content bridge marks non-durable state as memory and rehydrates a restored page', async (t) => {

@@ -42,6 +42,9 @@ before(async () => {
     const findWorkOrExamRuntimeWindow = () => ({ window, source: 'fixture' });
     const workExamCorrelationId = 'fixture';
     const logDebug = () => {};
+    const assertInitialAnswerRun = () => {
+      if (window.answerRunCancelled) throw new Error('本轮答题已清空。');
+    };
     ${submission}
     ${dialogs}
     ${topLevel.map((node) => node.getText(ast).replace(/^export\s+/, '')).join('\n')}
@@ -90,6 +93,13 @@ async function scenario(kind) {
     const outcome = await page.evaluate(async (kind) => {
       const events = [];
       let prechecks = 0, submissions = 0, saves = 0, cancellations = 0;
+      let finishPrecheck;
+      let onPrecheckStarted;
+      const precheckStarted = new Promise((done) => { onPrecheckStarted = done; });
+      window.cancelActualAnswerRun = () => {
+        window.answerRunCancelled = true;
+        events.push('cancel');
+      };
       const originalAlert = alert;
       const originalConfirm = confirm;
       const originalFetch = fetch;
@@ -111,6 +121,16 @@ async function scenario(kind) {
       window.btnBlueSubmit = () => {
         prechecks++;
         events.push('precheck');
+        onPrecheckStarted();
+        if (kind === 'cancel-precheck') {
+          return new Promise((done) => {
+            finishPrecheck = () => {
+              events.push('ready');
+              document.querySelector('#workpop').style.display = 'block';
+              done({ status: true, msg: '预检查成功' });
+            };
+          });
+        }
         if (kind === 'async-code1' || kind === 'stale-confirmation') {
           setTimeout(() => alert('无效的参数：code-1!'), 15);
         } else if (kind === 'direct') {
@@ -164,7 +184,13 @@ async function scenario(kind) {
       let error = '';
       try {
         if (kind === 'save') await saveActualWork();
-        else await submitActualWork();
+        else if (kind === 'cancel-precheck') {
+          const running = submitActualWork();
+          await precheckStarted;
+          window.cancelActualAnswerRun();
+          finishPrecheck();
+          await running;
+        } else await submitActualWork();
       } catch (caught) { error = caught.message; }
       await new Promise((done) => setTimeout(done, 65));
       return { events, prechecks, submissions, saves, cancellations, error,
@@ -189,6 +215,17 @@ test('ordinary work waits for its actual confirmation before the final submit fu
   assert.equal(result.error, '');
   assert.deepEqual(result.events, ['precheck', 'ready', 'submit']);
   assert.equal(result.submissions, 1);
+  assert.deepEqual(result.dialogs, []);
+  assert.equal(result.restored, true);
+});
+
+test('clearing answers during an ordinary work precheck prevents its late final confirmation and POST', async () => {
+  const result = await scenario('cancel-precheck');
+  assert.match(result.error, /清空|取消/);
+  assert.deepEqual(result.events, ['precheck', 'cancel', 'ready']);
+  assert.equal(result.prechecks, 1);
+  assert.equal(result.submissions, 0);
+  assert.equal(result.posts, 0);
   assert.deepEqual(result.dialogs, []);
   assert.equal(result.restored, true);
 });

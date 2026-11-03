@@ -11,9 +11,29 @@ import {
 
 export function optimizationElementWithImage(root: HTMLElement, cloneNode = false): HTMLElement {
   const clone = cloneNode ? (root.cloneNode(true) as HTMLElement) : root;
-  for (const img of Array.from(clone.querySelectorAll('img'))) {
-    const src = document.createElement('span');
-    src.innerText = img.src;
+  const originals = Array.from(root.querySelectorAll('img'));
+  // Repeated extraction must not accumulate generated image evidence.
+  for (const previous of Array.from(clone.querySelectorAll('[data-cx-image-reference]'))) {
+    previous.remove();
+  }
+  for (const [index, img] of Array.from(clone.querySelectorAll('img')).entries()) {
+    const original = originals[index];
+    let source = '';
+    for (const candidate of [img.getAttribute('data-original'), img.getAttribute('data-src'), original?.currentSrc, img.getAttribute('src')]) {
+      if (!candidate?.trim()) continue;
+      try {
+        const url = new URL(candidate.trim(), img.ownerDocument.baseURI);
+        if (url.protocol === 'http:' || url.protocol === 'https:') {
+          source = url.href;
+          break;
+        }
+      } catch { /* Ignore malformed image sources; retain any alt transcription. */ }
+    }
+    const evidence = [img.getAttribute('alt')?.trim(), source].filter(Boolean).join(' ');
+    if (!evidence) continue;
+    const src = img.ownerDocument.createElement('span');
+    src.setAttribute('data-cx-image-reference', '');
+    src.textContent = ` ${evidence} `;
     src.style.fontSize = '0px';
     img.after(src);
   }
@@ -35,6 +55,7 @@ export function simplifyWorkResult<T extends { ctx?: any; error?: string; reques
   return results.map((item) => ({
     question: titleTransform?.(item.ctx?.elements?.title ?? []) ?? '',
     type: item.ctx?.type,
+    ...(item.ctx?.searchIdentity ? { searchIdentity: item.ctx.searchIdentity } : {}),
     error: item.error,
     finish: item.result?.finish,
     requested: item.requested,

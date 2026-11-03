@@ -1,7 +1,7 @@
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
-import { $modal } from '../runtime/message.js';
+import { $message, $modal } from '../runtime/message.js';
 import { mountWindowsHostLogPanel } from '../runtime/windows-host-log.js';
 import type { ScriptPanel, ConfigDefinition } from '../runtime/types.js';
 import { playbackRate, volume } from '../utils/configs.js';
@@ -58,8 +58,11 @@ type WorkResultsRuntimeControls = {
   isStopped: () => boolean;
   stop: () => void;
   continuate: () => void;
-  retryQuestion: (index: number) => Promise<SimplifyWorkResult | undefined>;
+  retryQuestion: (index: number, resetAnswer?: boolean) => Promise<SimplifyWorkResult | undefined>;
   canRetryQuestion?: (index: number) => boolean;
+  clearAnswers?: () => void | Promise<void>;
+  prepareReset?: () => void | Promise<void>;
+  getQuestions?: () => SimplifyWorkResult[];
 };
 
 type WorkResultsView = 'numbers' | 'questions';
@@ -72,6 +75,17 @@ type PanelPosition = {
 
 type SearchCacheMode = 'normal' | 'deep';
 
+interface QuestionCacheIdentity {
+  type?: string;
+  options?: string[] | string;
+}
+
+interface NormalizedQuestionCacheIdentity {
+  title: string;
+  type: string;
+  options: string[];
+}
+
 interface QuestionCache {
   title: string;
   answer: string;
@@ -79,6 +93,7 @@ interface QuestionCache {
   homepage?: string;
   ai?: boolean;
   mode?: SearchCacheMode;
+  identity?: NormalizedQuestionCacheIdentity;
 }
 
 const WORK_RESULTS_PANEL_POSITION_KEY = 'common.work-results.panel-position';
@@ -374,6 +389,8 @@ const state = {
     type: runtimeStore.get(WORK_RESULTS_VIEW_KEY, 'numbers' as WorkResultsView),
     questionPositionSyncHandlerType: undefined as QuestionPositionSyncHandlerType | undefined,
     runtimeControls: undefined as WorkResultsRuntimeControls | undefined,
+    resetOperation: undefined as object | undefined,
+    resetGeneration: 0,
     controlDocument: document,
     ui: resolveInitialWorkResultsPanelUiState()
   },
@@ -412,7 +429,10 @@ function applyQuestionCaches(value: unknown) {
 
 const questionPositionSyncHandlers: Record<QuestionPositionSyncHandlerType, (index: number) => void> = {
   cx(index) {
-    const el = document.querySelectorAll<HTMLElement>('[id*="sigleQuestionDiv"], .questionLi')?.item(index);
+    const currentRoots = document.querySelectorAll<HTMLElement>('.singleQuesId');
+    const el = (currentRoots.length > 0
+      ? currentRoots
+      : document.querySelectorAll<HTMLElement>('[id*="sigleQuestionDiv"], .questionLi'))?.item(index);
     if (el) {
       window.scrollTo({
         top: el.getBoundingClientRect().top + window.pageYOffset - 50,
@@ -531,6 +551,58 @@ function setWorkResults(results: SimplifyWorkResult[]) {
   }
   runtimeStore.set(WORK_RESULTS_KEY, state.workResults.results);
   renderWorkResultsPanel();
+}
+
+async function clearAndRetryWorkResults() {
+  syncWorkResultsControlDocument();
+  const controls = state.workResults.runtimeControls;
+  if (state.workResults.resetOperation) return;
+  if (!controls?.clearAnswers) {
+    setWorkResults([]);
+    return;
+  }
+
+  const operation = {};
+  state.workResults.resetGeneration = (state.workResults.resetGeneration ?? 0) + 1;
+  const isCurrent = () => {
+    if (state.workResults.runtimeControls !== controls || state.workResults.resetOperation !== operation) return false;
+    try {
+      return !controls.ownerDocument || controls.ownerDocument.defaultView?.document === controls.ownerDocument;
+    } catch { return false; }
+  };
+  state.workResults.resetOperation = operation;
+  renderWorkResultsPanel();
+  try {
+    await controls.prepareReset?.();
+    if (!isCurrent()) return;
+    // Clear every page before publishing unanswered results or applying any new answer.
+    await controls.clearAnswers();
+    if (!isCurrent()) return;
+    const questions = (controls.getQuestions?.() ?? state.workResults.results).map(({ question, type, searchIdentity }) => ({
+      question, type, searchIdentity, searchInfos: [], requested: false, resolved: false,
+      finish: false, manual: false, retrying: false, searching: false
+    }));
+    setWorkResults([]); // Bypass preservation of successful results from the previous run.
+    setWorkResults(questions);
+    for (let index = 0; index < questions.length && isCurrent(); index++) {
+      try {
+        const retried = await controls.retryQuestion(index, true);
+        if (!isCurrent()) return;
+        if (retried) patchWorkResult(index, { ...retried, manual: false, retrying: false });
+        else patchWorkResult(index, { retrying: false });
+      } catch (error) {
+        if (!isCurrent()) return;
+        patchWorkResult(index, { retrying: false, error: (error as Error).message || String(error) });
+      }
+    }
+  } catch (error) {
+    if (isCurrent()) $message.error('清空作答失败：' + ((error as Error).message || String(error)));
+  } finally {
+    if (state.workResults.resetOperation === operation) {
+      state.workResults.resetOperation = undefined;
+      renderWorkResultsPanel();
+    }
+  }
 }
 
 function saveWorkResultsPanelPosition(position: PanelPosition) {
@@ -879,8 +951,51 @@ function questionCacheMode(cache: QuestionCache): SearchCacheMode {
   return cache.mode === 'deep' ? 'deep' : 'normal';
 }
 
-function answerCacheKey(title: string, mode: SearchCacheMode): string {
-  return JSON.stringify([mode, title]);
+function normalizeCacheText(value: unknown): string {
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/[！-～]/gu, (character) => String.fromCharCode(character.charCodeAt(0) - 0xfee0))
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function normalizeQuestionCacheIdentity(
+  title: string,
+  identity: QuestionCacheIdentity | undefined
+): NormalizedQuestionCacheIdentity | undefined {
+  if (!identity || typeof identity !== 'object') {
+    return undefined;
+  }
+
+  const rawOptions = Array.isArray(identity.options)
+    ? identity.options
+    : typeof identity.options === 'string'
+      ? identity.options.split(/\r?\n/gu)
+      : [];
+  return {
+    title: normalizeCacheText(title),
+    type: normalizeCacheText(identity.type).toLocaleLowerCase(),
+    options: rawOptions.map((option) => normalizeCacheText(option))
+  };
+}
+
+function questionCacheIdentityKey(
+  title: string,
+  identity: QuestionCacheIdentity | NormalizedQuestionCacheIdentity | undefined
+): string | undefined {
+  const normalized = normalizeQuestionCacheIdentity(title, identity);
+  return normalized ? JSON.stringify([normalized.title, normalized.type, normalized.options]) : undefined;
+}
+
+function answerCacheKey(
+  title: string,
+  mode: SearchCacheMode,
+  identity?: QuestionCacheIdentity
+): string {
+  const identityKey = questionCacheIdentityKey(title, identity);
+  return identityKey === undefined
+    ? JSON.stringify([mode, title])
+    : JSON.stringify([mode, 'identity', identityKey]);
 }
 
 function addQuestionCaches(...items: QuestionCache[]) {
@@ -891,7 +1006,10 @@ function addQuestionCaches(...items: QuestionCache[]) {
 
     if (
       state.apps.localQuestionCaches.find((cache) =>
-        cache.title === item.title && cache.answer === item.answer && questionCacheMode(cache) === questionCacheMode(item)
+        cache.title === item.title &&
+        cache.answer === item.answer &&
+        questionCacheMode(cache) === questionCacheMode(item) &&
+        questionCacheIdentityKey(cache.title, cache.identity) === questionCacheIdentityKey(item.title, item.identity)
       ) === undefined
     ) {
       state.apps.localQuestionCaches.unshift(item);
@@ -904,9 +1022,17 @@ function addQuestionCaches(...items: QuestionCache[]) {
   renderWorkResultsPanel();
 }
 
-function questionCachesToSearchInfos(title: string, mode: SearchCacheMode = 'normal'): SearchInformation[] {
+function questionCachesToSearchInfos(
+  title: string,
+  mode: SearchCacheMode = 'normal',
+  identity?: QuestionCacheIdentity
+): SearchInformation[] {
+  const identityKey = questionCacheIdentityKey(title, identity);
   const matched = state.apps.localQuestionCaches.filter((cache) =>
-    cache.title.trim() === title.trim() && questionCacheMode(cache) === mode
+    questionCacheMode(cache) === mode &&
+    (identityKey === undefined
+      ? cache.identity === undefined && cache.title.trim() === title.trim()
+      : questionCacheIdentityKey(cache.title, cache.identity) === identityKey)
   );
   return matched.map((cache) => ({
     name: `【题库缓存】${cache.from || '本地缓存'}`,
@@ -931,17 +1057,24 @@ function normalizeWorkResultsPayload(payload: unknown): SimplifyWorkResult[] {
   });
 }
 
-function resultToQuestionCaches(results: SimplifyWorkResult[], mode: SearchCacheMode = 'normal'): QuestionCache[] {
+function resultToQuestionCaches(
+  results: SimplifyWorkResult[],
+  mode: SearchCacheMode = 'normal',
+  identity?: QuestionCacheIdentity
+): QuestionCache[] {
   return results.flatMap((result) =>
     result.searchInfos.flatMap((info) =>
       info.results
-        .filter((entry) => entry[1])
+        .filter((entry) => String(entry[1] ?? '').trim())
         .map((entry) => ({
           title: result.question || entry[0],
           answer: entry[1],
           from: info.name.replace(/【题库缓存】/g, '') || '未知题库',
           homepage: info.homepage || '',
           ai: Boolean((entry[2] as Record<string, unknown> | undefined)?.ai),
+          ...(identity === undefined && result.searchIdentity === undefined
+            ? {}
+            : { identity: normalizeQuestionCacheIdentity(result.question || entry[0], identity ?? result.searchIdentity) }),
           ...(mode === 'deep' ? { mode } : {})
         }))
     )
@@ -1183,7 +1316,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
   const runtimeControls = state.workResults.runtimeControls;
   const selectedIndex = state.workResults.currentResultIndex;
   const canRetry = Boolean(
-    runtimeControls?.retryQuestion && (runtimeControls.canRetryQuestion?.(selectedIndex) ?? true)
+    !state.workResults.resetOperation && runtimeControls?.retryQuestion && (runtimeControls.canRetryQuestion?.(selectedIndex) ?? true)
   );
 
   const detailActions = createElement('div');
@@ -1199,9 +1332,13 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
     }
 
     const previousResult = { ...result };
+    const retryGeneration = state.workResults.resetGeneration;
+    const isCurrentRetry = () => state.workResults.runtimeControls === runtimeControls
+      && state.workResults.resetGeneration === retryGeneration && !state.workResults.resetOperation;
     patchWorkResult(selectedIndex, { retrying: true, error: undefined, manual: false });
     try {
       const retried = await runtimeControls.retryQuestion(selectedIndex);
+      if (!isCurrentRetry()) return;
       if (retried) {
         patchWorkResult(selectedIndex, {
           ...retried,
@@ -1212,6 +1349,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
         patchWorkResult(selectedIndex, { ...previousResult, retrying: false });
       }
     } catch (err) {
+      if (!isCurrentRetry()) return;
       patchWorkResult(selectedIndex, {
         retrying: false,
         error: (err as Error).message || String(err)
@@ -2239,10 +2377,9 @@ function createWorkResultsPanel() {
     setWorkResultsView(state.workResults.type === 'numbers' ? 'questions' : 'numbers');
   };
 
-  const clearButton = createElement('button', { text: '清空结果' });
-  clearButton.onclick = () => {
-    setWorkResults([]);
-  };
+  const clearButton = createElement('button', { text: state.workResults.resetOperation ? '正在重新作答...' : '清空结果' });
+  clearButton.title = '取消当前轮次，清除页面全部作答痕迹，并重新作答';
+  clearButton.onclick = clearAndRetryWorkResults;
 
   applyActionButtonStyle(typeButton, 'primary');
   applyActionButtonStyle(clearButton, 'danger');
@@ -2765,11 +2902,13 @@ export const CommonProject = Project.create({
           },
           setRuntimeControls(controls: WorkResultsRuntimeControls) {
             syncWorkResultsControlDocument(controls.ownerDocument ?? document);
+            state.workResults.resetOperation = undefined;
             state.workResults.runtimeControls = controls;
             if (tabAnswerPause.isPaused()) controls.stop();
             renderWorkResultsPanel();
           },
           clearRuntimeControls() {
+            state.workResults.resetOperation = undefined;
             state.workResults.runtimeControls = undefined;
             setWorkResults(
               state.workResults.results.map((item) => ({
@@ -2826,8 +2965,13 @@ export const CommonProject = Project.create({
       namespace: 'common.apps',
       methods() {
         return {
-          searchAnswerInCaches<T>(title: string, provider: () => Promise<T>, mode: SearchCacheMode = 'normal') {
-            const cacheKey = answerCacheKey(title, mode);
+          searchAnswerInCaches<T>(
+            title: string,
+            provider: () => Promise<T>,
+            mode: SearchCacheMode = 'normal',
+            identity?: QuestionCacheIdentity
+          ) {
+            const cacheKey = answerCacheKey(title, mode, identity);
             if (!isLocalQuestionCacheEnabled()) {
               return provider().then((result) => {
                 if (Array.isArray(result)) {
@@ -2847,7 +2991,7 @@ export const CommonProject = Project.create({
               answerCache.delete(cacheKey);
             }
 
-            const cacheResults = questionCachesToSearchInfos(title, mode);
+            const cacheResults = questionCachesToSearchInfos(title, mode, identity);
             if (cacheResults.length) {
               answerCache.set(cacheKey, cacheResults);
               return Promise.resolve(cacheResults as T);
@@ -2862,12 +3006,16 @@ export const CommonProject = Project.create({
               return result;
             });
           },
-          addQuestionCacheFromWorkResult(result: unknown, mode: SearchCacheMode = 'normal') {
+          addQuestionCacheFromWorkResult(
+            result: unknown,
+            mode: SearchCacheMode = 'normal',
+            identity?: QuestionCacheIdentity
+          ) {
             const normalized = normalizeWorkResultsPayload(result);
             if (normalized.length === 0) {
               return;
             }
-            addQuestionCaches(...resultToQuestionCaches(normalized, mode));
+            addQuestionCaches(...resultToQuestionCaches(normalized, mode, identity));
           },
           clearQuestionCaches() {
             state.apps.localQuestionCaches = [];
