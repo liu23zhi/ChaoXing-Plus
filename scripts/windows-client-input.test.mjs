@@ -102,9 +102,9 @@ test('安装搜狗拼音：winget 与官方下载两条线上兜底都在', () =
   assert.doesNotMatch(source, /WeChat|WeType|wechat/u, '微信输入法安装代码与备份必须彻底移除');
   assert.doesNotMatch(source, /wechat-ime/u, '不得再引用微信输入法安装包');
   const installBody = source.slice(source.indexOf('function Install-SogouInputMethod'));
-  assert.match(installBody, /winget\.exe install --id Sogou\.SogouInput/u, '首选 winget 安装');
+  assert.match(installBody, /-FilePath \$winget\.Source -ArgumentList @\('install', '--id', 'Sogou\.SogouInput'/u, '保留 winget 安装来源');
   assert.match(installBody, /Resolve-SogouInputInstaller/u, 'winget 失败后要有官方安装包兜底');
-  assert.match(installBody, /ArgumentList \$using:installer\.Silent/u, '静默参数必须来自解析结果');
+  assert.match(installBody, /ArgumentList \$installer\.Silent/u, '静默参数必须来自解析结果');
   assert.match(source, /function Resolve-SogouInputInstaller/u, '必须能解析当前版本（不写死）');
   assert.match(source, /_sogou_pinyin_\$\(\$version\)_0\.exe/u, '下载地址按固定模板拼装');
   assert.match(source, /manifests\/s\/Sogou\/SogouInput/u, '版本回退到 winget-pkgs 清单');

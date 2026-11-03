@@ -377,6 +377,7 @@ function Import-ImmInputMethodLayout {
 # again: Windows can return the default HKL or ignore loading from a process without keyboard focus.
 # No registry values, default input language or keyboard API results are fabricated here.
 function Enable-SogouImmInputMethod {
+    param([switch] $Quiet)
     $state = [pscustomobject]@{ Prepared = $false; Reason = ''; Candidates = @(); Attempts = @(); ImmDescriptions = @(Get-ImmInputMethodProbe) }
     if (Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions) {
         $state.Prepared = $true
@@ -386,7 +387,7 @@ function Enable-SogouImmInputMethod {
     try { $state.Candidates = @(Get-RegisteredSogouImmLayouts) }
     catch {
         $state.Reason = 'registry-probe-failed'
-        Write-Step "input: prepared=false reason=$($state.Reason) error=$($_.Exception.Message)"
+        if (-not $Quiet) { Write-Step "input: prepared=false reason=$($state.Reason) error=$($_.Exception.Message)" }
         return $state
     }
     if ($DryRun) { $state.Reason = 'dry-run' }
@@ -404,12 +405,72 @@ function Enable-SogouImmInputMethod {
                 }
             } catch { $attempt.Error = $_.Exception.Message }
             $state.Attempts += $attempt
-            Write-Step "input: IMM load klid=$klid handle='$($attempt.Handle)' ready=$($attempt.Ready) error='$($attempt.Error)'"
+            if (-not $Quiet -or $attempt.Ready) { Write-Step "input: IMM load klid=$klid handle='$($attempt.Handle)' ready=$($attempt.Ready) error='$($attempt.Error)'" }
             if ($attempt.Ready) { $state.Prepared = $true; $state.Reason = 'registered-sogou-imm-loaded'; break }
         }
     }
-    Write-Step "input: prepared=$($state.Prepared) reason=$($state.Reason) registeredSogouLayouts=$($state.Candidates -join ',')"
+    if (-not $Quiet -or $state.Prepared) { Write-Step "input: prepared=$($state.Prepared) reason=$($state.Reason) registeredSogouLayouts=$($state.Candidates -join ',')" }
     return $state
+}
+
+# Sogou setup can keep running after its IMM layer is usable. Poll in this process so that loading and
+# describing the layout use the same keyboard layout list. Do not put the installer in a PowerShell job:
+# disposing a still-running job can stop its wait/children, while we only need to stop waiting here.
+function Invoke-SogouInstaller {
+    param(
+        [Parameter(Mandatory = $true)] [string] $FilePath,
+        [Parameter(Mandatory = $true)] [string[]] $ArgumentList,
+        [Parameter(Mandatory = $true)] [string] $Label,
+        [int] $TimeoutSeconds = 180
+    )
+    if ($DryRun) {
+        Write-Step "$Label : dry run, skipped"
+        return [pscustomobject]@{ Ok = $false; TimedOut = $false; ImmReady = $false; StillRunning = $false; ExitCode = $null }
+    }
+    Write-Step "$Label : starting (IMM timeout ${TimeoutSeconds}s)"
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -WindowStyle Hidden -ErrorAction Stop
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $nextHeartbeat = 15
+    $exitCode = $null
+    try {
+        while ($true) {
+            try {
+                $script:SogouImmPreparation = Enable-SogouImmInputMethod -Quiet
+                if ($script:SogouImmPreparation.Prepared) {
+                    # Installer state is diagnostic only once IMM is ready.
+                    $running = $null
+                    try { $process.Refresh(); $running = -not $process.HasExited } catch { }
+                    Write-Step "$Label : IMM ready; continuing without waiting for installer exit (pid=$($process.Id) running=$running)"
+                    foreach ($line in @($script:SogouImmPreparation.ImmDescriptions)) { Write-Step "input: imm after install $line" }
+                    return [pscustomobject]@{ Ok = $true; TimedOut = $false; ImmReady = $true; StillRunning = $running; ExitCode = $exitCode }
+                }
+            } catch { Write-Step "$Label : IMM probe failed - $($_.Exception.Message)" }
+            $process.Refresh()
+            if ($process.HasExited -and $null -eq $exitCode) {
+                $process.WaitForExit()
+                $exitCode = $process.ExitCode
+                Write-Step "$Label : installer exit $exitCode (IMM not ready)"
+                if ($exitCode -ne 0) {
+                    return [pscustomobject]@{ Ok = $false; TimedOut = $false; ImmReady = $false; StillRunning = $false; ExitCode = $exitCode }
+                }
+                # A successful launcher can exit before its installation child; keep waiting for IMM.
+            }
+            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                $running = -not $process.HasExited
+                Write-Step "$Label : IMM not ready after ${TimeoutSeconds}s (pid=$($process.Id) running=$running); stopped waiting, installer left untouched"
+                return [pscustomobject]@{ Ok = $false; TimedOut = $true; ImmReady = $false; StillRunning = $running; ExitCode = $exitCode }
+            }
+            if ($watch.Elapsed.TotalSeconds -ge $nextHeartbeat) {
+                Write-Step "$Label : IMM not ready after $([int]$watch.Elapsed.TotalSeconds)s (pid=$($process.Id) running=$(-not $process.HasExited))"
+                $nextHeartbeat = $watch.Elapsed.TotalSeconds + 15
+            }
+            $remainingMs = [Math]::Ceiling(($TimeoutSeconds - $watch.Elapsed.TotalSeconds) * 1000)
+            Start-Sleep -Milliseconds ([int][Math]::Max(1, [Math]::Min(3000, $remainingMs)))
+        }
+    } finally {
+        $watch.Stop()
+        $process.Dispose()
+    }
 }
 
 function Get-InputMethodSummary {
@@ -571,6 +632,11 @@ function Resolve-SogouInputInstaller {
 
 function Install-SogouInputMethod {
     try {
+        $script:SogouImmPreparation = Enable-SogouImmInputMethod -Quiet
+        if ($script:SogouImmPreparation.Prepared) {
+            Write-Step 'input: IMM already ready; no Sogou installation needed'
+            return
+        }
         $state = Get-SogouInputState
         if ($state.Installed) {
             Write-Step "input: Sogou Pinyin already installed (version=$($state.Version) dir=$($state.InstallDir) source=$($state.Source))"
@@ -597,14 +663,16 @@ function Install-SogouInputMethod {
                     Write-Step "input: bundled Sogou installer hash mismatch (have $($verified.Sha256), manifest $expected)"
                 } else {
                     Write-Step "input: using bundled Sogou installer $([IO.Path]::GetFileName($bundled)) ($([math]::Round((Get-Item -LiteralPath $bundled).Length / 1MB, 1)) MB, sha256 $($verified.Sha256))"
-                    $runBundled = Invoke-Bounded -Label 'input: bundled Sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-                        $process = Start-Process -FilePath $using:bundled -ArgumentList '/S' -PassThru -Wait
-                        "installer exit $($process.ExitCode)"
-                    }
+                    $runBundled = Invoke-SogouInstaller -FilePath $bundled -ArgumentList '/S' -Label 'input: bundled Sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds
+                    if ($runBundled.ImmReady) { return }
                     $state = Get-SogouInputState
                     if ($state.Installed) {
                         Write-Step "input: Sogou Pinyin installed from the bundled installer (version=$($state.Version))"
                         foreach ($line in @(Get-ImmInputMethodProbe)) { Write-Step "input: imm after install $line" }
+                        return
+                    }
+                    if ($runBundled.StillRunning) {
+                        Write-Step 'input: bundled installer still running without IMM; skipping additional installers'
                         return
                     }
                     Write-Step "input: bundled installer did not install Sogou Pinyin (ok=$($runBundled.Ok) timedOut=$($runBundled.TimedOut)); trying winget"
@@ -615,12 +683,15 @@ function Install-SogouInputMethod {
         # 2) winget: version-agnostic, but needs the package source to be reachable.
         $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
         if ($winget) {
-            $install = Invoke-Bounded -Label 'input: winget install Sogou.SogouInput' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-                & winget.exe install --id Sogou.SogouInput -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Select-Object -Last 4
-            }
+            $install = Invoke-SogouInstaller -FilePath $winget.Source -ArgumentList @('install', '--id', 'Sogou.SogouInput', '-e', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity') -Label 'input: winget install Sogou.SogouInput' -TimeoutSeconds $CapabilityTimeoutSeconds
+            if ($install.ImmReady) { return }
             $state = Get-SogouInputState
             if ($state.Installed) {
                 Write-Step "input: Sogou Pinyin installed through winget (version=$($state.Version))"
+                return
+            }
+            if ($install.StillRunning) {
+                Write-Step 'input: winget still running without IMM; skipping the manifest installer'
                 return
             }
             Write-Step "input: winget path did not install Sogou Pinyin (ok=$($install.Ok) timedOut=$($install.TimedOut)); trying the manifest installer"
@@ -647,10 +718,8 @@ function Install-SogouInputMethod {
         $signature = Get-AuthenticodeSignature -LiteralPath $target -ErrorAction SilentlyContinue
         if ($signature) { Write-Step "input: signature status=$($signature.Status) signer=$($signature.SignerCertificate.Subject)" }
 
-        $run = Invoke-Bounded -Label 'input: sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds -Action {
-            $process = Start-Process -FilePath $using:target -ArgumentList $using:installer.Silent -PassThru -Wait
-            "installer exit $($process.ExitCode)"
-        }
+        $run = Invoke-SogouInstaller -FilePath $target -ArgumentList $installer.Silent -Label 'input: sogou setup /S' -TimeoutSeconds $CapabilityTimeoutSeconds
+        if ($run.ImmReady) { return }
         $state = Get-SogouInputState
         if ($state.Installed) {
             Write-Step "input: Sogou Pinyin installed from the manifest installer (version=$($state.Version))"
@@ -713,7 +782,7 @@ if (-not $SkipInputMethod) {
   Add-ChineseInputMethod
   if (-not $SkipSogouInputMethod) {
     Install-SogouInputMethod
-    $script:SogouImmPreparation = Enable-SogouImmInputMethod
+    if (-not $script:SogouImmPreparation.Prepared) { $script:SogouImmPreparation = Enable-SogouImmInputMethod }
   }
 }
 if (-not $SkipCamera) { Add-VirtualCamera }

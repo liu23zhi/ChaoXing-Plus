@@ -12,7 +12,7 @@ const smallFixture = resolveTestPath('tests', 'fixtures', 'real-client', 'check-
 const windowSource = resolveTestPath('scripts', 'test-helpers', 'client-dialog-fixture.cs');
 const quote = (value) => `'${String(value).replace(/'/gu, "''")}'`;
 
-function runDialog(scenario) {
+function runDialog(scenario, { reacquire = false } = {}) {
   const directory = createTestDirectory('client-dialog');
   const harness = path.join(directory, 'harness.ps1');
   writeFileSync(harness, `
@@ -43,12 +43,21 @@ try {
       return [pscustomobject]@{ Buffer = $buffer; Stride = $data.Stride; Width = $CropWidth; Height = $CropHeight; OffsetX = -$CropLeft; OffsetY = -$CropTop }
     } finally { $bitmap.UnlockBits($data) }
   }
-  $selected = Get-ClientDialogWindow -CheckWindow ([ClientDialogFixture]::Check) -ProcessId $PID
+  $diverted = [IntPtr]::Zero
+  if ($${reacquire}) {
+    [ClientDialogFixture]::EnsureForeground([ClientDialogFixture]::Check)
+    $diverted = [CXClientEntry]::GetForegroundWindow()
+  }
+  # Other browser/native tests share this desktop. Reestablish the scenario after bitmap setup,
+  # then independently read the actual foreground immediately before exercising window selection.
+  [ClientDialogFixture]::EnsureForeground($(if (${quote(scenario)} -eq 'fullscreen-focus') { [ClientDialogFixture]::Dialog } else { [ClientDialogFixture]::Unknown }))
   $foreground = [CXClientEntry]::GetForegroundWindow()
+  $selected = Get-ClientDialogWindow -CheckWindow ([ClientDialogFixture]::Check) -ProcessId $PID
   $accepted = Confirm-ClientExamEntry -Window ([ClientDialogFixture]::Check) -TimeoutSeconds 1 -PollMilliseconds 20 -ProcessId $PID
   [pscustomobject]@{
     selected = $selected.ToInt64(); expected = [ClientDialogFixture]::Dialog.ToInt64()
     foreground = $foreground.ToInt64(); unknown = [ClientDialogFixture]::Unknown.ToInt64()
+    diverted = $diverted.ToInt64(); check = [ClientDialogFixture]::Check.ToInt64()
     clicked = $accepted.Clicked; x = $accepted.X; y = $accepted.Y; via = $accepted.Via
     clicks = [ClientDialogFixture]::Clicks; wrongClicks = [ClientDialogFixture]::WrongClicks
     lastX = [ClientDialogFixture]::LastX; lastY = [ClientDialogFixture]::LastY
@@ -104,5 +113,15 @@ test('unknown same-process window is not a confirmation dialog and receives no i
   assert.equal(actual.selected, 0);
   assert.equal(actual.clicked, false);
   assert.equal(actual.clicks, 0);
+  assert.equal(actual.remaining, 0);
+});
+
+test('dialog fixture reacquires its unknown foreground after another owned window becomes active', { skip: windowsOnly }, () => {
+  const actual = runDialog('fullscreen', { reacquire: true });
+  assert.equal(actual.diverted, actual.check, 'the fixture must first observe a different real foreground HWND');
+  assert.equal(actual.foreground, actual.unknown, 'the requested unknown window must regain actual foreground');
+  assert.equal(actual.selected, actual.expected);
+  assert.equal(actual.clicked, true);
+  assert.equal(actual.wrongClicks, 0);
   assert.equal(actual.remaining, 0);
 });

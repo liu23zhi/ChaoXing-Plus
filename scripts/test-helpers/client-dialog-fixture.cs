@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -30,6 +31,8 @@ public static class ClientDialogFixture {
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint process);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint first, uint second, bool attach);
     [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool PeekMessageW(out Message message, IntPtr hwnd, uint first, uint last, uint remove);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     private static readonly WindowProc Procedure = HandleMessage;
     private static readonly List<IntPtr> Windows = new List<IntPtr>();
@@ -41,13 +44,35 @@ public static class ClientDialogFixture {
     public static IntPtr Check, Dialog, Unknown;
     public static int Clicks, WrongClicks, LastX, LastY;
 
-    private static void Foreground(IntPtr hwnd) {
-        uint owner;
-        uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
+    public static void EnsureForeground(IntPtr hwnd) {
+        if (hwnd == IntPtr.Zero || !Windows.Contains(hwnd)) throw new ArgumentException("Foreground target must belong to this fixture");
         uint currentThread = GetCurrentThreadId();
-        bool attached = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
-        try { BringWindowToTop(hwnd); SetForegroundWindow(hwnd); }
-        finally { if (attached) AttachThreadInput(currentThread, foregroundThread, false); }
+        uint owner;
+        uint windowThread = GetWindowThreadProcessId(hwnd, out owner);
+        Message pending;
+        // AttachThreadInput requires a message queue on both threads. This method is called from the
+        // PowerShell thread after the fixture UI thread has started its message pump.
+        PeekMessageW(out pending, IntPtr.Zero, 0, 0, 0);
+        Stopwatch watch = Stopwatch.StartNew();
+        do {
+            if (GetForegroundWindow() == hwnd) return;
+            uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out owner);
+            bool foregroundAttached = foregroundThread != 0 && foregroundThread != currentThread &&
+                foregroundThread != windowThread && AttachThreadInput(currentThread, foregroundThread, true);
+            bool windowAttached = windowThread != currentThread && AttachThreadInput(currentThread, windowThread, true);
+            try { BringWindowToTop(hwnd); SetForegroundWindow(hwnd); }
+            finally {
+                if (windowAttached) AttachThreadInput(currentThread, windowThread, false);
+                if (foregroundAttached) AttachThreadInput(currentThread, foregroundThread, false);
+            }
+            // A cross-thread activation can be asynchronous. Let the actual window process its
+            // messages before checking the desktop state; no synthetic keyboard/mouse input is sent.
+            IntPtr ignored;
+            SendMessageTimeoutW(hwnd, 0, IntPtr.Zero, IntPtr.Zero, 2, 100, out ignored);
+            if (GetForegroundWindow() == hwnd) return;
+            Thread.Sleep(20);
+        } while (watch.ElapsedMilliseconds < 3000);
+        throw new Exception("Fixture could not acquire foreground: expected=" + hwnd.ToInt64() + " actual=" + GetForegroundWindow().ToInt64());
     }
 
     private static IntPtr HandleMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam) {
@@ -95,7 +120,6 @@ public static class ClientDialogFixture {
                     Create("ExamCheckHintUI", 0, 0, 0, 0, true);
                 }
                 Unknown = Create("ClientUnknownFixture", 20, 20, 300, 200, true);
-                Foreground(scenario == "fullscreen-focus" ? Dialog : Unknown);
                 Ready.Set();
                 Message message;
                 while (GetMessageW(out message, IntPtr.Zero, 0, 0) > 0) {
@@ -107,6 +131,8 @@ public static class ClientDialogFixture {
         thread.IsBackground = true; thread.Start();
         if (!Ready.WaitOne(10000)) throw new Exception("Fixture startup timed out");
         if (startupError != null) throw startupError;
+        try { EnsureForeground(scenario == "fullscreen-focus" ? Dialog : Unknown); }
+        catch { Stop(); throw; }
     }
 
     public static void Stop() {

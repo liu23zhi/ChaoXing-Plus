@@ -15,6 +15,7 @@
 
 - 依据：客户端按 `ImmGetDescriptionW` 是否为空筛选输入法（IG5：`FUN_004a6b30`），纯 TSF 的微软拼音
   不满足。安装后需从实际注册的搜狗 IMM 布局读取 KLID、加载并读回非空描述；安装目录或卸载表项不能代替就绪证据。`cx-real-client-prep-summary.json` 的 `prepared` / `immPreparation` 分别记录实际就绪结果与逐次加载诊断。
+- 安装期间每三秒探测 IMM；读到非空描述即完成准备并继续，即使安装器仍在运行也不等待或结束它。启动器退出码 0 仍须等待 IMM；超时且安装器仍在运行时停止后续安装来源，避免并发重复安装。
 - 安装顺序：仓库内安装包 → `winget install Sogou.SogouInput -e --silent` → 从 winget-pkgs 清单
   (`manifests/s/Sogou/SogouInput`) 解析当前版本，按固定模板 `https://ime.gtimg.com/pc/build/_sogou_pinyin_<version>_0.exe`
   下载。三层都带超时，失败只记录不中断。

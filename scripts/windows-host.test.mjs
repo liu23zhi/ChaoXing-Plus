@@ -28,6 +28,7 @@ import {
 import { fetchJson, CdpConnection } from '../windows/node-source/cdp.mjs';
 import { isBlankishUrl, PageSession } from '../windows/node-source/inject.mjs';
 import { evaluateDpiDiagnosis, evaluatePageDiagnosis } from '../windows/node-source/diagnostics.mjs';
+import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const root = process.cwd();
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -92,7 +93,8 @@ function consumeClientFrames(socketState, chunk, onMessage) {
 }
 
 async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFirstConnection = false } = {}) {
-  const captured = { evaluates: [], trampolineSource: null, methodLog: [], connections: 0 };
+  const captured = { evaluates: [], trampolineSource: null, methodLog: [], connections: 0, controlledDisconnects: 0 };
+  let firstConnection = null;
   const sockets = new Set();
   const server = http.createServer((request, response) => {
     const port = server.address().port;
@@ -138,6 +140,7 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
     sockets.add(socket);
     captured.connections += 1;
     const connectionIndex = captured.connections;
+    if (connectionIndex === 1) firstConnection = socket;
 
     const sendJson = (payload) => {
       try { socket.write(encodeServerFrame(JSON.stringify(payload))); } catch { /* ignore */ }
@@ -232,11 +235,13 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
             captured.evaluates.push(String(message.params && message.params.expression ? message.params.expression : ''));
             try {
               vm.runInContext(captured.evaluates[captured.evaluates.length - 1], sandbox, { timeout: 2000 });
-              sendJson({ id: message.id, result: { result: { type: 'undefined' } } });
+              const response = { id: message.id, result: { result: { type: 'undefined' } } };
               if (captured.connections === 1 && disconnectOnExpression
                 && captured.evaluates.at(-1).includes(disconnectOnExpression)) {
+                // Interrupt an in-flight evaluation before its response is acknowledged.
+                // A test requiring a completed injection must close the connection afterwards.
                 socket.end(Buffer.from([0x88, 0x00]));
-              }
+              } else sendJson(response);
             } catch (error) {
               sendJson({
                 id: message.id,
@@ -260,6 +265,12 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
   return {
     port: server.address().port,
     captured,
+    disconnectFirstConnection() {
+      if (!firstConnection || firstConnection.destroyed || firstConnection.writableEnded) return false;
+      captured.controlledDisconnects += 1;
+      firstConnection.end(Buffer.from([0x88, 0x00]));
+      return true;
+    },
     async close() {
       for (const socket of sockets) {
         try { socket.destroy(); } catch { /* ignore */ }
@@ -269,7 +280,7 @@ async function startMockCdp({ disconnectOnExpression = '', suppressReadyAfterFir
   };
 }
 
-async function runCommand(command, args, { cwd = root, env = {}, timeoutMs = 20000 } = {}) {
+async function runCommand(command, args, { cwd = root, env = {}, timeoutMs = 20000, onStdout } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -279,7 +290,12 @@ async function runCommand(command, args, { cwd = root, env = {}, timeoutMs = 200
     });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      onStdout?.(stdout);
+    });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     const timer = setTimeout(() => {
       child.kill();
@@ -842,13 +858,13 @@ test('Node SEA 单 EXE 脱离构建目录后完成 mock CDP 注入且 no-disk-wr
 
 test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async () => {
   const mock = await startMockCdp({ disconnectOnExpression: '__reconnectBundle' });
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-'));
+  const directory = createTestDirectory('cdp-reconnect');
   const assetsDir = path.join(directory, 'assets');
-  await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
-    bundle: 'window.__reconnectBundle=true;'
-  });
   try {
+    await writeFixtureAssets(assetsDir, {
+      bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+      bundle: 'window.__reconnectBundle=true;'
+    });
     const result = await runCommand(process.execPath, [
       path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir,
@@ -861,33 +877,42 @@ test('target 仍存在但 CDP 断开时宿主会在轮询中重建会话', async
     assert.ok(mock.captured.evaluates.filter((source) => source.includes('__reconnectBundle')).length >= 2);
   } finally {
     await mock.close();
-    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
 test('CDP 重连后保留前一会话已完成的注入统计及成功退出码', async () => {
-  const mock = await startMockCdp({ disconnectOnExpression: '__historyBundle', suppressReadyAfterFirstConnection: true });
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-reconnect-history-'));
+  const mock = await startMockCdp({ suppressReadyAfterFirstConnection: true });
+  const directory = createTestDirectory('cdp-reconnect-history');
   const assetsDir = path.join(directory, 'assets');
   const reportPath = path.join(directory, 'report.json');
-  await writeFixtureAssets(assetsDir, {
-    bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
-    bundle: 'window.__historyBundle=true;'
-  });
+  let disconnectedAfterInjection = false;
   try {
+    await writeFixtureAssets(assetsDir, {
+      bootstrap: "window.__CX_WIN_HOST__={};console.log('__CX_WIN_MSG__'+JSON.stringify({source:'chaoxing-plus-windows',instance:window.__CX_WIN_INSTANCE__,kind:'ready',detail:{}}));",
+      bundle: 'window.__historyBundle=true;'
+    });
     const result = await runCommand(process.execPath, [
       path.resolve(root, 'windows', 'node-source', 'main.mjs'),
       '--attach', String(mock.port), '--assets', assetsDir,
       '--config', path.join(directory, 'config.json'), '--report', reportPath,
-      '--target-poll-interval', '250', '--duration', '1800', '--no-log', '--quiet'
-    ]);
+      '--target-poll-interval', '250', '--duration', '1800', '--no-log'
+    ], {
+      onStdout(stdout) {
+        // This callback is logged after stats.bundles is incremented. Closing on the CDP response
+        // itself races the host's async continuation and does not establish a completed injection.
+        if (!disconnectedAfterInjection && stdout.includes('[inject] context=1 bundle 完成（')) {
+          disconnectedAfterInjection = mock.disconnectFirstConnection();
+        }
+      }
+    });
+    assert.equal(disconnectedAfterInjection, true, result.stdout);
+    assert.equal(mock.captured.controlledDisconnects, 1);
     assert.ok(mock.captured.connections >= 2, `实际连接数 ${mock.captured.connections}`);
     const report = JSON.parse(await fs.readFile(reportPath, 'utf8'));
     assert.equal(report.totals.bundles, 1);
     assert.equal(result.code, 0, result.stderr);
   } finally {
     await mock.close();
-    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
