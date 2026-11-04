@@ -8,6 +8,7 @@ import { build } from 'vite';
 let browser;
 let runtime;
 let resolverBundle;
+let adapterBundle;
 
 before(async () => {
   const declarations = async (path, names) => {
@@ -25,6 +26,11 @@ before(async () => {
     lib: { entry: 'src/core/index.ts', name: 'QuestionResolverFixture', formats: ['iife'] }
   } });
   resolverBundle = (Array.isArray(built) ? built[0] : built).output.find((entry) => entry.type === 'chunk' && entry.isEntry).code;
+  const adapterBuilt = await build({ configFile: false, logLevel: 'silent', build: {
+    write: false, target: 'es2020', minify: false,
+    lib: { entry: 'src/projects/tiku-adapter-config.ts', name: 'TikuAdapterFixture', formats: ['iife'] }
+  } });
+  adapterBundle = (Array.isArray(adapterBuilt) ? adapterBuilt[0] : adapterBuilt).output.find((entry) => entry.type === 'chunk' && entry.isEntry).code;
   browser = await puppeteer.launch({ headless: true, executablePath: process.env.CX_BROWSER_EXECUTABLE,
     args: ['--no-first-run', '--no-default-browser-check', '--disable-background-networking'] });
 });
@@ -39,6 +45,7 @@ async function withPage(html, run) {
     await page.setContent(`<base href="https://fixture.invalid/course/">${html}`);
     await page.addScriptTag({ content: runtime });
     await page.addScriptTag({ content: resolverBundle });
+    await page.addScriptTag({ content: adapterBundle });
     return await run(page);
   } finally { await page.close(); }
 }
@@ -163,9 +170,36 @@ test('work option text elements infer type through their containing answerBg con
 
 test('option extraction prefers displayed labels over conflicting platform values and preserves image order', async () => {
   await withPage(`<ul><li class="answerBg" data="B"><span class="num_option">A</span><div class="answer_p">first</div></li>
-    <li class="answerBg" data="A"><span class="num_option">B</span><div class="answer_p"><img data-src="/choice.png" alt="diagram">second</div></li></ul>`, async (page) => {
+    <li class="answerBg" data="A"><span class="num_option">B</span><div class="answer_p"><img data-src="/choice.png" alt="diagram">second</div></li>
+    <li class="answerBg"><span class="num_option">C</span><div class="answer_p">甲</div></li>
+    <li class="answerBg"><span class="num_option">A</span><div class="answer_p">A variable</div></li>
+    <li class="answerBg"><span class="num_option">D.</span><div class="answer_p">D. delta</div></li>
+    <li class="answerBg"><span class="num_option">E、</span><div class="answer_p">epsilon</div></li>
+    <li class="answerBg"><span class="num_option">正确</span><div class="answer_p">正确</div></li>
+    <li class="answerBg"><div class="answer_p">A variable</div></li></ul>`, async (page) => {
     const values = await page.evaluate(() => extractQuestionOptionTexts([...document.querySelectorAll('.answer_p')]));
-    assert.deepEqual(values, ['A first', 'B diagram https://fixture.invalid/choice.png second']);
+    assert.deepEqual(values, ['A. first', 'B. diagram https://fixture.invalid/choice.png second', 'C. 甲',
+      'A. A variable', 'D. delta', 'E、 epsilon', '正确', 'A variable']);
+  });
+});
+
+test('extracted short and English options retain adapter-compatible labels in the Tiku request', async () => {
+  await withPage(`<ul><li class="answerBg" data="B"><span class="num_option">A</span><div class="answer_p">甲</div></li>
+    <li class="answerBg" data="A"><span class="num_option">B</span><div class="answer_p">A variable</div></li></ul>`, async (page) => {
+    const payload = await page.evaluate(async () => {
+      let body;
+      window.fetch = async (_url, init) => {
+        body = JSON.parse(init.body);
+        return new Response(JSON.stringify({ question: '题目', type: 0, answer: { answerKeyText: 'A' } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } });
+      };
+      const wrapper = TikuAdapterFixture.createTikuAdapterAnswererWrapper({ baseurl: 'https://adapter.test', key: 'fixture', asyncSearch: false });
+      await QuestionResolverFixture.defaultAnswerWrapperHandler([wrapper], {
+        title: '题目', type: 'single', options: extractQuestionOptionTexts([...document.querySelectorAll('.answer_p')]).join('\n')
+      });
+      return body;
+    });
+    assert.deepEqual(payload.options, ['A. 甲', 'B. A variable']);
   });
 });
 

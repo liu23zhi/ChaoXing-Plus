@@ -63,6 +63,13 @@ export function extractQuestionOptionTexts(options: HTMLElement[]) {
     const visibleLabel = labelScope.querySelector<HTMLElement>('.num_option, .option-label, .optionLabel, .answer_num')?.innerText?.trim() ?? '';
     const contentRoot = option.querySelector<HTMLElement>('.answer_p, .after') ?? option;
     const content = optimizationElementWithImage(contentRoot, true).innerText.trim();
+    const letterLabel = visibleLabel.match(/^([A-Za-z])(?:[.、:：)）．])?$/u);
+    if (letterLabel) {
+      const letter = letterLabel[1];
+      if (new RegExp(`^${letter}[.、:：)）．]`, 'u').test(content)) return content;
+      const prefix = visibleLabel.length === 1 ? `${letter}.` : visibleLabel;
+      return [prefix, content].filter(Boolean).join(' ').trim();
+    }
     const text = visibleLabel && content.startsWith(visibleLabel) ? content : [visibleLabel, content].filter(Boolean).join(' ');
     return text.trim();
   });
