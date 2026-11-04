@@ -219,3 +219,26 @@ test('cache normalization preserves mathematical superscripts and letter case', 
   await cache.searchAnswerInCaches('x²', provider, 'normal', { type: 'single', options: ['x', 'x'] });
   assert.equal(calls, 2);
 });
+
+test('image evidence keeps cache identities separate across alt text, image order and persistence', async () => {
+  const cache = await loadCacheHarness();
+  const identity = {
+    type: 'single', options: ['A', 'B'],
+    questionEvidence: { stemImages: [{ url: 'https://img.test/formula.png', alt: 'x²', index: 0 }], optionImages: [] }
+  };
+  cache.addQuestionCacheFromWorkResult(completedResult('带图答案'), 'normal', identity);
+  let calls = 0;
+  const provider = async () => { calls++; return []; };
+  assert.equal((await cache.searchAnswerInCaches('同一道题', provider, 'normal', identity))[0].results[0].answer, '带图答案');
+  for (const changed of [
+    { type: 'single', options: ['A', 'B'] },
+    { ...identity, questionEvidence: { stemImages: [{ url: 'https://img.test/formula.png', alt: 'x2', index: 0 }], optionImages: [] } },
+    { ...identity, questionEvidence: { stemImages: [{ url: 'https://img.test/other.png', alt: 'x²', index: 0 }], optionImages: [] } },
+    { ...identity, questionEvidence: { stemImages: [{ url: 'https://img.test/formula.png', alt: 'x²', index: 1 }], optionImages: [] } }
+  ]) await cache.searchAnswerInCaches('同一道题', provider, 'normal', changed);
+  assert.equal(calls, 4);
+
+  const hydrated = await loadCacheHarness(cache.saved());
+  assert.equal((await hydrated.searchAnswerInCaches('同一道题', provider, 'normal', identity))[0].results[0].answer, '带图答案');
+  assert.equal(calls, 4);
+});

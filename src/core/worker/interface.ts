@@ -33,9 +33,21 @@ export type QuestionTypes = 'single' | 'multiple' | 'completion' | 'judgement' |
 
 export type AnswerMatchMode = 'exact' | 'similar';
 
+export interface QuestionImageEvidence {
+	url: string;
+	alt: string;
+	index: number;
+}
+
+export interface QuestionEvidence {
+	stemImages: QuestionImageEvidence[];
+	optionImages: QuestionImageEvidence[];
+}
+
 export interface QuestionSearchIdentity {
 	type?: string;
 	options: string[];
+	questionEvidence?: QuestionEvidence;
 }
 
 /** 答题器上下文 */

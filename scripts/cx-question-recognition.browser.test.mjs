@@ -18,7 +18,7 @@ before(async () => {
   };
   runtime = ts.transpileModule([
     await declarations('src/projects/cx.ts', ['queryWorkOrExamQuestionRoots', 'getWorkOrExamQuestionSelector']),
-    await declarations('src/utils/work.ts', ['optimizationElementWithImage', 'simplifyWorkResult'])
+    await declarations('src/utils/work.ts', ['optimizationElementWithImage', 'extractQuestionImageEvidence', 'extractExplicitCorrectAnswerEvidence', 'inferQuestionTypeFromOptionElements', 'extractQuestionOptionTexts', 'simplifyWorkResult'])
   ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
   const built = await build({ configFile: false, logLevel: 'silent', build: {
     write: false, target: 'es2020', minify: false,
@@ -117,6 +117,84 @@ test('image evidence resolves relative URLs in the iframe owner document', async
     });
     assert.match(result.text, /a\+b.*https:\/\/iframe\.invalid\/assets\/formula\.png/su);
     assert.equal(result.ownerMatches, true);
+  });
+});
+
+test('question image evidence preserves ordered stem and option images with lazy URLs and alt text', async () => {
+  await withPage(`<div id="stem"><img data-src="/a.png" alt="formula"><img src="placeholder.png" data-original="/b.png" alt="diagram"></div>
+    <div class="option"><img data-src="/c.png" alt="choice"></div>`, async (page) => {
+    const result = await page.evaluate(() => extractQuestionImageEvidence(
+      [document.querySelector('#stem')], [...document.querySelectorAll('.option')]
+    ));
+    assert.deepEqual(result, {
+      stemImages: [
+        { url: 'https://fixture.invalid/a.png', alt: 'formula', index: 0 },
+        { url: 'https://fixture.invalid/b.png', alt: 'diagram', index: 1 }
+      ],
+      optionImages: [{ url: 'https://fixture.invalid/c.png', alt: 'choice', index: 0 }]
+    });
+  });
+});
+
+test('conservative type inference preserves unknown while recognizing explicit choice and text controls', async () => {
+  await withPage(`<div id="single"><label><input type="radio">A</label><label><input type="radio">B</label><label><input type="radio">C</label></div>
+    <div id="judgement"><label><input type="radio">正确</label><label><input type="radio">错误</label></div>
+    <div id="ambiguous"><label><input type="radio">选项甲</label><label><input type="radio">选项乙</label></div>
+    <div id="multiple"><label><input type="checkbox">甲</label></div>
+    <div id="fill"><textarea></textarea></div>`, async (page) => {
+    const types = await page.evaluate(() => [
+      inferQuestionTypeFromOptionElements([...document.querySelectorAll('#single label')]),
+      inferQuestionTypeFromOptionElements([...document.querySelectorAll('#judgement label')]),
+      inferQuestionTypeFromOptionElements([...document.querySelectorAll('#ambiguous label')]),
+      inferQuestionTypeFromOptionElements([...document.querySelectorAll('#multiple label')]),
+      inferQuestionTypeFromOptionElements([document.querySelector('#fill textarea')])
+    ]);
+    assert.deepEqual(types, ['single', 'judgement', null, 'multiple', 'completion']);
+  });
+});
+
+test('work option text elements infer type through their containing answerBg controls', async () => {
+  await withPage(`<div class="questionLi"><div class="answerBg"><input type="radio"><span class="num_option">正确</span><div class="answer_p">正确</div></div>
+    <div class="answerBg"><input type="radio"><span class="num_option">错误</span><div class="answer_p">错误</div></div></div>`, async (page) => {
+    const result = await page.evaluate(() => inferQuestionTypeFromOptionElements([...document.querySelectorAll('.answer_p')]));
+    assert.equal(result, 'judgement');
+  });
+});
+
+test('option extraction prefers displayed labels over conflicting platform values and preserves image order', async () => {
+  await withPage(`<ul><li class="answerBg" data="B"><span class="num_option">A</span><div class="answer_p">first</div></li>
+    <li class="answerBg" data="A"><span class="num_option">B</span><div class="answer_p"><img data-src="/choice.png" alt="diagram">second</div></li></ul>`, async (page) => {
+    const values = await page.evaluate(() => extractQuestionOptionTexts([...document.querySelectorAll('.answer_p')]));
+    assert.deepEqual(values, ['A first', 'B diagram https://fixture.invalid/choice.png second']);
+  });
+});
+
+test('correct answer extraction requires an explicit visible platform label inside the question root', async () => {
+  await withPage(`<div id="q1"><dd class="rightAnswerContent">正确答案：B</dd></div>
+    <div id="q2"><dd class="rightAnswerContent">我的答案：A</dd></div>
+    <div id="q3"><dd class="rightAnswerContent" style="display:none">正确答案：C</dd></div>
+    <div id="q4"><div class="description">题目描述中提到正确答案：D，但没有独立答案字段</div></div>`, async (page) => {
+    const result = await page.evaluate(() => ['q1', 'q2', 'q3', 'q4'].map((id) =>
+      extractExplicitCorrectAnswerEvidence(document.querySelector(`#${id}`))
+    ));
+    assert.deepEqual(result, [
+      { label: 'rightAnswerContent', answer: 'B', text: '正确答案：B' },
+      null,
+      null,
+      null
+    ]);
+  });
+});
+
+test('graded answer extraction preserves multiple blank answers and formula image evidence', async () => {
+  await withPage(`<div id="q"><dd class="rightAnswerContent">参考答案：first blank</dd>
+    <dd class="rightAnswerContent"><img data-src="/answer.png" alt="x² − y²"></dd></div>`, async (page) => {
+    const result = await page.evaluate(() => extractExplicitCorrectAnswerEvidence(document.querySelector('#q')));
+    assert.deepEqual(result, {
+      label: 'rightAnswerContent',
+      answer: 'first blank#x² − y² https://fixture.invalid/answer.png',
+      text: '参考答案：first blank\nx² − y² https://fixture.invalid/answer.png'
+    });
   });
 });
 

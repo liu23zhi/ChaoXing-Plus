@@ -1,4 +1,4 @@
-import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType } from '../core/index.js';
+import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType, QuestionEvidence } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
@@ -78,12 +78,14 @@ type SearchCacheMode = 'normal' | 'deep';
 interface QuestionCacheIdentity {
   type?: string;
   options?: string[] | string;
+  questionEvidence?: QuestionEvidence;
 }
 
 interface NormalizedQuestionCacheIdentity {
   title: string;
   type: string;
   options: string[];
+  questionEvidence?: QuestionEvidence;
 }
 
 interface QuestionCache {
@@ -972,10 +974,20 @@ function normalizeQuestionCacheIdentity(
     : typeof identity.options === 'string'
       ? identity.options.split(/\r?\n/gu)
       : [];
+  const normalizeImages = (images: unknown) => Array.isArray(images) ? images.map((image, index) => ({
+    url: String(image?.url ?? '').trim(),
+    alt: String(image?.alt ?? '').normalize('NFC').replace(/\s+/gu, ' ').trim(),
+    index: Number.isInteger(image?.index) && image.index >= 0 ? image.index : index
+  })).filter((image) => image.url || image.alt) : [];
+  const questionEvidence = {
+    stemImages: normalizeImages(identity.questionEvidence?.stemImages),
+    optionImages: normalizeImages(identity.questionEvidence?.optionImages)
+  };
   return {
     title: normalizeCacheText(title),
     type: normalizeCacheText(identity.type).toLocaleLowerCase(),
-    options: rawOptions.map((option) => normalizeCacheText(option))
+    options: rawOptions.map((option) => normalizeCacheText(option)),
+    ...(questionEvidence.stemImages.length > 0 || questionEvidence.optionImages.length > 0 ? { questionEvidence } : {})
   };
 }
 
@@ -984,7 +996,7 @@ function questionCacheIdentityKey(
   identity: QuestionCacheIdentity | NormalizedQuestionCacheIdentity | undefined
 ): string | undefined {
   const normalized = normalizeQuestionCacheIdentity(title, identity);
-  return normalized ? JSON.stringify([normalized.title, normalized.type, normalized.options]) : undefined;
+  return normalized ? JSON.stringify([normalized.title, normalized.type, normalized.options, normalized.questionEvidence ?? null]) : undefined;
 }
 
 function answerCacheKey(

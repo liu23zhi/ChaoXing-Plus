@@ -5,7 +5,6 @@ import {
   DEFAULT_WORKER_THREAD_COUNT,
   AnswerWrapperHandlerConfig,
   defaultAnswerWrapperHandler,
-  defaultWorkTypeResolver,
   domSearch,
   domSearchAll,
   OCSWorker,
@@ -13,6 +12,7 @@ import {
   type QuestionTypes,
   type RawElements,
   type SearchInformation,
+  type QuestionEvidence,
   type SimplifyWorkResult
 } from '../core/index.js';
 import { Project, $gm, runtimeStore } from '../runtime/index.js';
@@ -23,6 +23,10 @@ import { playbackRate, volume } from '../utils/configs.js';
 import { waitForElement, waitForMedia } from '../utils/study.js';
 import {
   answerWrapperEmptyWarning,
+  extractExplicitCorrectAnswerEvidence,
+  extractQuestionImageEvidence,
+  extractQuestionOptionTexts,
+  inferQuestionTypeFromOptionElements,
   optimizationElementWithImage,
   removeRedundantWords,
   simplifyWorkResult,
@@ -33,6 +37,8 @@ import {
   collectTikuAdapterWarnings,
   resetTikuAdapterBalanceGuard,
   requestTikuAdapterAIFallback,
+  requestTikuAdapterAnswerEvidence,
+  resolveTikuAdapterQuestionType,
   TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
 } from './tiku-adapter-config.js';
 import {
@@ -928,6 +934,52 @@ function queryWorkOrExamQuestionRoots(doc: ParentNode = document): HTMLElement[]
 
 function getWorkOrExamQuestionSelector(doc: ParentNode = document): '.singleQuesId' | '.questionLi' {
   return doc.querySelector('.singleQuesId') ? '.singleQuesId' : '.questionLi';
+}
+
+const uploadedCorrectAnswerRoots = new WeakSet<HTMLElement>();
+
+function uploadVisibleCorrectAnswerEvidence(
+  roots: HTMLElement[],
+  options: { source: 'chaoxing-chapter-result' | 'chaoxing-homework-result'; courseName: string; titleSelector: string; optionSelector: string; titleTransform?: (title: string) => string }
+) {
+  for (const root of roots) {
+    if (uploadedCorrectAnswerRoots.has(root)) continue;
+    const answerEvidence = extractExplicitCorrectAnswerEvidence(root);
+    if (!answerEvidence) continue;
+
+    const structuredTitles = Array.from(root.querySelectorAll<HTMLElement>('.qtContent'));
+    const titleElements = structuredTitles.length > 0 ? structuredTitles : Array.from(root.querySelectorAll<HTMLElement>(options.titleSelector));
+    const rawTitle = titleElements.map((element) => optimizationElementWithImage(element, true).innerText.trim()).filter(Boolean).join('\n');
+    const question = String(options.titleTransform?.(rawTitle) ?? rawTitle).trim();
+    if (!question) continue;
+
+    const optionElements = Array.from(root.querySelectorAll<HTMLElement>(options.optionSelector));
+    const optionTexts = extractQuestionOptionTexts(optionElements).filter(Boolean);
+    const type = resolveAnswerSearchType(root) ?? inferQuestionTypeFromOptionElements(optionElements);
+    const idRoot = root.closest<HTMLElement>('.singleQuesId[data],.questionLi[data],[data-qid],[data-questionid]')
+      ?? root.querySelector<HTMLElement>('.singleQuesId[data],.questionLi[data],[data-qid],[data-questionid]');
+    const qid = String(idRoot?.getAttribute('data-qid') ?? idRoot?.getAttribute('data-questionid') ?? idRoot?.getAttribute('data') ?? root.id ?? '');
+    const questionEvidence = extractQuestionImageEvidence(titleElements, optionElements);
+
+    uploadedCorrectAnswerRoots.add(root);
+    void requestTikuAdapterAnswerEvidence(getStoredTikuAdapterConfig(), {
+      qid,
+      question,
+      options: optionTexts,
+      type: resolveTikuAdapterQuestionType(type),
+      courseName: options.courseName,
+      answer: answerEvidence.answer,
+      source: options.source,
+      evidence: { ...answerEvidence, ...questionEvidence }
+    }).catch((error) => {
+      uploadedCorrectAnswerRoots.delete(root);
+      logDebug('warn', '学习通批改答案证据回传失败', {
+        source: options.source,
+        qid,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
 }
 
 const siblingSubTaskRefreshDelayMs = 10000;
@@ -2458,6 +2510,7 @@ async function appendAIFallbackSearchInfos(
     title: string;
     type: string;
     optionsText: string;
+    questionEvidence?: QuestionEvidence;
   }
 ) {
   if (await notifyTikuAdapterInsufficientBalance(searchInfos) || !workOptions.enableAIFallbackAnswer || hasAnyResolvedSearchResults(searchInfos)) {
@@ -2468,6 +2521,7 @@ async function appendAIFallbackSearchInfos(
     title: payload.title,
     type: payload.type,
     options: payload.optionsText,
+    questionEvidence: payload.questionEvidence,
     deepThinking: workOptions.deepThinking === true
   });
   const fallbackError = fallbackInfos[0]?.response?.error;
@@ -2874,6 +2928,21 @@ export const CXProject = Project.create({
           },
           getWorkOptions()
         );
+      }
+    },
+    workReview: {
+      name: '作业批阅答案取证',
+      matches: [['作业批阅页面', '/work/selectWorkQuestionYiPiYue']],
+      namespace: 'cx.new.work-review',
+      hideInPanel: true,
+      oncomplete() {
+        const workRoots = queryWorkOrExamQuestionRoots(document);
+        uploadVisibleCorrectAnswerEvidence(workRoots.length > 0 ? workRoots : Array.from(document.querySelectorAll<HTMLElement>('.TiMu')), {
+          source: 'chaoxing-homework-result',
+          courseName: topWindow.document.querySelector<HTMLElement>('.course-title, .courseName, #courseName')?.innerText?.trim() ?? '',
+          titleSelector: '.mark_name, .Zy_TItle .clearfix',
+          optionSelector: '.mark_letter li, .answerBg .answer_p, .textDIV, .eidtDiv'
+        });
       }
     },
     autoRead: {
@@ -4232,6 +4301,15 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
       const workType = attachment.job ? 'job' : attachment.isPassed ? 'finished' : 'not-job';
       const status = chapterTest ? win.document.querySelector<HTMLElement>('.testTit_status') : undefined;
       const chapterStatusComplete = status?.classList.contains('testTit_status_complete') === true;
+      if (chapterTest && chapterStatusComplete) {
+        uploadVisibleCorrectAnswerEvidence(Array.from(win.document.querySelectorAll<HTMLElement>('.TiMu')), {
+          source: 'chaoxing-chapter-result',
+          courseName: topWindow.document.querySelector<HTMLElement>('.course-title, .courseName, #courseName')?.innerText?.trim() ?? '',
+          titleSelector: '.Zy_TItle .clearfix',
+          optionSelector: 'ul li .after,ul li textarea,ul textarea,ul li label:not(.before)',
+          titleTransform: (value) => value.replace(/^\d+[。、.]/u, '').replace(/（\d+\.\d+分）/u, '').trim()
+        });
+      }
       const alreadySearched = alreadySearchedJob !== undefined;
       const isMediaLikeJob = Boolean(videojs || read || hyperlink || pptWithAudio || timereader);
       const alreadyProcessedMediaJob = alreadySearched && workType === 'job' && isMediaLikeJob && !chapterTest;
@@ -4891,12 +4969,10 @@ const JobRunner = {
           }
 
           const questionType = resolveChapterQuestionType(ctx.root, elements);
-          const optionTexts =
-            questionType === 'completion'
-              ? []
-              : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText);
+          const questionEvidence = extractQuestionImageEvidence(elements.title ?? [], ctx.elements.options);
+          const optionTexts = questionType === 'completion' ? [] : extractQuestionOptionTexts(ctx.elements.options);
           const optionsText = optionTexts.join('\n');
-          const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts };
+          const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts, questionEvidence };
           ctx.searchIdentity = cacheIdentity;
 
           const provider = async () => {
@@ -4908,6 +4984,7 @@ const JobRunner = {
                     type: questionType,
                     title,
                     options: optionsText,
+                    questionEvidence,
                     deepThinking,
                     skipCache: Boolean(workerOptions.skipCache)
                   });
@@ -4918,13 +4995,14 @@ const JobRunner = {
                   {
                     title,
                     type: questionType ?? 'unknown',
-                    optionsText
+                    optionsText,
+                    questionEvidence
                   }
                 )
               );
             };
             const requestKey = JSON.stringify([
-              title, questionType ?? 'unknown', optionsText,
+              title, questionType ?? 'unknown', optionsText, questionEvidence,
               Boolean(workerOptions.forceAIFallbackOnly), enableAIFallbackAnswer, deepThinking, aiFallbackFailureAction
             ]);
             return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
@@ -6157,13 +6235,12 @@ function workOrExam(
           throw new Error('题目为空，请查看题目是否为空，或者忽略此题');
         }
 
-        const questionType = resolveAnswerSearchType(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document);
-        const optionTexts =
-          questionType === 'completion'
-            ? []
-            : ctx.elements.options.map((o) => optimizationElementWithImage(o, true).innerText);
+        const typeRoot = resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document;
+        const questionType = resolveAnswerSearchType(typeRoot) ?? inferQuestionTypeFromOptionElements(ctx.elements.options);
+        const questionEvidence = extractQuestionImageEvidence(elements.title ?? [], ctx.elements.options);
+        const optionTexts = questionType === 'completion' ? [] : extractQuestionOptionTexts(ctx.elements.options);
         const optionsText = optionTexts.join('\n');
-        const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts };
+        const cacheIdentity = { type: questionType ?? 'unknown', options: optionTexts, questionEvidence };
         ctx.searchIdentity = cacheIdentity;
 
         const provider = async () => {
@@ -6173,6 +6250,7 @@ function workOrExam(
               type: questionType,
               title,
               options: optionsText,
+              questionEvidence,
               deepThinking,
               skipCache: Boolean(workerOptions.skipCache)
             });
@@ -6183,13 +6261,14 @@ function workOrExam(
                 {
                   title,
                   type: questionType ?? 'unknown',
-                  optionsText
+                  optionsText,
+                  questionEvidence
                 }
               )
             );
           };
           const requestKey = JSON.stringify([
-            title, questionType ?? 'unknown', optionsText,
+            title, questionType ?? 'unknown', optionsText, questionEvidence,
             false, enableAIFallbackAnswer, deepThinking, aiFallbackFailureAction
           ]);
           return workerOptions.skipCache === true ? request() : deduplicateSearchRequest(requestKey, request);
@@ -7017,7 +7096,7 @@ function getQuestionTypeInput(root: ParentNode): HTMLInputElement | undefined {
 function resolveQuestionType(root: ParentNode): ReturnType<typeof getQuestionType> | 'unknown' {
   const typeInput = getQuestionTypeInput(root);
   const rawValue = typeInput?.value?.trim() ?? '';
-  const parsedValue = rawValue === '' ? Number.NaN : parseInt(rawValue, 10);
+  const parsedValue = /^-?\d+$/u.test(rawValue) ? Number(rawValue) : Number.NaN;
   const questionType = Number.isFinite(parsedValue) ? getQuestionType(parsedValue) : undefined;
 
   if (!questionType) {
@@ -7056,16 +7135,7 @@ function resolveQuestionTypeForWork(root: ParentNode, ctx?: { elements?: { optio
     return directType;
   }
 
-  if (ctx?.elements?.options?.length) {
-    return defaultWorkTypeResolver({
-      elements: { options: ctx.elements.options },
-      root: root as HTMLElement,
-      searchInfos: [],
-      type: undefined,
-      answerSeparators: [],
-      answerMatchMode: 'similar'
-    } as any);
-  }
+  if (ctx?.elements?.options?.length) return inferQuestionTypeFromOptionElements(ctx.elements.options) as QuestionTypes;
 
   return undefined;
 }
@@ -7085,10 +7155,9 @@ function resolveChapterQuestionType(
   elements: { type?: HTMLElement[]; options?: HTMLElement[] }
 ): QuestionTypes {
   const typeInput = elements.type?.[0] as HTMLInputElement | undefined;
-  const inputType = typeInput ? getQuestionType(parseInt(typeInput.value, 10)) : undefined;
-  return normalizeResultQuestionType(inputType) ?? resolveQuestionTypeForWork(root, {
-    elements: { options: elements.options ?? getChapterQuestionOptions(root) }
-  });
+  const rawType = typeInput?.value?.trim() ?? '';
+  const inputType = /^-?\d+$/u.test(rawType) ? getQuestionType(Number(rawType)) : undefined;
+  return normalizeResultQuestionType(inputType) ?? inferQuestionTypeFromOptionElements(elements.options ?? getChapterQuestionOptions(root)) as QuestionTypes;
 }
 
 async function waitForChapterQuestionTypeReadiness(

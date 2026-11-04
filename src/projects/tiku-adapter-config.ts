@@ -1,5 +1,6 @@
 /// <reference path="../types.d.ts" />
-import { type SearchInformation } from '../core/index.js';
+import md5 from 'md5';
+import { type SearchInformation, type QuestionEvidence } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
 import { pollTikuAdapterSearchTask, pollTikuAdapterTask, type TikuAdapterTaskEnvelope } from '../core/answer-wrapper/task-poller.js';
 import {
@@ -141,6 +142,75 @@ export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string
   const url = new URL(`${normalized}/adapter-service/search/status`);
   url.searchParams.set('taskId', String(taskId ?? '').trim());
   return url.toString();
+}
+
+export function createTikuAdapterEvidenceUrl(baseurl: string): string {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl);
+  return normalized ? `${normalized}/adapter-service/tiku/evidence` : '';
+}
+
+export type TikuAdapterAnswerEvidencePayload = {
+  qid: string;
+  question: string;
+  options: string[];
+  type: number;
+  courseName: string;
+  answer: string;
+  source: string;
+  evidence: Record<string, unknown>;
+};
+
+export async function requestTikuAdapterAnswerEvidence(
+  config: TikuAdapterConfig,
+  payload: TikuAdapterAnswerEvidencePayload,
+  options: { requestTimeoutMs?: number; idempotencyKey?: string } = {}
+) {
+  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
+  const key = String(config.key ?? '').trim();
+  const problem = getTikuAdapterConfigProblem({ baseurl, key });
+  if (problem) throw new Error(problem);
+
+  const body = normalizeTikuAdapterAnswerEvidencePayload(payload);
+  const idempotencyKey = String(options.idempotencyKey ?? createStableEvidenceIdempotencyKey(body));
+  const timeoutMs = normalizePositiveInteger(options.requestTimeoutMs, 10000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(createTikuAdapterEvidenceUrl(baseurl), {
+      method: 'POST',
+      headers: {
+        Authorization: createTikuAdapterAuthorizationHeader(key),
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const responseText = await response.text();
+    let responseBody: unknown = {};
+    try { responseBody = responseText ? JSON.parse(responseText) : {}; } catch { responseBody = { message: responseText }; }
+    if (!response.ok) throw createTikuAdapterRequestError(responseBody, response.status);
+    return responseBody as Record<string, unknown>;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeTikuAdapterAnswerEvidencePayload(payload: TikuAdapterAnswerEvidencePayload): TikuAdapterAnswerEvidencePayload {
+  return {
+    qid: String(payload.qid ?? '').trim(),
+    question: String(payload.question ?? '').trim(),
+    options: Array.isArray(payload.options) ? payload.options.map((item) => String(item ?? '')) : [],
+    type: Number.isInteger(payload.type) ? payload.type : -1,
+    courseName: String(payload.courseName ?? '').trim(),
+    answer: String(payload.answer ?? '').trim(),
+    source: String(payload.source ?? '').trim(),
+    evidence: payload.evidence && typeof payload.evidence === 'object' ? payload.evidence : {}
+  };
+}
+
+function createStableEvidenceIdempotencyKey(payload: TikuAdapterAnswerEvidencePayload) {
+  return `chaoxing-evidence-${md5(JSON.stringify(payload))}`;
 }
 
 export function createTikuAdapterAIFallbackUrl(baseurl: string): string {
@@ -333,6 +403,7 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
   type?: string;
   options?: string;
   deepThinking?: boolean;
+  questionEvidence?: QuestionEvidence;
 }, options: TikuAdapterAIFallbackRequestOptions = {}): Promise<TikuAdapterAIFallbackResponse[]> {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
@@ -444,6 +515,7 @@ function buildTikuAdapterAIFallbackPayload(payload: {
   type?: string;
   options?: string;
   deepThinking?: boolean;
+  questionEvidence?: QuestionEvidence;
 }) {
   return {
     question: String(payload.title ?? '').trim(),
@@ -452,7 +524,8 @@ function buildTikuAdapterAIFallbackPayload(payload: {
       .split(/\n+/)
       .map((item) => item.trim())
       .filter(Boolean),
-    ...(payload.deepThinking === true ? { deepThinking: true } : {})
+    ...(payload.deepThinking === true ? { deepThinking: true } : {}),
+    ...(payload.questionEvidence ? { questionEvidence: payload.questionEvidence } : {})
   };
 }
 
@@ -755,9 +828,10 @@ export function resolveTikuAdapterQuestionType(type: string | undefined): number
     case 'line':
       return 2;
     case 'reader':
+      return 4;
     case 'unknown':
     default:
-      return 4;
+      return -1;
   }
 }
 
@@ -882,7 +956,7 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
                 ? 3
                 : value === 'completion' || value === 'fill' || value === 'line'
                   ? 2
-                  : 4;
+                  : value === 'reader' ? 4 : -1;
         }`
       },
       courseName: '',
@@ -892,6 +966,9 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       },
       deepThinking: {
         handler: `return (env) => env.deepThinking === true ? true : undefined`
+      },
+      questionEvidence: {
+        handler: `return (env) => { const value = env.questionEvidence; if (!value || typeof value !== 'object') return undefined; const normalize = (items) => Array.isArray(items) ? items.map((item, index) => ({ url: String(item && item.url || ''), alt: String(item && item.alt || ''), index: Number.isInteger(item && item.index) ? item.index : index })).filter((item) => item.url || item.alt) : []; return { stemImages: normalize(value.stemImages), optionImages: normalize(value.optionImages) }; }`
       }
     },
     handler: `return (res) => {

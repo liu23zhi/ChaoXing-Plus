@@ -1,4 +1,4 @@
-import type { SimplifyWorkResult } from '../core/index.js';
+import type { SimplifyWorkResult, QuestionEvidence, QuestionImageEvidence } from '../core/index.js';
 import { runtimeStore } from '../runtime/index.js';
 import { $modal } from '../runtime/message.js';
 import {
@@ -38,6 +38,96 @@ export function optimizationElementWithImage(root: HTMLElement, cloneNode = fals
     img.after(src);
   }
   return clone;
+}
+
+export function inferQuestionTypeFromOptionElements(options: HTMLElement[]) {
+  const text = options.map((option) => String(option.innerText ?? option.textContent ?? '').replace(/\s+/gu, ' ').trim().toLowerCase());
+  const controlScopes = options.map((option) => option.closest('.answerBg, li') ?? option);
+  const controls = controlScopes.flatMap((scope) => Array.from(scope.querySelectorAll<HTMLInputElement>('input[type="radio"],input[type="checkbox"]')));
+  if (controls.some((control) => control.type === 'checkbox')) return 'multiple' as const;
+  if (options.some((option) => option.matches('textarea') || option.querySelector('textarea'))) return 'completion' as const;
+
+  const radioCount = controls.filter((control) => control.type === 'radio').length;
+  if (radioCount > 2) return 'single' as const;
+  if (radioCount === 2 && text.length === 2) {
+    const labels = new Set(text.map((item) => item.replace(/^[A-Da-d][.、:：)）]\s*/u, '').trim()));
+    const judgementPairs = [['正确', '错误'], ['对', '错'], ['是', '否'], ['true', 'false']];
+    if (judgementPairs.some((pair) => pair.every((label) => labels.has(label)))) return 'judgement' as const;
+  }
+  return undefined;
+}
+
+export function extractQuestionOptionTexts(options: HTMLElement[]) {
+  return options.map((option) => {
+    const labelScope = option.closest('.answerBg, li') ?? option;
+    const visibleLabel = labelScope.querySelector<HTMLElement>('.num_option, .option-label, .optionLabel, .answer_num')?.innerText?.trim() ?? '';
+    const contentRoot = option.querySelector<HTMLElement>('.answer_p, .after') ?? option;
+    const content = optimizationElementWithImage(contentRoot, true).innerText.trim();
+    const text = visibleLabel && content.startsWith(visibleLabel) ? content : [visibleLabel, content].filter(Boolean).join(' ');
+    return text.trim();
+  });
+}
+
+export function extractQuestionImageEvidence(
+  stemRoots: Array<HTMLElement | undefined>,
+  optionRoots: Array<HTMLElement | undefined>
+): QuestionEvidence {
+  const collect = (roots: Array<HTMLElement | undefined>): QuestionImageEvidence[] => {
+    const evidence: QuestionImageEvidence[] = [];
+    let imageIndex = 0;
+    for (const root of roots) {
+      if (!root) continue;
+      const images = root.matches('img') ? [root as HTMLImageElement] : Array.from(root.querySelectorAll('img'));
+      for (const img of images) {
+        let url = '';
+        for (const candidate of [img.getAttribute('data-original'), img.getAttribute('data-src'), img.currentSrc, img.getAttribute('src')]) {
+          if (!candidate?.trim()) continue;
+          try {
+            const parsed = new URL(candidate.trim(), img.ownerDocument.baseURI);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+              url = parsed.href;
+              break;
+            }
+          } catch { /* Keep an alt-only image as useful evidence. */ }
+        }
+        const alt = img.getAttribute('alt')?.trim() ?? '';
+        if (url || alt) evidence.push({ url, alt, index: imageIndex });
+        imageIndex++;
+      }
+    }
+    return evidence;
+  };
+
+  return { stemImages: collect(stemRoots), optionImages: collect(optionRoots) };
+}
+
+export function extractExplicitCorrectAnswerEvidence(root: HTMLElement | null | undefined) {
+  if (!root) return undefined;
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>('.rightAnswerContent'));
+  const answers: string[] = [];
+  const texts: string[] = [];
+  for (const node of nodes) {
+    let current: HTMLElement | null = node;
+    let visible = true;
+    while (current) {
+      const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+      if (current.hidden || current.getAttribute('aria-hidden') === 'true' || current.classList.contains('element-invisible-hidden') || current.classList.contains('sr-only') || style?.display === 'none' || style?.visibility === 'hidden' || style?.visibility === 'collapse' || style?.opacity === '0') {
+        visible = false;
+        break;
+      }
+      current = current.parentElement;
+    }
+    if (!visible || node.getClientRects().length === 0) continue;
+
+    const text = optimizationElementWithImage(node, true).innerText.replace(/\s+/gu, ' ').trim();
+    if (/^(?:我的答案|你的答案|学生答案)\s*[:：]/u.test(text)) continue;
+    const answer = text.replace(/^(?:正确答案|标准答案|参考答案)\s*[:：]\s*/u, '').trim();
+    if (answer) {
+      answers.push(answer);
+      texts.push(text);
+    }
+  }
+  return answers.length > 0 ? { label: 'rightAnswerContent', answer: answers.join('#'), text: texts.join('\n') } : undefined;
 }
 
 export function removeRedundantWords(text: string, words: string[]): string {

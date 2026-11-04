@@ -85,7 +85,7 @@ test('normal search sends deepThinking only when enabled on async and legacy rou
         asyncSearch
       });
       assert.deepEqual(Object.keys(wrapper.data), [
-        'qid', 'question', 'options', 'type', 'courseName', 'extra', 'skipCache', 'deepThinking'
+        'qid', 'question', 'options', 'type', 'courseName', 'extra', 'skipCache', 'deepThinking', 'questionEvidence'
       ]);
       for (const deepThinking of [false, true]) {
         const env = { title: '题目', type: 'single', options: 'A\nB', deepThinking };
@@ -124,6 +124,8 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
         resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
         resolveAnswerSearchType: (root) => root.questionType,
         optimizationElementWithImage: (element) => element,
+        extractQuestionImageEvidence: () => ({ stemImages: [{ url: 'https://img.test/1.png', alt: 'formula', index: 0 }], optionImages: [] }),
+        extractQuestionOptionTexts: (options) => options.map((option) => option.innerText),
         answererWrappers: [],
         defaultAnswerWrapperHandler: async (_wrappers, request) => {
           requests.push(request);
@@ -150,12 +152,15 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
       const infos = await makeAnswerer({ skipCache })(elements, { root, type: 'single', elements });
       const shouldRequest = deepThinking || skipCache;
       assert.deepEqual(cacheModes, skipCache ? [] : [deepThinking ? 'deep' : 'normal']);
-      assert.deepEqual(cacheIdentities, skipCache ? [] : [{ type: 'single', options: ['A'] }]);
+      assert.deepEqual(cacheIdentities, skipCache ? [] : [{ type: 'single', options: ['A'], questionEvidence: {
+        stemImages: [{ url: 'https://img.test/1.png', alt: 'formula', index: 0 }], optionImages: []
+      } }]);
       assert.equal(requests.length, shouldRequest ? 1 : 0);
       assert.equal(infos[0].results[0].answer, shouldRequest ? 'fresh' : 'cached');
       if (shouldRequest) {
         assert.equal(requests[0].deepThinking, deepThinking);
         assert.equal(requests[0].skipCache, skipCache);
+        assert.equal(requests[0].questionEvidence.stemImages[0].alt, 'formula');
       }
     }
   });

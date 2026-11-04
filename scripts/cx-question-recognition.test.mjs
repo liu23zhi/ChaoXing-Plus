@@ -25,3 +25,14 @@ test('work and exam retries and preview status use the same version-aware roots'
   assert.equal(source.includes('questionCount: queryWorkOrExamQuestionRoots().length'), true);
   assert.equal(source.includes('hasCurrentPage: () => queryWorkOrExamQuestionRoots().length > 0'), true);
 });
+
+test('grading evidence upload is gated to completed chapter reviews and homework grading pages', async () => {
+  const source = await readFile(cxPath, 'utf8');
+
+  assert.match(source, /if \(chapterTest && chapterStatusComplete\) \{[\s\S]{0,320}uploadVisibleCorrectAnswerEvidence/u);
+  assert.match(source, /workReview:\s*\{[\s\S]{0,160}matches:\s*\[\['作业批阅页面', '\/work\/selectWorkQuestionYiPiYue'\]\]/u);
+  assert.match(await readFile(resolveTestPath('src', 'utils', 'work.ts'), 'utf8'), /querySelectorAll<HTMLElement>\('\.rightAnswerContent'\)/u);
+  assert.match(source, /if \(alreadySearched\)[\s\S]{0,60}logDebug/u);
+  assert.doesNotMatch(source, /isGradedChapterResult/u);
+  assert.doesNotMatch(source, /uploadWorkOrExamResults[\s\S]{0,300}uploadVisibleCorrectAnswerEvidence/u);
+});

@@ -529,7 +529,7 @@ test('cx chapter answering uses the current question type input directly instead
 
   assert.equal(source.includes('function resolveChapterQuestionType('), true);
   assert.equal(source.includes('const typeInput = elements.type?.[0] as HTMLInputElement | undefined;'), true);
-  assert.equal(source.includes('return normalizeResultQuestionType(inputType) ?? resolveQuestionTypeForWork(root, {'), true);
+  assert.equal(source.includes('return normalizeResultQuestionType(inputType) ?? inferQuestionTypeFromOptionElements(elements.options ?? getChapterQuestionOptions(root))'), true);
   assert.equal(source.includes('const questionType = resolveChapterQuestionType(ctx.root, elements);'), true);
   assert.equal(source.includes('const type = resolveChapterQuestionType(ctx.root, elements);'), true);
   assert.equal(source.includes('章节测试单题结果诊断'), true);

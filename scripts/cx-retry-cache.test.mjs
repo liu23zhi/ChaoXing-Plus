@@ -249,6 +249,8 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
       resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
       resolveAnswerSearchType: (root) => root.questionType,
       optimizationElementWithImage: (element) => element,
+      extractQuestionImageEvidence: () => ({ stemImages: [], optionImages: [] }),
+      extractQuestionOptionTexts: (options) => options.map((option) => option.innerText),
       answererWrappers: [],
       defaultAnswerWrapperHandler: async (_wrappers, request) => {
         requests.push(request);
@@ -304,5 +306,43 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
     assert.ok(results.every((result) => result[0].results[0].answer === 'A'));
     await run(answerer);
     assert.equal(requests.length, 6);
+  });
+
+  test(`${factoryName} keeps identical question text with different image evidence in separate pending searches`, async () => {
+    const pending = deferred();
+    const requests = [];
+    const fallbackPayloads = [];
+    const makeAnswerer = await loadAnswererFactory(factoryName, {
+      createSearchRequestDeduplicator: helperModule.createSearchRequestDeduplicator,
+      chapterTestTaskQuestionTitleTransform: (titles) => titles[0].innerText,
+      workOrExamQuestionTitleTransform: (titles) => titles[0].innerText,
+      sleep: async () => {}, period: 0,
+      resolveChapterQuestionType: () => 'single',
+      resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
+      resolveAnswerSearchType: () => 'single',
+      extractQuestionImageEvidence: (titles) => titles[0].questionEvidence,
+      extractQuestionOptionTexts: (options) => options.map((option) => option.innerText),
+      answererWrappers: [],
+      defaultAnswerWrapperHandler: async (_wrappers, request) => { requests.push(request); await pending.promise; return []; },
+      withTikuAdapterAdminWarnings: (infos) => infos,
+      appendAIFallbackSearchInfos: async (infos, _options, payload) => { fallbackPayloads.push(payload); return infos; },
+      enableAIFallbackAnswer: true, deepThinking: false, aiFallbackFailureAction: 'skip',
+      appsMethods: () => ({})
+    });
+    const answerer = makeAnswerer();
+    const run = (alt) => {
+      const questionEvidence = { stemImages: [{ url: 'https://img.test/same.png', alt, index: 0 }], optionImages: [] };
+      const root = {};
+      const elements = { title: [{ innerText: 'same question', questionEvidence }], options: [{ innerText: 'A' }], root };
+      return answerer(elements, { root, type: 'single', elements });
+    };
+    const first = run('x²');
+    const duplicate = run('x²');
+    const distinct = run('x2');
+    await new Promise(setImmediate);
+    assert.equal(requests.length, 2);
+    pending.resolve();
+    await Promise.all([first, duplicate, distinct]);
+    assert.deepEqual(fallbackPayloads.map((payload) => payload.questionEvidence.stemImages[0].alt).sort(), ['x2', 'x²']);
   });
 }

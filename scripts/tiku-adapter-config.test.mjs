@@ -97,7 +97,14 @@ test('maps current chaoxing question types to tikuAdapter numeric types', async 
   assert.equal(mod.resolveTikuAdapterQuestionType('judgement'), 3);
   assert.equal(mod.resolveTikuAdapterQuestionType('completion'), 2);
   assert.equal(mod.resolveTikuAdapterQuestionType('line'), 2);
-  assert.equal(mod.resolveTikuAdapterQuestionType('unknown'), 4);
+  assert.equal(mod.resolveTikuAdapterQuestionType('reader'), 4);
+  assert.equal(mod.resolveTikuAdapterQuestionType('unknown'), -1);
+
+  const wrapper = mod.createTikuAdapterAnswererWrapper({ baseurl: 'https://adapter.local', key: 'secret' });
+  const resolveType = Function(wrapper.data.type.handler)();
+  assert.equal(resolveType({ type: 'unknown' }), -1);
+  assert.equal(resolveType({}), -1);
+  assert.equal(resolveType({ type: 'reader' }), 4);
 });
 
 test('creates a post wrapper using async search by default', async () => {
@@ -153,8 +160,65 @@ test('tiku adapter request payload no longer carries the removed plat field', as
     'courseName',
     'extra',
     'skipCache',
-    'deepThinking'
+    'deepThinking',
+    'questionEvidence'
   ]);
+});
+
+test('answer evidence upload uses bearer auth, endpoint, and a stable idempotency key', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json({ success: true });
+  };
+
+  const payload = {
+    qid: 'q-1', question: '题目', options: ['A. one'], type: 0,
+    courseName: 'Course', answer: 'A', source: 'chaoxing-homework-result',
+    evidence: { label: '正确答案', text: '正确答案：A' }
+  };
+  try {
+    await mod.requestTikuAdapterAnswerEvidence({ baseurl: 'https://adapter.local/', key: ' secret ' }, payload);
+    await mod.requestTikuAdapterAnswerEvidence({ baseurl: 'https://adapter.local/', key: 'secret' }, payload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, 'https://adapter.local/adapter-service/tiku/evidence');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer secret');
+  assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
+  assert.deepEqual(JSON.parse(calls[0].init.body), payload);
+});
+
+test('search wrapper includes optional question image evidence without changing older request fields', async () => {
+  const mod = await loadHelperModule();
+  const wrapper = mod.createTikuAdapterAnswererWrapper({ baseurl: 'https://adapter.local', key: 'secret' });
+  const resolveEvidence = Function(wrapper.data.questionEvidence.handler)();
+  const evidence = { stemImages: [{ url: 'https://img.test/1.png', alt: 'formula', index: 0 }], optionImages: [] };
+
+  assert.deepEqual(resolveEvidence({ questionEvidence: evidence }), evidence);
+  assert.equal(resolveEvidence({}), undefined);
+});
+
+test('AI fallback forwards ordered question evidence to the task request', async () => {
+  const mod = await loadHelperModule();
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return Response.json({ success: true, result: { question: '图片题', answer: 'A' } });
+  };
+  const questionEvidence = { stemImages: [{ url: 'https://img.test/1.png', alt: 'x²', index: 0 }], optionImages: [] };
+  try {
+    await mod.requestTikuAdapterAIFallback({ baseurl: 'https://adapter.local', key: 'secret' }, {
+      title: '图片题', type: 'single', options: 'A\nB', questionEvidence
+    });
+  } finally { globalThis.fetch = originalFetch; }
+  assert.deepEqual(bodies[0].questionEvidence, questionEvidence);
 });
 
 test('async search submits once with idempotency, follows another-origin status URL, and returns empty answers', async () => {
