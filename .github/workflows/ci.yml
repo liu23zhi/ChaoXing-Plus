@@ -614,6 +614,16 @@ jobs:
           Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
           $after = Get-CapabilityState
           Write-Host ("after: {0} = {1}" -f $capability, $after)
+          $rebootMarkers = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          Write-Host ("pending reboot markers: {0}" -f (@($rebootMarkers) -join ', '))
+          if ($after -ne 'Installed') {
+            Write-Host ("::warning::语言包安装未完成（State=$after），reboot markers: {0}" -f (@($rebootMarkers) -join ', '))
+          } elseif (@($rebootMarkers).Count -gt 0) {
+            Write-Host '::warning::语言包已安装但仍存在待重启标记；IME 子系统通常要重启/重新登录后才生效'
+          }
           exit 0
       - name: 检查宿主是否具备东亚语言支持
         shell: pwsh
@@ -634,7 +644,7 @@ jobs:
           }
           exit 0
       - name: 诊断：系统 IME 与占位 IME 的加载差异
-        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
+        if: env.CX_FAKE_IME_MODULE == '1'
         continue-on-error: true
         shell: pwsh
         run: |

@@ -79,11 +79,14 @@ $systemLoaded = Test-ImeCandidate -CandidateKlid $SystemKlid -CandidateIme $Syst
 $standInLoaded = Test-ImeCandidate -CandidateKlid $StandInKlid -CandidateIme $StandInImeFile
 
 if (-not $systemLoaded -and -not $standInLoaded) {
-    Write-Host 'diagnosis: no legacy IME layout can be loaded on this host; the IME subsystem is unavailable'
+    $diagnosis = 'no legacy IME layout can be loaded on this host; the IME subsystem is unavailable'
 } elseif ($systemLoaded -and -not $standInLoaded) {
-    Write-Host 'diagnosis: the system IME loads but the stand-in module does not; inspect cxime.ime'
+    $diagnosis = 'the system IME loads but the stand-in module does not; inspect cxime.ime'
 } else {
-    Write-Host 'diagnosis: legacy IME layouts load on this host'
+    $diagnosis = 'legacy IME layouts load on this host'
 }
+Write-Host ('diagnosis: ' + $diagnosis)
+# Job logs need authentication; annotations are readable, so surface the verdict there too.
+Write-Host ('::warning::IME probe: system=' + $systemLoaded + ' stand-in=' + $standInLoaded + '; ' + $diagnosis)
 
 exit 0
