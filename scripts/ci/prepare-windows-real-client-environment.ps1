@@ -450,10 +450,8 @@ function Invoke-SogouInstaller {
                 $process.WaitForExit()
                 $exitCode = $process.ExitCode
                 Write-Step "$Label : installer exit $exitCode (IMM not ready)"
-                if ($exitCode -ne 0) {
-                    return [pscustomobject]@{ Ok = $false; TimedOut = $false; ImmReady = $false; StillRunning = $false; ExitCode = $exitCode }
-                }
-                # A successful launcher can exit before its installation child; keep waiting for IMM.
+                # Installer exit cannot establish IMM readiness; stop polling rather than waiting on a dead process.
+                return [pscustomobject]@{ Ok = $false; TimedOut = $false; ImmReady = $false; StillRunning = $false; ExitCode = $exitCode }
             }
             if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 $running = -not $process.HasExited

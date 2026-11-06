@@ -436,11 +436,7 @@ function Confirm-ClientExamEntry {
             if (-not (Invoke-WindowClick -Window $target -X $button.X -Y $button.Y)) {
                 return [pscustomobject]@{ Clicked = $false; X = $button.X; Y = $button.Y; Via = 'window-message-failed' }
             }
-            Start-Sleep -Seconds 2
             $stillOpen = (Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId) -ne [IntPtr]::Zero
-            Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $target
-            # Keep the desktop frame above: it is the black one. This is its readable counterpart.
-            [void](Save-EntryCdpFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -ProcessId $ProcessId)
             if (-not $stillOpen) {
                 return [pscustomobject]@{ Clicked = $true; X = $button.X; Y = $button.Y; Via = $via }
             }
@@ -464,6 +460,24 @@ function Confirm-ClientExamEntry {
     $after = Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId
     if ($after -eq [IntPtr]::Zero) { return [pscustomobject]@{ Clicked = $true; X = 0; Y = 0; Via = 'keyboard' } }
     return [pscustomobject]@{ Clicked = $false; X = 0; Y = 0 }
+}
+
+function Save-AfterConfirmFrames {
+    param([string] $Prefix, [IntPtr] $Window, [int] $ProcessId, [int] $TimeoutSeconds = 60)
+    if (-not $Prefix -or -not $ProcessId -or -not (Get-Command Wait-CdpPageReady -ErrorAction SilentlyContinue)) { return $false }
+    $port = Get-ClientCdpPort -ProcessId $ProcessId
+    if ($port -le 0) { return $false }
+    $ready = Wait-CdpPageReady -Port $port -TimeoutSeconds $TimeoutSeconds
+    if (-not $ready.Ready) {
+        Write-Host "[real-client] after-confirm page not ready within ${TimeoutSeconds}s; paired frames skipped url=$($ready.Url)"
+        return $false
+    }
+    Write-Host "[real-client] after-confirm page ready stable=$($ready.StableSamples) text=$($ready.TextLength) quiet=$($ready.QuietMilliseconds)ms url=$($ready.Url)"
+    [void][CXClientEntry]::SetForegroundWindow($Window)
+    Start-Sleep -Milliseconds 250
+    Save-EntryFrame -Prefix $Prefix -Name '4-after-confirm' -Window $Window
+    [void](Save-EntryCdpFrame -Prefix $Prefix -Name '4-after-confirm' -ProcessId $ProcessId)
+    return $true
 }
 
 # The window is created before Duilib lays it out; a click at that moment lands on a 137x36 client area.
@@ -677,6 +691,7 @@ function Wait-ClientExamEntry {
             Start-Sleep -Seconds 1
             $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
             if ($pages -gt 0) {
+                [void](Save-AfterConfirmFrames -Prefix $ScreenshotPrefix -Window $window -ProcessId $clientProcess.Id)
                 return [pscustomobject]@{
                     Clicked = $true; Reason = 'entry-page-detected-after-confirm'; Window = [int64]$window
                     ProcessId = $clientProcess.Id; Point = "$($accepted.X),$($accepted.Y)"; Dpi = $dpi
@@ -766,6 +781,7 @@ function Wait-ClientExamEntry {
                 while ((Get-Date) -lt $confirmDeadline) {
                     $pages = Get-ClientPageTargetCount -ProcessId $clientProcess.Id
                     if ($pages -gt 0) {
+                        [void](Save-AfterConfirmFrames -Prefix $ScreenshotPrefix -Window $window -ProcessId $clientProcess.Id)
                         return [pscustomobject]@{
                             Clicked = $true; Reason = 'entry-page-detected-after-confirm'; Window = [int64]$window
                             ProcessId = $clientProcess.Id; Point = "$($confirm.X),$($confirm.Y)"; Dpi = $dpi

@@ -195,6 +195,15 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.match(script, /entry-page-detected-after-confirm/u, '确认后出现页面要有独立原因');
   assert.match(script, /3-confirm-dialog/u, '点确认前必须留帧');
   assert.match(script, /4-after-confirm/u, '点确认后必须留帧');
+  const confirmCaptureBody = script.slice(script.indexOf('function Confirm-ClientExamEntry'), script.indexOf('function Save-AfterConfirmFrames'));
+  assert.doesNotMatch(confirmCaptureBody, /4-after-confirm/u, '确认动作本身不得在固定等待后过早拍摄');
+  assert.match(script, /Wait-CdpPageReady/u, '必须等待 CDP 页面就绪信号');
+  assert.match(script, /function Save-AfterConfirmFrames/u, '页面就绪后统一保存成对截图');
+  const saveBody = script.slice(script.indexOf('function Save-AfterConfirmFrames'), script.indexOf('function Wait-ClientExamEntry'));
+  assert.ok(saveBody.indexOf('Wait-CdpPageReady') < saveBody.indexOf("Save-EntryFrame -Prefix $Prefix -Name '4-after-confirm'"),
+    '桌面截图必须排在 CDP 页面就绪检查之后');
+  assert.ok(saveBody.indexOf('Wait-CdpPageReady') < saveBody.indexOf("Save-EntryCdpFrame -Prefix $Prefix -Name '4-after-confirm'"),
+    'CDP 截图必须排在 CDP 页面就绪检查之后');
   assert.match(script, /CropLeft \$cropLeft -CropTop \$cropTop/u, '确认按钮扫描必须限制在弹窗区域');
   assert.match(script, /overlap \* 100 >= \(long\)span \* 60/u, '圆角按钮需要按重叠判定连续性');
   assert.match(script, /Via = 'keyboard'/u, '扫描找不到按钮时必须有键盘兜底');

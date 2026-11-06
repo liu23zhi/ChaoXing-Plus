@@ -71,8 +71,8 @@ function consumeClientFrames(state, chunk, onMessage) {
 // Minimal DevTools endpoint: /json/list plus one page WebSocket that answers Page.captureScreenshot.
 // The child PowerShell process is spawned asynchronously: spawnSync would block this event loop, so the
 // mock could never answer the HTTP/WebSocket requests it is being asked to serve.
-async function startMockCdp({ respondWithPng = true, listTargets } = {}) {
-  const captured = { methods: [], params: {}, upgrades: 0, expressions: [] };
+async function startMockCdp({ respondWithPng = true, listTargets, evaluateValues = [] } = {}) {
+  const captured = { methods: [], params: {}, upgrades: 0, expressions: [], evaluations: 0 };
   const sockets = new Set();
   const server = http.createServer((request, response) => {
     const port = server.address().port;
@@ -112,6 +112,15 @@ async function startMockCdp({ respondWithPng = true, listTargets } = {}) {
         captured.methods.push(message.method);
         captured.params[message.method] = message.params ?? {};
         if (message.params && typeof message.params.expression === 'string') captured.expressions.push(message.params.expression);
+        if (message.method === 'Runtime.evaluate') {
+          const value = evaluateValues[Math.min(captured.evaluations, evaluateValues.length - 1)] ?? null;
+          captured.evaluations += 1;
+          socket.write(encodeServerFrame(JSON.stringify({
+            id: message.id,
+            result: { result: { type: 'object', value } }
+          })));
+          return;
+        }
         if (!respondWithPng) {
           socket.write(encodeServerFrame(JSON.stringify({ id: message.id, error: { code: -32000, message: 'Unable to capture screenshot' } })));
           return;
@@ -243,4 +252,69 @@ test('没有 page 目标时不去连接 WebSocket', { skip: windowsOnly }, async
   assert.equal(json.shot, null);
   assert.equal(existsSync(out), false);
   assert.equal(server.captured.upgrades, 0, '没有 page 目标时不得发起 WebSocket 升级');
+});
+
+test('确认后等待文档完成、网络静默和页面内容连续稳定', { skip: windowsOnly }, async (t) => {
+  const stablePage = {
+    url: 'https://mooc1.chaoxing.com/login', readyState: 'complete', textLength: 160,
+    quietMs: 4000, key: 'login-form-ready'
+  };
+  const server = await startMockCdp({ evaluateValues: [
+    { ...stablePage, readyState: 'loading', key: 'initial' },
+    { ...stablePage, key: 'login-shell' },
+    { ...stablePage, key: 'login-form-ready' },
+    stablePage,
+    stablePage
+  ] });
+  t.after(() => server.close());
+  const harness = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)',
+    `. '${cdpScript.replace(/'/gu, "''")}'`,
+    `$ready = Wait-CdpPageReady -Port ${server.port} -TimeoutSeconds 5 -StableSamples 3 -PollMilliseconds 20 -QuietMilliseconds 0`,
+    '$ready | ConvertTo-Json -Compress'
+  ].join('\n');
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness], { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const status = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(status, 0, `${stdout}\n${stderr}`);
+  const line = stdout.split(/\r?\n/u).map((value) => value.trim()).filter((value) => value.startsWith('{')).pop();
+  const ready = line ? JSON.parse(line) : null;
+  assert.equal(ready?.Ready, true, `页面应在加载及 DOM 变化结束后才 ready: ${stdout}${stderr}`);
+  assert.equal(ready?.StableSamples, 3);
+  assert.equal(ready?.Url, stablePage.url);
+  assert.equal(server.captured.evaluations, 5, 'loading 与变化中的页面都不能通过就绪检查');
+  assert.ok(server.captured.expressions.every((expression) => /document\.readyState/u.test(expression)));
+  assert.match(server.captured.expressions[0], /replace\(\/\\s\+\//u, '页面文本应按空白归一化后形成稳定签名');
+});
+
+test('页面持续加载或内容不足时超时，不报告就绪', { skip: windowsOnly }, async (t) => {
+  const server = await startMockCdp({ evaluateValues: [
+    { url: 'https://mooc1.chaoxing.com/login', readyState: 'complete', textLength: 8, quietMs: 4000, key: 'empty' }
+  ] });
+  t.after(() => server.close());
+  const harness = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)',
+    `. '${cdpScript.replace(/'/gu, "''")}'`,
+    `$ready = Wait-CdpPageReady -Port ${server.port} -TimeoutSeconds 1 -StableSamples 2 -PollMilliseconds 50 -QuietMilliseconds 0`,
+    '$ready | ConvertTo-Json -Compress'
+  ].join('\n');
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', harness], { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const status = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(status, 0, `${stdout}\n${stderr}`);
+  const line = stdout.split(/\r?\n/u).map((value) => value.trim()).filter((value) => value.startsWith('{')).pop();
+  const ready = line ? JSON.parse(line) : null;
+  assert.equal(ready?.Ready, false, `内容太少的页面不得误报就绪: ${stdout}${stderr}`);
 });

@@ -76,6 +76,66 @@ function Invoke-CdpCommand {
     }
 }
 
+# A page target only proves that CEF created a session. Wait for completed document state, useful
+# content, quiet resources and DOM, and an unchanged content signature across multiple samples.
+function Wait-CdpPageReady {
+    param(
+        [Parameter(Mandatory = $true)] [int] $Port,
+        [int] $TimeoutSeconds = 45,
+        [int] $StableSamples = 3,
+        [int] $PollMilliseconds = 500,
+        [int] $QuietMilliseconds = 1500,
+        [int] $MinimumTextLength = 80
+    )
+    $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    $stableKey = ''
+    $stableCount = 0
+    $lastUrl = ''
+    while ((Get-Date) -lt $deadline) {
+        $target = Get-CdpPageTarget -Port $Port -TimeoutSeconds 2
+        if ($target -and [string]$target.url -match '^https?://') {
+            $expression = "(function(){try{var root=document.documentElement;if(!window.__CX_PAGE_READY_OBSERVER__){var state={lastMutation:performance.now()};var observer=new MutationObserver(function(){state.lastMutation=performance.now();});if(root){observer.observe(root,{subtree:true,childList:true,attributes:true,characterData:true});}window.__CX_PAGE_READY_OBSERVER__=state;}var text=(document.body&&document.body.innerText)||'';var compact=text.replace(/\s+/g,' ').trim();var entries=performance.getEntriesByType('resource');var latest=window.__CX_PAGE_READY_OBSERVER__.lastMutation;for(var i=0;i<entries.length;i++){if(entries[i].responseEnd>latest){latest=entries[i].responseEnd;}}return {url:location.href,readyState:document.readyState,title:document.title||'',textLength:compact.length,quietMs:Math.max(0,Math.floor(performance.now()-latest)),key:location.href+'|'+(document.title||'')+'|'+compact.length+'|'+compact.slice(0,1200)+'|'+compact.slice(-1200)};}catch(e){return null;}})()"
+            $request = '{"id":1,"method":"Runtime.evaluate","params":{"expression":' + (ConvertTo-Json $expression -Compress) + ',"returnByValue":true}}'
+            $reply = Invoke-CdpCommand -WebSocketUrl ([string]$target.webSocketDebuggerUrl) -ParamsJson $request -CommandId 1 -TimeoutSeconds 5
+            $state = $null
+            if ($reply -and $reply.result -and $reply.result.result -and $reply.result.result.value) {
+                $state = $reply.result.result.value
+            }
+            if ($state) {
+                $lastUrl = [string]$state.url
+                $key = [string]$state.key
+                $eligible = [string]$state.readyState -eq 'complete' -and
+                    [string]$state.url -match '^https?://' -and
+                    [int]$state.textLength -ge $MinimumTextLength -and
+                    [int]$state.quietMs -ge $QuietMilliseconds
+                if ($eligible -and $key -eq $stableKey) {
+                    $stableCount++
+                } elseif ($eligible) {
+                    $stableKey = $key
+                    $stableCount = 1
+                } else {
+                    $stableKey = ''
+                    $stableCount = 0
+                }
+                if ($stableCount -ge [Math]::Max(2, $StableSamples)) {
+                    return [pscustomobject]@{
+                        Ready = $true; StableSamples = $stableCount; Url = $lastUrl
+                        TextLength = [int]$state.textLength; QuietMilliseconds = [int]$state.quietMs
+                    }
+                }
+            } else {
+                $stableKey = ''
+                $stableCount = 0
+            }
+        } else {
+            $stableKey = ''
+            $stableCount = 0
+        }
+        Start-Sleep -Milliseconds ([Math]::Max(20, $PollMilliseconds))
+    }
+    return [pscustomobject]@{ Ready = $false; StableSamples = $stableCount; Url = $lastUrl; TextLength = 0; QuietMilliseconds = 0 }
+}
+
 # Tell the page to hide its panel while the client photographs the screen.
 #
 # CXExam.exe disables its own WDA_MONITOR right before it grabs the desktop with GetDC(NULL) and
