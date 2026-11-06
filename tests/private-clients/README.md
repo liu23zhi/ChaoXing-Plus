@@ -8,6 +8,21 @@
 | `chaoxing-exam-v4.1.4.*.exe` | `cdp-port` |
 | `chaoxing-exam-v4.3.*.exe` | `dll-proxy` |
 
+## 客户端自定义窗口消息（IG5 静态证据）
+
+`CXExam.exe` 4.1.4.25389（x86，sha256 `9d5f785e1bcc070517bbf31f5ad2b21458a9d3b3357f63f1a4808f2eaf8cf926`）的考试窗口用一张自定义消息分发表处理服务端指令，函数为 `FUN_004d0730(WindowImplBase*, msg, …)`。从表中直接读出的四条取证/生命周期指令（其余 `0x60x`/`0x61x` 分支是 UI 与登录流程）：
+
+| 消息 | 指令名（二进制内字符串） | 含义 |
+| --- | --- | --- |
+| `0x5FA` | `CLIENT_FACE_RECOGNITION_BLINK` | 人脸识别（眨眼） |
+| `0x5FB` | `CLIENT_FACE_COLLECTION` | 人脸采集 |
+| `0x5FC` | `CLIENT_WEB_LIFECYCLE` | 网页生命周期 |
+| `0x5FD` | `CLIENT_SNAP_SHOT` | **取证抓屏入口**（服务端 `GetScreenImage` → `screenImg` BMP） |
+
+对照关系：`0x5FD` 对应的抓屏动作最终落在 `FUN_0043a8b0`（先 `SetWindowDisplayAffinity(hwnd,0)`）→ `FUN_0043a340`（`GetDC(NULL)` + `GetDIBits` 写 BMP）→ 恢复 `WDA_MONITOR`，这就是"客户端自己拍照时会临时关掉防截屏"的完整链路，也是悬浮面板在那几百毫秒里会被拍进去的原因（`scripts/windows-client-entry.ps1` 的 `Watch-ClientCaptureGuard` 因此按亲和力 `1 -> 0` 的跳变隐藏面板）。键盘钩子一侧的 `0x61C`（IME 类组合）落到 `FUN_004d10a0()`：`KillTimer(hwnd,0x7EA)` + `SetTimer(hwnd,0x7EA,500,NULL)`，500 ms 后重设输入法——这解释了为什么注入前后必须快照并恢复键盘布局。
+
+版本适用性：4.1.4.25512 的字符串里同样存在 `ExamCheckUI` / `ExamCheckHintUI` / `WebHintUI` / `GetScreenImage`，属同一代构建；4.3.0.4 为 Themida 加壳（`.rsrc` 仅 53 KB，读不到这些字符串），只能靠运行期 `entry.json` 的 `windowAffinity` / `keyboardHookLog` 定论。以上均为静态分析结论，不代表已在真实考试会话中逐条触发验证。
+
 ## 输入法：仓库内伪装输入法
 
 CI 不再下载或安装第三方输入法；`sogou-ime-v16.9.0.5523.exe`、`sogou-ime.json` 与

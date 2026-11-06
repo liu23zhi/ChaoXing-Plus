@@ -296,6 +296,21 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
     }
   }
 
+  # Version matrix evidence: record the display affinity of every client top-level window at entry
+  # (1 = WDA_MONITOR, so window captures are black) and whether hook.txt exists (the client writes it
+  # when its WH_KEYBOARD_LL install fails, which disables both the swallowed keys and the key log).
+  $affinitySnapshot = ''
+  $hookLog = ''
+  if ($entry.PSObject.Properties['ProcessId'] -and [int]$entry.ProcessId -gt 0) {
+    try {
+      $affinityMap = Get-ClientWindowAffinity -ProcessId ([int]$entry.ProcessId)
+      $affinitySnapshot = (@($affinityMap.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ';')
+    } catch { }
+  }
+  if ($clientDirectory -and (Test-Path -LiteralPath (Join-Path $clientDirectory 'hook.txt'))) { $hookLog = 'hook.txt' }
+  if ($affinitySnapshot) { Write-Host "[real-client] window affinity: $affinitySnapshot" }
+  if ($hookLog) { Write-Host '[real-client] client wrote hook.txt: its keyboard hook failed to install' }
+
   if ($env:RUNNER_TEMP) {
     try {
       [pscustomobject]@{
@@ -310,6 +325,8 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
         confirmed = $entry.Confirmed
         windows = $(if ($entry.PSObject.Properties['Windows']) { $entry.Windows } else { '' })
         confirm = $(if ($entry.PSObject.Properties['ConfirmVia']) { $entry.ConfirmVia } else { '' })
+        windowAffinity = $affinitySnapshot
+        keyboardHookLog = $hookLog
         capturedAt = (Get-Date).ToString('o')
       } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-entry.json") -Encoding UTF8
     } catch { }
@@ -451,7 +468,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   } catch {
     Write-Host "[real-client] shell repair failed: $($_.Exception.Message)"
   }
-  Write-Host "[real-client] summary case=$CaseName stage=$stage stopReason=$($report.stopReason) success=$($report.success) pages=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) errors=$($report.totals.errors) probe=$($report.endpointProbe.lastReason)/$($report.endpointProbe.attempts) entry=$($entry.Reason)"
+  Write-Host "[real-client] summary case=$CaseName stage=$stage stopReason=$($report.stopReason) success=$($report.success) pages=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) errors=$($report.totals.errors) probe=$($report.endpointProbe.lastReason)/$($report.endpointProbe.attempts) entry=$($entry.Reason) affinity=$affinitySnapshot hook=$hookLog"
   Save-ArtifactManifest -CaseName $CaseName
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
