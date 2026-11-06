@@ -120,6 +120,12 @@ function assertFinished(result, expectedError) {
     'the private unpack directory must be removed even after an early failure');
 }
 
+test('真实客户端失败时把 stage 与原因写进注解', () => {
+  const text = readFileSync(source, 'utf8');
+  assert.match(text, /::error::real-client failed case=\$CaseName stage=\$stage message=/u,
+    'catch 分支必须发 ::error:: 注解，便于在没有作业日志时定位');
+});
+
 test('early validation failure without client logs preserves its error and finishes cleanup', { skip: windowsOnly }, () => {
   const result = runCleanupCase({ early: true });
   assertFinished(result, /Client fixture is missing:/u);

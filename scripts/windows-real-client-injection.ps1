@@ -396,6 +396,8 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {
   Write-Host "[real-client] FAILED case=$CaseName stage=$stage type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
+  # Annotations are readable without job logs, so surface the failing stage and message there too.
+  Write-Host ("::error::real-client failed case=$CaseName stage=$stage message=" + $_.Exception.Message)
   try { Save-RunArtifacts -CaseName $CaseName } catch {
     Write-Host "[real-client] artifact collection failed: $($_.Exception.Message)"
   }
