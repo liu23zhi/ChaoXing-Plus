@@ -527,15 +527,24 @@ jobs:
       - name: 记录安装前基线
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
           $baselinePath = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.txt'
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify *>&1
+          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.err.txt'
+          try {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out 2> $err
+          } catch {
+            throw "无法启动基线探针: $($_.Exception.Message)"
+          }
           $code = $LASTEXITCODE
-          $output | ForEach-Object { Write-Host $_ }
-          $result = @($output | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
-          if ($result.Count -eq 0) { throw "基线探针没有输出 RESULT（退出码 $code）" }
-          Set-Content -LiteralPath $baselinePath -Value $result[0] -Encoding ASCII
-          Write-Host ("baseline: {0} (exit {1})" -f $result[0], $code)
+          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+          $text | ForEach-Object { Write-Host $_ }
+          $line = @($text | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
+          if ($line.Count -eq 0) { throw "基线探针没有输出 RESULT（退出码 $code）" }
+          Set-Content -LiteralPath $baselinePath -Value $line[0] -Encoding ASCII
+          Write-Host ("baseline: {0} (exit {1})" -f $line[0], $code)
       - name: 编译占位输入法模块
         shell: pwsh
         run: |
@@ -551,66 +560,97 @@ jobs:
       - name: 安装并验证占位输入法
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
           $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.log'
-          # 用独立进程执行：脚本里的 exit 只结束子进程，退出码可被可靠读取。
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -DisplayName 'CiExamInput' *>&1
+          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.err.txt'
+          try {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -DisplayName 'CiExamInput' 1> $out 2> $err
+          } catch {
+            throw "无法启动安装脚本: $($_.Exception.Message)"
+          }
           $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+          $text | Set-Content -LiteralPath $log -Encoding UTF8
+          $text | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { throw "安装占位输入法失败（退出码 $code）" }
       - name: 64 位 IMM 判据复核
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
           $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.log'
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify *>&1
+          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.err.txt'
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out 2> $err
           $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+          $text | Set-Content -LiteralPath $log -Encoding UTF8
+          $text | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { throw "64 位探针未就绪（退出码 $code）" }
-          $text = ($output | Out-String)
-          if ($text -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
-          if ($text -notmatch 'HKL 0xE0[0-9A-F]{6}') { throw '缺少 E0 标记的输入法布局（客户端判据第一条）' }
-          if ($text -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '输入法布局语言必须是 0804（客户端判据第三条）' }
+          $joined = ($text -join "`n")
+          if ($joined -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
+          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{6}') { throw '缺少 E0 标记的输入法布局（客户端判据第一条）' }
+          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '输入法布局语言必须是 0804（客户端判据第三条）' }
       - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
           $x86 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
           if (-not (Test-Path -LiteralPath $x86)) { throw "找不到 32 位 PowerShell：$x86" }
           $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.log'
-          $output = & $x86 -NoProfile -ExecutionPolicy Bypass -File $script -Verify -Load *>&1
+          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.err.txt'
+          & $x86 -NoProfile -ExecutionPolicy Bypass -File $script -Verify -Load 1> $out 2> $err
           $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+          $text | Set-Content -LiteralPath $log -Encoding UTF8
+          $text | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { throw "32 位探针未就绪（退出码 $code）：CXExam.exe 也读不到描述" }
-          $text = ($output | Out-String)
-          if ($text -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
-          if ($text -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '32 位视图缺少 0804 语言的 E0 布局' }
+          $joined = ($text -join "`n")
+          if ($joined -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
+          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '32 位视图缺少 0804 语言的 E0 布局' }
       - name: 卸载并确认回滚
         if: always()
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
           $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
           $baselinePath = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.txt'
           $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.log'
-          $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Uninstall *>&1
+          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.err.txt'
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Uninstall 1> $out 2> $err
           $code = $LASTEXITCODE
-          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
+          $text | Set-Content -LiteralPath $log -Encoding UTF8
+          $text | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { throw "卸载失败（退出码 $code）" }
-          $probe = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify *>&1
-          $probe | ForEach-Object { Write-Host $_ }
-          $probeResult = @($probe | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
-          if ($probeResult.Count -eq 0) { throw '卸载后探针没有输出 RESULT' }
-          # runner 镜像本身就带 IMM 输入法时，回滚只要求恢复到安装前状态，而不是“未就绪”。
-          if (-not (Test-Path -LiteralPath $baselinePath)) { throw '缺少安装前基线，无法判断回滚' }
-          $baseline = (Get-Content -LiteralPath $baselinePath -Raw).Trim()
-          Write-Host ("rollback: {0} (baseline {1})" -f $probeResult[0], $baseline)
-          if ($probeResult[0] -ne $baseline) { throw "卸载后探针结果 $($probeResult[0]) 与基线 $baseline 不一致" }
+          $probe = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out.p 2> $err.p
+          $probeText = @(Get-Content -LiteralPath $out.p -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err.p -ErrorAction SilentlyContinue)
+          $probeText | ForEach-Object { Write-Host $_ }
+          $probeLine = @($probeText | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
+          if ($probeLine.Count -eq 0) { throw '卸载后探针没有输出 RESULT' }
+          # runner 镜像自带 IMM 输入法时，回滚只要求恢复到安装前状态，而不是“未就绪”。
+          if (Test-Path -LiteralPath $baselinePath) {
+            $baseline = (Get-Content -LiteralPath $baselinePath -Raw).Trim()
+            Write-Host ("rollback: {0} (baseline {1})" -f $probeLine[0], $baseline)
+            if ($probeLine[0] -ne $baseline) { throw "卸载后探针结果 $($probeLine[0]) 与基线 $baseline 不一致" }
+          } else {
+            Write-Host ("rollback: {0} (no baseline recorded; skipping comparison)" -f $probeLine[0])
+          }
       - name: 上传伪装输入法日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-fake-ime-logs
-          path: ${{ runner.temp }}/cx-fake-ime-*.log
+          path: ${{ runner.temp }}/cx-fake-ime-*
           if-no-files-found: warn
           retention-days: 7
 

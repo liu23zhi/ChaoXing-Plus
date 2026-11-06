@@ -325,7 +325,9 @@ function Install-StandInInputMethod {
     }
     $state.Module = $module
     $installer = Join-Path $root 'Install-FakeInputMethod.ps1'
-    $output = & $installer -DisplayName 'StandInInput' *>&1
+    # -NoDefault keeps the real client's own input language untouched: the client only needs an IME layout
+    # with a readable description, and changing the default input language would alter the run's inputs.
+    $output = & $installer -DisplayName 'StandInInput' -NoDefault *>&1
     $code = $LASTEXITCODE
     $state.Output = @($output | ForEach-Object { [string]$_ })
     foreach ($line in $state.Output) { Write-Step "input: $line" }
