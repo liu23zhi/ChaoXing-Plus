@@ -557,6 +557,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $capability = 'Language.Basic~~~zh-CN~0.0.1.0'
+          $build = [Environment]::OSVersion.Version
+          Write-Host ("host: {0} build {1}" -f [Environment]::OSVersion.VersionString, $build.Build)
           function Get-CapabilityState {
             try {
               $item = Get-WindowsCapability -Online -Name $capability -ErrorAction Stop
@@ -566,42 +568,42 @@ jobs:
             }
             return 'Unknown'
           }
-          function Invoke-Bounded {
-            param([string] $Label, [string[]] $Arguments, [int] $TimeoutSeconds = 900)
-            $stdout = Join-Path $env:RUNNER_TEMP ("dism-" + [guid]::NewGuid().ToString('N') + '.out.txt')
-            $stderr = Join-Path $env:RUNNER_TEMP ("dism-" + [guid]::NewGuid().ToString('N') + '.err.txt')
-            $process = Start-Process -FilePath dism.exe -ArgumentList $Arguments -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-              Write-Host "::warning::$Label 超过 $TimeoutSeconds 秒，终止 dism"
-              try { $process.Kill() } catch { }
-              return $false
-            }
-            Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue | Select-Object -Last 6 | ForEach-Object { Write-Host $_ }
-            Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | Select-Object -Last 3 | ForEach-Object { Write-Host $_ }
-            Write-Host ("{0}: exit {1}" -f $Label, $process.ExitCode)
-            return ($process.ExitCode -eq 0)
-          }
           $before = Get-CapabilityState
           Write-Host ("before: {0} = {1}" -f $capability, $before)
-          if ($before -ne 'Installed') {
-            $zip = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip'
-            if (-not (Test-Path -LiteralPath $zip)) {
-              Write-Host "::warning::仓库语言包缺失: $zip"
-            } else {
-              $destination = Join-Path $env:RUNNER_TEMP 'zhcn-langpack'
-              Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
-              $repo = Join-Path $destination 'WinSrv2025-zhCN-LanguagePack/repo'
-              if (-not (Test-Path -LiteralPath $repo)) { throw "语言包解压目录不正确: $repo" }
-              # 按内置 Install-zhCN-Language.ps1 的顺序：先整包语言包，再按 -Source 装 Basic 能力。
-              $languagePack = Get-ChildItem -LiteralPath $repo -Filter 'Microsoft-Windows-Server-Language-Pack_x64_zh-cn.cab' | Select-Object -First 1
-              if ($languagePack) {
-                $null = Invoke-Bounded -Label 'dism Add-Package zh-CN LanguagePack' -Arguments @('/Online', '/Add-Package', ('/PackagePath:' + $languagePack.FullName))
-              }
-              $null = Invoke-Bounded -Label 'dism Add-Capability Language.Basic' -Arguments @('/Online', '/Add-Capability', ('/CapabilityName:' + $capability), ('/Source:' + $repo), '/LimitAccess')
-              $after = Get-CapabilityState
-              Write-Host ("after: {0} = {1}" -f $capability, $after)
-            }
+          if ($before -eq 'Installed') { exit 0 }
+          # 厂商 README 只保证 Windows Server 2025（10.0.26100）；版本不符时按用户要求仍然尝试，
+          # 但留下告警，方便失败时归因到版本不匹配。
+          if ($build.Build -ne 26100) {
+            Write-Host "::warning::当前镜像不是 Windows Server 2025（build $($build.Build)），仍按要求尝试安装语言包"
           }
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip'
+          if (-not (Test-Path -LiteralPath $zip)) {
+            Write-Host "::warning::仓库语言包缺失: $zip"
+            exit 0
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'zhcn-langpack'
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
+          $package = Join-Path $destination 'WinSrv2025-zhCN-LanguagePack'
+          $installer = Join-Path $package 'Install-zhCN-Language.ps1'
+          if (-not (Test-Path -LiteralPath $installer)) { throw "语言包缺少安装脚本: $installer" }
+          # 直接复用厂商脚本（Add-Package LanguagePack -> Add-Capability … /Source:repo /LimitAccess -> 区域设置），
+          # -NoReboot 交给 job 继续跑；整段放进后台作业限时，避免 DISM 卡住 runner。
+          $job = Start-Job -ScriptBlock {
+            param($ScriptPath)
+            Set-Location (Split-Path -Parent $ScriptPath)
+            & $ScriptPath -NoReboot *>&1
+          } -ArgumentList $installer
+          $deadline = (Get-Date).AddSeconds(1800)
+          while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 10 }
+          if ($job.State -eq 'Running') {
+            Write-Host '::warning::Install-zhCN-Language.ps1 1800 秒未完成，停止等待'
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+          } else {
+            Receive-Job -Job $job -ErrorAction SilentlyContinue | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
+          }
+          Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+          $after = Get-CapabilityState
+          Write-Host ("after: {0} = {1}" -f $capability, $after)
           exit 0
       - name: 检查宿主是否具备东亚语言支持
         shell: pwsh

@@ -92,7 +92,7 @@ CI（`.github/workflows/ci.yml` 的 `windows-fake-ime` job）在管理员 runner
 
 MSDN 对 [`ImmInstallIMEW`](https://learn.microsoft.com/en-us/windows/win32/api/imm/nf-imm-imminstallimew)
 的最低要求写的是 “Windows XP [desktop apps only], **East Asian language support installed**”。
-hosted `windows-latest` 只有 en-US（`Language.Basic~~~zh-CN = NotPresent`）。job 会用仓库内置的 `langpack/WinSrv2025-zhCN-LanguagePack.zip` 解压后按内置安装脚本的顺序执行 `dism /Add-Package` 与 `dism /Add-Capability ... /Source:<repo> /LimitAccess`（各自 900 秒上限），仍然不可用时才降级；在没装成功的机器上：
+hosted `windows-latest` 只有 en-US（`Language.Basic~~~zh-CN = NotPresent`）。job 会解压仓库内置的 `langpack/WinSrv2025-zhCN-LanguagePack.zip`，**直接运行包内 `Install-zhCN-Language.ps1 -NoReboot`**（它自己执行 `dism /Add-Package` → 各 `dism /Add-Capability ... /Source:<repo> /LimitAccess` → 区域设置），整段限时 1800 秒。该包只保证 **Windows Server 2025（10.0.26100）**，README 明确不建议用于其它版本；job 会先核对 build 号，不是 26100 只打告警、仍按要求尝试安装。仍然不可用时才降级，在没装成功的机器上：
 
 - `ImmInstallIMEW` 返回 `NULL` 且 `GetLastError()=0`；
 - 手写 `E0xx` 布局后 `LoadKeyboardLayoutW` 返回 `1419 ERROR_HOTKEY_NOT_REGISTERED`；

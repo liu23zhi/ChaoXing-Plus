@@ -106,9 +106,13 @@ test('仓库不携带任何预编译模块，CI 现场编译', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, 'CI 的编译失败必须降级为告警');
   assert.match(workflow, /vars\.FAKE_IME_RUNNER/u, 'job 必须允许指向带 zh-CN 的 runner');
-  assert.match(workflow, /dism\.exe -ArgumentList/u, '必须用 dism 安装语言包/能力');
-  assert.match(workflow, /WaitForExit\(\$TimeoutSeconds \* 1000\)/u, 'dism 必须有超时上限，不能挂住 job');
-  assert.match(workflow, /\$process\.Kill\(\)/u, '超时必须终止 dism');
+  assert.match(workflow, /Install-zhCN-Language\.ps1/u, '必须复用厂商安装脚本');
+  assert.match(workflow, /-NoReboot/u, '安装脚本必须带 -NoReboot，让 job 继续执行');
+  assert.match(workflow, /AddSeconds\(1800\)/u, '语言包安装必须有 1800 秒上限');
+  assert.match(workflow, /Stop-Job -Job \$job/u, '超时必须停止后台作业');
+  assert.match(workflow, /\$build\.Build -ne 26100/u, '必须核对 Windows Server 2025 的 build 号');
+  assert.match(workflow, /仍按要求尝试安装语言包/u, '版本不符时也要继续尝试安装，只告警');
+  assert.doesNotMatch(workflow, /（build \$\(\$build\.Build\)），跳过语言包安装/u, '不得因版本不符直接跳过');
   assert.match(workflow, /Language\.Basic~~~zh-CN/u, '必须先检查东亚语言支持（legacy IMM 的前提）');
   assert.match(workflow, /CX_FAKE_IME_HOST/u, '没有东亚语言支持时必须跳过安装与复核');
   assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');
@@ -137,8 +141,8 @@ test('仓库内置 zh-CN 语言包，CI 用它安装东亚语言支持', async (
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /tools\/fake-ime\/langpack\/WinSrv2025-zhCN-LanguagePack\.zip/u, 'CI 必须使用仓库内置语言包');
   assert.match(workflow, /Expand-Archive -LiteralPath \$zip/u, '使用前必须解压');
-  assert.match(workflow, /\/Add-Package/u, '必须先安装整包语言包（对应内置安装脚本第 1 步）');
-  assert.match(workflow, /\/Add-Capability[\s\S]*?\/Source:' \+ \$repo[\s\S]*?\/LimitAccess/u, '必须按 -Source 安装 Basic 能力并禁止联网');
+  assert.match(workflow, /Install-zhCN-Language\.ps1/u, '必须调用语言包自带的安装脚本');
+  assert.match(workflow, /Set-Location \(Split-Path -Parent \$ScriptPath\)/u, '脚本必须在自己的目录里运行（ 定位 repo）');
 });
 
 test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async () => {
