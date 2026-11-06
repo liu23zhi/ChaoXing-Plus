@@ -467,7 +467,7 @@ if ($hkl -eq 0) {
     if ($errorCode -eq 1813) {
         Write-Host 'error 1813 = the IME module has no VERSIONINFO resource; rebuild it with cxime.rc (build-cxime.ps1 does this).'
     } elseif ($errorCode -eq 1419) {
-        Write-Host 'error 1419 = the layout registry entry is not readable yet.'
+        Write-Host 'error 1419 (ERROR_HOTKEY_NOT_REGISTERED) = Windows refused to load the IME module for this layout.'
     }
     # KLF_SUBSTITUTE_OK (0x2) can succeed where the plain load fails on some builds.
     $hkl = [CxImeProbe]::LoadLayoutWithFlags($Klid, 2, [ref]$errorCode)

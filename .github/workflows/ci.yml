@@ -694,8 +694,11 @@ jobs:
           $text | Set-Content -LiteralPath $log -Encoding UTF8
           $text | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { throw "卸载失败（退出码 $code）" }
-          $probe = & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out.p 2> $err.p
-          $probeText = @(Get-Content -LiteralPath $out.p -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err.p -ErrorAction SilentlyContinue)
+          # 单独命名：PowerShell 里 $out.p 会被当成属性访问，重定向目标会变成 null。
+          $probeOut = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-rollback.out.txt'
+          $probeErr = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-rollback.err.txt'
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $probeOut 2> $probeErr
+          $probeText = @(Get-Content -LiteralPath $probeOut -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $probeErr -ErrorAction SilentlyContinue)
           $probeText | ForEach-Object { Write-Host $_ }
           $probeLine = @($probeText | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
           if ($probeLine.Count -eq 0) { throw '卸载后探针没有输出 RESULT' }
