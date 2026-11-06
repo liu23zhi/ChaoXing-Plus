@@ -444,7 +444,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
   assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
   assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, windows-fake-ime\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境并报告结果');
-  assert.match(workflow, /name: Windows 伪装输入法就绪验证[\s\S]*?runs-on: windows-latest/u, 'CI 必须在 Windows runner 上验证伪装输入法就绪');
+  assert.match(workflow, /name: Windows 伪装输入法就绪验证[\s\S]*?runs-on: \$\{\{ fromJSON\(vars\.FAKE_IME_RUNNER \|\| '"windows-latest"'\) \}\}/u,
+    'CI 必须在可配置的 Windows runner 上验证伪装输入法就绪（默认 windows-latest，可指向带 zh-CN 的 runner）');
   assert.match(workflow, /SysWOW64\\WindowsPowerShell\\v1\.0\\powershell\.exe/u, '伪装输入法必须用 32 位 PowerShell 复核（CXExam.exe 是 x86）');
   assert.match(workflow, /Install-FakeInputMethod\.ps1/u, 'CI 必须调用伪装输入法安装脚本');
   assert.match(workflow, /-Verify -Load/u, '32 位复核必须在探针进程内加载布局');

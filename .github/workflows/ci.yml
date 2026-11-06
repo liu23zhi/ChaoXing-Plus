@@ -526,7 +526,9 @@ jobs:
 
   windows-fake-ime:
     name: Windows 伪装输入法就绪验证
-    runs-on: windows-latest
+    # legacy IMM 只在装有东亚语言支持的 Windows 上可用；把仓库变量 FAKE_IME_RUNNER 指向这样的 runner
+    # （例如 ["self-hosted","windows","zh-cn"]）就能做真实验证。
+    runs-on: ${{ fromJSON(vars.FAKE_IME_RUNNER || '"windows-latest"') }}
     timeout-minutes: 20
     steps:
       - name: 检出代码
@@ -549,7 +551,24 @@ jobs:
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             throw '伪装输入法验证需要管理员上下文（写入 HKLM 与 System32）'
           }
-      - name: 记录安装前基线
+      - name: 检查宿主是否具备东亚语言支持
+        shell: pwsh
+        run: |
+          $state = 'Unknown'
+          try {
+            $cap = Get-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0' -ErrorAction Stop
+            if ($cap) { $state = [string]$cap.State }
+          } catch {
+            Write-Host ("capability query failed: {0}" -f $_.Exception.Message)
+          }
+          Write-Host ("Language.Basic~~~zh-CN = {0}" -f $state)
+          if ($state -eq 'Installed') {
+            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_HOST=1' -Encoding utf8
+          } else {
+            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_HOST=0' -Encoding utf8
+            Write-Host '::warning::当前 runner 未安装东亚语言支持（Language.Basic~~~zh-CN），legacy IMM 的安装与加载都不被支持；把仓库变量 FAKE_IME_RUNNER 指向带 zh-CN 的 runner 才能真实验证'
+          }
+          exit 0      - name: 记录安装前基线
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -604,7 +623,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: 安装并验证占位输入法
-        if: env.CX_FAKE_IME_MODULE == '1'
+        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -630,7 +649,7 @@ jobs:
           if ($code -ne 0) { throw "安装占位输入法失败（退出码 $code）" }
           exit 0
       - name: 64 位 IMM 判据复核
-        if: env.CX_FAKE_IME_MODULE == '1'
+        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -653,7 +672,7 @@ jobs:
           if ($joined -notmatch ('HKL 0xE0[0-9A-F]{2}' + $lang + '\s+length=[1-9]')) { throw "缺少描述非空的 E0xx$lang 布局" }
           exit 0
       - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
-        if: env.CX_FAKE_IME_MODULE == '1'
+        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
