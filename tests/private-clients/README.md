@@ -8,21 +8,19 @@
 | `chaoxing-exam-v4.1.4.*.exe` | `cdp-port` |
 | `chaoxing-exam-v4.3.*.exe` | `dll-proxy` |
 
-## 搜狗输入法兜底安装包
+## 输入法：仓库内伪装输入法
 
-`sogou-ime-v16.9.0.5523.exe`（213.7 MB，Git LFS）是 CI 准备桌面环境时的兜底输入法安装包，配套的
-`sogou-ime.json` 记录版本、体积、SHA256、来源 URL、签名主体与静默开关。
+CI 不再下载或安装第三方输入法；`sogou-ime-v16.9.0.5523.exe`、`sogou-ime.json` 与
+`scripts/ci/verify-sogou-resolver.ps1` 已删除。客户端按 `ImmGetDescriptionW` 是否为空筛选输入法
+（IG5：`FUN_004a2780`；只有 `E0xxxxxx` 布局才可能有描述），纯 TSF 的微软拼音不满足。
 
-- 依据：客户端按 `ImmGetDescriptionW` 是否为空筛选输入法（IG5：`FUN_004a6b30`），纯 TSF 的微软拼音
-  不满足。安装后需从实际注册的搜狗 IMM 布局读取 KLID、加载并读回非空描述；安装目录或卸载表项不能代替就绪证据。`cx-real-client-prep-summary.json` 的 `prepared` / `immPreparation` 分别记录实际就绪结果与逐次加载诊断。
-- 安装期间每三秒探测 IMM；读到非空描述即完成准备并继续，即使安装器仍在运行也不等待或结束它。启动器退出码 0 仍须等待 IMM；超时且安装器仍在运行时停止后续安装来源，避免并发重复安装。
-- 安装顺序：仓库内安装包 → `winget install Sogou.SogouInput -e --silent` → 从 winget-pkgs 清单
-  (`manifests/s/Sogou/SogouInput`) 解析当前版本，按固定模板 `https://ime.gtimg.com/pc/build/_sogou_pinyin_<version>_0.exe`
-  下载。三层都带超时，失败只记录不中断。
-- 校验：仓库内安装包执行前必须同时满足 `Authenticode Status=Valid`、签名主体含 `Sogou`、SHA256 与
-  `sogou-ime.json` 一致；下载路径同样校验清单里的 SHA256 与签名。
-- 版本自动解析：`winget show` → winget-pkgs 目录 → 仓库内清单，不写死版本号。
-- 手动核对链接（不安装）：`pwsh -File scripts/ci/verify-sogou-resolver.ps1 [-NoWinget] [-Download]`。
+- 替代方案是 `tests/fixtures/sogou-imm-vm/fake-ime/`：导出完整 IME32 接口的最小模块 `cxime.ime`，
+  加上注册 `HKLM\...\Keyboard Layouts\E0F00804`、复制到 `SysWOW64`/`System32` 与
+  `LoadKeyboardLayoutW` 的安装脚本；`-Verify` 只读，安装/卸载需要管理员。
+- `scripts/ci/prepare-windows-real-client-environment.ps1` 会定位该夹具，必要时用 MSVC 编译，再调用
+  `Install-FakeInputMethod.ps1 -DisplayName StandInInput`；就绪结果以 `ImmGetDescriptionW` 回读为准，
+  写入 `cx-real-client-prep-summary.json` 的 `prepared` 与 `immPreparation`。
+- 安装目录、卸载表项或 TSF profile 都不能代替就绪证据；`prepared=false` 时客户端显示「检测未通过」。
 
 私有客户端测试在非 PR 事件（`push` / `workflow_dispatch`）自动运行，不再依赖额外的启用变量——缺少数据库变量时 discovery 会直接报错，而不是静默跳过。CI 会自动发现所有非空的 `Examination_Client_Database_*` GitHub Actions 变量，并与 `tests/private-clients/` 下每个客户端 EXE 组合。变量值必须是 `UserExamInfo.db` 的 Base64 文本（换行与空白会被忽略）；注入脚本解码后直接把字节写入解压出的 `CXExam.exe` 同目录，文件名固定为 `UserExamInfo.db`，不做任何解压。旧的 `enabled` 标记和 ZIP 载荷会在发现或注入阶段直接报错。测试结束时删除独立临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。
 
@@ -52,7 +50,7 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 **托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也通常没有摄像头，可能停在客户端检查提示。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
-注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口）、登记微软拼音/五笔（仅当镜像带 zh-CN 载荷时；语言文件通过 `Add-WindowsCapability Language.Basic~~~zh-CN` 安装，不用会长时间挂起的 `Install-Language`），并安装搜狗拼音（客户端只接受 `ImmGetDescriptionW` 非空的输入法，纯 TSF 的微软拼音不满足），所有安装动作都带超时、并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
+注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口），并用仓库内伪装输入法（`tests/fixtures/sogou-imm-vm/fake-ime/`，客户端只接受 `ImmGetDescriptionW` 非空的 `E0xxxxxx` 布局）准备输入法；不再下载或安装搜狗、不再登记微软拼音/五笔、不再安装 zh-CN 语言包。所有准备动作都带超时，并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。
 

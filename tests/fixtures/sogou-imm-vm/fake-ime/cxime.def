@@ -1,0 +1,19 @@
+LIBRARY cxime
+
+EXPORTS
+    ImeInquire
+    ImeConfigure
+    ImeDestroy
+    ImeEscape
+    ImeSelect
+    ImeSetActiveContext
+    ImeProcessKey
+    ImeToAsciiEx
+    NotifyIME
+    ImeRegisterWord
+    ImeUnregisterWord
+    ImeEnumRegisterWord
+    ImeSetCompositionString
+    ImeConversionList
+    ImeGetRegisterWordStyle
+    ImeGetImeMenuItems

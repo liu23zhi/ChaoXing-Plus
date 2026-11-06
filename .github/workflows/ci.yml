@@ -499,10 +499,87 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  windows-fake-ime:
+    name: Windows 伪装输入法就绪验证
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 确认管理员上下文
+        shell: pwsh
+        run: |
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw '伪装输入法验证需要管理员上下文（写入 HKLM 与 System32）'
+          }
+      - name: 编译占位输入法模块
+        shell: pwsh
+        run: ./tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1
+      - name: 安装并验证占位输入法
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
+          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.log'
+          $output = & $script -DisplayName 'CiExamInput' *>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "安装占位输入法失败（退出码 $code）" }
+      - name: 64 位 IMM 判据复核
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
+          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.log'
+          $output = & $script -Verify *>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "64 位探针未就绪（退出码 $code）" }
+          $text = ($output | Out-String)
+          if ($text -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
+          if ($text -notmatch 'HKL 0xE0[0-9A-F]{6}') { throw '缺少 E0 标记的输入法布局（客户端判据第一条）' }
+          if ($text -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '输入法布局语言必须是 0804（客户端判据第三条）' }
+      - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
+          $x86 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+          if (-not (Test-Path -LiteralPath $x86)) { throw "找不到 32 位 PowerShell：$x86" }
+          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.log'
+          $output = & $x86 -NoProfile -ExecutionPolicy Bypass -File $script -Verify -Load *>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "32 位探针未就绪（退出码 $code）：CXExam.exe 也读不到描述" }
+          $text = ($output | Out-String)
+          if ($text -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
+          if ($text -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '32 位视图缺少 0804 语言的 E0 布局' }
+      - name: 卸载并确认回滚
+        if: always()
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1'
+          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.log'
+          $output = & $script -Uninstall *>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object -FilePath $log | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "卸载失败（退出码 $code）" }
+          $probe = & $script -Verify *>&1
+          $probeCode = $LASTEXITCODE
+          $probe | ForEach-Object { Write-Host $_ }
+          if ($probeCode -ne 1) { throw "卸载后探针仍报告就绪（退出码 $probeCode）" }
+      - name: 上传伪装输入法日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-fake-ime-logs
+          path: ${{ runner.temp }}/cx-fake-ime-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, windows-fake-ime]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -517,6 +594,7 @@ jobs:
           WINDOWS_RELEASE_RESULT: ${{ needs.windows-release.result }}
           WINDOWS_REAL_CLIENT_DISCOVERY_RESULT: ${{ needs.windows-real-client-discovery.result }}
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
+          WINDOWS_FAKE_IME_RESULT: ${{ needs.windows-fake-ime.result }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -544,6 +622,7 @@ jobs:
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
+            printf '| Windows 伪装输入法就绪验证 | %s |\n' "$(result_label "$WINDOWS_FAKE_IME_RESULT")"
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"

@@ -1,24 +1,39 @@
-# Sogou IMM VM Diagnostic
+# IMM diagnostic fixture
 
-This folder is self-contained. Copy the whole folder to a Windows VM, then run the script there. It includes the exact Sogou installer used by the desktop-prep job and verifies its SHA256 and Authenticode signer before launching it.
+Self-contained, read-only diagnostic for the exam client's "input method" check. Copy the folder to a
+Windows machine (a VM snapshot is fine) and run it; nothing is installed or changed.
+
+The folder name is historical: it used to carry a Sogou installer. That installer is gone (CI no longer
+installs third-party input methods); the client only ever looks at `ImmGetDescriptionW`, so the probe and
+the stand-in IME in `fake-ime/` replace it.
 
 ## Run
 
-Use an elevated Windows PowerShell 5.1 window in a disposable VM snapshot:
-
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\run-sogou-imm-diagnostic.ps1
+.\run-sogou-imm-diagnostic.ps1              # 30 second window, 3 second samples
+.\run-sogou-imm-diagnostic.ps1 -TimeoutSeconds 5
 ```
 
-The script launches `sogou-ime-v16.9.0.5523.exe /S`, samples every 3 seconds for up to 180 seconds, and does not terminate the installer or any child process. It deliberately continues sampling after the launcher exits so the evidence shows whether an installer child continues, whether a Sogou layout appears in the registry, and when `ImmGetDescriptionW` first returns a non-empty description.
+Each run writes `results/<timestamp>/events.jsonl` and `summary.json` under this folder. Every sample
+contains:
 
-To observe an already-installed VM without launching the installer:
+- `ImmDescriptions` - `GetKeyboardLayoutList` + `ImmGetDescriptionW` for every loaded HKL, exactly the
+  pair `CXExam.exe` uses (`FUN_004a2780`);
+- `ReadyDescriptions` - the subset with a non-empty description, i.e. what the client would count;
+- `RegisteredImeLayouts` - `HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layouts` entries that carry an
+  `IME file` value (an `E0xxxxxx` KLID is the only way to get a description).
 
-```powershell
-.\run-sogou-imm-diagnostic.ps1 -ProbeOnly -TimeoutSeconds 30
-```
+`RESULT=IMM_READY` means at least one loaded layout returned a description. `RESULT=PROBE_TIMEOUT_IMM_NOT_READY`
+means the client's item will fail: either no IME-marked layout is registered, or none is loaded.
 
-Each run writes `results/<timestamp>/events.jsonl` and `summary.json` under this folder. `events.jsonl` contains the initial machine/installer facts, installer exit event, 3-second samples, process tree, registered IME layout keys, layout-load handles, IMM descriptions, and install-registration signals. The final `RESULT=` value distinguishes Sogou IMM readiness, another ready IMM layout, a launcher exit with a still-running child, and an exited installer with IMM still unavailable.
+## Files
 
-The script does not change the default input language or registry. It calls the same `LoadKeyboardLayoutW` and `ImmGetDescriptionW` APIs used by desktop-prep, in its own PowerShell process. Run it on a VM snapshot because the installer itself changes the VM. Do not share the full event log publicly without checking it for machine-specific paths and process details.
+| File | Purpose |
+| --- | --- |
+| `run-sogou-imm-diagnostic.ps1` | Read-only probe (the client's own criterion) |
+| `IMM-TSF-diagnostic-report.md` | Evidence: client binary, `imm32` rules, environment findings |
+| `fake-ime/` | Minimal IME32 module + install/verify/uninstall for machines without a real IMM IME |
+
+Run the probe on a VM snapshot if you want a clean comparison; it never writes outside its own
+`results/` folder.

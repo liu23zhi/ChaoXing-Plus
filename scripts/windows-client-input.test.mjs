@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolveTestPath } from './test-helpers/temp-directory.mjs';
 
@@ -84,76 +84,45 @@ test('CI 桌面环境准备脚本可在无副作用模式下运行', () => {
   assert.doesNotMatch(result.stdout, /camera: choco install/u, '跳过开关不得真的安装摄像头驱动');
 });
 
-test('只登记微软自带拼音与五笔，且安装步骤都有超时上限', () => {
+test('输入法准备改用仓库内伪装输入法，不再下载或安装第三方输入法', () => {
   const source = readFileSync(preparationScript, 'utf8');
-  assert.match(source, /\{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E\}/u, '必须登记微软拼音输入法');
-  assert.match(source, /\{E7EA138E-69F8-11D7-A6EA-00065B844310\}/u, '必须登记微软五笔输入法');
-  assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得再使用');
-  assert.doesNotMatch(source, /qqpinyin|baidu|QQ拼音|百度/iu, '除搜狗外不得安装其它第三方输入法');
-  assert.match(source, /Invoke-Bounded/u, '安装动作必须带超时');
-  assert.match(source, /-TimeoutSeconds \$CapabilityTimeoutSeconds/u, '语言能力安装必须有超时上限');
-  assert.match(source, /Add-WindowsCapability -Online -Name 'Language\.Basic~~~zh-CN~0\.0\.1\.0'/u,
-    '语言文件应通过 Add-WindowsCapability 安装');
-});
-
-test('安装搜狗拼音：winget 与官方下载两条线上兜底都在', () => {
-  const source = readFileSync(preparationScript, 'utf8');
-  assert.match(source, /\[switch\] \$SkipSogouInputMethod/u, '必须能单独跳过搜狗输入法');
-  assert.doesNotMatch(source, /WeChat|WeType|wechat/u, '微信输入法安装代码与备份必须彻底移除');
-  assert.doesNotMatch(source, /wechat-ime/u, '不得再引用微信输入法安装包');
-  const installBody = source.slice(source.indexOf('function Install-SogouInputMethod'));
-  assert.match(installBody, /-FilePath \$winget\.Source -ArgumentList @\('install', '--id', 'Sogou\.SogouInput'/u, '保留 winget 安装来源');
-  assert.match(installBody, /Resolve-SogouInputInstaller/u, 'winget 失败后要有官方安装包兜底');
-  assert.match(installBody, /ArgumentList \$installer\.Silent/u, '静默参数必须来自解析结果');
-  assert.match(source, /function Resolve-SogouInputInstaller/u, '必须能解析当前版本（不写死）');
-  assert.match(source, /_sogou_pinyin_\$\(\$version\)_0\.exe/u, '下载地址按固定模板拼装');
-  assert.match(source, /manifests\/s\/Sogou\/SogouInput/u, '版本回退到 winget-pkgs 清单');
-  assert.match(source, /InstallerSha256/u, '清单提供 SHA256 时必须校验');
-  assert.match(source, /Silent = '\/S'/u, 'nullsoft 安装包用 /S 静默');
-  assert.match(source, /function Get-SogouInputState/u, '必须能判定是否已安装，避免重复安装');
-  const verifier = readFileSync(resolveTestPath('scripts', 'ci', 'verify-sogou-resolver.ps1'), 'utf8');
-  assert.match(verifier, /\[switch\] \$NoWinget/u, '验证脚本必须能模拟 winget 缺失');
-  assert.match(verifier, /Get-SogouInputState/u, '验证脚本必须复用安装状态判定');
-  for (const byte of readFileSync(resolveTestPath('scripts', 'ci', 'verify-sogou-resolver.ps1'))) {
-    assert.equal(byte <= 0x7f, true, 'verify-sogou-resolver.ps1 必须保持纯 ASCII');
-  }
-  assert.match(source, /input: dry run, Sogou Pinyin not installed/u, 'dry run 不得真的安装');
-});
-test('仓库内搜狗安装包与清单一致，且优先使用', () => {
-  const fixtureDir = resolveTestPath('tests', 'private-clients');
-  const manifest = JSON.parse(readFileSync(resolveTestPath('tests', 'private-clients', 'sogou-ime.json'), 'utf8'));
-  assert.match(manifest.sha256, /^[0-9A-F]{64}$/u, '清单必须记录大写 SHA256');
-  assert.equal(manifest.silentSwitch, '/S', '必须记录 nullsoft 静默开关');
-  assert.equal(manifest.file, `sogou-ime-v${manifest.version}.exe`, '文件名必须与版本一致');
-  const installer = resolveTestPath('tests', 'private-clients', manifest.file);
-  assert.ok(existsSync(installer), '搜狗兜底安装包必须随仓库提供');
-  const head = readFileSync(installer).subarray(0, 200).toString('utf8');
-  if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1/u.test(head)) {
-    const oid = /oid sha256:([0-9a-f]{64})/u.exec(head);
-    const size = /size (\d+)/u.exec(head);
-    assert.equal(oid[1].toUpperCase(), manifest.sha256, 'LFS 指针 oid 必须与清单一致');
-    assert.equal(Number(size[1]), manifest.size, 'LFS 指针 size 必须与清单一致');
-  } else {
-    assert.equal(statSync(installer).size, manifest.size, '安装包体积必须与清单一致');
-  }
-  const source = readFileSync(preparationScript, 'utf8');
-  const installBody = source.slice(source.indexOf('function Install-SogouInputMethod'));
-  assert.ok(installBody.indexOf('using bundled Sogou installer') < installBody.indexOf('winget install Sogou.SogouInput'),
-    '仓库内安装包必须优先于 winget');
-  assert.ok(installBody.indexOf('winget install Sogou.SogouInput') < installBody.indexOf('Resolve-SogouInputInstaller'),
-    'winget 失败后才解析最新下载地址');
-  assert.match(source, /function Get-BundledSogouInstaller/u, '必须能定位仓库内搜狗安装包');
-  assert.match(source, /sogou-ime-v\*\.exe/u, '按文件名约定查找');
-  assert.match(source, /function Test-SogouInstallerFile/u, '执行前必须校验签名与哈希');
-  assert.match(source, /unexpected signer/u, '签名主体不含 Sogou 时必须拒绝');
-  // 安装器可能用中文 DisplayName 注册，只看名字会重复安装：三条独立信号都要在。
-  assert.match(source, /Source = 'uninstall-entry'/u, '必须识别卸载表项');
-  assert.match(source, /Control\\Keyboard Layouts/u, '必须识别 IMM 键盘布局注册');
-  assert.match(source, /Source = 'install-dir'/u, '必须识别安装目录');
-  assert.match(source, /UninstallString/u, '卸载命令含 sogou 也应识别');
-  assert.match(source, /function Get-ImmInputMethodProbe/u, '必须记录客户端判定输入法所用的 ImmGetDescriptionW');
+  assert.doesNotMatch(source, /winget|ime\.gtimg\.com|sogou-ime-v|Install-SogouInputMethod|Get-SogouInputState|Resolve-SogouInputInstaller/iu,
+    'CI 不得再下载或安装第三方输入法');
+  assert.doesNotMatch(source, /Add-WindowsCapability|Set-WinUserLanguageList|InputMethodTips/u,
+    '不再下载语言包或注册系统自带输入法');
+  assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得使用');
+  assert.match(source, /function Install-StandInInputMethod/u, '必须用仓库内伪装输入法替代第三方安装');
+  assert.match(source, /tests\/fixtures\/sogou-imm-vm\/fake-ime/u, '必须指向 fake-ime 夹具');
+  assert.match(source, /Install-FakeInputMethod\.ps1/u, '必须调用伪装输入法安装脚本');
+  assert.match(source, /-DisplayName 'StandInInput'/u, '必须传入稳定的布局描述');
+  assert.match(source, /function Get-ImmInputMethodProbe/u, '必须保留客户端判据探针');
+  assert.match(source, /ImmGetDescriptionW/u, '探针必须使用客户端同一个 API');
+  assert.match(source, /function Test-ImmInputMethodReady/u, '必须按非空描述判定就绪');
+  assert.match(source, /stand-in-installed'/u, '必须记录安装成功');
+  assert.match(source, /stand-in-installed-but-not-ready/u, '安装成功但描述为空必须能区分');
+  assert.match(source, /stand-in-fixture-missing/u, '夹具缺失必须显式记录');
+  assert.match(source, /stand-in-build-failed/u, '模块编译失败必须显式记录');
+  assert.match(source, /Invoke-Bounded -Label 'input: build stand-in IME module'/u, '编译步骤必须带超时');
   assert.match(source, /cx-real-client-prep-summary\.json/u, '准备阶段必须写出可下载的摘要');
   assert.match(source, /input: imm \$line/u, '必须逐条打印每个布局的 IMM 描述');
-  assert.equal(typeof manifest.silentSwitchVerified, 'string', '清单必须记录 /S 的实测结论');
-  assert.match(manifest.silentSwitchVerified, /虚拟机/u, '必须注明是虚拟机实测');
+});
+
+test('准备脚本只保留整体跳过开关，没有第三方输入法专用开关', () => {
+  const source = readFileSync(preparationScript, 'utf8');
+  assert.match(source, /\[switch\] \$SkipInputMethod/u, '必须能整体跳过输入法准备');
+  assert.doesNotMatch(source, /\[switch\] \$SkipSogouInputMethod/u, '第三方输入法开关必须删除');
+  assert.doesNotMatch(source, /\$SogouImeInstaller/u, '第三方安装包参数必须删除');
+  assert.match(source, /if \(-not \$SkipInputMethod\) \{ \$null = Install-StandInInputMethod \}/u, '主流程必须直接调用伪装输入法准备');
+});
+
+test('准备脚本不再引用搜狗安装包与清单', async () => {
+  const { access } = await import('node:fs/promises');
+  for (const relative of [
+    ['tests', 'private-clients', 'sogou-ime-v16.9.0.5523.exe'],
+    ['tests', 'private-clients', 'sogou-ime.json'],
+    ['scripts', 'ci', 'verify-sogou-resolver.ps1'],
+    ['tests', 'fixtures', 'sogou-imm-vm', 'sogou-ime-v16.9.0.5523.exe']
+  ]) {
+    await assert.rejects(access(resolveTestPath(...relative)), '输入法安装包与清单必须删除');
+  }
 });
