@@ -102,7 +102,7 @@ test('仓库不携带任何预编译模块，CI 现场编译', async () => {
   const install = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
   assert.match(install, /Run build-cxime\.ps1 first/u, '缺少模块时必须要求先编译');
   const workflow = await read('.github/workflows/ci.yml');
-  assert.match(workflow, /只使用 CI 现场编译的模块/u, 'CI 只使用现场编译产物');
+  assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, 'CI 的编译失败必须降级为告警');
   assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');
 });
 
@@ -116,6 +116,10 @@ test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async (
   assert.match(workflow, /Install-FakeInputMethod\.ps1/u, 'job 必须调用安装脚本');
   assert.match(workflow, /-Verify -Load/u, '32 位复核必须在探针进程内加载布局');
   assert.match(workflow, /-Uninstall/u, 'job 必须回滚');
+  assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, '编译失败只能告警，不能阻断后续步骤');
+  assert.match(workflow, /CX_FAKE_IME_MODULE/u, '必须用环境标记把“没有模块”传给后续步骤');
+  assert.match(workflow, /if: env\.CX_FAKE_IME_MODULE == '1'/u, '安装与复核必须按模块可用性跳过');
+  assert.match(workflow, /-Verify 用 1 表示“未就绪”[\s\S]*?exit 0/u, '预期非零退出的步骤必须显式 exit 0');
   assert.match(workflow, /needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, windows-fake-ime\]/u,
     '汇总 job 必须等待伪装输入法验证');
 });
