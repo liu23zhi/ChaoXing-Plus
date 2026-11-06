@@ -147,6 +147,17 @@ test('仓库内置 zh-CN 语言包，CI 用它安装东亚语言支持', async (
   assert.match(workflow, /Set-Location \(Split-Path -Parent \$ScriptPath\)/u, '脚本必须在自己的目录里运行（ 定位 repo）');
 });
 
+test('提供 IME 加载 A/B 探针，区分模块与子系统问题', async () => {
+  const probe = await readBytes('tools/fake-ime/Probe-ImeLoad.ps1');
+  assert.ok(!probe.some((byte) => byte > 127), 'Probe-ImeLoad.ps1 必须保持纯 ASCII');
+  const text = await read('tools/fake-ime/Probe-ImeLoad.ps1');
+  assert.match(text, /msctfime\.ime/u, '必须用系统自带 IME 做对照');
+  assert.match(text, /cxime\.ime/u, '必须同时测试占位模块');
+  assert.match(text, /diagnosis: /u, '必须输出结论行');
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.match(workflow, /Probe-ImeLoad\.ps1/u, 'CI 必须调用该探针');
+});
+
 test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /^  windows-fake-ime:$/mu, '必须有独立的伪装输入法 job');

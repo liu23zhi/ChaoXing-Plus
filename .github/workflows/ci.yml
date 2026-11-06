@@ -633,6 +633,18 @@ jobs:
             Write-Host '::warning::当前 runner 未安装东亚语言支持（Language.Basic~~~zh-CN），legacy IMM 的安装与加载都不被支持；把仓库变量 FAKE_IME_RUNNER 指向带 zh-CN 的 runner 才能真实验证'
           }
           exit 0
+      - name: 诊断：系统 IME 与占位 IME 的加载差异
+        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Probe-ImeLoad.ps1'
+          if (-not (Test-Path -LiteralPath $probe)) {
+            Write-Host '::warning::缺少 Probe-ImeLoad.ps1'
+            exit 0
+          }
+          & $probe
+          exit 0
       - name: 记录安装前基线
         shell: pwsh
         run: |

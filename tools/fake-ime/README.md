@@ -36,6 +36,7 @@ zh-CN 机器得到 `E0F00804`，纯英文 runner 得到 `E0F00409`，这样同�
 | `build-cxime.ps1` | 用 MSVC 编译 `build\cxime32.dll`、`build\cxime64.dll`（仓库不携带预编译产物，CI 现场编译） |
 | `cxime.rc` | VERSIONINFO 资源（缺它 `LoadKeyboardLayoutW` 会返回 1813） |
 | `Install-FakeInputMethod.ps1` | 安装 / 验证 / 卸载 |
+| `Probe-ImeLoad.ps1` | 只读 A/B 探针：分别尝试加载系统 `msctfime.ime` 与 `cxime.ime` 的临时布局，判断是子系统还是模块的问题 |
 | `langpack/WinSrv2025-zhCN-LanguagePack.zip` | Windows Server 2025 zh-CN 语言包（Git LFS，~222 MB）：CI 用它装东亚语言支持；job 的 checkout 必须带 `lfs: true`，否则工作区只有 134 字节指针 |
 
 ## 使用
@@ -98,7 +99,8 @@ hosted `windows-latest` 只有 en-US（`Language.Basic~~~zh-CN = NotPresent`）�
 - 手写 `E0xx` 布局后 `LoadKeyboardLayoutW` 返回 `1419 ERROR_HOTKEY_NOT_REGISTERED`；
 - 即使先用 `KLF_ACTIVATE` 载入 `00000804` 基础布局也无济于事（缺的是语言载荷，不是布局键）。
 
-这不是脚本缺陷：装完语言包再查 `Language.Basic~~~zh-CN`，仍不是 `Installed` 就打 warning 并跳过安装/复核
+这不是脚本缺陷：装完语言包再查 `Language.Basic~~~zh-CN`，仍不是 `Installed` 就打 warning 并跳过安装/复核；
+装上了却仍加载失败时，`Probe-ImeLoad.ps1` 的对照结果（系统 IME 与占位模块分别能否加载）会把原因定位到子系统还是模块
 （`CX_FAKE_IME_HOST=0`）。想真验证也可以把仓库变量 `FAKE_IME_RUNNER` 指向带 zh-CN 的 self-hosted runner，
 例如 `["self-hosted","windows","zh-cn"]`。桌面准备遇到同一限制时记录 `stand-in-host-unavailable`。
 
