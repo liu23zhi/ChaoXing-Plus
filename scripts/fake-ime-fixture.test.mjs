@@ -106,6 +106,9 @@ test('仓库不携带任何预编译模块，CI 现场编译', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, 'CI 的编译失败必须降级为告警');
   assert.match(workflow, /vars\.FAKE_IME_RUNNER/u, 'job 必须允许指向带 zh-CN 的 runner');
+  assert.match(workflow, /Add-WindowsCapability -Online -Name \$name/u, '必须先尝试安装东亚语言支持');
+  assert.match(workflow, /AddSeconds\(300\)/u, '语言包安装必须有 300 秒上限，不能挂住 job');
+  assert.match(workflow, /Stop-Job -Job \$job/u, '超时必须停止后台作业');
   assert.match(workflow, /Language\.Basic~~~zh-CN/u, '必须先检查东亚语言支持（legacy IMM 的前提）');
   assert.match(workflow, /CX_FAKE_IME_HOST/u, '没有东亚语言支持时必须跳过安装与复核');
   assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');

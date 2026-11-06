@@ -551,6 +551,43 @@ jobs:
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             throw '伪装输入法验证需要管理员上下文（写入 HKLM 与 System32）'
           }
+      - name: 尝试安装东亚语言支持（有界）
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $capability = 'Language.Basic~~~zh-CN~0.0.1.0'
+          function Get-CapabilityState {
+            try {
+              $item = Get-WindowsCapability -Online -Name $capability -ErrorAction Stop
+              if ($item) { return [string]$item.State }
+            } catch {
+              Write-Host ("capability query failed: {0}" -f $_.Exception.Message)
+            }
+            return 'Unknown'
+          }
+          $before = Get-CapabilityState
+          Write-Host ("before: {0} = {1}" -f $capability, $before)
+          if ($before -ne 'Installed') {
+            # Add-WindowsCapability 在缺 FOD 源的镜像上可能长时间挂起（Install-Language 更糟，禁止使用），
+            # 因此放进后台作业并限时；超时只记录，不影响后续能力预检。
+            $job = Start-Job -ScriptBlock {
+              param($name)
+              Add-WindowsCapability -Online -Name $name -ErrorAction Stop
+            } -ArgumentList $capability
+            $deadline = (Get-Date).AddSeconds(300)
+            while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+            if ($job.State -eq 'Running') {
+              Write-Host '::warning::Add-WindowsCapability 300 秒未完成，已停止等待（镜像通常不带 zh-CN FOD 源）'
+              Stop-Job -Job $job -ErrorAction SilentlyContinue
+            } else {
+              Receive-Job -Job $job -ErrorAction SilentlyContinue | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+            }
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            $after = Get-CapabilityState
+            Write-Host ("after: {0} = {1}" -f $capability, $after)
+          }
+          exit 0
       - name: 检查宿主是否具备东亚语言支持
         shell: pwsh
         run: |
@@ -568,7 +605,8 @@ jobs:
             Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_HOST=0' -Encoding utf8
             Write-Host '::warning::当前 runner 未安装东亚语言支持（Language.Basic~~~zh-CN），legacy IMM 的安装与加载都不被支持；把仓库变量 FAKE_IME_RUNNER 指向带 zh-CN 的 runner 才能真实验证'
           }
-          exit 0      - name: 记录安装前基线
+          exit 0
+      - name: 记录安装前基线
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
