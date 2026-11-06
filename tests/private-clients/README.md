@@ -38,6 +38,10 @@ zh-CN 语言包已删除；伪装输入法整包 `tools/fake-ime/` **封存归�
 - 不要再引入第三方输入法安装包、zh-CN 语言包或自建 IME 模块；确需验证时请在满足条件的自托管 runner 上
   按冻结记录里的步骤单独进行。
 
+**偶发失败自动重试**：`真实客户端注入` 步骤默认尝试 2 次（间隔 15 秒）。第一次失败时会把
+`cx-real-client-*` 现场文件改名为 `*-attempt1.*` 后重试，artifact 里两次证据都会保留；两次都失败才
+以最后一次的退出码判定失败，并输出 `::error::` 注解。
+
 **托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也通常没有摄像头，可能停在客户端检查提示。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
 注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口），并只做只读的 IMM 探针（不再安装任何输入法；输入法伪装已冻结，见 `docs/ime-spoofing-freeze.md`）；不下载搜狗、不登记微软拼音/五笔、不安装 zh-CN 语言包。所有准备动作都带超时，并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。

@@ -494,6 +494,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     '私有客户端 discovery 必须只在非 PR 事件运行，且不得再依赖额外的启用变量（否则整组静默跳过）');
   assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-build\.result == 'success' && needs\.windows-real-client-discovery\.result == 'success' && github\.event_name != 'pull_request'/u,
     '真实客户端注入必须跟随 discovery 结果在非 PR 事件运行');
+  assert.match(workflow, /\$attempts = 2/u, '真实客户端注入必须自动重试');
+  assert.match(workflow, /注入尝试 \$attempt\/\$attempts 失败（退出码 \$code），15 秒后自动重试/u, '重试前必须给出可读告警');
+  assert.match(workflow, /\$base-attempt\$attempt/u, '重试前必须保留上一次的现场文件');
   assert.match(workflow, /needs: \[windows-build, windows-real-client-discovery\]/u,
     '真实客户端 job 只需等构建与 discovery');
   assert.doesNotMatch(workflow, /CI_PRIVATE_CLIENTS_ENABLED/u,

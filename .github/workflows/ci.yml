@@ -494,13 +494,33 @@ jobs:
           Write-Host "读取数据库变量 $env:DATABASE_VARIABLE_NAME（Base64 $($compactDb.Length) 字符，已掩码），解码为 UserExamInfo.db 并写入 CXExam.exe 同目录"
           # 非考试页也挂载面板（-PanelAllPages → --panel-all-pages）：考试窗口带 WDA_MONITOR，
           # 进入考试后的屏幕拷屏必为纯黑，只有登录/课程/跳转页的现场截图能人工确认注入是否生效。
-          ./scripts/windows-real-client-injection.ps1 `
-            -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
-            -InjectMode '${{ matrix.inject_mode }}' `
-            -DatabaseBase64 $compactDb `
-            -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
-            -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
-            -PanelAllPages
+                    $attempts = 2
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            Write-Host "::group::真实客户端注入尝试 $attempt/$attempts"
+            ./scripts/windows-real-client-injection.ps1 `
+              -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
+              -InjectMode '${{ matrix.inject_mode }}' `
+              -DatabaseBase64 $compactDb `
+              -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
+              -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
+              -PanelAllPages
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -eq 0) { exit 0 }
+            Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'cx-real-client-*' -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $extension = [IO.Path]::GetExtension($_.Name)
+              $base = [IO.Path]::GetFileNameWithoutExtension($_.Name)
+              $target = Join-Path $env:RUNNER_TEMP ("$base-attempt$attempt$extension")
+              if ($target -ne $_.FullName) { Move-Item -LiteralPath $_.FullName -Destination $target -Force }
+            }
+            if ($attempt -lt $attempts) {
+              Write-Host "::warning::注入尝试 $attempt/$attempts 失败（退出码 $code），15 秒后自动重试"
+              Start-Sleep -Seconds 15
+            } else {
+              Write-Host "::error::注入尝试 $attempts 次均失败（最后一次退出码 $code）"
+              exit $code
+            }
+          }
       - name: 上传注入现场
         if: always()
         uses: actions/upload-artifact@v4
