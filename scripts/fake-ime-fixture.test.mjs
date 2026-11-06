@@ -133,9 +133,16 @@ test('模块携带 VERSIONINFO，否则 LoadKeyboardLayout 返回 1813', async (
 });
 
 test('仓库内置 zh-CN 语言包，CI 用它安装东亚语言支持', async () => {
-  const zip = await readBytes('tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip');
-  assert.ok(zip.length > 100 * 1024 * 1024, '语言包必须真的随仓库提供（>100MB）');
-  assert.deepEqual([...zip.subarray(0, 2)], [0x50, 0x4b], '必须是 zip');
+  // 没启用 Git LFS 的检出（单元 job）只会看到指针文件；两种形态都要接受，真实体积由拉取了 LFS 的 job 校验。
+  const raw = await read('tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip');
+  if (raw.startsWith('version https://git-lfs.github.com/spec/v1')) {
+    assert.match(raw, /^oid sha256:[a-f0-9]{64}$/m, 'LFS 指针必须带对象哈希');
+    assert.match(raw, /^size \d+$/m, 'LFS 指针必须带原始体积');
+  } else {
+    const zip = await readBytes('tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip');
+    assert.ok(zip.length > 100 * 1024 * 1024, '语言包必须真的随仓库提供（>100MB）');
+    assert.deepEqual([...zip.subarray(0, 2)], [0x50, 0x4b], '必须是 zip');
+  }
   const attributes = await read('.gitattributes');
   assert.match(attributes, /tools\/fake-ime\/langpack\/\*\.zip filter=lfs/u, '语言包必须走 Git LFS');
   const workflow = await read('.github/workflows/ci.yml');
