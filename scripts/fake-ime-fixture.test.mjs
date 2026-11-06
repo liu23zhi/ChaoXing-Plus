@@ -141,6 +141,8 @@ test('仓库内置 zh-CN 语言包，CI 用它安装东亚语言支持', async (
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /tools\/fake-ime\/langpack\/WinSrv2025-zhCN-LanguagePack\.zip/u, 'CI 必须使用仓库内置语言包');
   assert.match(workflow, /Expand-Archive -LiteralPath \$zip/u, '使用前必须解压');
+  assert.match(workflow, /lfs: true/u, '检出必须拉取 Git LFS 对象，否则只有指针');
+  assert.match(workflow, /语言包是 Git LFS 指针/u, '未拉取 LFS 时必须告警跳过而不是直接失败');
   assert.match(workflow, /Install-zhCN-Language\.ps1/u, '必须调用语言包自带的安装脚本');
   assert.match(workflow, /Set-Location \(Split-Path -Parent \$ScriptPath\)/u, '脚本必须在自己的目录里运行（ 定位 repo）');
 });

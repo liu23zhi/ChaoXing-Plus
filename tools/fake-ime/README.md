@@ -36,7 +36,7 @@ zh-CN 机器得到 `E0F00804`，纯英文 runner 得到 `E0F00409`，这样同�
 | `build-cxime.ps1` | 用 MSVC 编译 `build\cxime32.dll`、`build\cxime64.dll`（仓库不携带预编译产物，CI 现场编译） |
 | `cxime.rc` | VERSIONINFO 资源（缺它 `LoadKeyboardLayoutW` 会返回 1813） |
 | `Install-FakeInputMethod.ps1` | 安装 / 验证 / 卸载 |
-| `langpack/WinSrv2025-zhCN-LanguagePack.zip` | Windows Server 2025 zh-CN 语言包（Git LFS，~222 MB）：CI 用它装东亚语言支持 |
+| `langpack/WinSrv2025-zhCN-LanguagePack.zip` | Windows Server 2025 zh-CN 语言包（Git LFS，~222 MB）：CI 用它装东亚语言支持；job 的 checkout 必须带 `lfs: true`，否则工作区只有 134 字节指针 |
 
 ## 使用
 

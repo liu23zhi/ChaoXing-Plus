@@ -533,6 +533,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 语言包是 Git LFS 对象；不拉 LFS 时工作区里只有 134 字节指针，Expand-Archive 会立刻失败。
+          lfs: true
       - name: 确认管理员上下文
         shell: pwsh
         run: |
@@ -582,6 +585,13 @@ jobs:
             exit 0
           }
           $destination = Join-Path $env:RUNNER_TEMP 'zhcn-langpack'
+          # Git LFS 未拉取时这里只有 134 字节指针，Expand-Archive 会瞬间失败（上轮就是这样）。
+          $zipSize = (Get-Item -LiteralPath $zip).Length
+          if ($zipSize -lt 1MB) {
+            Write-Host "::warning::语言包是 Git LFS 指针（$zipSize 字节），checkout 未拉取 LFS 对象，跳过安装"
+            exit 0
+          }
+          Write-Host ("langpack: {0:N1} MB" -f ($zipSize / 1MB))
           Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
           $package = Join-Path $destination 'WinSrv2025-zhCN-LanguagePack'
           $installer = Join-Path $package 'Install-zhCN-Language.ps1'
