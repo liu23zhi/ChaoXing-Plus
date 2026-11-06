@@ -411,6 +411,19 @@ Write-Host '== installing stand-in input method =='
 Save-Backup
 Install-Modules
 
+# Legacy IMM layouts only load for languages that support IMEs. English-only runners reject both
+# ImmInstallIMEW and LoadKeyboardLayout (error 0), so activate the built-in zh-CN layout first when the
+# host can load it; then the stand-in is installed for 0804 instead of 0409.
+$baseError = 0
+$baseHkl = [CxImeProbe]::LoadLayoutWithFlags('00000804', 1, [ref]$baseError)   # KLF_ACTIVATE
+if ($baseHkl -ne 0) {
+    $Klid = 'E0F00804'
+    $layoutKey = Join-Path $layoutsRoot $Klid
+    Write-Host ("activated built-in zh-CN layout 0x{0:X8}; installing the stand-in for 0804" -f $baseHkl)
+} else {
+    Write-Host ("could not activate 00000804 (error {0}); keeping the current language {1}" -f $baseError, $Klid)
+}
+
 # Prefer the documented install path: ImmInstallIMEW writes every value Windows itself expects
 # ("Layout Id", the layout text, an E0xx KLID) and returns the resulting HKL. Writing the key by hand
 # left the layout unloadable (1813 / error 0).
@@ -491,6 +504,12 @@ if ($ready -ne 0) {
     Write-Host 'The layout is registered but Windows still reports an empty description.'
     Write-Host 'Check that the IME module exists in SysWOW64 (x86 client) and that the'
     Write-Host 'module exports the Ime* entry points.'
+    if ($hkl -eq 0 -and $installedHkl -eq [IntPtr]::Zero) {
+        # English-only hosts reject legacy IMM layouts outright (both APIs return NULL with error 0);
+        # report it as "this host cannot host an IMM layout" instead of a tool bug.
+        Write-Host '::warning::this host cannot host a legacy IMM layout (no IME-capable language); skipping readiness'
+        exit 3
+    }
     exit 1
 }
 

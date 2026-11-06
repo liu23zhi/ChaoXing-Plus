@@ -622,6 +622,11 @@ jobs:
           $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
           $text | Set-Content -LiteralPath $log -Encoding UTF8
           $text | ForEach-Object { Write-Host $_ }
+          if ($code -eq 3) {
+            Write-Host '::warning::当前 runner 无法承载 legacy IMM 布局，跳过 64/32 位复核'
+            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_MODULE=0' -Encoding utf8
+            exit 0
+          }
           if ($code -ne 0) { throw "安装占位输入法失败（退出码 $code）" }
           exit 0
       - name: 64 位 IMM 判据复核

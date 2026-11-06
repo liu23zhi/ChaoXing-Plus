@@ -334,7 +334,10 @@ function Install-StandInInputMethod {
     foreach ($line in $state.Output) { Write-Step "input: $line" }
     $state.ImmDescriptions = @(Get-ImmInputMethodProbe)
     foreach ($line in $state.ImmDescriptions) { Write-Step "input: imm $line" }
-    if ($code -ne 0) {
+    if ($code -eq 3) {
+        # English-only images reject legacy IMM layouts outright; that is a host limitation, not a prep bug.
+        $state.Reason = 'stand-in-host-unavailable'
+    } elseif ($code -ne 0) {
         $state.Reason = 'stand-in-install-failed'
     } elseif (Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions) {
         $state.Prepared = $true
