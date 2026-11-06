@@ -75,6 +75,14 @@ function Test-ImeCandidate {
     }
 }
 
+# Why a freshly installed language pack still refuses: legacy IMM needs the system ANSI code page to be
+# DBCS (936) and the East Asian language group enabled. Both are read at boot, so record them explicitly.
+$codePage = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -ErrorAction SilentlyContinue
+$acp = if ($codePage) { [string]$codePage.ACP } else { 'unknown' }
+$languageGroups = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language Groups' -ErrorAction SilentlyContinue
+$groupOne = if ($languageGroups -and $languageGroups.PSObject.Properties.Name -contains '1') { [string]$languageGroups.'1' } else { 'missing' }
+Write-Host ("system: ACP={0} language-group-1={1} installed-ui={2}" -f $acp, $groupOne, [System.Globalization.CultureInfo]::InstalledUICulture.Name)
+
 $systemLoaded = Test-ImeCandidate -CandidateKlid $SystemKlid -CandidateIme $SystemImeFile
 $standInLoaded = Test-ImeCandidate -CandidateKlid $StandInKlid -CandidateIme $StandInImeFile
 
@@ -87,6 +95,6 @@ if (-not $systemLoaded -and -not $standInLoaded) {
 }
 Write-Host ('diagnosis: ' + $diagnosis)
 # Job logs need authentication; annotations are readable, so surface the verdict there too.
-Write-Host ('::warning::IME probe: system=' + $systemLoaded + ' stand-in=' + $standInLoaded + '; ' + $diagnosis)
+Write-Host ('::warning::IME probe: ACP=' + $acp + ' language-group-1=' + $groupOne + ' system=' + $systemLoaded + ' stand-in=' + $standInLoaded + '; ' + $diagnosis)
 
 exit 0
