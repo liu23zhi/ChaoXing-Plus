@@ -261,91 +261,22 @@ function Test-ImmInputMethodReady {
     return $false
 }
 
-# The client only accepts input methods whose ImmGetDescriptionW is non-empty (IG5: FUN_004a6b30 keeps
-# only layouts with a description). Windows answers that call only for IME-marked layouts (KLID E0xxxxxx)
-# whose IME module loads, so TSF-only IMEs and plain keyboard layouts never qualify. The repository ships a
-# stand-in IME (tools/fake-ime): no third-party installer, no download, no network.
-function Get-StandInImeRoot {
-    $starts = @($PSScriptRoot, $env:GITHUB_WORKSPACE, (Get-Location).Path)
-    foreach ($start in $starts) {
-        if (-not $start) { continue }
-        $probe = $start
-        while ($probe) {
-            $candidate = Join-Path $probe 'tools/fake-ime'
-            if (Test-Path -LiteralPath (Join-Path $candidate 'Install-FakeInputMethod.ps1')) { return $candidate }
-            $parent = Split-Path $probe -Parent
-            if (-not $parent -or $parent -eq $probe) { break }
-            $probe = $parent
-        }
+# FROZEN (2026-11-06): input-method spoofing is abandoned. The language pack and the stand-in IME
+# package were removed from the repository; see docs/ime-spoofing-freeze.md. This function only records
+# the frozen state and the read-only IMM probe, and never installs or registers anything.
+function Get-FrozenInputMethodState {
+    $state = [pscustomobject]@{
+        Prepared = $false
+        Reason = 'stand-in-frozen'
+        Root = ''
+        Module = ''
+        Output = @()
+        ImmDescriptions = @()
     }
-    return ''
-}
-
-function Build-StandInImeModule {
-    param([Parameter(Mandatory = $true)] [string] $Root)
-    $builder = Join-Path $Root 'build-cxime.ps1'
-    if (-not (Test-Path -LiteralPath $builder)) { return $false }
-    $result = Invoke-Bounded -Label 'input: build stand-in IME module' -TimeoutSeconds 300 -Action {
-        & $builder *>&1 | Select-Object -Last 5
-    }
-    return [bool]$result.Ok
-}
-
-# Registers a local IMM layout (KLID E0F00804) bound to the stand-in IME module and loads it into this
-# session. Everything is read back through the client's own criterion before it is reported as prepared.
-function Install-StandInInputMethod {
-    $state = [pscustomobject]@{ Prepared = $false; Reason = ''; Root = ''; Module = ''; Output = @(); ImmDescriptions = @() }
     $script:ImmPreparation = $state
     $state.ImmDescriptions = @(Get-ImmInputMethodProbe)
-    if (Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions) {
-        $state.Prepared = $true
-        $state.Reason = 'already-ready'
-        Write-Step 'input: an IMM description is already readable; stand-in input method not needed'
-        return $state
-    }
-    if ($DryRun) {
-        $state.Reason = 'dry-run'
-        Write-Step 'input: dry run, stand-in input method not installed'
-        return $state
-    }
-    $root = Get-StandInImeRoot
-    if (-not $root) {
-        $state.Reason = 'stand-in-fixture-missing'
-        Write-Step 'input: fake-ime fixture not found; cannot prepare an input method'
-        return $state
-    }
-    $state.Root = $root
-    # Nothing prebuilt is shipped: the module is compiled from the repository in the CI job/step.
-    $module = Join-Path $root 'build\cxime32.dll'
-    if (-not (Test-Path -LiteralPath $module)) {
-        if (-not (Build-StandInImeModule -Root $root)) {
-            $state.Reason = 'stand-in-build-failed'
-            Write-Step 'input: stand-in IME module could not be built; no IMM description will be readable'
-            return $state
-        }
-    }
-    $state.Module = $module
-    $installer = Join-Path $root 'Install-FakeInputMethod.ps1'
-    # -NoDefault keeps the real client's own input language untouched: the client only needs an IME layout
-    # with a readable description, and changing the default input language would alter the run's inputs.
-    $output = & $installer -DisplayName 'StandInInput' -NoDefault *>&1
-    $code = $LASTEXITCODE
-    $state.Output = @($output | ForEach-Object { [string]$_ })
-    foreach ($line in $state.Output) { Write-Step "input: $line" }
-    $state.ImmDescriptions = @(Get-ImmInputMethodProbe)
     foreach ($line in $state.ImmDescriptions) { Write-Step "input: imm $line" }
-    if ($code -eq 3) {
-        # English-only images reject legacy IMM layouts outright; that is a host limitation, not a prep bug.
-        $state.Reason = 'stand-in-host-unavailable'
-    } elseif ($code -ne 0) {
-        $state.Reason = 'stand-in-install-failed'
-    } elseif (Test-ImmInputMethodReady -Descriptions $state.ImmDescriptions) {
-        $state.Prepared = $true
-        $state.Reason = 'stand-in-installed'
-    } else {
-        $state.Reason = 'stand-in-installed-but-not-ready'
-    }
-    Write-Step "input: prepared=$($state.Prepared) reason=$($state.Reason) root='$($state.Root)'"
+    Write-Step 'input: stand-in input method is frozen (docs/ime-spoofing-freeze.md); nothing is installed'
     return $state
 }
 
@@ -411,7 +342,7 @@ public class CXDpiProbe {
 
 if (-not $SkipResolution) { Set-DesktopResolution }
 if ($TryDpiScaling) { Set-SystemDpiScaling }
-if (-not $SkipInputMethod) { $null = Install-StandInInputMethod }
+if (-not $SkipInputMethod) { $null = Get-FrozenInputMethodState }
 if (-not $SkipCamera) { Add-VirtualCamera }
 
 try {

@@ -84,35 +84,29 @@ test('CI 桌面环境准备脚本可在无副作用模式下运行', () => {
   assert.doesNotMatch(result.stdout, /camera: choco install/u, '跳过开关不得真的安装摄像头驱动');
 });
 
-test('输入法准备改用仓库内伪装输入法，不再下载或安装第三方输入法', () => {
+test('输入法伪装已冻结，准备脚本不再安装任何输入法', () => {
   const source = readFileSync(preparationScript, 'utf8');
-  assert.doesNotMatch(source, /winget|ime\.gtimg\.com|sogou-ime-v|Install-SogouInputMethod|Get-SogouInputState|Resolve-SogouInputInstaller/iu,
-    'CI 不得再下载或安装第三方输入法');
-  assert.doesNotMatch(source, /Add-WindowsCapability|Set-WinUserLanguageList|InputMethodTips/u,
-    '不再下载语言包或注册系统自带输入法');
-  assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得使用');
-  assert.match(source, /function Install-StandInInputMethod/u, '必须用仓库内伪装输入法替代第三方安装');
-  assert.match(source, /tools\/fake-ime/u, '必须指向 tools/fake-ime');
-  assert.match(source, /Install-FakeInputMethod\.ps1/u, '必须调用伪装输入法安装脚本');
-  assert.match(source, /-DisplayName 'StandInInput'/u, '必须传入稳定的布局描述');
+  assert.doesNotMatch(source, /winget|ime\.gtimg\.com|sogou-ime-v|Install-SogouInputMethod|Get-SogouInputState/iu,
+    'CI 不得下载或安装第三方输入法');
+  assert.doesNotMatch(source, /Add-WindowsCapability|Set-WinUserLanguageList|InputMethodTips|Install-Language/u,
+    '不再安装语言包或注册系统输入法');
+  assert.doesNotMatch(source, /Install-FakeInputMethod|build-cxime|tools\/fake-ime/u,
+    '伪装输入法安装包已删除，不得再调用');
+  assert.match(source, /function Get-FrozenInputMethodState/u, '必须保留冻结状态函数');
+  assert.match(source, /stand-in-frozen/u, '状态必须明确为 stand-in-frozen');
   assert.match(source, /function Get-ImmInputMethodProbe/u, '必须保留客户端判据探针');
   assert.match(source, /ImmGetDescriptionW/u, '探针必须使用客户端同一个 API');
   assert.match(source, /function Test-ImmInputMethodReady/u, '必须按非空描述判定就绪');
-  assert.match(source, /stand-in-installed'/u, '必须记录安装成功');
-  assert.match(source, /stand-in-installed-but-not-ready/u, '安装成功但描述为空必须能区分');
-  assert.match(source, /stand-in-fixture-missing/u, '夹具缺失必须显式记录');
-  assert.match(source, /stand-in-build-failed/u, '模块编译失败必须显式记录');
-  assert.match(source, /Invoke-Bounded -Label 'input: build stand-in IME module'/u, '编译步骤必须带超时');
   assert.match(source, /cx-real-client-prep-summary\.json/u, '准备阶段必须写出可下载的摘要');
   assert.match(source, /input: imm \$line/u, '必须逐条打印每个布局的 IMM 描述');
 });
 
-test('准备脚本只保留整体跳过开关，没有第三方输入法专用开关', () => {
+test('准备脚本只保留整体跳过开关，没有输入法专用开关', () => {
   const source = readFileSync(preparationScript, 'utf8');
-  assert.match(source, /\[switch\] \$SkipInputMethod/u, '必须能整体跳过输入法准备');
+  assert.match(source, /\[switch\] \$SkipInputMethod/u, '必须能整体跳过输入法探测');
   assert.doesNotMatch(source, /\[switch\] \$SkipSogouInputMethod/u, '第三方输入法开关必须删除');
   assert.doesNotMatch(source, /\$SogouImeInstaller/u, '第三方安装包参数必须删除');
-  assert.match(source, /if \(-not \$SkipInputMethod\) \{ \$null = Install-StandInInputMethod \}/u, '主流程必须直接调用伪装输入法准备');
+  assert.match(source, /if \(-not \$SkipInputMethod\) \{ \$null = Get-FrozenInputMethodState \}/u, '主流程必须走冻结状态');
 });
 
 test('准备脚本不再引用搜狗安装包与清单', async () => {

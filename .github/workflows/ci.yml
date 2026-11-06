@@ -432,7 +432,7 @@ jobs:
     name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
     permissions:
       contents: read
-    needs: [windows-build, windows-real-client-discovery, windows-fake-ime]
+    needs: [windows-build, windows-real-client-discovery]
     if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
     # Point this at a machine that can satisfy the client's environment check (camera + zh-CN input
     # method) by setting the repository variable REAL_CLIENT_RUNNER, e.g.
@@ -454,13 +454,6 @@ jobs:
         with:
           name: windows-ci-build-${{ github.sha }}
           path: .
-      - name: 下载伪装输入法模块
-        # windows-fake-ime 已编译并上传；这里只取现成产物，缺失时准备脚本会自行编译兜底。
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: cx-fake-ime-modules
-          path: tools/fake-ime/build
       - name: 校验私有客户端资产
         shell: pwsh
         run: |
@@ -524,312 +517,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  windows-fake-ime:
-    name: Windows 伪装输入法就绪验证
-    # legacy IMM 只在装有东亚语言支持的 Windows 上可用；把仓库变量 FAKE_IME_RUNNER 指向这样的 runner
-    # （例如 ["self-hosted","windows","zh-cn"]）就能做真实验证。
-    runs-on: ${{ fromJSON(vars.FAKE_IME_RUNNER || '"windows-latest"') }}
-    timeout-minutes: 45
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          # 语言包是 Git LFS 对象；不拉 LFS 时工作区里只有 134 字节指针，Expand-Archive 会立刻失败。
-          lfs: true
-      - name: 确认管理员上下文
-        shell: pwsh
-        run: |
-          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-          Write-Host ("context: user={0} admin={1} ps={2} os={3}" -f $identity.Name,
-            $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator),
-            $PSVersionTable.PSVersion, [Environment]::OSVersion.VersionString)
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          Write-Host ("vswhere={0}" -f (Test-Path -LiteralPath $vswhere))
-          if (Test-Path -LiteralPath $vswhere) {
-            & $vswhere -latest -products * -property installationPath
-          }
-          Get-ChildItem (Join-Path $env:ProgramFiles 'Microsoft Visual Studio') -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host ("vs-root: {0}" -f $_.FullName) }
-          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw '伪装输入法验证需要管理员上下文（写入 HKLM 与 System32）'
-          }
-      - name: 安装东亚语言支持（仓库内置语言包，有界）
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $capability = 'Language.Basic~~~zh-CN~0.0.1.0'
-          $build = [Environment]::OSVersion.Version
-          Write-Host ("host: {0} build {1}" -f [Environment]::OSVersion.VersionString, $build.Build)
-          function Get-CapabilityState {
-            try {
-              $item = Get-WindowsCapability -Online -Name $capability -ErrorAction Stop
-              if ($item) { return [string]$item.State }
-            } catch {
-              Write-Host ("capability query failed: {0}" -f $_.Exception.Message)
-            }
-            return 'Unknown'
-          }
-          $before = Get-CapabilityState
-          Write-Host ("before: {0} = {1}" -f $capability, $before)
-          if ($before -eq 'Installed') { exit 0 }
-          # 厂商 README 只保证 Windows Server 2025（10.0.26100）；版本不符时按用户要求仍然尝试，
-          # 但留下告警，方便失败时归因到版本不匹配。
-          if ($build.Build -ne 26100) {
-            Write-Host "::warning::当前镜像不是 Windows Server 2025（build $($build.Build)），仍按要求尝试安装语言包"
-          }
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip'
-          if (-not (Test-Path -LiteralPath $zip)) {
-            Write-Host "::warning::仓库语言包缺失: $zip"
-            exit 0
-          }
-          $destination = Join-Path $env:RUNNER_TEMP 'zhcn-langpack'
-          # Git LFS 未拉取时这里只有 134 字节指针，Expand-Archive 会瞬间失败（上轮就是这样）。
-          $zipSize = (Get-Item -LiteralPath $zip).Length
-          if ($zipSize -lt 1MB) {
-            Write-Host "::warning::语言包是 Git LFS 指针（$zipSize 字节），checkout 未拉取 LFS 对象，跳过安装"
-            exit 0
-          }
-          Write-Host ("langpack: {0:N1} MB" -f ($zipSize / 1MB))
-          Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
-          $package = Join-Path $destination 'WinSrv2025-zhCN-LanguagePack'
-          $installer = Join-Path $package 'Install-zhCN-Language.ps1'
-          if (-not (Test-Path -LiteralPath $installer)) { throw "语言包缺少安装脚本: $installer" }
-          # 直接复用厂商脚本（Add-Package LanguagePack -> Add-Capability … /Source:repo /LimitAccess -> 区域设置），
-          # -NoReboot 交给 job 继续跑；整段放进后台作业限时，避免 DISM 卡住 runner。
-          $job = Start-Job -ScriptBlock {
-            param($ScriptPath)
-            Set-Location (Split-Path -Parent $ScriptPath)
-            & $ScriptPath -NoReboot *>&1
-          } -ArgumentList $installer
-          $deadline = (Get-Date).AddSeconds(1800)
-          while ($job.State -eq 'Running' -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 10 }
-          if ($job.State -eq 'Running') {
-            Write-Host '::warning::Install-zhCN-Language.ps1 1800 秒未完成，停止等待'
-            Stop-Job -Job $job -ErrorAction SilentlyContinue
-          } else {
-            Receive-Job -Job $job -ErrorAction SilentlyContinue | Select-Object -Last 20 | ForEach-Object { Write-Host $_ }
-          }
-          Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-          $after = Get-CapabilityState
-          Write-Host ("after: {0} = {1}" -f $capability, $after)
-          $rebootMarkers = @(
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-          ) | Where-Object { Test-Path -LiteralPath $_ }
-          Write-Host ("pending reboot markers: {0}" -f (@($rebootMarkers) -join ', '))
-          if ($after -ne 'Installed') {
-            Write-Host ("::warning::语言包安装未完成（State=$after），reboot markers: {0}" -f (@($rebootMarkers) -join ', '))
-          } elseif (@($rebootMarkers).Count -gt 0) {
-            Write-Host '::warning::语言包已安装但仍存在待重启标记；IME 子系统通常要重启/重新登录后才生效'
-          }
-          exit 0
-      - name: 检查宿主是否具备东亚语言支持
-        shell: pwsh
-        run: |
-          $state = 'Unknown'
-          try {
-            $cap = Get-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0' -ErrorAction Stop
-            if ($cap) { $state = [string]$cap.State }
-          } catch {
-            Write-Host ("capability query failed: {0}" -f $_.Exception.Message)
-          }
-          Write-Host ("Language.Basic~~~zh-CN = {0}" -f $state)
-          if ($state -eq 'Installed') {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_HOST=1' -Encoding utf8
-          } else {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_HOST=0' -Encoding utf8
-            Write-Host '::warning::当前 runner 未安装东亚语言支持（Language.Basic~~~zh-CN），legacy IMM 的安装与加载都不被支持；把仓库变量 FAKE_IME_RUNNER 指向带 zh-CN 的 runner 才能真实验证'
-          }
-          exit 0
-      - name: 诊断：系统 IME 与占位 IME 的加载差异
-        if: env.CX_FAKE_IME_MODULE == '1'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $probe = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Probe-ImeLoad.ps1'
-          if (-not (Test-Path -LiteralPath $probe)) {
-            Write-Host '::warning::缺少 Probe-ImeLoad.ps1'
-            exit 0
-          }
-          & $probe
-          exit 0
-      - name: 记录安装前基线
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Install-FakeInputMethod.ps1'
-          $baselinePath = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.txt'
-          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.err.txt'
-          try {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out 2> $err
-          } catch {
-            throw "无法启动基线探针: $($_.Exception.Message)"
-          }
-          $code = $LASTEXITCODE
-          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
-          $text | ForEach-Object { Write-Host $_ }
-          $line = @($text | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
-          if ($line.Count -eq 0) { throw "基线探针没有输出 RESULT（退出码 $code）" }
-          Set-Content -LiteralPath $baselinePath -Value $line[0] -Encoding ASCII
-          Write-Host ("baseline: {0} (exit {1})" -f $line[0], $code)
-          # -Verify 用 1 表示“未就绪”，这是预期结果；必须显式 exit 0，否则 pwsh 会把子进程的 1 当成步骤退出码。
-          exit 0
-      - name: 编译占位输入法模块
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $root = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime'
-          $builder = Join-Path $root 'build-cxime.ps1'
-          $module = Join-Path $root 'build/cxime32.dll'
-          # 编译是可选步骤：失败只告警并跳过依赖它的安装/复核，不阻断 job 的其余步骤。
-          try {
-            & $builder *>&1 | ForEach-Object { Write-Host $_ }
-          } catch {
-            Write-Host ("WARN: 编译失败，跳过伪装输入法安装与复核: {0}" -f $_.Exception.Message)
-          }
-          if (Test-Path -LiteralPath $module) {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_MODULE=1' -Encoding utf8
-            Write-Host ("module: {0} ({1} bytes)" -f $module, (Get-Item -LiteralPath $module).Length)
-          } else {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_MODULE=0' -Encoding utf8
-            Write-Host '::warning::伪装输入法模块未能编译，安装与 64/32 位复核将跳过（不影响其它验证）'
-          }
-          exit 0
-      - name: 上传占位输入法模块
-        if: env.CX_FAKE_IME_MODULE == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          # 只在这一处编译；真实客户端 job 直接下载这个产物，不再重复编译。
-          name: cx-fake-ime-modules
-          path: tools/fake-ime/build/*.dll
-          if-no-files-found: error
-          retention-days: 7
-      - name: 安装并验证占位输入法
-        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Install-FakeInputMethod.ps1'
-          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.log'
-          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-install.err.txt'
-          try {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -DisplayName 'CiExamInput' 1> $out 2> $err
-          } catch {
-            throw "无法启动安装脚本: $($_.Exception.Message)"
-          }
-          $code = $LASTEXITCODE
-          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
-          $text | Set-Content -LiteralPath $log -Encoding UTF8
-          $text | ForEach-Object { Write-Host $_ }
-          if ($code -eq 3) {
-            Write-Host '::warning::当前 runner 无法承载 legacy IMM 布局，跳过 64/32 位复核'
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'CX_FAKE_IME_MODULE=0' -Encoding utf8
-            exit 0
-          }
-          if ($code -ne 0) { throw "安装占位输入法失败（退出码 $code）" }
-          exit 0
-      - name: 64 位 IMM 判据复核
-        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Install-FakeInputMethod.ps1'
-          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.log'
-          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x64.err.txt'
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $out 2> $err
-          $code = $LASTEXITCODE
-          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
-          $text | Set-Content -LiteralPath $log -Encoding UTF8
-          $text | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "64 位探针未就绪（退出码 $code）" }
-          $joined = ($text -join "`n")
-          if ($joined -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
-          $klid = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
-          if (-not $klid) { throw '探针未输出推导出的 KLID' }
-          $lang = $klid.Substring(4)
-          if ($joined -notmatch ('HKL 0xE0[0-9A-F]{2}' + $lang + '\s+length=[1-9]')) { throw "缺少描述非空的 E0xx$lang 布局" }
-          exit 0
-      - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
-        if: env.CX_FAKE_IME_MODULE == '1' && env.CX_FAKE_IME_HOST == '1'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Install-FakeInputMethod.ps1'
-          $x86 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
-          if (-not (Test-Path -LiteralPath $x86)) { throw "找不到 32 位 PowerShell：$x86" }
-          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.log'
-          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-verify-x86.err.txt'
-          & $x86 -NoProfile -ExecutionPolicy Bypass -File $script -Verify -Load 1> $out 2> $err
-          $code = $LASTEXITCODE
-          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
-          $text | Set-Content -LiteralPath $log -Encoding UTF8
-          $text | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "32 位探针未就绪（退出码 $code）：CXExam.exe 也读不到描述" }
-          $joined = ($text -join "`n")
-          if ($joined -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
-          $klid32 = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
-          if (-not $klid32) { throw '32 位探针未输出推导出的 KLID' }
-          $lang32 = $klid32.Substring(4)
-          if ($joined -notmatch ('HKL 0xE0[0-9A-F]{2}' + $lang32 + '\s+length=[1-9]')) { throw "32 位视图缺少描述非空的 E0xx$lang32 布局" }
-          exit 0
-      - name: 卸载并确认回滚
-        if: always()
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) { $PSNativeCommandUseErrorActionPreference = $false }
-          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/fake-ime/Install-FakeInputMethod.ps1'
-          $baselinePath = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-baseline.txt'
-          $log = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.log'
-          $out = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.out.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-uninstall.err.txt'
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Uninstall 1> $out 2> $err
-          $code = $LASTEXITCODE
-          $text = @(Get-Content -LiteralPath $out -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $err -ErrorAction SilentlyContinue)
-          $text | Set-Content -LiteralPath $log -Encoding UTF8
-          $text | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "卸载失败（退出码 $code）" }
-          # 单独命名：PowerShell 里 $out.p 会被当成属性访问，重定向目标会变成 null。
-          $probeOut = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-rollback.out.txt'
-          $probeErr = Join-Path $env:RUNNER_TEMP 'cx-fake-ime-rollback.err.txt'
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File $script -Verify 1> $probeOut 2> $probeErr
-          $probeText = @(Get-Content -LiteralPath $probeOut -ErrorAction SilentlyContinue) + @(Get-Content -LiteralPath $probeErr -ErrorAction SilentlyContinue)
-          $probeText | ForEach-Object { Write-Host $_ }
-          $probeLine = @($probeText | Where-Object { $_ -match '^RESULT=' } | Select-Object -Last 1)
-          if ($probeLine.Count -eq 0) { throw '卸载后探针没有输出 RESULT' }
-          # runner 镜像自带 IMM 输入法时，回滚只要求恢复到安装前状态，而不是“未就绪”。
-          if (Test-Path -LiteralPath $baselinePath) {
-            $baseline = (Get-Content -LiteralPath $baselinePath -Raw).Trim()
-            Write-Host ("rollback: {0} (baseline {1})" -f $probeLine[0], $baseline)
-            if ($probeLine[0] -ne $baseline) { throw "卸载后探针结果 $($probeLine[0]) 与基线 $baseline 不一致" }
-          } else {
-            Write-Host ("rollback: {0} (no baseline recorded; skipping comparison)" -f $probeLine[0])
-          }
-          exit 0
-      - name: 上传伪装输入法日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-fake-ime-logs
-          path: ${{ runner.temp }}/cx-fake-ime-*
-          if-no-files-found: warn
-          retention-days: 7
 
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, windows-fake-ime]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -844,7 +536,6 @@ jobs:
           WINDOWS_RELEASE_RESULT: ${{ needs.windows-release.result }}
           WINDOWS_REAL_CLIENT_DISCOVERY_RESULT: ${{ needs.windows-real-client-discovery.result }}
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
-          WINDOWS_FAKE_IME_RESULT: ${{ needs.windows-fake-ime.result }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -872,7 +563,6 @@ jobs:
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
-            printf '| Windows 伪装输入法就绪验证 | %s |\n' "$(result_label "$WINDOWS_FAKE_IME_RESULT")"
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"
