@@ -65,6 +65,12 @@ public static class CxImeProbe
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool GetKeyboardLayoutNameW(StringBuilder name);
 
+    [DllImport("imm32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr ImmInstallIMEW(string imeFileName, string layoutText);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
+
     [DllImport("imm32.dll", CharSet = CharSet.Unicode)]
     public static extern int ImmGetDescriptionW(IntPtr hkl, StringBuilder text, int capacity);
 
@@ -285,14 +291,29 @@ function Add-PreloadEntry {
     Write-Host ("preload entry added: {0}={1}" -f $next, $Klid.ToLowerInvariant())
 }
 
+function Get-StandInLayoutKeys {
+    # ImmInstallIMEW picks its own vendor digits, so uninstall has to find the keys by IME file name
+    # instead of trusting the derived KLID.
+    $keys = @()
+    if (-not (Test-Path -LiteralPath $layoutsRoot)) { return $keys }
+    foreach ($key in @(Get-ChildItem -LiteralPath $layoutsRoot -ErrorAction SilentlyContinue)) {
+        $values = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+        if (-not $values) { continue }
+        if (([string]$values.'IME file') -ieq $ImeFile) { $keys += [string]$key.PSChildName }
+    }
+    return $keys
+}
+
 function Remove-PreloadEntry {
+    $targets = @($Klid.ToLowerInvariant())
+    foreach ($extra in @(Get-StandInLayoutKeys)) { $targets += $extra.ToLowerInvariant() }
     if (-not (Test-Path -LiteralPath $preloadKey)) { return }
     $preload = Get-ItemProperty -LiteralPath $preloadKey
     foreach ($name in $preload.PSObject.Properties.Name) {
         if ($name -notmatch '^\d+$') { continue }
-        if ([string]$preload.$name -eq $Klid.ToLowerInvariant()) {
+        if ($targets -contains ([string]$preload.$name).ToLowerInvariant()) {
             Remove-ItemProperty -LiteralPath $preloadKey -Name $name -Force
-            Write-Host ("preload entry removed: {0}" -f $name)
+            Write-Host ("preload entry removed: {0}={1}" -f $name, $preload.$name)
         }
     }
 }
@@ -312,15 +333,20 @@ function Invoke-Uninstall {
         Write-Host ("unload skipped: {0}" -f $_.Exception.Message)
     }
     try { Remove-PreloadEntry } catch { Write-Host ("preload cleanup skipped: {0}" -f $_.Exception.Message) }
-    try {
-        if (Test-Path -LiteralPath $layoutKey) {
-            Remove-Item -LiteralPath $layoutKey -Recurse -Force -ErrorAction Stop
-            Write-Host ("layout key removed: {0}" -f $layoutKey)
-        } else {
-            Write-Host ("layout key absent: {0}" -f $layoutKey)
+    $layoutKeys = @(Get-StandInLayoutKeys)
+    if ($layoutKeys.Count -eq 0) { $layoutKeys = @($Klid) }
+    foreach ($installedKlid in $layoutKeys) {
+        $installedKey = Join-Path $layoutsRoot $installedKlid
+        try {
+            if (Test-Path -LiteralPath $installedKey) {
+                Remove-Item -LiteralPath $installedKey -Recurse -Force -ErrorAction Stop
+                Write-Host ("layout key removed: {0}" -f $installedKey)
+            } else {
+                Write-Host ("layout key absent: {0}" -f $installedKey)
+            }
+        } catch {
+            Write-Host ("layout key removal failed: {0}" -f $_.Exception.Message)
         }
-    } catch {
-        Write-Host ("layout key removal failed: {0}" -f $_.Exception.Message)
     }
     foreach ($candidate in @(
         (Join-Path $env:WINDIR ("SysWOW64\" + $ImeFile)),
@@ -384,7 +410,40 @@ if (-not (Test-Admin)) {
 Write-Host '== installing stand-in input method =='
 Save-Backup
 Install-Modules
-New-LayoutKey
+
+# Prefer the documented install path: ImmInstallIMEW writes every value Windows itself expects
+# ("Layout Id", the layout text, an E0xx KLID) and returns the resulting HKL. Writing the key by hand
+# left the layout unloadable (1813 / error 0).
+$installedHkl = [IntPtr]::Zero
+try {
+    # ImmInstallIMEW wants a path that resolves from the system directory; pass the full path we copied to.
+    $systemIme = Join-Path $env:WINDIR ("System32\" + $ImeFile)
+    if (-not (Test-Path -LiteralPath $systemIme)) { $systemIme = $ImeFile }
+    $installedHkl = [CxImeProbe]::ImmInstallIMEW($systemIme, $DisplayName)
+} catch {
+    Write-Host ("ImmInstallIMEW threw: {0}" -f $_.Exception.Message)
+}
+if ($installedHkl -ne [IntPtr]::Zero) {
+    $Klid = ('{0:X8}' -f ($installedHkl.ToInt64() -band 0xFFFFFFFF))
+    $layoutKey = Join-Path $layoutsRoot $Klid
+    Write-Host ("ImmInstallIMEW installed '{0}' as KLID {1} (HKL 0x{2})" -f $DisplayName, $Klid, $Klid)
+    # Show what Windows wrote, so a later failure points at the actual values instead of guesses.
+    try {
+        $created = Get-ItemProperty -LiteralPath $layoutKey -ErrorAction Stop
+        foreach ($name in @('Layout File', 'Layout Text', 'Layout Id', 'Layout Display Name', 'IME file')) {
+            if ($created.PSObject.Properties.Name -contains $name) {
+                Write-Host ("  key {0} = {1}" -f $name, $created.$name)
+            }
+        }
+    } catch {
+        Write-Host ("  key read failed: {0}" -f $_.Exception.Message)
+    }
+} else {
+    $installError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    $installMessage = (New-Object System.ComponentModel.Win32Exception($installError)).Message
+    Write-Host ("ImmInstallIMEW failed (error {0}: {1}); falling back to manual registration" -f $installError, $installMessage)
+    New-LayoutKey
+}
 if (-not $NoPreload) { Add-PreloadEntry }
 
 $errorCode = 0
@@ -400,6 +459,17 @@ if ($hkl -eq 0) {
     # KLF_SUBSTITUTE_OK (0x2) can succeed where the plain load fails on some builds.
     $hkl = [CxImeProbe]::LoadLayoutWithFlags($Klid, 2, [ref]$errorCode)
     if ($hkl -ne 0) { Write-Host ("layout loaded with KLF_SUBSTITUTE_OK: 0x{0:X8}" -f $hkl) }
+}
+if ($hkl -eq 0) {
+    # Last resort: ask the shell to switch input language; Windows then loads the layout itself.
+    $klidValue = [IntPtr][Convert]::ToInt64($Klid, 16)
+    $null = [CxImeProbe]::PostMessageW([IntPtr]0xFFFF, 0x0050, [IntPtr]::Zero, $klidValue)
+    Start-Sleep -Milliseconds 500
+    $appeared = @([CxImeProbe]::Rows() | Where-Object { $_ -match ('^' + $Klid + '\|') })
+    if ($appeared.Count -gt 0) {
+        Write-Host ("layout appeared after WM_INPUTLANGCHANGEREQUEST: {0}" -f $appeared[0])
+        $hkl = [Convert]::ToInt64($Klid, 16)
+    }
 }
 if ($hkl -eq 0) {
     Write-Host 'Registry entry is present; the layout may only appear after the next logon.'

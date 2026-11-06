@@ -644,7 +644,8 @@ jobs:
           if ($joined -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
           $klid = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
           if (-not $klid) { throw '探针未输出推导出的 KLID' }
-          if ($joined -notmatch ('HKL 0x' + $klid + '\s+length=[1-9]')) { throw "缺少描述非空的 $klid 布局" }
+          $lang = $klid.Substring(4)
+          if ($joined -notmatch ('HKL 0xE0[0-9A-F]{2}' + $lang + '\s+length=[1-9]')) { throw "缺少描述非空的 E0xx$lang 布局" }
           exit 0
       - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
         if: env.CX_FAKE_IME_MODULE == '1'
@@ -668,7 +669,8 @@ jobs:
           if ($joined -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
           $klid32 = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
           if (-not $klid32) { throw '32 位探针未输出推导出的 KLID' }
-          if ($joined -notmatch ('HKL 0x' + $klid32 + '\s+length=[1-9]')) { throw "32 位视图缺少描述非空的 $klid32 布局" }
+          $lang32 = $klid32.Substring(4)
+          if ($joined -notmatch ('HKL 0xE0[0-9A-F]{2}' + $lang32 + '\s+length=[1-9]')) { throw "32 位视图缺少描述非空的 E0xx$lang32 布局" }
           exit 0
       - name: 卸载并确认回滚
         if: always()
