@@ -642,8 +642,9 @@ jobs:
           if ($code -ne 0) { throw "64 位探针未就绪（退出码 $code）" }
           $joined = ($text -join "`n")
           if ($joined -notmatch 'RESULT=IME_READY') { throw '64 位探针缺少 RESULT=IME_READY' }
-          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{6}') { throw '缺少 E0 标记的输入法布局（客户端判据第一条）' }
-          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '输入法布局语言必须是 0804（客户端判据第三条）' }
+          $klid = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
+          if (-not $klid) { throw '探针未输出推导出的 KLID' }
+          if ($joined -notmatch ('HKL 0x' + $klid + '\s+length=[1-9]')) { throw "缺少描述非空的 $klid 布局" }
           exit 0
       - name: 32 位 IMM 判据复核与 CXExam.exe 同位数
         if: env.CX_FAKE_IME_MODULE == '1'
@@ -665,7 +666,9 @@ jobs:
           if ($code -ne 0) { throw "32 位探针未就绪（退出码 $code）：CXExam.exe 也读不到描述" }
           $joined = ($text -join "`n")
           if ($joined -notmatch 'RESULT=IME_READY') { throw '32 位探针缺少 RESULT=IME_READY' }
-          if ($joined -notmatch 'HKL 0xE0[0-9A-F]{2}0804') { throw '32 位视图缺少 0804 语言的 E0 布局' }
+          $klid32 = [regex]::Match($joined, 'probe \(klid (E0[0-9A-F]{6})').Groups[1].Value
+          if (-not $klid32) { throw '32 位探针未输出推导出的 KLID' }
+          if ($joined -notmatch ('HKL 0x' + $klid32 + '\s+length=[1-9]')) { throw "32 位视图缺少描述非空的 $klid32 布局" }
           exit 0
       - name: 卸载并确认回滚
         if: always()

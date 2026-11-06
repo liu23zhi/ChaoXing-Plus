@@ -1,9 +1,11 @@
 [CmdletBinding()]
 param(
     # KLID for the stand-in input method. The "E0" prefix is what makes Windows
-    # treat the layout as an IME; the last four hex digits are the language
-    # (0804 = zh-CN).
-    [string] $Klid = 'E0F00804',
+    # treat the layout as an IME; the last four hex digits are the language.
+    # Empty = derive from the current layout (E0F0 + its last four digits), so an
+    # English-only runner gets E0F00409 and a zh-CN machine gets E0F00804. The
+    # client compares exactly that suffix against the current layout.
+    [string] $Klid = '',
 
     # Text Windows reports through ImmGetDescriptionW (registry "Layout Text").
     [string] $DisplayName = 'ExamInput',
@@ -38,9 +40,7 @@ $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $buildDir = Join-Path $here 'build'
 $layoutsRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts'
-$layoutKey = Join-Path $layoutsRoot $Klid
 $preloadKey = 'HKCU:\Keyboard Layout\Preload'
-$backupPath = Join-Path $env:TEMP ("cx-fake-ime-{0}.json" -f $Klid.ToLowerInvariant())
 
 $signature = @'
 using System;
@@ -61,6 +61,9 @@ public static class CxImeProbe
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool SystemParametersInfoW(uint action, uint param, ref IntPtr data, uint winIni);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool GetKeyboardLayoutNameW(StringBuilder name);
 
     [DllImport("imm32.dll", CharSet = CharSet.Unicode)]
     public static extern int ImmGetDescriptionW(IntPtr hkl, StringBuilder text, int capacity);
@@ -89,6 +92,13 @@ public static class CxImeProbe
         return hkl.ToInt64() & 0xFFFFFFFFL;
     }
 
+    public static long LoadLayoutWithFlags(string klid, uint flags, out int error)
+    {
+        IntPtr hkl = LoadKeyboardLayoutW(klid, flags);
+        error = Marshal.GetLastWin32Error();
+        return hkl.ToInt64() & 0xFFFFFFFFL;
+    }
+
     public static bool UnloadLayout(long hkl)
     {
         return UnloadKeyboardLayout(new IntPtr(hkl));
@@ -100,12 +110,42 @@ public static class CxImeProbe
         // SPI_SETDEFAULTINPUTLANG = 0x005A, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE = 3
         return SystemParametersInfoW(0x005A, 0, ref value, 3);
     }
+
+    public static long GetDefaultLayout()
+    {
+        IntPtr value = IntPtr.Zero;
+        // SPI_GETDEFAULTINPUTLANG = 0x0059
+        if (!SystemParametersInfoW(0x0059, 0, ref value, 0)) return 0;
+        return value.ToInt64() & 0xFFFFFFFFL;
+    }
 }
 '@
 
 if (-not ('CxImeProbe' -as [type])) {
     Add-Type -TypeDefinition $signature -ErrorAction Stop
 }
+
+# Derive the KLID from the system default input language when the caller did not pass one: the client
+# compares the last four hex digits of the layout name against its own current layout, so the suffix has
+# to follow the machine (E0F00409 on an English-only runner, E0F00804 on zh-CN).
+if (-not $Klid) {
+    $suffix = ''
+    $defaultLayout = [CxImeProbe]::GetDefaultLayout()
+    if ($defaultLayout -ne 0) { $suffix = ('{0:X8}' -f $defaultLayout).Substring(4) }
+    if (-not $suffix) {
+        $current = New-Object System.Text.StringBuilder 32
+        if (-not [CxImeProbe]::GetKeyboardLayoutNameW($current)) {
+            throw 'cannot determine the current input language; pass -Klid E0F0xxxx explicitly.'
+        }
+        $name = $current.ToString()
+        if ($name.Length -lt 4) { throw "unexpected keyboard layout name: '$name'" }
+        $suffix = $name.Substring($name.Length - 4)
+    }
+    $Klid = 'E0F0' + $suffix
+    Write-Host ("klid derived from default input language: {0}" -f $Klid)
+}
+$layoutKey = Join-Path $layoutsRoot $Klid
+$backupPath = Join-Path $env:TEMP ("cx-fake-ime-{0}.json" -f $Klid.ToLowerInvariant())
 
 function Test-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -203,6 +243,9 @@ function Install-Modules {
     foreach ($item in $sources) {
         Copy-Item -LiteralPath $item.Path -Destination $item.Target -Force
         Write-Host ("installed module: {0} (from {1})" -f $item.Target, $item.Path)
+        # 1813 happens when the copy lost its VERSIONINFO; log it so a failing run explains itself.
+        $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($item.Target)
+        Write-Host ("  module version: description='{0}' product='{1}' file='{2}'" -f $version.FileDescription, $version.ProductName, $version.FileVersion)
     }
 }
 
@@ -347,7 +390,18 @@ if (-not $NoPreload) { Add-PreloadEntry }
 $errorCode = 0
 $hkl = [CxImeProbe]::LoadLayout($Klid, [ref]$errorCode)
 if ($hkl -eq 0) {
-    Write-Host ("LoadKeyboardLayoutW failed for {0} (error {1})" -f $Klid, $errorCode)
+    $message = (New-Object System.ComponentModel.Win32Exception($errorCode)).Message
+    Write-Host ("LoadKeyboardLayoutW failed for {0} (error {1}: {2})" -f $Klid, $errorCode, $message)
+    if ($errorCode -eq 1813) {
+        Write-Host 'error 1813 = the IME module has no VERSIONINFO resource; rebuild it with cxime.rc (build-cxime.ps1 does this).'
+    } elseif ($errorCode -eq 1419) {
+        Write-Host 'error 1419 = the layout registry entry is not readable yet.'
+    }
+    # KLF_SUBSTITUTE_OK (0x2) can succeed where the plain load fails on some builds.
+    $hkl = [CxImeProbe]::LoadLayoutWithFlags($Klid, 2, [ref]$errorCode)
+    if ($hkl -ne 0) { Write-Host ("layout loaded with KLF_SUBSTITUTE_OK: 0x{0:X8}" -f $hkl) }
+}
+if ($hkl -eq 0) {
     Write-Host 'Registry entry is present; the layout may only appear after the next logon.'
 } else {
     Write-Host ("layout loaded: 0x{0:X8}" -f $hkl)

@@ -51,20 +51,26 @@ Write-Host "vcvarsall: $vcvars"
 
 $source = Join-Path $here 'cxime.c'
 $defFile = Join-Path $here 'cxime.def'
+$resourceFile = Join-Path $here 'cxime.rc'
 if (-not (Test-Path -LiteralPath $source)) { throw "Missing source: $source" }
 if (-not (Test-Path -LiteralPath $defFile)) { throw "Missing def: $defFile" }
+if (-not (Test-Path -LiteralPath $resourceFile)) { throw "Missing resource: $resourceFile" }
 
 function Build-One {
     param([string] $Arch, [string] $OutputName)
     $target = Join-Path $OutDir $OutputName
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+    $res = Join-Path $OutDir ("cxime-" + $Arch + ".res")
     $bat = Join-Path $env:TEMP ("cxime-build-" + $Arch + "-" + [guid]::NewGuid().ToString('N') + ".bat")
     $lines = @(
         '@echo off',
         ('call "' + $vcvars + '" ' + $Arch + ' >nul'),
         'if errorlevel 1 exit /b 1',
         ('cd /d "' + $here + '"'),
-        ('cl /nologo /LD /O1 /W3 /DUNICODE /D_UNICODE "cxime.c" /Fo:"' + $OutDir + '\\" /link /DEF:"cxime.def" /OUT:"' + $target + '" user32.lib'),
+        # The version resource is required: without it LoadKeyboardLayoutW fails with 1813.
+        ('rc /nologo /fo "' + $res + '" "cxime.rc"'),
+        'if errorlevel 1 exit /b 1',
+        ('cl /nologo /LD /O1 /W3 /DUNICODE /D_UNICODE "cxime.c" "' + $res + '" /Fo:"' + $OutDir + '\\" /link /DEF:"cxime.def" /OUT:"' + $target + '" user32.lib'),
         'if errorlevel 1 exit /b 1',
         'exit /b 0'
     )

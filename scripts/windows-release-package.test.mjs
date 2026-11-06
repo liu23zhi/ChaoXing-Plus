@@ -449,7 +449,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /Install-FakeInputMethod\.ps1/u, 'CI 必须调用伪装输入法安装脚本');
   assert.match(workflow, /-Verify -Load/u, '32 位复核必须在探针进程内加载布局');
   assert.match(workflow, /RESULT=IME_READY/u, 'CI 必须断言客户端判据所需的就绪结果');
-  assert.match(workflow, /HKL 0xE0\[0-9A-F\]\{2\}0804/u, 'CI 必须断言 E0 标记与 0804 语言');
+  assert.match(workflow, /probe \\\(klid \(E0\[0-9A-F\]\{6\}\)/u, 'CI 必须使用探针推导出的 KLID 做断言（英文 runner 是 0409）');
+  assert.match(workflow, /缺少描述非空的 \$klid/u, 'CI 必须断言该 KLID 的描述非空');
   assert.match(workflow, /-Uninstall/u, 'CI 必须验证卸载回滚');
   assert.match(workflow, /cx-fake-ime-baseline/u, 'CI 必须在安装前记录基线探针结果');
   assert.match(workflow, /与基线 \$baseline 不一致/u, 'CI 必须在卸载后恢复安装前状态（runner 可能本来就有 IMM 输入法）');

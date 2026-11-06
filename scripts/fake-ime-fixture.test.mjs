@@ -67,7 +67,9 @@ test('安装脚本按客户端判据注册布局并支持只读复核与回滚',
   const bytes = await readBytes('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
   assert.equal(bytes.some((byte) => byte > 0x7f), false, 'Install-FakeInputMethod.ps1 必须保持纯 ASCII');
 
-  assert.match(script, /\[string\] \$Klid = 'E0F00804'/u, '默认 KLID 必须是 E0 前缀 + 0804 语言');
+  assert.match(script, /\[string\] \$Klid = ''/u, 'KLID 默认按当前系统输入语言推导');
+  assert.match(script, /SPI_GETDEFAULTINPUTLANG = 0x0059/u, '必须读取系统默认输入语言');
+  assert.match(script, /\$Klid = 'E0F0' \+ \$suffix/u, 'KLID 必须由 E0F0 + 语言后缀组成');
   assert.match(script, /\$layoutsRoot = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts'/u, '必须写入客户端读取的布局注册表根');
   assert.match(script, /-Name 'Layout Text'/u, '必须写 Layout Text（ImmGetDescriptionW 的文本来源）');
   assert.match(script, /-Name 'IME file'/u, '必须写 IME file，否则 imm32 不会加载模块');
@@ -104,6 +106,20 @@ test('仓库不携带任何预编译模块，CI 现场编译', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, 'CI 的编译失败必须降级为告警');
   assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');
+});
+
+test('模块携带 VERSIONINFO，否则 LoadKeyboardLayout 返回 1813', async () => {
+  const rc = await read('tests/fixtures/sogou-imm-vm/fake-ime/cxime.rc');
+  assert.match(rc, /VERSIONINFO/u, '必须有版本资源');
+  assert.match(rc, /VALUE "FileDescription", "ExamInput IME stub"/u, 'FileDescription 必须稳定');
+  assert.match(rc, /VALUE "ProductName", "ExamInput"/u, 'ProductName 必须稳定');
+  const build = await read('tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1');
+  assert.match(build, /rc \/nologo \/fo /u, '构建脚本必须编译 .rc');
+  assert.match(build, /"cxime\.c" "' \+ \$res \+ '"|"cxime\.c" "\$res"/u, '必须把 .res 链接进 DLL')
+    ;
+  const install = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
+  assert.match(install, /error 1813 = the IME module has no VERSIONINFO resource/u, '安装脚本必须解释 1813');
+  assert.match(install, /LoadLayoutWithFlags\(\$Klid, 2/u, '失败后必须再试 KLF_SUBSTITUTE_OK');
 });
 
 test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async () => {
