@@ -451,7 +451,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /RESULT=IME_READY/u, 'CI 必须断言客户端判据所需的就绪结果');
   assert.match(workflow, /HKL 0xE0\[0-9A-F\]\{2\}0804/u, 'CI 必须断言 E0 标记与 0804 语言');
   assert.match(workflow, /-Uninstall/u, 'CI 必须验证卸载回滚');
-  assert.match(workflow, /卸载后探针仍报告就绪/u, 'CI 必须在卸载后确认探针回到未就绪');
+  assert.match(workflow, /cx-fake-ime-baseline/u, 'CI 必须在安装前记录基线探针结果');
+  assert.match(workflow, /与基线 \$baseline 不一致/u, 'CI 必须在卸载后恢复安装前状态（runner 可能本来就有 IMM 输入法）');
   assert.match(workflow, /runs-on: windows-latest/u);
   assert.match(workflow, /node-version: '22'/u);
   assert.match(workflow, /npm ci/u);

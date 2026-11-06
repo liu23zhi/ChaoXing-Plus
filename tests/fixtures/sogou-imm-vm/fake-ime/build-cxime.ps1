@@ -5,23 +5,45 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $OutDir) { $OutDir = Join-Path $here 'build' }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
+Write-Host ("build: pwsh {0}, script '{1}', output '{2}'" -f $PSVersionTable.PSVersion, $here, $OutDir)
 
+# Any Visual Studio layout (2019/2022/2026, Community..BuildTools, x86 or x64 install root) is acceptable:
+# vswhere is the supported probe, the directory scan is the fallback when the installer store is missing.
 function Find-VcVars {
     $candidates = @()
-    foreach ($edition in @('Community', 'Professional', 'Enterprise', 'BuildTools')) {
-        foreach ($year in @('2022', '2019')) {
-            $candidates += Join-Path $env:ProgramFiles "Microsoft Visual Studio\$year\$edition\VC\Auxiliary\Build\vcvarsall.bat"
-            $candidates += Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\$year\$edition\VC\Auxiliary\Build\vcvarsall.bat"
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        try {
+            $roots = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null)
+            foreach ($root in $roots) {
+                if (-not $root) { continue }
+                $candidates += Join-Path $root 'VC\Auxiliary\Build\vcvarsall.bat'
+            }
+        } catch {
+            Write-Host "build: vswhere failed - $($_.Exception.Message)"
         }
+    } else {
+        Write-Host "build: vswhere not found at $vswhere"
     }
-    foreach ($candidate in $candidates) {
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $base -or -not (Test-Path -LiteralPath $base)) { continue }
+        $visualStudio = Join-Path $base 'Microsoft Visual Studio'
+        if (-not (Test-Path -LiteralPath $visualStudio)) { continue }
+        $candidates += @(Get-ChildItem -LiteralPath $visualStudio -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
+                    ForEach-Object { Join-Path $_.FullName 'VC\Auxiliary\Build\vcvarsall.bat' }
+            })
+    }
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        Write-Host "build: candidate $candidate"
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
-    throw 'vcvarsall.bat not found; install the MSVC C++ build tools or build cxime.c manually.'
+    throw 'vcvarsall.bat not found (checked vswhere and both Program Files roots); install the MSVC C++ build tools or build cxime.c manually.'
 }
 
 $vcvars = Find-VcVars

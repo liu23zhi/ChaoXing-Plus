@@ -35,7 +35,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $buildDir = Join-Path $here 'build'
 $layoutsRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts'
 $layoutKey = Join-Path $layoutsRoot $Klid
@@ -254,12 +254,12 @@ function Remove-PreloadEntry {
 }
 
 function Invoke-Uninstall {
+    Write-Host ("context: user={0} admin={1}" -f [Security.Principal.WindowsIdentity]::GetCurrent().Name, (Test-Admin))
     if (-not (Test-Admin)) {
         Write-Host 'uninstall needs an elevated PowerShell (writes HKLM and System32).'
         exit 2
     }
     Write-Host '== removing stand-in input method =='
-    $handle = 0
     try {
         $errorCode = 0
         $handle = [CxImeProbe]::LoadLayout($Klid, [ref]$errorCode)
@@ -267,20 +267,28 @@ function Invoke-Uninstall {
     } catch {
         Write-Host ("unload skipped: {0}" -f $_.Exception.Message)
     }
-    Remove-PreloadEntry
-    if (Test-Path -LiteralPath $layoutKey) {
-        Remove-Item -LiteralPath $layoutKey -Recurse -Force
-        Write-Host ("layout key removed: {0}" -f $layoutKey)
-    } else {
-        Write-Host ("layout key absent: {0}" -f $layoutKey)
+    try { Remove-PreloadEntry } catch { Write-Host ("preload cleanup skipped: {0}" -f $_.Exception.Message) }
+    try {
+        if (Test-Path -LiteralPath $layoutKey) {
+            Remove-Item -LiteralPath $layoutKey -Recurse -Force -ErrorAction Stop
+            Write-Host ("layout key removed: {0}" -f $layoutKey)
+        } else {
+            Write-Host ("layout key absent: {0}" -f $layoutKey)
+        }
+    } catch {
+        Write-Host ("layout key removal failed: {0}" -f $_.Exception.Message)
     }
     foreach ($candidate in @(
         (Join-Path $env:WINDIR ("SysWOW64\" + $ImeFile)),
         (Join-Path $env:WINDIR ("System32\" + $ImeFile))
     )) {
-        if ((Test-Path -LiteralPath $candidate) -and ((Split-Path -Leaf $ImeFile) -eq 'cxime.ime')) {
-            Remove-Item -LiteralPath $candidate -Force
-            Write-Host ("module removed: {0}" -f $candidate)
+        try {
+            if ((Test-Path -LiteralPath $candidate) -and ((Split-Path -Leaf $ImeFile) -eq 'cxime.ime')) {
+                Remove-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                Write-Host ("module removed: {0}" -f $candidate)
+            }
+        } catch {
+            Write-Host ("module removal skipped: {0}" -f $_.Exception.Message)
         }
     }
     Show-Layouts
@@ -310,6 +318,8 @@ function Invoke-Verify {
     Write-Host 'description it shows "no supported input method" and fails the check.'
     return 1
 }
+
+Write-Host ("context: user={0} admin={1} ps={2} here='{3}'" -f [Security.Principal.WindowsIdentity]::GetCurrent().Name, (Test-Admin), $PSVersionTable.PSVersion, $here)
 
 if ($Verify) {
     $code = Invoke-Verify
