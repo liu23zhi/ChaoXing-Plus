@@ -60,7 +60,7 @@ test('桌面准备只保留只读探针，状态固定为冻结', async () => {
 
 test('冻结决定有据可查', async () => {
   const doc = await read('docs/ime-spoofing-freeze.md');
-  for (const needle of ['1813', '1419', 'ImmInstallIMEW', '东亚语言支持', 'stand-in-frozen', '封存', '为什么']) {
+  for (const needle of ['1813', '1419', 'ImmInstallIMEW', '东亚语言支持', 'stand-in-frozen', '封存', '为什么', '语言环境', '重启', '1419']) {
     assert.ok(doc.includes(needle), `冻结记录必须说明 ${needle}`);
   }
 });
