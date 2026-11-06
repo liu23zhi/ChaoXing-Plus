@@ -7,12 +7,19 @@ param(
   [Parameter(Mandatory = $true)] [string] $CaseName,
   # Local debugging only: with this switch an environment-blocked run exits 0 after reporting
   # REAL_CLIENT_INJECTION_BLOCKED. CI never passes it - a run without a page session must fail.
-  [switch] $AllowEnvironmentBlocked
+  [switch] $AllowEnvironmentBlocked,
+  # Panel on every page (host flag --panel-all-pages). CXExam.exe protects its exam window with
+  # SetWindowDisplayAffinity(hwnd, WDA_MONITOR) (IG5: 0x44d510 enables, 0x44d550 clears, both on the
+  # HWND registered by the exam window init at 0x4d1120), so every GDI screen capture of that window is
+  # pure black: manual confirmation has to come from the pages that are not protected yet (login,
+  # course, jump). -PanelAllPages:$false restores the exam-only panel.
+  [switch] $PanelAllPages = $true
 )
 
 $ErrorActionPreference = 'Stop'
 $script:snapshotSizes = @{}
 . (Join-Path $PSScriptRoot 'windows-client-database.ps1')
+. (Join-Path $PSScriptRoot 'windows-client-cdp.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-entry.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-diagnostics.ps1')
@@ -31,6 +38,11 @@ $report = $null
 $runStarted = Get-Date
 $base64 = ''
 $stage = 'initialize'
+# Script-scope so the cleanup path can still capture the page while the client is alive.
+$script:cdpPort = 0
+$script:cdpPrefix = ''
+$script:captureGuard = $null
+$script:captureGuardHandle = $null
 
 function Find-SevenZip {
   foreach ($name in @('7z.exe', '7zz.exe')) {
@@ -217,6 +229,10 @@ try {
     '--no-diagnose',
     '--stop-client-on-exit'
   )
+  # Mount the panel on non-exam pages too: the host evaluates window.__CX_WIN_PANEL_ALL_PAGES__ = true
+  # after each bootstrap, and that is the only evidence a human can see - the exam window itself is
+  # WDA_MONITOR protected and captures as pure black.
+  if ($PanelAllPages) { $arguments += '--panel-all-pages' }
   # The client writes debug.log and the host truncates it on shutdown, which can happen before the entry
   # phase even starts (a rejected database makes the client exit in seconds). Watch it from the moment the
   # host starts, in a background job, so the content survives the truncation.
@@ -224,6 +240,7 @@ try {
   Write-Host "[real-client] stage=$stage host=$NativeHost client=$($client.FullName)"
   $maskedArguments = @($arguments | ForEach-Object { if ($_ -is [string] -and $_.Length -gt 40) { $_.Substring(0, 12) + '...(' + $_.Length + ' chars)' } else { $_ } })
   Write-Host "[real-client] host arguments: $($maskedArguments -join ' ')"
+  Write-Host "[real-client] panelAllPages=$([bool]$PanelAllPages) (panel on non-exam pages for manual confirmation)"
   $hostProcess = Start-Process -FilePath $NativeHost -ArgumentList $arguments -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
   Write-Host "[real-client] native host started pid=$($hostProcess.Id)"
@@ -234,11 +251,49 @@ try {
   # pressed; without this click the host has no page to inject and the report stays at pageSessions=0.
   $stage = 'enter-exam'
   $entryPrefix = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName" } else { "" }
+  $script:cdpPrefix = $entryPrefix
   $entry = Wait-ClientExamEntry -ClientPath $client.FullName -TimeoutSeconds 90 -ScreenshotPrefix $entryPrefix -Heartbeat $debugHeartbeat
   if ($entry.Reason -eq 'entry-window-not-found') {
     Write-Host '[real-client] exam entry window was not found within 90s; continuing to collect the report'
   } else {
     Write-Host "[real-client] exam entry window=$($entry.Window) pid=$($entry.ProcessId) point=$($entry.Point) dpi=$($entry.Dpi) client=$($entry.ClientSize) attempts=$($entry.Attempts) pages=$($entry.PageTargets) clicked=$($entry.Clicked) reason=$($entry.Reason) windows=$([CXClientEntry]::WindowClasses([uint32]$entry.ProcessId))"
+  }
+
+  # The desktop frames that Wait-ClientExamEntry wrote stay as they are (frame 4 is the black one);
+  # this is the page-internal copy of the same moment, taken through the client's own DevTools endpoint.
+  $script:cdpPort = if ($entry.PSObject.Properties['ProcessId']) { Get-ClientCdpPort -ProcessId ([int]$entry.ProcessId) } else { 0 }
+  if ($script:cdpPort -gt 0 -and $entryPrefix) {
+    $entryShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path "$entryPrefix-cdp-page.png" -TimeoutSeconds 15
+    if ($entryShot) {
+      Write-Host "[real-client] cdp page screenshot bytes=$($entryShot.Bytes) size=$($entryShot.Width)x$($entryShot.Height) url=$($entryShot.Url)"
+    } else {
+      Write-Host "[real-client] cdp page screenshot unavailable (port=$($script:cdpPort)); desktop frames are still saved"
+    }
+  } else {
+    Write-Host '[real-client] no cdp endpoint yet; only desktop frames were captured so far'
+  }
+
+  # Proctoring capture guard: while the client photographs the desktop for the server it drops its own
+  # WDA_MONITOR, so an open panel would land in that upload. The watcher runs as an in-process runspace
+  # (no extra process to be enumerated) and hides the panel through DevTools until the window is
+  # protected again. Best effort, never fatal.
+  if ($script:cdpPort -gt 0 -and $entry.PSObject.Properties['ProcessId'] -and [int]$entry.ProcessId -gt 0) {
+    $guardProject = $PSScriptRoot
+    $guardPid = [int]$entry.ProcessId
+    $guardPort = $script:cdpPort
+    try {
+      $script:captureGuard = [PowerShell]::Create()
+      [void]$script:captureGuard.AddScript(@'
+param($root, $clientPid, $port)
+. (Join-Path $root 'windows-client-entry.ps1')
+. (Join-Path $root 'windows-client-cdp.ps1')
+Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
+'@).AddArgument($guardProject).AddArgument($guardPid).AddArgument($guardPort)
+      $script:captureGuardHandle = $script:captureGuard.BeginInvoke()
+      Write-Host "[real-client] capture guard watching pid=$guardPid port=$guardPort"
+    } catch {
+      Write-Host "[real-client] capture guard unavailable: $($_.Exception.Message)"
+    }
   }
 
   if ($env:RUNNER_TEMP) {
@@ -334,6 +389,31 @@ try {
   # Always keep the evidence bundle (screenshots, environment, report, host logs) for CI upload.
   try { Save-RunArtifacts -CaseName $CaseName } catch {
     Write-Host "[real-client] artifact collection failed: $($_.Exception.Message)"
+  }
+  # Last page-internal frame before the client is killed: this one holds the injected panel, which the
+  # WDA_MONITOR protected desktop frame can never show. Best effort - a missing client just skips it.
+  try {
+    if ($script:cdpPort -gt 0 -and $script:cdpPrefix) {
+      $finalShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path "$($script:cdpPrefix)-cdp-final.png" -TimeoutSeconds 10
+      if ($finalShot) {
+        Write-Host "[real-client] cdp final screenshot bytes=$($finalShot.Bytes) size=$($finalShot.Width)x$($finalShot.Height) url=$($finalShot.Url)"
+      }
+    }
+  } catch {
+    Write-Host "[real-client] cdp final screenshot failed: $($_.Exception.Message)"
+  }
+  if ($script:captureGuard) {
+    $guardEvents = $null
+    try {
+      if ($script:captureGuardHandle -and $script:captureGuardHandle.IsCompleted) {
+        $guardEvents = $script:captureGuard.EndInvoke($script:captureGuardHandle)
+      }
+    } catch { }
+    try { $script:captureGuard.Stop() } catch { }
+    try { $script:captureGuard.Dispose() } catch { }
+    if ($null -ne $guardEvents) { Write-Host "[real-client] capture guard events=$guardEvents" }
+    $script:captureGuard = $null
+    $script:captureGuardHandle = $null
   }
   Stop-ClientProcess $clientPath
   Stop-OwnedProcess $hostProcess

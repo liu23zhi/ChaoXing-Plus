@@ -151,6 +151,30 @@ test('compiled native CEF75 launch port limits apply to CLI and JSON without lim
   assert.equal(invoke('--options-json', '{"port":1023}', '--port', '9333').status, 0);
 });
 
+test('compiled native answer shortcuts reject keys the exam client keyboard hook swallows', {
+  skip: !host
+}, () => {
+  // CXExam.exe 装了会话级 WH_KEYBOARD_LL 钩子（IG5: FUN_004774b0）：这些组合在按键到达任何窗口
+  // 之前就被吞掉，配成答题键等于"按了没反应"。
+  for (const key of ['Escape', 'Ctrl+Escape', 'Alt+Escape', 'Ctrl+W', 'Ctrl+Shift+W', 'Alt+Tab', 'Ctrl+Alt+Tab', 'Alt+Space', 'Alt+F5', 'Alt+F24', 'Win+S']) {
+    for (const args of [['--answer-key', key], ['--options-json', JSON.stringify({ answerKey: key })]]) {
+      const result = invoke(...args);
+      assert.equal(result.status, 2, `${JSON.stringify(args)} 必须被拒绝: ${result.stdout}${result.stderr}`);
+      assert.match(`${result.stdout}${result.stderr}`, /swallowed by the exam client keyboard hook/u);
+    }
+  }
+  // 钩子只吞 Ctrl+W / Alt+Tab / Alt+Space / Alt+F1-F24 / Win 组合与 Esc，其余组合必须继续可用。
+  for (const key of ['F8', 'Ctrl+Shift+A', 'Ctrl+Alt+Shift+S', 'Ctrl+Tab', 'Shift+W', 'Ctrl+F8']) {
+    const result = invoke('--answer-key', key);
+    assert.equal(result.status, 0, `${key} 必须仍然可用: ${result.stdout}${result.stderr}`);
+  }
+  const settings = invoke('--options-json', JSON.stringify({ settings: { 'common.settings.windows-answer-key': 'Alt+Tab' } }));
+  assert.equal(settings.status, 2, '共享设置里的答题键同样要拒绝');
+  const destruct = invoke('--self-destruct-key', 'Ctrl+W');
+  assert.equal(destruct.status, 2, '自毁键也不能用被吞掉的组合');
+  assert.match(`${destruct.stdout}${destruct.stderr}`, /self-destruct-key is swallowed/u);
+});
+
 test('compiled native function shortcuts reject leading zeros without losing F1 through F24', {
   skip: !host
 }, () => {

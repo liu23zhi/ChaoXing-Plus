@@ -474,13 +474,16 @@ jobs:
           }
           Write-Output "::add-mask::$compactDb"
           Write-Host "读取数据库变量 $env:DATABASE_VARIABLE_NAME（Base64 $($compactDb.Length) 字符，已掩码），解码为 UserExamInfo.db 并写入 CXExam.exe 同目录"
+          # 非考试页也挂载面板（-PanelAllPages → --panel-all-pages）：考试窗口带 WDA_MONITOR，
+          # 进入考试后的屏幕拷屏必为纯黑，只有登录/课程/跳转页的现场截图能人工确认注入是否生效。
           ./scripts/windows-real-client-injection.ps1 `
             -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
             -InjectMode '${{ matrix.inject_mode }}' `
             -DatabaseBase64 $compactDb `
             -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
-            -CaseName '${{ matrix.client }}-${{ matrix.database }}'
-      - name: 上传注入现场（成功与失败都保留）
+            -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
+            -PanelAllPages
+      - name: 上传注入现场
         if: always()
         uses: actions/upload-artifact@v4
         with:

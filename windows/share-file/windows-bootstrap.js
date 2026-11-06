@@ -498,6 +498,32 @@ function isExamRelatedUrl(url) {
     }
   }
 
+  // ---- 拍照窗口期隐藏面板 ----
+  // 客户端自己的取证抓屏（server 端 GetScreenImage）会先把自己窗口的 WDA_MONITOR 关掉，
+  // 再 GetDC(NULL) 拷整屏，页面里的悬浮面板会被一起拍进去并上传。宿主监测到亲和力 1 -> 0 的
+  // 跳变时把 __CX_WIN_CAPTURE_GUARD__ 置真并调用下面的函数，这里立刻隐藏面板壳；跳回来再恢复。
+  function applyCaptureGuard() {
+    var hidden = win.__CX_WIN_CAPTURE_GUARD__ === true;
+    try {
+      if (hidden) {
+        doc.documentElement.setAttribute('data-cx-win-capture', 'hide');
+      } else {
+        doc.documentElement.removeAttribute('data-cx-win-capture');
+      }
+    } catch (error) {
+      // ignore attribute failures
+    }
+    var shell = findPanelById(PANEL_SHELL_ID);
+    if (shell) {
+      try {
+        shell.style.display = hidden ? 'none' : '';
+      } catch (error) {
+        // ignore style failures
+      }
+    }
+  }
+  win.__CX_WIN_APPLY_CAPTURE_GUARD__ = applyCaptureGuard;
+
   function createShellHeader() {
     var header = doc.createElement('div');
     header.style.display = 'flex';
@@ -566,6 +592,8 @@ function isExamRelatedUrl(url) {
         return;
       }
       parent.appendChild(root);
+      // 如果宿主已经在拍照窗口期，新挂载的壳也要立刻隐藏。
+      applyCaptureGuard();
     } catch (error) {
       send('bootstrap-error', { stage: 'panel-shell', message: String((error && error.message) || error) });
       return;

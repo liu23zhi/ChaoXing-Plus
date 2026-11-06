@@ -15,6 +15,7 @@
 
 Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
 
+if (-not ('CXClientEntry' -as [type])) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -72,6 +73,25 @@ public class CXClientEntry {
         StringBuilder name = new StringBuilder(128);
         GetClassNameW(handle, name, 128);
         return name.ToString();
+    }
+
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowDisplayAffinity(IntPtr handle, out uint affinity);
+
+    // "hwnd|affinity" per visible top-level window. CXExam.exe sets WDA_MONITOR (1) on its windows and
+    // drops it to 0 right before it photographs the desktop, so this list reveals the capture window.
+    public static string WindowAffinities(uint processId) {
+        System.Text.StringBuilder text = new System.Text.StringBuilder();
+        EnumWindows((handle, parameter) => {
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            if (owner != processId || !IsWindowVisible(handle)) return true;
+            uint affinity;
+            bool ok = GetWindowDisplayAffinity(handle, out affinity);
+            if (text.Length > 0) text.Append(';');
+            text.Append(handle.ToInt64()).Append('|').Append(ok ? affinity.ToString() : "?");
+            return true;
+        }, IntPtr.Zero);
+        return text.ToString();
     }
 
     // "class|visible|WxH" per window: enough to see what the client shows when nothing matches.
@@ -135,6 +155,7 @@ public class CXClientEntry {
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr module, string name);
 }
 '@
+}
 
 # Pixel scan for the solid blue button. The capture uses System.Drawing from PowerShell and only the raw
 # pixels cross into C#, so this type needs no extra assembly references (Add-Type -ReferencedAssemblies
@@ -409,6 +430,7 @@ function Confirm-ClientExamEntry {
         }
         if ($button.State -eq 'found') {
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -Window $target
+            [void](Save-EntryCdpFrame -Prefix $ScreenshotPrefix -Name '3-confirm-dialog' -ProcessId $ProcessId)
             $via = if ($dialog -ne [IntPtr]::Zero) { 'dialog-window' } else { 'check-window' }
             Write-Host "[real-client] confirm window=0x$($target.ToInt64().ToString('X')) class=$([CXClientEntry]::WindowClass($target)) size=$($dialogRect.Right)x$($dialogRect.Bottom) overlay=$overlay point=$($button.X),$($button.Y)"
             if (-not (Invoke-WindowClick -Window $target -X $button.X -Y $button.Y)) {
@@ -417,6 +439,8 @@ function Confirm-ClientExamEntry {
             Start-Sleep -Seconds 2
             $stillOpen = (Get-ClientDialogWindow -CheckWindow $Window -ProcessId $ProcessId) -ne [IntPtr]::Zero
             Save-EntryFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -Window $target
+            # Keep the desktop frame above: it is the black one. This is its readable counterpart.
+            [void](Save-EntryCdpFrame -Prefix $ScreenshotPrefix -Name '4-after-confirm' -ProcessId $ProcessId)
             if (-not $stillOpen) {
                 return [pscustomobject]@{ Clicked = $true; X = $button.X; Y = $button.Y; Via = $via }
             }
@@ -465,12 +489,103 @@ function Wait-ClientLayoutReady {
     return [pscustomobject]@{ Ready = $false; Width = 0; Height = 0 }
 }
 
-function Get-ClientPageTargetCount {
+function Get-ClientCdpPort {
     param([Parameter(Mandatory = $true)] [int] $ProcessId)
+    if (-not $ProcessId) { return 0 }
     try {
         $connection = Get-NetTCPConnection -State Listen -OwningProcess $ProcessId -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $connection) { return -1 }
-        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($connection.LocalPort)/json/list" -UseBasicParsing -TimeoutSec 3
+        if (-not $connection) { return 0 }
+        return [int]$connection.LocalPort
+    } catch {
+        return 0
+    }
+}
+
+# hwnd -> display affinity for the visible top-level windows of the client process.
+function Get-ClientWindowAffinity {
+    param([Parameter(Mandatory = $true)] [int] $ProcessId)
+    $map = @{}
+    if (-not $ProcessId) { return $map }
+    try {
+        foreach ($item in ([CXClientEntry]::WindowAffinities([uint32]$ProcessId) -split ';')) {
+            if (-not $item) { continue }
+            $parts = $item -split '\|'
+            if ($parts.Count -ne 2) { continue }
+            $map[$parts[0]] = if ($parts[1] -eq '?') { -1 } else { [int]$parts[1] }
+        }
+    } catch { }
+    return $map
+}
+
+# The client turns its own WDA_MONITOR off right before it photographs the desktop for proctoring
+# (server command "GetScreenImage"): during that gap the page panel would be inside the uploaded BMP.
+# Watch the 1 -> 0 transition and hide the panel through DevTools until the window is protected again.
+# Only transitions count: a window that was never protected must not keep the panel hidden forever.
+function Watch-ClientCaptureGuard {
+    param(
+        [Parameter(Mandatory = $true)] [int] $ProcessId,
+        [Parameter(Mandatory = $true)] [int] $Port,
+        [int] $TimeoutSeconds = 600,
+        [int] $PollMilliseconds = 200
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $previous = @{}
+    $hidden = $false
+    $hiddenSince = $null
+    $events = 0
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { break }
+        $current = Get-ClientWindowAffinity -ProcessId $ProcessId
+        foreach ($hwnd in @($current.Keys)) {
+            $value = [int]$current[$hwnd]
+            if (-not $previous.ContainsKey($hwnd)) { $previous[$hwnd] = $value; continue }
+            $last = [int]$previous[$hwnd]
+            if ($last -eq 1 -and $value -eq 0 -and -not $hidden) {
+                if (Get-Command Set-CdpCaptureGuard -ErrorAction SilentlyContinue) {
+                    if (Set-CdpCaptureGuard -Port $Port -Hidden $true) {
+                        $hidden = $true
+                        $hiddenSince = Get-Date
+                        $events++
+                        Write-Host "[real-client] capture guard on window=$hwnd affinity 1->0"
+                    }
+                }
+            } elseif ($last -eq 0 -and $value -eq 1 -and $hidden) {
+                if (Get-Command Set-CdpCaptureGuard -ErrorAction SilentlyContinue) {
+                    if (Set-CdpCaptureGuard -Port $Port -Hidden $false) {
+                        $hidden = $false
+                        $hiddenSince = $null
+                        Write-Host "[real-client] capture guard off window=$hwnd affinity 0->1"
+                    }
+                }
+            }
+            $previous[$hwnd] = $value
+        }
+        # Safety nets: a window that vanished, or a protection that never came back, must not leave the
+        # panel hidden for the rest of the run.
+        if ($hidden -and $current.Count -eq 0) { $hidden = $false; $hiddenSince = $null }
+        if ($hidden -and $hiddenSince -and ((Get-Date) - $hiddenSince).TotalSeconds -gt 5) {
+            if (Get-Command Set-CdpCaptureGuard -ErrorAction SilentlyContinue) {
+                [void](Set-CdpCaptureGuard -Port $Port -Hidden $false)
+            }
+            $hidden = $false
+            $hiddenSince = $null
+            Write-Host '[real-client] capture guard timeout; panel restored'
+        }
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+    if ($hidden -and (Get-Command Set-CdpCaptureGuard -ErrorAction SilentlyContinue)) {
+        [void](Set-CdpCaptureGuard -Port $Port -Hidden $false)
+    }
+    Write-Host "[real-client] capture guard stopped events=$events"
+    return $events
+}
+
+function Get-ClientPageTargetCount {
+    param([Parameter(Mandatory = $true)] [int] $ProcessId)
+    $port = Get-ClientCdpPort -ProcessId $ProcessId
+    if ($port -le 0) { return -1 }
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/json/list" -UseBasicParsing -TimeoutSec 3
         return @($response.Content | ConvertFrom-Json).Count
     } catch {
         return -1
@@ -488,6 +603,24 @@ function Save-EntryFrame {
     if (Get-Command Save-DesktopScreenshot -ErrorAction SilentlyContinue) {
         [void](Save-DesktopScreenshot -Path "$Prefix-$Name.png" -ScalePercent $ScalePercent)
     }
+}
+
+# Same frame, captured inside the page instead of from the desktop: once the exam window is up it is
+# WDA_MONITOR protected and every desktop frame of it is pure black, so this is the only readable copy.
+# The desktop frame is still written - it is the evidence that the window is protected, not broken.
+function Save-EntryCdpFrame {
+    param([string] $Prefix, [string] $Name, [int] $ProcessId)
+    if (-not $Prefix -or -not $ProcessId) { return $null }
+    if (-not (Get-Command Save-CdpPageScreenshot -ErrorAction SilentlyContinue)) { return $null }
+    $port = Get-ClientCdpPort -ProcessId $ProcessId
+    if ($port -le 0) { return $null }
+    $shot = Save-CdpPageScreenshot -Port $port -Path "$Prefix-$Name-cdp.png" -TimeoutSeconds 10
+    if ($shot) {
+        Write-Host "[real-client] cdp frame $Name bytes=$($shot.Bytes) size=$($shot.Width)x$($shot.Height) url=$($shot.Url)"
+    } else {
+        Write-Host "[real-client] cdp frame $Name unavailable (port=$port); desktop frame kept"
+    }
+    return $shot
 }
 
 # Click the button as soon as it is actually on screen, prove that a CEF page appeared, and retry until it

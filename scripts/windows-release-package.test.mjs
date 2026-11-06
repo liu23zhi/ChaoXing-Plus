@@ -521,6 +521,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /lfs: true/u, '客户端测试必须拉取 Git LFS 资产');
   assert.match(workflow, /仍是旧的 enabled 标记/u, '发现步骤必须拒绝旧的 enabled 标记变量');
   assert.match(workflow, /必须是 UserExamInfo\.db 的 Base64 文本/u, '注入步骤必须校验变量载荷是 Base64 文本');
+  assert.match(workflow, /-CaseName '\$\{\{ matrix\.client \}\}-\$\{\{ matrix\.database \}\}' `\s*\n\s*-PanelAllPages/u,
+    '真实客户端 CI 必须要求非考试页也挂载面板，供人工确认注入是否生效');
   const injectionScript = await fs.readFile(path.join(root, 'scripts', 'windows-real-client-injection.ps1'), 'utf8');
   assert.match(injectionScript, /Install-ClientDatabase -ClientDirectory \$clientDirectory -Base64 \$base64/u,
     '数据库 Base64 必须交给安装助手写入客户端目录');
@@ -536,6 +538,10 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   const entryScript = await fs.readFile(path.join(root, 'scripts', 'windows-client-entry.ps1'), 'utf8');
   assert.match(injectionScript, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-entry\.ps1'\)/u,
     '注入脚本必须 dot-source 进入考试助手');
+  assert.match(injectionScript, /\[switch\] \$PanelAllPages = \$true/u,
+    '非考试页面板开关必须默认开启（-PanelAllPages:$false 才恢复考试页专属行为）');
+  assert.match(injectionScript, /if \(\$PanelAllPages\) \{ \$arguments \+= '--panel-all-pages' \}/u,
+    '注入脚本必须把开关转换成宿主的 --panel-all-pages');
   assert.match(injectionScript, /Wait-ClientExamEntry -ClientPath \$client\.FullName/u,
     '注入脚本必须在客户端检查窗口出现后点击进入考试，否则没有可注入的 CEF 页面');
   assert.match(entryScript, /GetClientRect/u, '进入考试坐标必须按客户区尺寸换算，不能写死屏幕坐标');
@@ -544,6 +550,19 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     '客户端被关闭或杀掉后仍应接受完整报告');
   assert.match(injectionScript, /\$report\.totals\.pageSessions/u,
     '宿主报告的计数位于 totals 下，校验必须读取 totals.*（顶层没有 pageSessions）');
+  const cdpScript = await fs.readFile(path.join(root, 'scripts', 'windows-client-cdp.ps1'), 'utf8');
+  assert.match(injectionScript, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-cdp\.ps1'\)/u,
+    '注入脚本必须 dot-source CDP 页内截图助手');
+  assert.match(injectionScript, /Save-CdpPageScreenshot -Port \$script:cdpPort -Path "\$entryPrefix-cdp-page\.png"/u,
+    '进入考试后必须补一张页面内部截图（桌面截图此时已被 WDA_MONITOR 变黑）');
+  assert.match(injectionScript, /-cdp-final\.png/u,
+    '关掉客户端前必须再抓一帧页内截图，它才包含注入后的面板');
+  assert.match(cdpScript, /Page\.captureScreenshot/u, '页内截图必须走 CDP Page.captureScreenshot');
+  assert.match(cdpScript, /WDA_MONITOR/u, '页内截图的注释必须记录考试窗口的 WDA_MONITOR 保护背景');
+  assert.match(entryScript, /Save-EntryCdpFrame/u,
+    '进入考试的每一帧桌面截图都要有对应的页内截图');
+  assert.match(workflow, /\$\{\{ runner\.temp \}\}\/cx-real-client-\*\.png/u,
+    '真实客户端的桌面截图与页内截图必须一起上传');
   assert.match(workflow, /RedirectStandardOutput \$stdoutPath[\s\S]*?RedirectStandardError \$stderrPath/u, '真实客户端回归必须捕获宿主标准输出与错误输出');
   assert.match(workflow, /\[real-client\] FAILED case=\$CaseName stage=\$stage/u, '真实客户端失败必须报告具体阶段');
   assert.match(workflow, /Write-HostDiagnostics/u, '真实客户端回归必须输出截断且脱敏的宿主日志');

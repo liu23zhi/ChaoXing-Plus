@@ -98,6 +98,62 @@ export function createDefaultQuestionResolver(ctx) {
             const similar_list = [];
             const exact_list = [];
             const results = infos.map((info) => info.results).flat();
+            const plainLabelCandidates = new Map();
+            const optionIndexes = new Map(options.map((option, index) => [option, index]));
+            let hasResolvedPlainLabelAnswer = false;
+            const hasExplicitLabels = options.some((option) => {
+                const optionRoot = option.closest?.('.answerBg, .clearfix');
+                const visibleLabel = optionRoot?.querySelector('.num_option, .option_label, [data-option-label]');
+                return Boolean(readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '') ||
+                    readDisplayLabel(option.textContent || option.innerText));
+            });
+            const hasUnlabelledExactTextAnswer = !hasExplicitLabels && results.some((result) => options.some((option) => answerExactMatch([nowrap(result.answer, '').trim()], [removeRedundant(option.innerText)]).length === 1));
+            if (!hasUnlabelledExactTextAnswer)
+                infos.forEach((info) => {
+                const sourceCandidates = new Map();
+                for (const result of info.results) {
+                    const plainAnswer = resolvePlainAnswer(nowrap(result.answer, '').trim());
+                    if (!plainAnswer)
+                        continue;
+                    const resolved = [...plainAnswer].map((label) => resolveOptionByDisplayLabel(options, label));
+                    if (resolved.some((option) => option === undefined))
+                        continue;
+                    const selected = new Set(resolved);
+                    if (selected.size !== resolved.length)
+                        continue;
+                    hasResolvedPlainLabelAnswer = true;
+                    const selectedOptions = options.filter((option) => selected.has(option));
+                    const key = selectedOptions.map((option) => optionIndexes.get(option)).join(',');
+                    sourceCandidates.set(key, selectedOptions);
+                }
+                // A provider contributes one vote only when all of its usable rows agree.
+                if (sourceCandidates.size === 1) {
+                    const [key, selectedOptions] = sourceCandidates.entries().next().value;
+                    const candidate = plainLabelCandidates.get(key);
+                    if (candidate) {
+                        candidate.votes++;
+                    }
+                    else {
+                        plainLabelCandidates.set(key, { options: selectedOptions, votes: 1 });
+                    }
+                }
+            });
+            let plainLabelResolution;
+            let plainLabelConflict = false;
+            if (plainLabelCandidates.size > 0) {
+                const ranked = [...plainLabelCandidates.values()].sort((a, b) => b.votes - a.votes);
+                const totalVotes = ranked.reduce((sum, candidate) => sum + candidate.votes, 0);
+                plainLabelConflict = ranked[0].votes * 2 <= totalVotes;
+                plainLabelResolution = plainLabelConflict ? undefined : ranked[0].options;
+            }
+            if (hasResolvedPlainLabelAnswer) {
+                if (plainLabelCandidates.size === 0 || plainLabelConflict || !plainLabelResolution)
+                    return { finish: false };
+                for (const option of plainLabelResolution) {
+                    await apply('multiple', option.innerText, option, handler);
+                }
+                return { finish: true, plainOptions: plainLabelResolution };
+            }
             function limitSimilarResultToAnswerCount(result, answerCount) {
                 if (answerCount <= 0 || result.options.length <= answerCount) {
                     return result;

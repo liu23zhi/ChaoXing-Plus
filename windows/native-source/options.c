@@ -158,6 +158,51 @@ static BOOL cx_shortcut(const WCHAR *value) {
     return parts >= 1 && bases == 1 && modifiers <= 4;
 }
 
+/* CXExam.exe 装了会话级 WH_KEYBOARD_LL 钩子（IG5 v4.1.4.25389：FUN_00476d30 安装、
+   FUN_004774b0 处理），它在按键到达任何窗口之前就吞掉一批组合：单独 Esc、Ctrl+W、
+   Alt+Tab（含 Ctrl+Alt+Tab）、Alt+Space、Alt+F1..F24、以及 Win 按住期间按下的所有键
+   （客户端还会主动补发 Win+D）。把这些配成快捷键等于"按了没反应"，所以在校验阶段直接拒绝。
+   钩子只看修饰键的当前状态和基础键，所以 Ctrl+Shift+W 同样被吞。 */
+static BOOL cx_shortcut_blocked(const WCHAR *value) {
+    BOOL hasCtrl = FALSE, hasAlt = FALSE, hasWin = FALSE;
+    int i = 0, baseBegin = 0, baseLen = 0, baseCount = 0;
+    if (!value || !value[0]) return FALSE;
+    for (;;) {
+        int begin = i, end;
+        while (value[i] && value[i] != L'+') ++i;
+        end = i;
+        if (end == begin) return FALSE;
+        if (cx_token_eq(value + begin, end - begin, L"Ctrl")) hasCtrl = TRUE;
+        else if (cx_token_eq(value + begin, end - begin, L"Alt")) hasAlt = TRUE;
+        else if (cx_token_eq(value + begin, end - begin, L"Win")) hasWin = TRUE;
+        else if (cx_token_eq(value + begin, end - begin, L"Shift")) { /* 不影响判定 */ }
+        else { baseBegin = begin; baseLen = end - begin; baseCount++; }
+        if (!value[i]) break;
+        ++i;
+    }
+    /* 任何含 Win 的组合都会被吞：钩子把 Win 按住期间的所有按键都拦下来。 */
+    if (hasWin) return TRUE;
+    if (baseCount != 1 || baseLen <= 0) return FALSE;
+    /* 单独 Esc、Ctrl+Esc、Alt+Esc 都在吞键集合里。 */
+    if (cx_token_eq(value + baseBegin, baseLen, L"Escape")) return TRUE;
+    /* 只吞 Alt+Tab / Ctrl+Alt+Tab，普通 Ctrl+Tab 可以通过。 */
+    if (cx_token_eq(value + baseBegin, baseLen, L"Tab")) return hasAlt;
+    /* Alt+Space 被整条拦掉（也包括 Alt+Space+N 的窗口菜单路径）。 */
+    if (cx_token_eq(value + baseBegin, baseLen, L"Space")) return hasAlt;
+    /* 钩子只判断"Ctrl 按住 + 基础键 W"，Shift/Alt 都救不回来。 */
+    if (cx_token_eq(value + baseBegin, baseLen, L"W")) return hasCtrl;
+    if (hasAlt && baseLen >= 2 && baseLen <= 3 && cx_upper(value[baseBegin]) == L'F') {
+        int k, digits = 0, number = 0;
+        for (k = baseBegin + 1; k < baseBegin + baseLen; ++k) {
+            if (value[k] < L'0' || value[k] > L'9') break;
+            number = number * 10 + (value[k] - L'0');
+            digits++;
+        }
+        if (digits == baseLen - 1 && number >= 1 && number <= 24) return TRUE;
+    }
+    return FALSE;
+}
+
 void cx_options_init(CX_OPTIONS *o) {
     int i;
     if (!o) return;
@@ -1141,6 +1186,16 @@ BOOL cx_options_finalize(CX_OPTIONS *o, WCHAR *error, DWORD errorCap) {
     if (o->injectRetries < 0 || o->injectRetries > 5 || o->debugTimeoutMs < 1000 || o->debugTimeoutMs > 120000 || o->targetPollIntervalMs < 250 || o->targetPollIntervalMs > 10000 || o->bundleTimeoutMs < 1000 || o->bundleTimeoutMs > 300000 || o->port < 0 || o->port > 65535) { cx_error(error, errorCap, L"host settings are outside their allowed range"); return FALSE; }
     if (o->port != 0 && (o->port < 1024 || o->port > 65534)) { cx_error(error, errorCap, L"CEF75 launch port must be 0 (automatic) or 1024 to 65534"); return FALSE; }
     if (o->answerKey[0] && !cx_shortcut(o->answerKey)) { cx_error(error, errorCap, L"answer-key must contain one base key"); return FALSE; }
+    if (o->answerKey[0] && cx_shortcut_blocked(o->answerKey)) {
+        cx_error(error, errorCap, L"answer-key is swallowed by the exam client keyboard hook: use something other than Esc, Ctrl+W, Alt+Tab, Alt+Space, Alt+F1-F24 or any Win combination");
+        return FALSE;
+    }
+    { int k; for (k = 0; k < o->selfDestructKeyCount; ++k) {
+        if (cx_shortcut_blocked(o->selfDestructKeys[k])) {
+            cx_error(error, errorCap, L"self-destruct-key is swallowed by the exam client keyboard hook: avoid Esc, Ctrl+W, Alt+Tab, Alt+Space, Alt+F1-F24 and any Win combination");
+            return FALSE;
+        }
+    } }
     if (o->executionModeMemory) o->noDiskWrite = TRUE;
     if (o->noDiskWrite) { o->logFileEnabled = FALSE; o->diagnose = FALSE; o->noDiagnose = TRUE; o->reportPath[0] = 0; o->noScanCache = TRUE; }
     return TRUE;

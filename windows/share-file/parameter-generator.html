@@ -265,7 +265,25 @@
     var keys = parts.filter(function (part) { return !allowedModifiers[part.toLowerCase()]; });
     return keys.length === 1 && /^(?:[a-z0-9]|f(?:[1-9]|1[0-2])|space|enter|escape|esc|tab|delete|backspace|home|end|pageup|pagedown|(?:arrow)?(?:up|down|left|right))$/i.test(keys[0]);
   }
-  function canonicalShortcut(value) {
+  // 考试客户端装了会话级 WH_KEYBOARD_LL 钩子（IG5: CXExam.exe FUN_004774b0），这些组合在按键到达
+  // 任何窗口之前就被吞掉，配成快捷键等于按了没反应；生成器提前拦下来，避免到宿主里才报错。
+  function swallowedShortcut(value) {
+    var ctrl = false, alt = false, win = false, base = '';
+    String(value || '').split('+').forEach(function (part) {
+      var lower = String(part || '').trim().toLowerCase();
+      if (lower === 'ctrl' || lower === 'control') ctrl = true;
+      else if (lower === 'alt') alt = true;
+      else if (lower === 'win' || lower === 'windows' || lower === 'meta' || lower === 'command') win = true;
+      else if (lower === 'shift') { /* 不影响判定 */ }
+      else if (lower) base = lower;
+    });
+    if (win) return true;
+    if (!base) return false;
+    if (base === 'escape' || base === 'esc') return true;
+    if (base === 'tab' || base === 'space') return alt;
+    if (base === 'w') return ctrl;
+    return alt && /^f(?:[1-9]|1[0-9]|2[0-4])$/.test(base);
+  }  function canonicalShortcut(value) {
     var modifiers = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', shift: 'shift', win: 'win', windows: 'win', meta: 'win', command: 'win' };
     var parts = [];
     var base = '';
@@ -468,6 +486,7 @@
       if (['panelTop', 'panelRight', 'panelWidth'].some(function (key) { return !/^\d+$/u.test(String(s[key])); })) errors.push('原生宿主的面板位置与宽度必须是整数。');
       if (s.clientIndex && Number(s.clientIndex) > 2147483647) errors.push('原生宿主的扫描序号不能超过 2147483647。');
       if (!validNativeShortcut(s.answerKey)) errors.push('原生宿主快捷键需使用 Ctrl/Alt/Shift/Win 与一个基础按键，不能重复修饰键。');
+    if (swallowedShortcut(s.answerKey)) errors.push('答题快捷键会被考试客户端的键盘钩子吞掉，请换一个（Esc / Ctrl+W / Alt+Tab / Alt+Space / Alt+F1-F24 / 任何 Win 组合都不可用）。');
       ['clientPath', 'configPath', 'dataDir', 'diagnosticsDir', 'report'].forEach(function (key) {
         if (String(s[key] || '').length >= NATIVE_PATH_CAP) errors.push('原生宿主的 ' + key + ' 最多支持 1023 个 UTF-16 字符。');
       });
@@ -489,6 +508,7 @@
     if (!/^\d+$/u.test(String(s.answerCountdown)) || Number(s.answerCountdown) > 3600) errors.push('自动答题倒计时必须是 0 到 3600 之间的整数。');
     if (s.answerRetry !== '' && (!/^\d+$/u.test(String(s.answerRetry)) || Number(s.answerRetry) > 20)) errors.push('单题重试次数必须是 0 到 20 之间的整数。');
     if (!(s.hostType === 'native' ? validNativeShortcut(s.answerKey) : validShortcut(s.answerKey))) errors.push('答题快捷键必须包含一个基础按键，例如 F8 或 Ctrl+Alt+Shift+S。');
+    else if (swallowedShortcut(s.answerKey)) errors.push('答题快捷键会被考试客户端的键盘钩子吞掉，请换一个（Esc / Ctrl+W / Alt+Tab / Alt+Space / Alt+F1-F24 / 任何 Win 组合都不可用）。');
     if (!s.expectedBrowser || startsWithOptionPrefix(s.expectedBrowser)) errors.push('调试端点 Browser 校验文本不能为空且不能以 -- 开头。');
     if (['hybrid', 'runtime', 'script'].indexOf(s.injectStrategy) < 0) errors.push('注入策略只支持 hybrid、runtime 或 script。');
     if (!validBoundedInteger(s.injectRetries, 0, 5)) errors.push('注入重试次数必须是 0 到 5 之间的整数。');

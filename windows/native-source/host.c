@@ -3076,6 +3076,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "  --panel-top <0-10000> --panel-right <0-10000> --panel-width <320-800>\n"
             "  --panel-theme <pink|blue|green>（面板主题，未知值回退 pink）\n"
             "答题: --answer-mode auto|manual --answer-key <shortcut> --answer-threads <1-4> --answer-retry <0-20>\n"
+    "      快捷键不能用客户端键盘钩子会吞掉的组合: Esc / Ctrl+W / Alt+Tab / Alt+Space / Alt+F1-F24 / 任何 Win 组合\n"
             "  --show-answer-dialog|--hide-answer-dialog --answer-countdown <sec> --no-auto-submit\n"
             "注入: --inject-strategy runtime|script|hybrid --inject-retries <0-5>\n"
             "  --inject-blank-frames|--no-inject-blank-frames\n"

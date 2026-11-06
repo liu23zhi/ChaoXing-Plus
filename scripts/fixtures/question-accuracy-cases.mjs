@@ -265,6 +265,46 @@ export const cases = [
     note: 'Letter group must follow visible labels when data values are remapped'
   },
   {
+    id: 'multiple-plain-label-text-collision',
+    kind: 'multiple',
+    mode: 'similar',
+    options: [
+      { label: 'A', text: 'AC', dataValue: 'A' },
+      { label: 'B', text: '钠', dataValue: 'B' },
+      { label: 'C', text: '镁', dataValue: 'C' }
+    ],
+    answers: [['AC']],
+    expect: ['A', 'C'],
+    note: 'A multi-select label group takes precedence over a coincidental option text match'
+  },
+  {
+    id: 'multiple-unlabelled-option-text-collision',
+    kind: 'multiple',
+    mode: 'similar',
+    options: [
+      { text: 'AC', dataValue: 'A' },
+      { text: '钠', dataValue: 'B' },
+      { text: '镁', dataValue: 'C' }
+    ],
+    answers: [['AC']],
+    expect: ['#0'],
+    note: 'Without visible labels, an exact option text is not reinterpreted as a label set'
+  },
+  {
+    id: 'multiple-conflicting-label-groups-abstain',
+    kind: 'multiple',
+    mode: 'similar',
+    options: [
+      { label: 'A', text: 'AC', dataValue: 'A' },
+      { label: 'B', text: '乙', dataValue: 'B' },
+      { label: 'C', text: '丙', dataValue: 'C' },
+      { label: 'D', text: '丁', dataValue: 'D' }
+    ],
+    answers: [['AC'], ['BD']],
+    expect: 'abstain',
+    note: 'Conflicting label sets from one source must not be merged or recovered by text similarity'
+  },
+  {
     id: 'multiple-partial-group',
     kind: 'multiple',
     mode: 'similar',

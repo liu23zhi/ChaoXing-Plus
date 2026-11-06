@@ -800,3 +800,27 @@ test('bootstrap 支持宿主强制在所有页面显示面板（--panel-all-page
   assert.match(host, /panelAllPages/u);
 });
 
+test('客户端取证抓屏窗口期可以隐藏面板（__CX_WIN_CAPTURE_GUARD__）', async () => {
+  const source = await readFile(bootstrapPath, 'utf8');
+  assert.match(source, /__CX_WIN_CAPTURE_GUARD__/u, '页面必须能读到拍照期的隐藏标记');
+  assert.match(source, /__CX_WIN_APPLY_CAPTURE_GUARD__/u, '必须暴露一个宿主可直接调用的隐藏函数');
+  assert.match(source, /data-cx-win-capture/u, '必须给文档根留一个可观测标记');
+  assert.match(source, /shell\.style\.display = hidden \? 'none' : ''/u, '隐藏要真正作用在已挂载的面板壳上');
+  // 壳后挂载（SPA 换 body）时不能忘记当前状态。
+  assert.match(source, /parent\.appendChild\(root\);\s*\n\s*\/\/[^\n]*\n\s*applyCaptureGuard\(\);/u);
+  const cdp = await readFile(resolve(process.cwd(), 'scripts', 'windows-client-cdp.ps1'), 'utf8');
+  assert.match(cdp, /function Set-CdpCaptureGuard/u);
+  assert.match(cdp, /__CX_WIN_APPLY_CAPTURE_GUARD__\(\)/u, 'CDP 侧必须调用隐藏函数，只改全局变量不会立刻生效');
+  const injection = await readFile(resolve(process.cwd(), 'scripts', 'windows-real-client-injection.ps1'), 'utf8');
+  assert.match(injection, /Watch-ClientCaptureGuard/u, '真实客户端回归必须盯住拍照窗口期');
+  assert.match(injection, /\[PowerShell\]::Create\(\)/u, '守卫必须跑在本进程 runspace 里，不能新起进程');
+  assert.doesNotMatch(injection, /Start-Job/u, '拍照守卫不得引入新的宿主进程');
+  // 客户端按进程/窗口名做"冲突软件"检测：考试期只允许存在启动客户端的那一个宿主进程，
+  // 不得再拉起 powershell/cmd/node/wscript 之类的辅助进程，也不得落盘可执行文件。
+  assert.equal((injection.match(/Start-Process\s+-FilePath\s+\$NativeHost/gu) || []).length, 1,
+    '只允许启动客户端宿主这一个进程');
+  assert.doesNotMatch(injection, /Start-Process[^\n]*(powershell|pwsh|cmd\.exe|node\.exe|wscript)/iu,
+    '不得用子进程绕过不加进程的约束');
+  assert.doesNotMatch(injection, /WriteAllBytes\([^)]*\.(exe|dll)/iu, '不得在客户端目录落盘可执行文件');
+});
+

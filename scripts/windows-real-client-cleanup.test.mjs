@@ -25,6 +25,15 @@ function runCleanupCase({ early = false, logs = false, artifactFailure = false, 
   if (!early) writeFileSync(installer, 'fixture only');
   writeFileSync(host, 'must not launch');
   writeFileSync(path.join(directory, 'windows-client-entry.ps1'), '');
+  writeFileSync(path.join(directory, 'windows-client-cdp.ps1'), `
+function Get-CdpPageTarget { param([int] $Port, [int] $TimeoutSeconds) return $null }
+function Invoke-CdpCommand { param([string] $WebSocketUrl, [string] $ParamsJson, [int] $CommandId, [int] $TimeoutSeconds) return $null }
+function Save-CdpPageScreenshot {
+  param([int] $Port, [string] $Path, [int] $TimeoutSeconds)
+  [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'cdp-capture.marker'), 'fixture called')
+  return $null
+}
+`);
   writeFileSync(path.join(directory, 'windows-client-database.ps1'), `
 function Install-ClientDatabase {
   param([string] $ClientDirectory, [string] $Base64)
@@ -102,6 +111,8 @@ function assertFinished(result, expectedError) {
   assert.match(result.error, expectedError, 'cleanup must preserve the original failure');
   assert.ok(existsSync(path.join(result.runner, 'shell-repaired.marker')), 'shell repair must still run');
   assert.ok(existsSync(path.join(result.runner, 'input-restored.marker')), 'input restore must still run');
+  assert.equal(existsSync(path.join(result.runner, 'cdp-capture.marker')), false,
+    'no CDP endpoint was ever found, so no page capture may be attempted');
   const manifest = path.join(result.runner, 'cx-real-client-cleanup-sha256.txt');
   assert.ok(existsSync(manifest), `artifact manifest must be written after cleanup diagnostics:\n${result.output}`);
   assert.match(readFileSync(manifest, 'utf8'), /^[a-f0-9]{64}  cx-real-client-cleanup-/mu);

@@ -123,6 +123,69 @@ export function createDefaultQuestionResolver<E>(
       const similar_list: SimilarResult[] = [];
       const exact_list: HTMLElement[][] = [];
       const results = infos.map((info) => info.results).flat();
+      const plainLabelCandidates = new Map<string, { options: HTMLElement[]; votes: number }>();
+      const optionIndexes = new Map(options.map((option, index) => [option, index]));
+      let hasResolvedPlainLabelAnswer = false;
+      const hasExplicitLabels = options.some((option) => {
+        const optionRoot = option.closest?.('.answerBg, .clearfix');
+        const visibleLabel = optionRoot?.querySelector<HTMLElement>('.num_option, .option_label, [data-option-label]');
+        return Boolean(
+          readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '') ||
+          readDisplayLabel(option.textContent || option.innerText)
+        );
+      });
+      const hasUnlabelledExactTextAnswer = !hasExplicitLabels && results.some((result) =>
+        options.some((option) => answerExactMatch(
+          [nowrap(result.answer, '').trim()],
+          [removeRedundant(option.innerText)]
+        ).length === 1)
+      );
+
+      if (!hasUnlabelledExactTextAnswer) infos.forEach((info) => {
+        const sourceCandidates = new Map<string, HTMLElement[]>();
+        for (const result of info.results) {
+          const plainAnswer = resolvePlainAnswer(nowrap(result.answer, '').trim());
+          if (!plainAnswer) continue;
+
+          const resolved = [...plainAnswer].map((label) => resolveOptionByDisplayLabel(options, label));
+          if (resolved.some((option) => option === undefined)) continue;
+          const selected = new Set(resolved as HTMLElement[]);
+          if (selected.size !== resolved.length) continue;
+
+          hasResolvedPlainLabelAnswer = true;
+          const selectedOptions = options.filter((option) => selected.has(option));
+          const key = selectedOptions.map((option) => optionIndexes.get(option)).join(',');
+          sourceCandidates.set(key, selectedOptions);
+        }
+
+        // A provider contributes one vote only when all of its usable rows agree.
+        if (sourceCandidates.size === 1) {
+          const [key, selectedOptions] = sourceCandidates.entries().next().value!;
+          const candidate = plainLabelCandidates.get(key);
+          if (candidate) {
+            candidate.votes++;
+          } else {
+            plainLabelCandidates.set(key, { options: selectedOptions, votes: 1 });
+          }
+        }
+      });
+
+      let plainLabelResolution: HTMLElement[] | undefined;
+      let plainLabelConflict = false;
+      if (plainLabelCandidates.size > 0) {
+        const ranked = [...plainLabelCandidates.values()].sort((a, b) => b.votes - a.votes);
+        const totalVotes = ranked.reduce((sum, candidate) => sum + candidate.votes, 0);
+        plainLabelConflict = ranked[0].votes * 2 <= totalVotes;
+        plainLabelResolution = plainLabelConflict ? undefined : ranked[0].options;
+      }
+
+      if (hasResolvedPlainLabelAnswer) {
+        if (plainLabelCandidates.size === 0 || plainLabelConflict || !plainLabelResolution) return { finish: false };
+        for (const option of plainLabelResolution) {
+          await apply('multiple', option.innerText, option, handler);
+        }
+        return { finish: true, plainOptions: plainLabelResolution };
+      }
 
       function limitSimilarResultToAnswerCount(result: SimilarResult, answerCount: number): SimilarResult {
         if (answerCount <= 0 || result.options.length <= answerCount) {
@@ -253,28 +316,7 @@ export function createDefaultQuestionResolver<E>(
         }
       }
 
-      const plainOptions = [];
-      for (const result of results) {
-        const ans = nowrap(result.answer, '').trim();
-        const plainAnswer = resolvePlainAnswer(ans);
-        if (plainAnswer) {
-          const resolvedOptions = [...plainAnswer].map((char) => resolveOptionByDisplayLabel(options, char));
-          if (resolvedOptions.some((option) => option === undefined)) continue;
-          for (const option of resolvedOptions as HTMLElement[]) {
-            if (option === undefined) {
-              continue;
-            }
-            await apply('multiple', option.innerText, option, handler);
-            plainOptions.push(option);
-          }
-        }
-      }
-
-      if (plainOptions.length) {
-        return { finish: true, plainOptions };
-      } else {
-        return { finish: false };
-      }
+      return { finish: false };
     },
     async judgement(infos, options, handler) {
       for (const answers of infos.map((info) => info.results.map((res) => res.answer))) {

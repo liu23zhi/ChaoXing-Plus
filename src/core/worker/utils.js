@@ -21,32 +21,19 @@ export function defaultWorkTypeResolver(ctx) {
 }
 export function isPlainAnswer(answer) {
     answer = answer.trim();
-    if (answer.length > 8 || !/[A-Z]/.test(answer)) {
+    if (!/^[A-Z]{1,8}$/.test(answer)) {
         return false;
     }
-    const counter = {};
-    let min = 0;
-    for (let i = 0; i < answer.length; i++) {
-        if (answer.charCodeAt(i) < min) {
-            return false;
-        }
-        min = answer.charCodeAt(i);
-        counter[min] = (counter[min] || 0) + 1;
-    }
-    for (const key in counter) {
-        if (counter[key] !== 1) {
-            return false;
-        }
-    }
-    return true;
+    return new Set(answer).size === answer.length;
 }
 export function resolvePlainAnswer(answer) {
     const resolve = answer
         .trim()
         .replace(/[,，、 #]/g, '')
-        .trim();
+        .trim()
+        .toUpperCase();
     if (isPlainAnswer(resolve)) {
-        return resolve;
+        return [...resolve].sort().join('');
     }
     return undefined;
 }

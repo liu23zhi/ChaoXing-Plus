@@ -45,6 +45,15 @@ function createOption(text) {
   };
 }
 
+function createLabeledOption(label, text) {
+  const option = createOption(text);
+  const labelNode = createOption(label);
+  option.closest = (selector) => selector.includes('.answerBg, .clearfix')
+    ? { querySelector: () => labelNode }
+    : undefined;
+  return option;
+}
+
 test('multiple choice similar matching does not select more options than returned answers', async () => {
   const mod = await loadResolverModule();
   const selected = [];
@@ -244,4 +253,125 @@ test('exact mode rejects incomplete multiple answer groups and conflicting singl
     assert.equal(result.finish, false, fixture.answer);
     assert.deepEqual(selected, [], fixture.answer);
   }
+});
+
+test('multiple choice resolves a plain label group before matching option text', async () => {
+  const mod = await loadResolverModule();
+  const options = [createLabeledOption('A', 'AC'), createLabeledOption('B', '钠'), createLabeledOption('C', '镁')];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'similar', answerSeparators: ['#'] }).multiple(
+    [{ results: [{ answer: 'AC' }] }], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['AC', '镁']);
+});
+
+test('multiple choice does not treat unlabelled option text as a label group', async () => {
+  const mod = await loadResolverModule();
+  const options = [createOption('AC'), createOption('钠'), createOption('镁')];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'similar', answerSeparators: ['#'] }).multiple(
+    [{ results: [{ answer: 'AC' }] }], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['AC']);
+});
+
+test('multiple choice does not union conflicting plain-label groups', async () => {
+  const mod = await loadResolverModule();
+  const options = [
+    createLabeledOption('A', '甲'), createLabeledOption('B', '乙'),
+    createLabeledOption('C', '丙'), createLabeledOption('D', '丁')
+  ];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] }).multiple(
+    [
+      { name: 'provider-a', results: [{ answer: 'AC' }] },
+      { name: 'provider-b', results: [{ answer: 'BD' }] }
+    ], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, false);
+  assert.deepEqual(selected, []);
+});
+
+test('multiple choice treats reordered plain-label groups as the same set', async () => {
+  const mod = await loadResolverModule();
+  const options = [
+    createLabeledOption('A', '甲'), createLabeledOption('B', '乙'),
+    createLabeledOption('C', '丙'), createLabeledOption('D', '丁')
+  ];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] }).multiple(
+    [
+      { name: 'provider-a', results: [{ answer: 'AC' }] },
+      { name: 'provider-b', results: [{ answer: 'CA' }] }
+    ], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['甲', '丙']);
+});
+
+test('multiple choice abstains when one provider returns conflicting groups', async () => {
+  const mod = await loadResolverModule();
+  const options = [
+    createLabeledOption('A', 'AC'), createLabeledOption('B', '乙'),
+    createLabeledOption('C', '丙'), createLabeledOption('D', '丁')
+  ];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] }).multiple(
+    [{ name: 'provider-a', results: [{ answer: 'AC' }, { answer: 'BD' }] }], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, false);
+  assert.deepEqual(selected, []);
+});
+
+test('multiple choice follows the majority of agreeing label sets', async () => {
+  const mod = await loadResolverModule();
+  const options = [
+    createLabeledOption('A', '甲'), createLabeledOption('B', '乙'),
+    createLabeledOption('C', '丙'), createLabeledOption('D', '丁')
+  ];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] }).multiple(
+    [
+      { name: 'provider-a', results: [{ answer: 'AC' }] },
+      { name: 'provider-b', results: [{ answer: 'CA' }] },
+      { name: 'provider-c', results: [{ answer: 'BD' }] }
+    ], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, true);
+  assert.deepEqual(selected, ['甲', '丙']);
+});
+
+test('multiple choice abstains when the leading set lacks a strict majority', async () => {
+  const mod = await loadResolverModule();
+  const options = [
+    createLabeledOption('A', '甲'), createLabeledOption('B', '乙'),
+    createLabeledOption('C', '丙'), createLabeledOption('D', '丁')
+  ];
+  const selected = [];
+  const result = await mod.createDefaultQuestionResolver({ answerMatchMode: 'exact', answerSeparators: ['#'] }).multiple(
+    [
+      { name: 'provider-a', results: [{ answer: 'AC' }] },
+      { name: 'provider-b', results: [{ answer: 'CA' }] },
+      { name: 'provider-c', results: [{ answer: 'BD' }] },
+      { name: 'provider-d', results: [{ answer: 'AB' }] }
+    ], options,
+    (_type, _answer, option) => selected.push(option.innerText)
+  );
+
+  assert.equal(result.finish, false);
+  assert.deepEqual(selected, []);
 });

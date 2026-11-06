@@ -42,7 +42,13 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 报告校验要求 `success`、`ownershipVerified`、`totals.pageSessions/bootstraps/bundles ≥ 1`；`stopReason` 允许 `duration`（跑满时长）或 `client-exit`（客户端先被关闭或杀掉，宿主仍会写出完整报告）。没有出现 CEF 页面时脚本会提前关闭客户端再取报告，不会把它挂到时长结束。
 
+注入脚本默认带 `-PanelAllPages`（宿主参数 `--panel-all-pages`，CI 显式传入），非考试页（登录、课程、跳转页）也挂载悬浮面板。原因是**考试窗口自己做了防截屏**：`CXExam.exe` 在考试窗口初始化时调用 `SetWindowDisplayAffinity(hwnd, WDA_MONITOR)`（IG5 静态证据：`0x44d510` 为 `push 1` → `user32!SetWindowDisplayAffinity`，调用者 `0x4d1120` 与该窗口的 `HWND` 登记同一函数；`0x44d550` 用 `push 0` 恢复），此后任何 GDI 屏幕拷屏在该窗口区域只能读到纯黑（`cx-real-client-<case>-4-after-confirm.png` 曾 100% 为 0x000000）。所以"进入考试之后"的现场截图无法用于人工确认，确认点必须放在受保护之前的页面上；需要恢复"仅考试页显示面板"时用 `-PanelAllPages:$false`。
+
 现场会落盘到 `RUNNER_TEMP` 并由 CI 以 `compression-level: 0` 原样打包上传（artifact 名 `real-client-<客户端>-<数据库>`，成功与失败都上传；PNG 不再被二次压缩，下载后可用 `cx-real-client-<case>-sha256.txt` 里的 SHA256 逐字节校验）：`cx-real-client-<case>-environment.json`（会话 ID、窗口站/桌面名、是否远程会话、系统 DPI、虚拟屏幕与各显示器、是否提权）、`-start.png`（启动画面）、`-attempt-<n>.png`（每次点击尝试后的画面，50% 缩放）、`-desktop.png`（失败时的最终桌面）、`report.json`、宿主 stdout/stderr 与客户端 `debug.log` / `input.txt`。进入考试日志同时打印客户端窗口类列表（`windows=...`）：`ExamCheckHintUI` 表示出现了检查提示；`Chrome_WidgetWin_0` 也可能只是未加载页面的隐藏窗口，不能代替 `/json/list` 与报告中的页面会话证据。
+
+截图有两套，必须同时保留：桌面截图（`Save-EntryFrame` / `Save-DesktopScreenshot`，`Graphics.CopyFromScreen`）记录桌面真实像素，考试窗口被 `WDA_MONITOR` 保护后它就是纯黑——这正是"窗口受保护"的证据，不能因为黑就删掉；页内截图走客户端自己的 DevTools 端点（`/json/list` → `Page.captureScreenshot`，实现见 `scripts/windows-client-cdp.ps1`），由渲染进程出图，不受显示亲和性影响，因此可读，且包含注入后的面板。落盘名字：`-<帧名>-cdp.png`（与 `3-confirm-dialog` / `4-after-confirm` 等桌面帧一一对应）、`-cdp-page.png`（进入考试后立即抓）、`-cdp-final.png`（关闭客户端前抓，含注入结果）。页内截图是 best-effort：没有页面目标、CDP 报错或返回非 PNG 时只打印 `cdp ... unavailable` 并保留桌面截图，不影响报告校验。
+
+**拍照窗口期隐藏面板**：客户端的取证抓屏（服务端 `GetScreenImage`）会先把自己的 `WDA_MONITOR` 关掉再 `GetDC(NULL)` 拷整屏上传（IG5：`FUN_0043a8b0` → `FUN_0043a340`），打开的面板会被一起拍进去。注入脚本因此在本进程 runspace 里跑一个守卫（`Watch-ClientCaptureGuard`，不新起进程）：每 200 ms 读客户端可见顶层窗口的 `GetWindowDisplayAffinity`，发现某窗口从 `1` 跳到 `0` 就用 CDP 调 `window.__CX_WIN_APPLY_CAPTURE_GUARD__()` 立刻隐藏面板壳（`html[data-cx-win-capture="hide"]`），跳回 `1` 再恢复；窗口消失时兜底恢复。日志里是 `capture guard on/off window=...` 与收尾的 `capture guard events=<n>`，可据此确认守卫真的抓到了拍照窗口期。
 
 **托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也通常没有摄像头，可能停在客户端检查提示。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
