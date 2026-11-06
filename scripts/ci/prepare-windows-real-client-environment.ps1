@@ -264,14 +264,14 @@ function Test-ImmInputMethodReady {
 # The client only accepts input methods whose ImmGetDescriptionW is non-empty (IG5: FUN_004a6b30 keeps
 # only layouts with a description). Windows answers that call only for IME-marked layouts (KLID E0xxxxxx)
 # whose IME module loads, so TSF-only IMEs and plain keyboard layouts never qualify. The repository ships a
-# stand-in IME (tests/fixtures/sogou-imm-vm/fake-ime): no third-party installer, no download, no network.
+# stand-in IME (tools/fake-ime): no third-party installer, no download, no network.
 function Get-StandInImeRoot {
     $starts = @($PSScriptRoot, $env:GITHUB_WORKSPACE, (Get-Location).Path)
     foreach ($start in $starts) {
         if (-not $start) { continue }
         $probe = $start
         while ($probe) {
-            $candidate = Join-Path $probe 'tests/fixtures/sogou-imm-vm/fake-ime'
+            $candidate = Join-Path $probe 'tools/fake-ime'
             if (Test-Path -LiteralPath (Join-Path $candidate 'Install-FakeInputMethod.ps1')) { return $candidate }
             $parent = Split-Path $probe -Parent
             if (-not $parent -or $parent -eq $probe) { break }

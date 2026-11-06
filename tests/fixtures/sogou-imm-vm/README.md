@@ -5,7 +5,7 @@ Windows machine (a VM snapshot is fine) and run it; nothing is installed or chan
 
 The folder name is historical: it used to carry a Sogou installer. That installer is gone (CI no longer
 installs third-party input methods); the client only ever looks at `ImmGetDescriptionW`, so the probe and
-the stand-in IME in `fake-ime/` replace it.
+the stand-in IME in `tools/fake-ime/` replace it.
 
 ## Run
 
@@ -33,7 +33,7 @@ means the client's item will fail: either no IME-marked layout is registered, or
 | --- | --- |
 | `run-sogou-imm-diagnostic.ps1` | Read-only probe (the client's own criterion) |
 | `IMM-TSF-diagnostic-report.md` | Evidence: client binary, `imm32` rules, environment findings |
-| `fake-ime/` | Minimal IME32 module + install/verify/uninstall for machines without a real IMM IME |
+| `tools/fake-ime/` | Minimal IME32 module + install/verify/uninstall for machines without a real IMM IME |
 
 Run the probe on a VM snapshot if you want a clean comparison; it never writes outside its own
 `results/` folder.

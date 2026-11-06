@@ -14,7 +14,7 @@ test('桌面准备改用仓库内伪装输入法，不再下载或安装第三�
   assert.doesNotMatch(source, /Add-WindowsCapability|Set-WinUserLanguageList|InputMethodTips/u,
     '不再下载语言包或注册系统自带输入法');
   assert.match(source, /function Install-StandInInputMethod/u, '必须由伪装输入法完成准备');
-  assert.match(source, /tests\/fixtures\/sogou-imm-vm\/fake-ime/u, '必须指向 fake-ime 夹具');
+  assert.match(source, /tools\/fake-ime/u, '必须指向 tools/fake-ime');
   assert.match(source, /Install-FakeInputMethod\.ps1/u, '必须调用伪装输入法的安装脚本');
   assert.match(source, /-DisplayName 'StandInInput'/u, '布局描述必须稳定');
   assert.match(source, /function Get-StandInImeRoot/u, '必须能从仓库根定位夹具');

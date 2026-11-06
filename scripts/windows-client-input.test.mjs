@@ -92,7 +92,7 @@ test('输入法准备改用仓库内伪装输入法，不再下载或安装第�
     '不再下载语言包或注册系统自带输入法');
   assert.doesNotMatch(source, /Install-Language/u, 'Install-Language 在 runner 上会长时间挂起，不得使用');
   assert.match(source, /function Install-StandInInputMethod/u, '必须用仓库内伪装输入法替代第三方安装');
-  assert.match(source, /tests\/fixtures\/sogou-imm-vm\/fake-ime/u, '必须指向 fake-ime 夹具');
+  assert.match(source, /tools\/fake-ime/u, '必须指向 tools/fake-ime');
   assert.match(source, /Install-FakeInputMethod\.ps1/u, '必须调用伪装输入法安装脚本');
   assert.match(source, /-DisplayName 'StandInInput'/u, '必须传入稳定的布局描述');
   assert.match(source, /function Get-ImmInputMethodProbe/u, '必须保留客户端判据探针');

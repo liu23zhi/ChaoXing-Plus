@@ -29,7 +29,7 @@ CI 不再下载或安装第三方输入法；`sogou-ime-v16.9.0.5523.exe`、`sog
 `scripts/ci/verify-sogou-resolver.ps1` 已删除。客户端按 `ImmGetDescriptionW` 是否为空筛选输入法
 （IG5：`FUN_004a2780`；只有 `E0xxxxxx` 布局才可能有描述），纯 TSF 的微软拼音不满足。
 
-- 替代方案是 `tests/fixtures/sogou-imm-vm/fake-ime/`：导出完整 IME32 接口的最小模块 `cxime.ime`，
+- 替代方案是 `tools/fake-ime/`：导出完整 IME32 接口的最小模块 `cxime.ime`，
   加上注册 `HKLM\...\Keyboard Layouts\E0F00804`、复制到 `SysWOW64`/`System32` 与
   `LoadKeyboardLayoutW` 的安装脚本；`-Verify` 只读，安装/卸载需要管理员。
 - `scripts/ci/prepare-windows-real-client-environment.ps1` 会定位该夹具；模块由 CI 的 `windows-fake-ime`
@@ -66,7 +66,7 @@ GitHub 对单个配置变量有 48 KB 上限（base64 会把字节放大约 1/3�
 
 **托管 runner 的现实限制**：GitHub 的 Windows 镜像没有 zh-CN 语言载荷（`Language.Basic~~~zh-CN~0.0.1.0=NotPresent`，FOD ISO 只在 VLSC 提供），也通常没有摄像头，可能停在客户端检查提示。此时注入脚本会输出 `REAL_CLIENT_INJECTION_BLOCKED <case> reason=environment-check`（依据：窗口类含 `ExamCheckHintUI` 且 `totals.pageSessions=0`），作业不再误报成注入失败；真正的注入失败（有页面但没注入成功）仍然失败。要在 CI 上真正跑通注入，把仓库变量 `REAL_CLIENT_RUNNER` 设为满足条件的机器，例如 `["self-hosted","windows","cx-exam"]`，矩阵会自动改到那台 runner。
 
-注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口），并用仓库内伪装输入法（`tests/fixtures/sogou-imm-vm/fake-ime/`，客户端只接受 `ImmGetDescriptionW` 非空的 `E0xxxxxx` 布局）准备输入法；不再下载或安装搜狗、不再登记微软拼音/五笔、不再安装 zh-CN 语言包。所有准备动作都带超时，并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
+注入作业开始前会执行 `scripts/ci/prepare-windows-real-client-environment.ps1`：把桌面分辨率提到至少 1600x900（客户端设计面是 1200x700，默认 1024x768 会裁掉检查窗口），并用仓库内伪装输入法（`tools/fake-ime/`，客户端只接受 `ImmGetDescriptionW` 非空的 `E0xxxxxx` 布局）准备输入法；不再下载或安装搜狗、不再登记微软拼音/五笔、不再安装 zh-CN 语言包。所有准备动作都带超时，并在缺失时用 OBS 虚拟摄像头补齐设备。缺少设备或有效输入法时，客户端可能显示「检测未通过」和「可能影响部分功能，是否仍进入考试」确认框。确认层既可能是小型 `WebHintUI`，也可能是覆盖整个桌面的 `ExamCheckHintUI`：小窗口扫描其按钮区域，全屏层只扫描中央确认区域，避免命中遮罩后的「进入考试」。只识别同进程、可见且有有效尺寸的已知窗口类，点击后须确认弹窗已消失并实际出现页面。准备日志写入 `RUNNER_TEMP/cx-real-client-prep.log` 并随 artifact 上传。
 
 运行前后还会快照并恢复输入法：`HKCU\Keyboard Layout\Preload`、`Substitutes`、用户语言列表、当前激活布局；客户端（导入 `LoadKeyboardLayoutW` / `UnloadKeyboardLayout`）被杀后残留的自载布局会被卸载，快照与结果分别落盘为 `cx-real-client-<case>-input-before.json` / `-input-after.json`。
 

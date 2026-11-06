@@ -36,14 +36,14 @@ async function readBytes(relativePath) {
 }
 
 test('占位输入法模块导出完整 IME32 接口', async () => {
-  const def = await read('tests/fixtures/sogou-imm-vm/fake-ime/cxime.def');
+  const def = await read('tools/fake-ime/cxime.def');
   const exported = def
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith(';') && !/^LIBRARY/iu.test(line) && !/^EXPORTS$/u.test(line));
   assert.deepEqual(exported.sort(), [...IME_EXPORTS].sort(), '导出表必须与 IME32 接口一致，且不带 stdcall 修饰');
 
-  const source = await read('tests/fixtures/sogou-imm-vm/fake-ime/cxime.c');
+  const source = await read('tools/fake-ime/cxime.c');
   for (const name of IME_EXPORTS) {
     assert.match(source, new RegExp(`\\b${name}\\s*\\(`, 'u'), `cxime.c 必须实现 ${name}`);
   }
@@ -52,19 +52,19 @@ test('占位输入法模块导出完整 IME32 接口', async () => {
 });
 
 test('构建脚本只依赖 MSVC 且把中间产物放进 build 目录', async () => {
-  const script = await read('tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1');
+  const script = await read('tools/fake-ime/build-cxime.ps1');
   assert.match(script, /vcvarsall\.bat/u, '必须通过 vcvarsall 找到编译器');
   assert.match(script, /\/LD/u, '必须生成 DLL');
   assert.match(script, /\/DEF:"cxime\.def"/u, '必须使用导出定义文件');
   assert.match(script, /Build-One -Arch 'x86' -OutputName 'cxime32\.dll'/u, '必须构建 32 位模块（CXExam.exe 是 x86）');
   assert.match(script, /Build-One -Arch 'x64' -OutputName 'cxime64\.dll'/u, '必须构建 64 位模块');
-  const bytes = await readBytes('tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1');
+  const bytes = await readBytes('tools/fake-ime/build-cxime.ps1');
   assert.equal(bytes.some((byte) => byte > 0x7f), false, 'build-cxime.ps1 必须保持纯 ASCII');
 });
 
 test('安装脚本按客户端判据注册布局并支持只读复核与回滚', async () => {
-  const script = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
-  const bytes = await readBytes('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
+  const script = await read('tools/fake-ime/Install-FakeInputMethod.ps1');
+  const bytes = await readBytes('tools/fake-ime/Install-FakeInputMethod.ps1');
   assert.equal(bytes.some((byte) => byte > 0x7f), false, 'Install-FakeInputMethod.ps1 必须保持纯 ASCII');
 
   assert.match(script, /\[string\] \$Klid = ''/u, 'KLID 默认按当前系统输入语言推导');
@@ -101,31 +101,44 @@ test('仓库不携带任何预编译模块，CI 现场编译', async () => {
   ]) {
     await assert.rejects(access(path.join(root, ...relative)), '不允许提交本机编译的产物');
   }
-  const install = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
+  const install = await read('tools/fake-ime/Install-FakeInputMethod.ps1');
   assert.match(install, /Run build-cxime\.ps1 first/u, '缺少模块时必须要求先编译');
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /WARN: 编译失败，跳过伪装输入法安装与复核/u, 'CI 的编译失败必须降级为告警');
   assert.match(workflow, /vars\.FAKE_IME_RUNNER/u, 'job 必须允许指向带 zh-CN 的 runner');
-  assert.match(workflow, /Add-WindowsCapability -Online -Name \$name/u, '必须先尝试安装东亚语言支持');
-  assert.match(workflow, /AddSeconds\(300\)/u, '语言包安装必须有 300 秒上限，不能挂住 job');
-  assert.match(workflow, /Stop-Job -Job \$job/u, '超时必须停止后台作业');
+  assert.match(workflow, /dism\.exe -ArgumentList/u, '必须用 dism 安装语言包/能力');
+  assert.match(workflow, /WaitForExit\(\$TimeoutSeconds \* 1000\)/u, 'dism 必须有超时上限，不能挂住 job');
+  assert.match(workflow, /\$process\.Kill\(\)/u, '超时必须终止 dism');
   assert.match(workflow, /Language\.Basic~~~zh-CN/u, '必须先检查东亚语言支持（legacy IMM 的前提）');
   assert.match(workflow, /CX_FAKE_IME_HOST/u, '没有东亚语言支持时必须跳过安装与复核');
   assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');
 });
 
 test('模块携带 VERSIONINFO，否则 LoadKeyboardLayout 返回 1813', async () => {
-  const rc = await read('tests/fixtures/sogou-imm-vm/fake-ime/cxime.rc');
+  const rc = await read('tools/fake-ime/cxime.rc');
   assert.match(rc, /VERSIONINFO/u, '必须有版本资源');
   assert.match(rc, /VALUE "FileDescription", "ExamInput IME stub"/u, 'FileDescription 必须稳定');
   assert.match(rc, /VALUE "ProductName", "ExamInput"/u, 'ProductName 必须稳定');
-  const build = await read('tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1');
+  const build = await read('tools/fake-ime/build-cxime.ps1');
   assert.match(build, /rc \/nologo \/fo /u, '构建脚本必须编译 .rc');
   assert.match(build, /"cxime\.c" "' \+ \$res \+ '"|"cxime\.c" "\$res"/u, '必须把 .res 链接进 DLL')
     ;
-  const install = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
+  const install = await read('tools/fake-ime/Install-FakeInputMethod.ps1');
   assert.match(install, /error 1813 = the IME module has no VERSIONINFO resource/u, '安装脚本必须解释 1813');
   assert.match(install, /LoadLayoutWithFlags\(\$Klid, 2/u, '失败后必须再试 KLF_SUBSTITUTE_OK');
+});
+
+test('仓库内置 zh-CN 语言包，CI 用它安装东亚语言支持', async () => {
+  const zip = await readBytes('tools/fake-ime/langpack/WinSrv2025-zhCN-LanguagePack.zip');
+  assert.ok(zip.length > 100 * 1024 * 1024, '语言包必须真的随仓库提供（>100MB）');
+  assert.deepEqual([...zip.subarray(0, 2)], [0x50, 0x4b], '必须是 zip');
+  const attributes = await read('.gitattributes');
+  assert.match(attributes, /tools\/fake-ime\/langpack\/\*\.zip filter=lfs/u, '语言包必须走 Git LFS');
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.match(workflow, /tools\/fake-ime\/langpack\/WinSrv2025-zhCN-LanguagePack\.zip/u, 'CI 必须使用仓库内置语言包');
+  assert.match(workflow, /Expand-Archive -LiteralPath \$zip/u, '使用前必须解压');
+  assert.match(workflow, /\/Add-Package/u, '必须先安装整包语言包（对应内置安装脚本第 1 步）');
+  assert.match(workflow, /\/Add-Capability[\s\S]*?\/Source:' \+ \$repo[\s\S]*?\/LimitAccess/u, '必须按 -Source 安装 Basic 能力并禁止联网');
 });
 
 test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async () => {

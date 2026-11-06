@@ -506,7 +506,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /needs: \[windows-build, windows-real-client-discovery, windows-fake-ime\]/u,
     '真实客户端 job 必须等伪装输入法 job 产出模块');
   assert.match(workflow, /name: cx-fake-ime-modules/u, 'CI 必须在伪装输入法 job 上传编译产物');
-  assert.match(workflow, /name: cx-fake-ime-modules\s*\n\s*path: tests\/fixtures\/sogou-imm-vm\/fake-ime\/build/u,
+  assert.match(workflow, /name: cx-fake-ime-modules\s*\n\s*path: tools\/fake-ime\/build/u,
     '真实客户端 job 必须把模块下载到准备脚本查找的 build 目录');
   assert.match(workflow, /下载伪装输入法模块[\s\S]*?continue-on-error: true/u, '产物缺失时必须降级到现场编译而不是整组失败');
   assert.doesNotMatch(workflow, /CI_PRIVATE_CLIENTS_ENABLED/u,
