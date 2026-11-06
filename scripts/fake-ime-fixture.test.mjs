@@ -91,6 +91,21 @@ test('安装脚本按客户端判据注册布局并支持只读复核与回滚',
   assert.match(readyBody, /Get-LanguageFromKlid/u, '就绪判据必须核对语言后缀');
 });
 
+test('仓库不携带任何预编译模块，CI 现场编译', async () => {
+  const { access } = await import('node:fs/promises');
+  for (const relative of [
+    ['tests', 'fixtures', 'sogou-imm-vm', 'fake-ime', 'prebuilt', 'cxime32.dll'],
+    ['tests', 'fixtures', 'sogou-imm-vm', 'fake-ime', 'prebuilt', 'cxime64.dll']
+  ]) {
+    await assert.rejects(access(path.join(root, ...relative)), '不允许提交本机编译的产物');
+  }
+  const install = await read('tests/fixtures/sogou-imm-vm/fake-ime/Install-FakeInputMethod.ps1');
+  assert.match(install, /Run build-cxime\.ps1 first/u, '缺少模块时必须要求先编译');
+  const workflow = await read('.github/workflows/ci.yml');
+  assert.match(workflow, /只使用 CI 现场编译的模块/u, 'CI 只使用现场编译产物');
+  assert.doesNotMatch(workflow, /prebuilt/u, 'CI 不得回退到仓库内的预编译模块');
+});
+
 test('CI 在管理员 Windows runner 上验证伪装输入法并回滚', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.match(workflow, /^  windows-fake-ime:$/mu, '必须有独立的伪装输入法 job');

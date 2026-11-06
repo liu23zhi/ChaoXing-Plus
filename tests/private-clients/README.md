@@ -32,9 +32,10 @@ CI 不再下载或安装第三方输入法；`sogou-ime-v16.9.0.5523.exe`、`sog
 - 替代方案是 `tests/fixtures/sogou-imm-vm/fake-ime/`：导出完整 IME32 接口的最小模块 `cxime.ime`，
   加上注册 `HKLM\...\Keyboard Layouts\E0F00804`、复制到 `SysWOW64`/`System32` 与
   `LoadKeyboardLayoutW` 的安装脚本；`-Verify` 只读，安装/卸载需要管理员。
-- `scripts/ci/prepare-windows-real-client-environment.ps1` 会定位该夹具，必要时用 MSVC 编译，再调用
-  `Install-FakeInputMethod.ps1 -DisplayName StandInInput`；就绪结果以 `ImmGetDescriptionW` 回读为准，
-  写入 `cx-real-client-prep-summary.json` 的 `prepared` 与 `immPreparation`。
+- `scripts/ci/prepare-windows-real-client-environment.ps1` 会定位该夹具；模块由 CI 的 `windows-fake-ime`
+  job 现场编译并上传 `cx-fake-ime-modules`，真实客户端 job 下载到 `fake-ime/build` 后直接复用，不再重复编译
+  （artifact 缺失时才回退现场编译）；随后调用 `Install-FakeInputMethod.ps1 -DisplayName StandInInput -NoDefault`，
+  就绪结果以 `ImmGetDescriptionW` 回读为准，写入 `cx-real-client-prep-summary.json` 的 `prepared` 与 `immPreparation`。
 - 安装目录、卸载表项或 TSF profile 都不能代替就绪证据；`prepared=false` 时客户端显示「检测未通过」。
 
 私有客户端测试在非 PR 事件（`push` / `workflow_dispatch`）自动运行，不再依赖额外的启用变量——缺少数据库变量时 discovery 会直接报错，而不是静默跳过。CI 会自动发现所有非空的 `Examination_Client_Database_*` GitHub Actions 变量，并与 `tests/private-clients/` 下每个客户端 EXE 组合。变量值必须是 `UserExamInfo.db` 的 Base64 文本（换行与空白会被忽略）；注入脚本解码后直接把字节写入解压出的 `CXExam.exe` 同目录，文件名固定为 `UserExamInfo.db`，不做任何解压。旧的 `enabled` 标记和 ZIP 载荷会在发现或注入阶段直接报错。测试结束时删除独立临时目录。新增版本需要在 `.github/workflows/ci.yml` 的版本规则中声明注入通道。

@@ -499,8 +499,14 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
   assert.match(workflow, /if: \$\{\{ needs\.windows-build\.result == 'success' && github\.event_name != 'pull_request' \}\}/u,
     '私有客户端 discovery 必须只在非 PR 事件运行，且不得再依赖额外的启用变量（否则整组静默跳过）');
-  assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-real-client-discovery\.result == 'success' && github\.event_name != 'pull_request'/u,
+  assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-build\.result == 'success' && needs\.windows-real-client-discovery\.result == 'success' && github\.event_name != 'pull_request'/u,
     '真实客户端注入必须跟随 discovery 结果在非 PR 事件运行');
+  assert.match(workflow, /needs: \[windows-build, windows-real-client-discovery, windows-fake-ime\]/u,
+    '真实客户端 job 必须等伪装输入法 job 产出模块');
+  assert.match(workflow, /name: cx-fake-ime-modules/u, 'CI 必须在伪装输入法 job 上传编译产物');
+  assert.match(workflow, /name: cx-fake-ime-modules\s*\n\s*path: tests\/fixtures\/sogou-imm-vm\/fake-ime\/build/u,
+    '真实客户端 job 必须把模块下载到准备脚本查找的 build 目录');
+  assert.match(workflow, /下载伪装输入法模块[\s\S]*?continue-on-error: true/u, '产物缺失时必须降级到现场编译而不是整组失败');
   assert.doesNotMatch(workflow, /CI_PRIVATE_CLIENTS_ENABLED/u,
     '真实客户端矩阵不得再被未设置的仓库变量静默关闭');
   assert.match(workflow, /\$clientDirectory[\s\S]*?tests\/private-clients[\s\S]*?Get-ChildItem -LiteralPath \$clientDirectory[\s\S]*?-Filter ['"]chaoxing-exam-\*\.exe['"]/u,

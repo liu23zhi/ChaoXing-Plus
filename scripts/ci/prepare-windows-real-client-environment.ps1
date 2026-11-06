@@ -315,6 +315,7 @@ function Install-StandInInputMethod {
         return $state
     }
     $state.Root = $root
+    # Nothing prebuilt is shipped: the module is compiled from the repository in the CI job/step.
     $module = Join-Path $root 'build\cxime32.dll'
     if (-not (Test-Path -LiteralPath $module)) {
         if (-not (Build-StandInImeModule -Root $root)) {

@@ -293,6 +293,15 @@ jobs:
           node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files 2>&1 | Tee-Object -FilePath $tapPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 上传可见窗口测试 TAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-window-tap
+          path: ${{ runner.temp }}/ci-window-tests.tap
+          if-no-files-found: warn
+          retention-days: 7
+
   windows-browser:
     name: Windows 浏览器回归
     needs: windows-build
@@ -341,6 +350,15 @@ jobs:
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-browser-tests.tap'
           node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files 2>&1 | Tee-Object -FilePath $tapPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 上传可见窗口测试 TAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-window-tap
+          path: ${{ runner.temp }}/ci-window-tests.tap
+          if-no-files-found: warn
+          retention-days: 7
 
   windows-release:
     name: Windows 发布包验证
@@ -414,8 +432,8 @@ jobs:
     name: 真实客户端注入 ${{ matrix.client }} / 数据库 ${{ matrix.database }}
     permissions:
       contents: read
-    needs: [windows-build, windows-real-client-discovery]
-    if: ${{ needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
+    needs: [windows-build, windows-real-client-discovery, windows-fake-ime]
+    if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
     # Point this at a machine that can satisfy the client's environment check (camera + zh-CN input
     # method) by setting the repository variable REAL_CLIENT_RUNNER, e.g.
     #   ["self-hosted","windows","cx-exam"]
@@ -436,6 +454,13 @@ jobs:
         with:
           name: windows-ci-build-${{ github.sha }}
           path: .
+      - name: 下载伪装输入法模块
+        # windows-fake-ime 已编译并上传；这里只取现成产物，缺失时准备脚本会自行编译兜底。
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: cx-fake-ime-modules
+          path: tests/fixtures/sogou-imm-vm/fake-ime/build
       - name: 校验私有客户端资产
         shell: pwsh
         run: |
@@ -548,15 +573,25 @@ jobs:
       - name: 编译占位输入法模块
         shell: pwsh
         run: |
-          $builder = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/build-cxime.ps1'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime'
+          $builder = Join-Path $root 'build-cxime.ps1'
+          # 只使用 CI 现场编译的模块：仓库不携带任何预编译二进制，编译失败就是失败。
           try {
             & $builder *>&1 | ForEach-Object { Write-Host $_ }
           } catch {
             throw "编译占位输入法失败: $($_.Exception.Message)"
           }
-          $module = Join-Path $env:GITHUB_WORKSPACE 'tests/fixtures/sogou-imm-vm/fake-ime/build/cxime32.dll'
-          if (-not (Test-Path -LiteralPath $module)) { throw "缺少 32 位模块: $module" }
+          $module = Join-Path $root 'build/cxime32.dll'
+          if (-not (Test-Path -LiteralPath $module)) { throw '缺少 32 位模块: build/cxime32.dll' }
           Write-Host ("module: {0} ({1} bytes)" -f $module, (Get-Item -LiteralPath $module).Length)
+      - name: 上传占位输入法模块
+        uses: actions/upload-artifact@v4
+        with:
+          # 只在这一处编译；真实客户端 job 直接下载这个产物，不再重复编译。
+          name: cx-fake-ime-modules
+          path: tests/fixtures/sogou-imm-vm/fake-ime/build/*.dll
+          if-no-files-found: error
+          retention-days: 7
       - name: 安装并验证占位输入法
         shell: pwsh
         run: |

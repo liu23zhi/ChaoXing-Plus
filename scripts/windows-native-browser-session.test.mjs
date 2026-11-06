@@ -110,7 +110,9 @@ test('native browser startup keeps a total deadline and names the failed command
   const elapsed = Date.now() - started;
   assert.equal(result.code, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /Browser\.getVersion/);
-  assert.ok(elapsed >= 30_000 && elapsed < 38_000, `startup must expire once: ${elapsed}ms`);
+  // The fixture stalls for 60s, the harness itself times out at 45s, so anything under 45s proves the
+  // 30s startup deadline fired instead of waiting for the fixture; leave headroom for a loaded runner.
+  assert.ok(elapsed >= 30_000 && elapsed < 45_000, `startup must expire once: ${elapsed}ms`);
 });
 
 test('native CRX verifier authenticates the full package without writing files', { skip: !nativeAvailable, timeout: 90_000 }, async () => {

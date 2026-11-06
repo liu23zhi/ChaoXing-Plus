@@ -190,18 +190,19 @@ function Save-Backup {
 
 function Install-Modules {
     $sources = @()
+    # Modules are compiled in CI (build-cxime.ps1); nothing prebuilt is shipped in the repository.
     $cxime32 = Join-Path $buildDir 'cxime32.dll'
     $cxime64 = Join-Path $buildDir 'cxime64.dll'
     if ((Split-Path -Leaf $ImeFile) -eq 'cxime.ime') {
         if (Test-Path -LiteralPath $cxime32) { $sources += @{ Path = $cxime32; Target = (Join-Path $env:WINDIR ("SysWOW64\" + $ImeFile)) } }
         if (Test-Path -LiteralPath $cxime64) { $sources += @{ Path = $cxime64; Target = (Join-Path $env:WINDIR ("System32\" + $ImeFile)) } }
         if ($sources.Count -eq 0) {
-            throw "No built modules in $buildDir. Run build-cxime.ps1 first, or pass -ImeFile <existing IME module>."
+            throw "No cxime modules in $buildDir. Run build-cxime.ps1 first, or pass -ImeFile <existing IME module>."
         }
     }
     foreach ($item in $sources) {
         Copy-Item -LiteralPath $item.Path -Destination $item.Target -Force
-        Write-Host ("installed module: {0}" -f $item.Target)
+        Write-Host ("installed module: {0} (from {1})" -f $item.Target, $item.Path)
     }
 }
 
