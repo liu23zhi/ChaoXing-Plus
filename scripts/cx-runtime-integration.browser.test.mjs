@@ -9,6 +9,7 @@ const browserRequire = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES
 const puppeteer = browserRequire('puppeteer');
 const origin = 'https://mooc1.chaoxing.com';
 const courseUrl = `${origin}/mycourse/studentstudy?courseId=course&clazzid=class&chapterId=chapter&mooc2=1`;
+const workUrl = `${origin}/mooc2/work/dowork?courseId=course&classId=class&workId=work&answerId=0`;
 let browser;
 let fixtureDirectory;
 
@@ -69,7 +70,7 @@ const workPage = `<!doctype html><html><head><title>Local chapter test</title></
   </form></div>
 </body></html>`;
 
-async function openPage(t, { withTask = false, existingPage } = {}) {
+async function openPage(t, { withTask = false, existingPage, pageKind = 'course' } = {}) {
   const page = existingPage ?? await browser.newPage();
   t.after(() => page.close());
   page.setDefaultTimeout(12000);
@@ -136,13 +137,17 @@ async function openPage(t, { withTask = false, existingPage } = {}) {
       void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: url.pathname === '/knowledge/cards' ? cardsPage : workPage });
       return;
     }
+    if (url.pathname === '/mooc2/work/dowork') {
+      void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: workPage });
+      return;
+    }
     if (request.isNavigationRequest() && url.hostname.endsWith('.chaoxing.com')) {
       void request.respond({ status: 200, contentType: 'text/html; charset=utf-8', body: coursePage(withTask) });
       return;
     }
     void request.abort();
   });
-  await page.goto(courseUrl);
+  await page.goto(pageKind === 'work' ? workUrl : courseUrl);
   // The first panel mount waits for the whole bundled runtime to boot in a cold Chromium profile;
   // on a shared CI runner that regularly needs more than the 12s default (observed 12s+ stalls).
   await page.waitForSelector('#panel-common-work-results', { timeout: 25000 });
@@ -169,6 +174,23 @@ async function expectButton(page, text) {
     visible: element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' }));
   assert.deepEqual(state, { text, disabled: false, visible: true });
 }
+
+test('work pages show the auto-answer countdown before sending a search request', { timeout: 60000 }, async (t) => {
+  const { page, searched, requests } = await openPage(t, { pageKind: 'work' });
+
+  await page.waitForSelector('.swal2-popup .swal2-cancel');
+  const dialogText = await page.$eval('.swal2-html-container', (element) => element.textContent || '');
+  assert.match(dialogText, /5 秒后开始自动答题/u);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(requests.some((request) => request.includes('provider.chaoxing.com')), false);
+
+  await page.$eval('.swal2-confirm', (element) => element.click());
+  await Promise.race([
+    searched,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('work page did not search after confirmation')), 15000))
+  ]);
+  assert.equal(requests.some((request) => request.includes('provider.chaoxing.com')), true);
+});
 
 test('complete extension bundle keeps an available panel control and isolates pause by browser tab', { timeout: 60000 }, async (t) => {
   const { page } = await openPage(t);

@@ -6657,7 +6657,7 @@ function workOrExam(
 
     worker.on('close', clearRuntimeControls);
     void (async () => {
-      const confirmed = isWindowsHostRuntime() ? await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker)) : true;
+      const confirmed = await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker));
       if (!confirmed) {
         clearRuntimeControls();
         return;
@@ -6916,7 +6916,7 @@ function workOrExam(
     worker.on('close', clearRuntimeControls);
 
     void (async () => {
-      const confirmed = isWindowsHostRuntime() ? await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker)) : true;
+      const confirmed = await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker));
       if (!confirmed) return;
 
       logDebug('info', '动作节点诊断：开始逐题切换答题', {

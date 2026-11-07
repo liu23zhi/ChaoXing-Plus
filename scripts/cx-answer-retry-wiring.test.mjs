@@ -131,6 +131,13 @@ test('cx asks for a 5 second confirmation before auto answering and pauses on ca
   assert.equal(messageSource.includes('return result.isConfirmed || (defaultConfirmed && result.dismiss === Swal.DismissReason.timer);'), true);
 });
 
+test('cx keeps the work and exam answer entry points behind the countdown outside the Windows host', async () => {
+  const source = await readFile(cxProjectPath, 'utf8');
+
+  assert.equal(source.includes('const confirmed = isWindowsHostRuntime() ? await waitForInitialAnswerRun(confirmBeforeAutoAnswer(worker)) : true;'), false);
+  assert.equal(source.match(/const confirmed = await waitForInitialAnswerRun\(confirmBeforeAutoAnswer\(worker\)\);/g)?.length, 2);
+});
+
 test('cx remembers a manual answer choice for the current page and pauses the chapter scan', async () => {
   const source = await readFile(cxProjectPath, 'utf8');
 
