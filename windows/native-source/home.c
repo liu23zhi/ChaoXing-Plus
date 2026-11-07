@@ -138,6 +138,121 @@ static void home_append(WCHAR *out, DWORD cap, const WCHAR *value) {
     lstrcpynW(out + used, value, (int)(cap - used));
 }
 
+static BOOL home_json_append_char(char *out, DWORD cap, DWORD *at, char c);
+static BOOL home_json_append_utf8(char *out, DWORD cap, DWORD *at, const WCHAR *value);
+
+static void home_hex32(WCHAR *out, DWORD cap, DWORD *at, DWORD value) {
+    static const WCHAR digits[] = L"0123456789abcdef";
+    int i;
+    if (!out || !at || *at + 8 >= cap) return;
+    for (i = 7; i >= 0; --i) out[(*at)++] = digits[(value >> (i * 4)) & 0x0f];
+    out[*at] = 0;
+}
+
+static void home_build_script_identity(WCHAR *out, DWORD cap) {
+    DWORD at = 0;
+    if (!out || cap < 2) return;
+    out[0] = 0;
+    home_append(out, cap, L"native-"); at = (DWORD)lstrlenW(out);
+    home_hex32(out, cap, &at, GetTickCount());
+    home_append(out, cap, L"-"); at = (DWORD)lstrlenW(out);
+    home_hex32(out, cap, &at, GetCurrentProcessId());
+    home_append(out, cap, L"-"); at = (DWORD)lstrlenW(out);
+    home_hex32(out, cap, &at, GetCurrentThreadId());
+}
+
+static BOOL home_extract_url_path(const WCHAR *url, WCHAR *out, DWORD cap) {
+    DWORD i = 0, slash = 0, scheme = 0;
+    if (!url || !out || cap < 2) return FALSE;
+    out[0] = 0;
+    while (url[i] && !(url[i] == L':' && url[i + 1] == L'/' && url[i + 2] == L'/')) ++i;
+    if (!url[i]) return FALSE;
+    scheme = i + 3;
+    i = scheme;
+    while (url[i] && url[i] != L'/' && url[i] != L'?' && url[i] != L'#') ++i;
+    if (!url[i]) { home_copy(out, cap, L"/"); return TRUE; }
+    slash = i;
+    if (url[slash] == L'/') {
+        if (lstrlenW(url + slash) >= (int)cap) return FALSE;
+        lstrcpynW(out, url + slash, (int)cap);
+    } else {
+        home_copy(out, cap, L"/");
+    }
+    return TRUE;
+}
+
+static BOOL home_response_string(const CX_ADAPTER_REPLY *reply, const char *key,
+                                 WCHAR *out, DWORD cap) {
+    JT *tokens;
+    int count, value;
+    BOOL ok = FALSE;
+    if (!reply || !reply->body || !key || !out || cap < 1) return FALSE;
+    out[0] = 0;
+    tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT));
+    if (!tokens) return FALSE;
+    count = jparse(reply->body, (int)reply->length, tokens, 4096);
+    value = count > 0 ? jkey(reply->body, tokens, 0, key) : -1;
+    if (value >= 0) ok = jwstr(reply->body, tokens, value, out, (int)cap);
+    HeapFree(GetProcessHeap(), 0, tokens);
+    return ok;
+}
+
+static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activationToken,
+                                 const WCHAR *sessionUrl, WCHAR *error, DWORD errorCap) {
+    WCHAR path[CX_OPTIONS_PATH_CAP], identity[CX_HOME_SCRIPT_IDENTITY_CAP];
+    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512];
+    char *json = NULL;
+    DWORD jsonLength = 0, used = 0, i;
+    BOOL ok = FALSE;
+    CX_ADAPTER_REPLY reply;
+    if (!config || !activationToken || !activationToken[0] || !sessionUrl || !sessionUrl[0]) return TRUE;
+    if (!home_extract_url_path(sessionUrl, path, CX_OPTIONS_PATH_CAP)) {
+        home_copy(error, errorCap, L"脚本会话地址无效，无法激活。"); return FALSE;
+    }
+    home_build_script_identity(identity, CX_HOME_SCRIPT_IDENTITY_CAP);
+    json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 65536);
+    if (!json) { home_copy(error, errorCap, L"脚本会话激活内存不足。"); return FALSE; }
+    json[used++] = '{';
+    if (!home_json_append_char(json, 65536, &used, '"')) goto done;
+    for (i = 0; L"activationToken"[i]; ++i)
+        if (!home_json_append_char(json, 65536, &used, (char)L"activationToken"[i])) goto done;
+    if (!home_json_append_char(json, 65536, &used, '"') || !home_json_append_char(json, 65536, &used, ':')
+        || !home_json_append_char(json, 65536, &used, '"')
+        || !home_json_append_utf8(json, 65536, &used, activationToken)
+        || !home_json_append_char(json, 65536, &used, '"')) goto done;
+    if (!home_json_append_char(json, 65536, &used, ',') || !home_json_append_char(json, 65536, &used, '"')) goto done;
+    for (i = 0; L"identity"[i]; ++i)
+        if (!home_json_append_char(json, 65536, &used, (char)L"identity"[i])) goto done;
+    if (!home_json_append_char(json, 65536, &used, '"') || !home_json_append_char(json, 65536, &used, ':')
+        || !home_json_append_char(json, 65536, &used, '"')
+        || !home_json_append_utf8(json, 65536, &used, identity)
+        || !home_json_append_char(json, 65536, &used, '"')
+        || !home_json_append_char(json, 65536, &used, '}')) goto done;
+    json[used] = 0; jsonLength = used;
+    ZeroMemory(&reply, sizeof(reply));
+    ok = cx_adapter_request(config->adapterBaseUrl, L"POST", path, NULL, json,
+        10000, 65536, &reply, error, errorCap);
+    if (!ok || reply.status < 200 || reply.status >= 300) {
+        if (ok && home_response_string(&reply, "message", message, 512) && message[0])
+            home_copy(error, errorCap, message);
+        ok = FALSE; goto done;
+    }
+    if (!home_response_string(&reply, "token", sessionToken, CX_HOME_API_KEY_CAP)
+        || !sessionToken[0]) {
+        home_copy(error, errorCap, L"脚本会话响应无效，未继续启动。"); ok = FALSE; goto done;
+    }
+    home_copy(config->apiKey, CX_HOME_API_KEY_CAP, sessionToken);
+    home_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+    ok = TRUE;
+done:
+    cx_adapter_reply_free(&reply);
+    if (json) { SecureZeroMemory(json, 65536); HeapFree(GetProcessHeap(), 0, json); }
+    SecureZeroMemory(sessionToken, sizeof(sessionToken));
+    SecureZeroMemory(identity, sizeof(identity));
+    (void)jsonLength;
+    return ok;
+}
+
 static BOOL home_exists(const WCHAR *path) {
     DWORD attr = GetFileAttributesW(path);
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
@@ -156,7 +271,8 @@ void cx_home_config_clear(CX_HOME_CONFIG *config) {
 
 BOOL cx_home_config_apply_options(CX_HOME_CONFIG *config, const CX_OPTIONS *options,
     WCHAR *error, DWORD errorCap) {
-    char *json; JT *tokens; DWORD length; int count, base, key; BOOL ok = FALSE;
+    char *json; JT *tokens; DWORD length; int count, base, key, activation, sessionUrl; BOOL ok = FALSE;
+    WCHAR activationText[CX_HOME_API_KEY_CAP], sessionUrlText[CX_OPTIONS_PATH_CAP];
     CX_HOME_CONFIG *copy;
     if (!config || !options) return FALSE;
     length = options->sharedSettingsLength;
@@ -172,14 +288,25 @@ BOOL cx_home_config_apply_options(CX_HOME_CONFIG *config, const CX_OPTIONS *opti
     if (count < 1 || tokens[0].type != '{') goto done;
     base = jkey(json, tokens, 0, "common.settings.tiku-adapter.baseurl");
     key = jkey(json, tokens, 0, "common.settings.tiku-adapter.key");
+    activation = jkey(json, tokens, 0, "common.settings.tiku-adapter.script-activation-token");
+    sessionUrl = jkey(json, tokens, 0, "common.settings.tiku-adapter.script-session-url");
     if (base >= 0 && !jwstr(json, tokens, base, copy->adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP)) goto done;
     if (key >= 0 && !jwstr(json, tokens, key, copy->apiKey, CX_HOME_API_KEY_CAP)) goto done;
+    activationText[0] = 0; sessionUrlText[0] = 0;
+    if ((activation >= 0 && !jwstr(json, tokens, activation, activationText, CX_HOME_API_KEY_CAP))
+        || (sessionUrl >= 0 && !jwstr(json, tokens, sessionUrl, sessionUrlText, CX_OPTIONS_PATH_CAP))) goto done;
+    if (activationText[0] || sessionUrlText[0]) {
+        if (!activationText[0] || !sessionUrlText[0]
+            || !home_activate_script(copy, activationText, sessionUrlText, error, errorCap)) goto done;
+    }
     CopyMemory(config, copy, sizeof(*copy)); ok = TRUE;
 done:
     if (copy) { SecureZeroMemory(copy, sizeof(*copy)); HeapFree(GetProcessHeap(), 0, copy); }
     if (json) { SecureZeroMemory(json, length + 3); HeapFree(GetProcessHeap(), 0, json); }
     if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
-    if (!ok && error && errorCap) home_copy(error, errorCap, L"已有题库服务设置无效，无法初始化首页。");
+    SecureZeroMemory(activationText, sizeof(activationText));
+    SecureZeroMemory(sessionUrlText, sizeof(sessionUrlText));
+    if (!ok && error && errorCap && !error[0]) home_copy(error, errorCap, L"已有题库服务设置无效，无法初始化首页。");
     return ok;
 }
 
@@ -275,18 +402,34 @@ done:
     return ok;
 }
 
+static BOOL home_json_append_pair(char *out, DWORD cap, DWORD *at,
+                                  const char *key, const WCHAR *value, BOOL *first) {
+    DWORD i;
+    if (!out || !at || !key || !value || !first) return FALSE;
+    if (!*first && !home_json_append_char(out, cap, at, ',')) return FALSE;
+    if (!home_json_append_char(out, cap, at, '"')) return FALSE;
+    for (i = 0; key[i]; ++i) if (!home_json_append_char(out, cap, at, key[i])) return FALSE;
+    if (!home_json_append_char(out, cap, at, '"') || !home_json_append_char(out, cap, at, ':')
+        || !home_json_append_char(out, cap, at, '"')
+        || !home_json_append_utf8(out, cap, at, value)
+        || !home_json_append_char(out, cap, at, '"')) return FALSE;
+    *first = FALSE;
+    return TRUE;
+}
+
 static BOOL home_adapter_patch(const CX_HOME_CONFIG *config, char *patch, DWORD cap) {
     DWORD n = 0;
-    return home_json_append_char(patch, cap, &n, '{')
-        && home_json_append_char(patch, cap, &n, '"')
-        && home_json_append_utf8(patch, cap, &n, L"common.settings.tiku-adapter.baseurl")
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_char(patch, cap, &n, ':')
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_utf8(patch, cap, &n, config->adapterBaseUrl)
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_char(patch, cap, &n, ',')
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_utf8(patch, cap, &n, L"common.settings.tiku-adapter.key")
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_char(patch, cap, &n, ':')
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_utf8(patch, cap, &n, config->apiKey)
-        && home_json_append_char(patch, cap, &n, '"') && home_json_append_char(patch, cap, &n, '}');
+    BOOL first = TRUE;
+    if (!config || !patch || cap < 8 || !home_json_append_char(patch, cap, &n, '{')) return FALSE;
+    if (!home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.baseurl", config->adapterBaseUrl, &first)
+        || !home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.key", config->apiKey, &first)) return FALSE;
+    /* A script activation ticket is single-use. Never expose the consumed
+       ticket or activation endpoint to the browser's runtime settings. */
+    if (!home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.script-activation-token", L"", &first)
+        || !home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.script-session-url", L"", &first)) return FALSE;
+    if (config->scriptIdentity[0]
+        && !home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.script-identity", config->scriptIdentity, &first)) return FALSE;
+    return home_json_append_char(patch, cap, &n, '}');
 }
 
 static BOOL home_build_settings(const HOME_STATE *state, const CX_HOME_CONFIG *config,

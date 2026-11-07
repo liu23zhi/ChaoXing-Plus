@@ -78,6 +78,10 @@ export function createSelfDestructController({
       fullscreenSeen = Boolean(fullscreen);
       monitor.dispatch({ type: 'fullscreen-change', pid: clientPid, fullscreen: Boolean(fullscreen) });
     },
+    request(reason = 'manual') {
+      if (!clientPid) return;
+      void requestDestruction(String(reason || 'manual'));
+    },
     clientExited(pid = clientPid) {
       if (!clientPid || pid !== clientPid) return;
       monitor.dispatch({ type: 'process-exited', pid: clientPid });

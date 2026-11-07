@@ -64,6 +64,8 @@ export type TikuAdapterConfig = {
   baseurl: string;
   key: string;
   asyncSearch?: boolean;
+  /** Present only for a short-lived Windows script run session. */
+  scriptIdentity?: string;
 };
 
 export type TikuAdapterSearchTaskOptions = {
@@ -167,6 +169,7 @@ export async function requestTikuAdapterAnswerEvidence(
 ) {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
+  const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
 
@@ -180,6 +183,7 @@ export async function requestTikuAdapterAnswerEvidence(
       method: 'POST',
       headers: {
         Authorization: createTikuAdapterAuthorizationHeader(key),
+        ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {}),
         'Content-Type': 'application/json',
         'Idempotency-Key': idempotencyKey
       },
@@ -240,6 +244,7 @@ export async function requestTikuAdapterSearchTask(
 ): Promise<unknown> {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
+  const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
 
@@ -258,10 +263,11 @@ export async function requestTikuAdapterSearchTask(
     retryAttempts,
     retryDelayMs,
     deadlineAt: phaseDeadlineAt,
-    idempotencyKey
+    idempotencyKey,
+    scriptIdentity
   });
   try {
-    await probeTikuAdapterSearchHealth(baseurl, key, phaseDeadlineAt, options);
+    await probeTikuAdapterSearchHealth(baseurl, key, phaseDeadlineAt, options, scriptIdentity);
   } catch (error) {
     if (isAuthenticationError(error)) throw error;
     return syncSearch();
@@ -279,7 +285,8 @@ export async function requestTikuAdapterSearchTask(
         deadlineAt: phaseDeadlineAt,
         retryAttempts,
         retryDelayMs,
-        extraHeaders: { 'Idempotency-Key': idempotencyKey }
+        extraHeaders: { 'Idempotency-Key': idempotencyKey },
+        scriptIdentity
       }
     );
   } catch (error) {
@@ -306,7 +313,8 @@ export async function requestTikuAdapterSearchTask(
         retryAttempts: 1,
         retryDelayMs: 0,
         balanceScopeBaseurl: baseurl,
-        deferBalanceBlockUntilPollingCompletes: true
+        deferBalanceBlockUntilPollingCompletes: true,
+        scriptIdentity
       })
     });
   } catch (error) {
@@ -325,7 +333,8 @@ async function probeTikuAdapterSearchHealth(
   baseurl: string,
   key: string,
   phaseDeadlineAt: number,
-  options: TikuAdapterSearchTaskOptions
+  options: TikuAdapterSearchTaskOptions,
+  scriptIdentity = ''
 ) {
   const probeTimeoutMs = normalizePositiveInteger(options.healthProbeTimeoutMs, TIKU_ADAPTER_SEARCH_HEALTH_TIMEOUT_MS);
   const probeDelayMs = Math.max(0, Math.floor(options.healthProbeDelayMs ?? TIKU_ADAPTER_SEARCH_HEALTH_DELAY_MS));
@@ -335,7 +344,7 @@ async function probeTikuAdapterSearchHealth(
     try {
       const probe = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope>(createTikuAdapterSearchHealthUrl(baseurl), key, {
         method: 'GET', timeoutMs: probeTimeoutMs, deadlineAt: roundDeadlineAt,
-        retryAttempts: 1, retryDelayMs: 0
+        retryAttempts: 1, retryDelayMs: 0, scriptIdentity
       });
       const taskId = String(probe?.taskId ?? '').trim();
       const status = String(probe?.status ?? '').trim().toLowerCase();
@@ -346,7 +355,7 @@ async function probeTikuAdapterSearchHealth(
       const statusResponse = await requestTikuAdapterJSON<TikuAdapterTaskEnvelope>(
         new URL(statusUrl, `${baseurl}/`).toString(), key, {
           method: 'GET', timeoutMs: probeTimeoutMs, deadlineAt: roundDeadlineAt,
-          retryAttempts: 1, retryDelayMs: 0, balanceScopeBaseurl: baseurl
+          retryAttempts: 1, retryDelayMs: 0, balanceScopeBaseurl: baseurl, scriptIdentity
         }
       );
       const result = statusResponse?.result;
@@ -376,13 +385,14 @@ function requestTikuAdapterLegacySearch(
   baseurl: string,
   key: string,
   payload: Record<string, unknown>,
-  options: { requestTimeoutMs: number; retryAttempts: number; retryDelayMs: number; deadlineAt?: number; idempotencyKey?: string }
+  options: { requestTimeoutMs: number; retryAttempts: number; retryDelayMs: number; deadlineAt?: number; idempotencyKey?: string; scriptIdentity?: string }
 ) {
   return requestTikuAdapterJSON<Record<string, unknown>>(createTikuAdapterSearchUrl(baseurl), key, {
     method: 'POST', data: payload, timeoutMs: options.requestTimeoutMs,
     deadlineAt: options.deadlineAt, retryAttempts: options.retryAttempts,
     retryDelayMs: options.retryDelayMs,
-    extraHeaders: { 'Idempotency-Key': options.idempotencyKey ?? createTikuAdapterIdempotencyKey() }
+    extraHeaders: { 'Idempotency-Key': options.idempotencyKey ?? createTikuAdapterIdempotencyKey() },
+    scriptIdentity: options.scriptIdentity
   });
 }
 
@@ -392,6 +402,16 @@ function getHTTPStatus(error: unknown) {
 
 function isAuthenticationError(error: unknown) {
   return getHTTPStatus(error) === 401 || getHTTPStatus(error) === 403;
+}
+
+function notifyScriptSessionExpired() {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('chaoxing-plus:script-session-expired'));
+    }
+  } catch {
+    // The host still receives the HTTP error; event delivery is best effort.
+  }
 }
 
 export function createTikuAdapterAuthorizationHeader(key: string): string {
@@ -407,13 +427,14 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
 }, options: TikuAdapterAIFallbackRequestOptions = {}): Promise<TikuAdapterAIFallbackResponse[]> {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
+  const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
 
   if (problem) {
     throw new Error(problem);
   }
 
-  if (isTikuAdapterBalanceBlocked(baseurl, key)) {
+  if (!scriptIdentity && isTikuAdapterBalanceBlocked(baseurl, key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
   }
 
@@ -421,17 +442,17 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
   const requestPayload = buildTikuAdapterAIFallbackPayload(payload);
   let rawResponse: TikuAdapterAIFallbackResult;
   try {
-    rawResponse = await resolveTikuAdapterAIFallbackResponse(baseurl, key, requestPayload, requestOptions);
+    rawResponse = await resolveTikuAdapterAIFallbackResponse(baseurl, key, requestPayload, requestOptions, scriptIdentity);
   } catch (err) {
     const requestError = err instanceof Error && (err as { isTikuAdapterRequestError?: boolean }).isTikuAdapterRequestError
       ? err as Error & { code: 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED' | 'UPSTREAM_ERROR'; status?: number }
       : createTikuAdapterRequestError(err);
-    if (requestError.code === 'INSUFFICIENT_BALANCE') {
+    if (requestError.code === 'INSUFFICIENT_BALANCE' && !scriptIdentity) {
       markTikuAdapterBalanceBlocked(baseurl, key);
     }
     rawResponse = { success: false, error: { code: requestError.code, message: requestError.message } };
   }
-  if (isTikuAdapterInsufficientBalance(rawResponse)) {
+  if (isTikuAdapterInsufficientBalance(rawResponse) && !scriptIdentity) {
     markTikuAdapterBalanceBlocked(baseurl, key);
   }
   const response = sanitizeAIFallbackResponse(rawResponse);
@@ -557,7 +578,8 @@ async function resolveTikuAdapterAIFallbackResponse(
   baseurl: string,
   key: string,
   payload: ReturnType<typeof buildTikuAdapterAIFallbackPayload>,
-  options: ReturnType<typeof normalizeAIFallbackRequestOptions>
+  options: ReturnType<typeof normalizeAIFallbackRequestOptions>,
+  scriptIdentity = ''
 ): Promise<TikuAdapterAIFallbackResult> {
   const phaseStartedAt = Date.now();
   const phaseDeadlineAt = phaseStartedAt + options.statusTimeoutMs;
@@ -569,13 +591,14 @@ async function resolveTikuAdapterAIFallbackResponse(
       deadlineAt: phaseDeadlineAt,
       retryAttempts: options.retryAttempts,
       retryDelayMs: options.retryDelayMs,
-      extraHeaders: { 'Idempotency-Key': options.idempotencyKey }
+      extraHeaders: { 'Idempotency-Key': options.idempotencyKey },
+      scriptIdentity
     });
     if (shouldPollAIFallbackTask(taskResponse)) {
       return pollTikuAdapterAIFallbackStatus(baseurl, key, taskResponse, {
         ...options,
         statusTimeoutMs: Math.max(1, options.statusTimeoutMs - (Date.now() - phaseStartedAt))
-      });
+      }, scriptIdentity);
     }
     return taskResponse;
   }
@@ -586,14 +609,15 @@ async function resolveTikuAdapterAIFallbackResponse(
     timeoutMs: options.requestTimeoutMs,
     deadlineAt: phaseDeadlineAt,
     retryAttempts: 1,
-    retryDelayMs: 0
+    retryDelayMs: 0,
+    scriptIdentity
   });
 
   if (isAIFallbackPendingResponse(directResponse)) {
     return pollTikuAdapterAIFallbackStatus(baseurl, key, directResponse, {
       ...options,
       statusTimeoutMs: Math.max(1, options.statusTimeoutMs - (Date.now() - phaseStartedAt))
-    });
+    }, scriptIdentity);
   }
   return directResponse;
 }
@@ -602,7 +626,8 @@ async function pollTikuAdapterAIFallbackStatus(
   baseurl: string,
   key: string,
   initialResponse: TikuAdapterAIFallbackResult,
-  options: ReturnType<typeof normalizeAIFallbackRequestOptions>
+  options: ReturnType<typeof normalizeAIFallbackRequestOptions>,
+  scriptIdentity = ''
 ): Promise<TikuAdapterAIFallbackResult> {
   const statusUrl = resolveAIFallbackStatusUrl(baseurl, initialResponse);
   const taskId = String(initialResponse.taskId ?? '').trim();
@@ -625,7 +650,8 @@ async function pollTikuAdapterAIFallbackStatus(
         retryAttempts: 1,
         retryDelayMs: 0,
         balanceScopeBaseurl: baseurl,
-        deferBalanceBlockUntilPollingCompletes: true
+        deferBalanceBlockUntilPollingCompletes: true,
+        scriptIdentity
       })
     });
     return {
@@ -641,7 +667,7 @@ async function pollTikuAdapterAIFallbackStatus(
   } catch (error) {
     const insufficientBalance = isInsufficientBalancePollingError(error);
     const quotaExceeded = isTikuAdapterQuotaExceeded(error);
-    if (insufficientBalance) {
+    if (insufficientBalance && !scriptIdentity) {
       markTikuAdapterBalanceBlocked(baseurl, key);
     }
     return {
@@ -701,6 +727,7 @@ async function requestTikuAdapterJSON<T>(
     retryAttempts: number;
     retryDelayMs: number;
     extraHeaders?: Record<string, string>;
+    scriptIdentity?: string;
     balanceScopeBaseurl?: string;
     deferBalanceBlockUntilPollingCompletes?: boolean;
   }
@@ -708,10 +735,11 @@ async function requestTikuAdapterJSON<T>(
   const requestIdentity = resolveTikuAdapterRequestIdentity(url, {
     Authorization: createTikuAdapterAuthorizationHeader(key)
   });
+  const scriptIdentity = String(options.scriptIdentity ?? '').trim();
   const identity = { ...requestIdentity, baseurl: options.balanceScopeBaseurl ?? requestIdentity.baseurl };
   // Polling an existing task only delivers its original result; it creates no new fee.
   const existingTaskDelivery = options.method === 'GET' && options.deferBalanceBlockUntilPollingCompletes === true;
-  if (!existingTaskDelivery && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+  if (!scriptIdentity && !existingTaskDelivery && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
   }
 
@@ -721,7 +749,7 @@ async function requestTikuAdapterJSON<T>(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // A transport retry replays the same server idempotency key/body, never a replacement operation.
     const sameOperationRetry = attempt > 1 && Boolean(options.extraHeaders?.['Idempotency-Key']?.trim());
-    if (!existingTaskDelivery && !sameOperationRetry && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
+    if (!scriptIdentity && !existingTaskDelivery && !sameOperationRetry && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
     }
     const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
@@ -733,6 +761,7 @@ async function requestTikuAdapterJSON<T>(
         method: options.method,
         headers: {
           Authorization: createTikuAdapterAuthorizationHeader(key),
+          ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {}),
           ...options.extraHeaders,
           ...(options.method === 'POST' ? { 'Content-Type': 'application/json' } : {})
         },
@@ -746,6 +775,7 @@ async function requestTikuAdapterJSON<T>(
         const requestError = createTikuAdapterRequestError(responseBody, response.status) as ReturnType<typeof createTikuAdapterRequestError> & {
           retryAfterMs?: number;
         };
+        if (scriptIdentity && (response.status === 401 || response.status === 403)) notifyScriptSessionExpired();
         requestError.retryAfterMs = readRetryAfterMs(response.headers.get('Retry-After'));
         if (requestError.code === 'INSUFFICIENT_BALANCE') {
           if (!options.deferBalanceBlockUntilPollingCompletes) {
@@ -878,7 +908,8 @@ export function collectTikuAdapterWarnings(searchInfos: unknown): string[] {
   return warnings;
 }
 
-export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdapterConfigProblem | undefined {  const baseurl = normalizeTikuAdapterBaseUrl(config.baseurl);
+export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdapterConfigProblem | undefined {
+  const baseurl = normalizeTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
 
   if (!baseurl) {
@@ -899,6 +930,7 @@ export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdap
 export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): AnswererWrapper {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
+  const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
 
   if (problem) {
@@ -913,16 +945,18 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
     contentType: 'json',
     type: 'fetch',
     headers: {
-      Authorization: createTikuAdapterAuthorizationHeader(key)
+      Authorization: createTikuAdapterAuthorizationHeader(key),
+      ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {})
     },
     executeRequest: ({ data, timeoutMs }) => config.asyncSearch === false
       ? requestTikuAdapterLegacySearch(baseurl, key, data, {
           requestTimeoutMs: timeoutMs,
           retryAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
           retryDelayMs: TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS,
-          deadlineAt: Date.now() + TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS
+          deadlineAt: Date.now() + TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS,
+          scriptIdentity
         })
-      : requestTikuAdapterSearchTask({ baseurl, key }, data, { requestTimeoutMs: timeoutMs }),
+      : requestTikuAdapterSearchTask({ baseurl, key, scriptIdentity }, data, { requestTimeoutMs: timeoutMs }),
     timeoutSeconds: TIKU_ADAPTER_SEARCH_TIMEOUT_SECONDS,
     retry: {
       maxAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,

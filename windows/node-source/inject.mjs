@@ -387,7 +387,7 @@ export class PageSession {
       this.onConfigSync?.(detail, contextId);
       return;
     }
-    if (payload.kind === 'silent-hotkey' || payload.kind === 'silent-fullscreen') {
+    if (payload.kind === 'silent-hotkey' || payload.kind === 'silent-fullscreen' || payload.kind === 'script-session-expired') {
       // 只接受顶层文档的静默控制事件：答题页大量 about:blank iframe 各自上报
       // 全屏状态时，子 frame 的窗口尺寸必然小于屏幕，会把"已进入全屏"翻成
       // "退出全屏"并误触发自毁。frame 树未知时保持旧行为（不阻断功能）。
@@ -596,6 +596,7 @@ export class PageSession {
     const prefix = `window.__CX_WIN_CONFIG_JSON__=${configJson};`
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
       + silentPrefix
+      + `window.addEventListener('chaoxing-plus:script-session-expired',function(){try{console.log(${JSON.stringify(MESSAGE_PREFIX)}+JSON.stringify({kind:'script-session-expired',detail:{}}));}catch(e){}});`
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
       await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });

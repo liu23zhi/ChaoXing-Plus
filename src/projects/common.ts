@@ -447,10 +447,12 @@ const questionPositionSyncHandlers: Record<QuestionPositionSyncHandlerType, (ind
 export function getStoredTikuAdapterConfig() {
   const baseurl = runtimeStore.get(TIKU_ADAPTER_BASEURL_KEY, DEFAULT_TIKU_BASE_URL);
   const key = runtimeStore.get(TIKU_ADAPTER_KEY_KEY, '');
+  const scriptIdentity = runtimeStore.get('common.settings.tiku-adapter.script-identity', '');
 
   return {
     baseurl: typeof baseurl === 'string' ? baseurl : DEFAULT_TIKU_BASE_URL,
-    key: typeof key === 'string' ? key : ''
+    key: typeof key === 'string' ? key : '',
+    scriptIdentity: typeof scriptIdentity === 'string' ? scriptIdentity : ''
   };
 }
 
@@ -469,6 +471,7 @@ function getWorkOptions(): CommonWorkOptions {
     : createTikuAdapterAnswererWrapper({
         baseurl: resolvedBaseurl,
         key: tikuConfig.key,
+        scriptIdentity: tikuConfig.scriptIdentity,
         asyncSearch: useAsyncTikuSearch
       });
 

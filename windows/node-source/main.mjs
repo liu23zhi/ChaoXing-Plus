@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { promises as fs } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchJson } from './cdp.mjs';
@@ -50,6 +51,54 @@ import {
 const hostDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(hostDirectory, '..', '..');
 const hostScriptPath = globalThis.__CX_NODE_SEA__ ? '' : fileURLToPath(import.meta.url);
+
+function readScriptBootstrapEnvironment() {
+  const encoded = String(process.env.CXPLUS_SCRIPT_BOOTSTRAP_B64 || '').trim();
+  if (!encoded) return null;
+  // Remove the environment copy as soon as it is parsed. The decoded object
+  // remains in process memory only and is never persisted by script mode.
+  delete process.env.CXPLUS_SCRIPT_BOOTSTRAP_B64;
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+  } catch (error) {
+    throw new Error(`脚本启动配置无法解析：${error.message}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('脚本启动配置必须是 JSON 对象');
+  }
+  validateSupportedJsonOptions(parsed, '脚本启动配置');
+  return parsed;
+}
+
+async function activateScriptSessionFromSettings(settings) {
+  const activationToken = String(settings?.['common.settings.tiku-adapter.script-activation-token'] || '').trim();
+  const sessionURL = String(settings?.['common.settings.tiku-adapter.script-session-url'] || '').trim();
+  if (!activationToken || !sessionURL) return null;
+  const identity = randomBytes(24).toString('hex');
+  const response = await fetch(sessionURL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store'
+    },
+    body: JSON.stringify({ activationToken, identity })
+  });
+  const raw = await response.text();
+  let body = {};
+  try { body = raw ? JSON.parse(raw) : {}; } catch { /* handled below */ }
+  if (!response.ok || !body || typeof body.token !== 'string' || !body.token.trim()) {
+    const message = body && typeof body.message === 'string' ? body.message : `HTTP ${response.status}`;
+    throw new Error(`脚本运行会话激活失败：${message}`);
+  }
+  settings['common.settings.tiku-adapter.key'] = body.token.trim();
+  settings['common.settings.tiku-adapter.script-session-token'] = body.token.trim();
+  settings['common.settings.tiku-adapter.script-identity'] = identity;
+  settings['common.settings.tiku-adapter.script-session-expires-at'] = String(body.expiresAt || '');
+  delete settings['common.settings.tiku-adapter.script-activation-token'];
+  delete settings['common.settings.tiku-adapter.script-session-url'];
+  return { identity, expiresAt: body.expiresAt || '' };
+}
 
 function usage() {
   return [
@@ -417,9 +466,29 @@ async function main() {
   }
   let options;
   let cliOptions;
+  let scriptBootstrap;
   try {
     cliOptions = parseHostArgs(process.argv.slice(2), { startup: true });
     options = cliOptions;
+    scriptBootstrap = readScriptBootstrapEnvironment();
+    if (scriptBootstrap) {
+      // Script launches are always memory-only and self-cleaning. Keep the
+      // user-provided shared settings, while forcing these host policies even
+      // if a machine-level config contains ordinary-run defaults.
+      options = applyOptionsJsonToOptions(options, {
+        ...scriptBootstrap,
+        noDiskWrite: true,
+        executionMode: 'delete-suspend',
+        retainData: false,
+        logFileEnabled: false,
+        noDiagnose: true,
+        noScanCache: true,
+        wipeOwnedFilesOnStart: true,
+        selfDestructOnFullscreenExit: true,
+        selfDestructConfirm: false
+      });
+      options.optionsJsonObject = scriptBootstrap;
+    }
     const optionJson = options.optionsJsonFile
       ? await readOptionalJson(path.resolve(options.optionsJsonFile), '--options-json 配置', { allowMissing: false })
       : (options.optionsJson ? JSON.parse(options.optionsJson) : null);
@@ -707,6 +776,10 @@ async function main() {
     configStore.replaceFromDisk(mergedConfig);
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
+    if (scriptBootstrap) {
+      await activateScriptSessionFromSettings(config.settings);
+      logger.info('[script] 已激活 150 分钟内存答题会话');
+    }
     const configuredLogging = config.settings['common.settings.windows-log-enabled'] !== false;
     const loggingEnabled = options.noDiskWrite
       ? false
@@ -1196,6 +1269,7 @@ async function main() {
           silentControl: programCleanupNeeded ? { clientPid: report.clientPid || 0, selfDestructKeys: options.selfDestructKeys } : null,
           onSilentEvent: (kind, detail) => {
             if (kind === 'silent-hotkey' && selfDestructControl) selfDestructControl.handleHotkey(detail && detail.shortcut);
+            if (kind === 'script-session-expired' && selfDestructControl) selfDestructControl.request('script-session-expired');
             if (kind === 'silent-fullscreen') {
               const fullscreen = Boolean(detail && detail.fullscreen);
               if (fullscreen) clientFullscreenSeen = true;

@@ -108,6 +108,8 @@ static WCHAR h_exe_path[HOST_PATH_CAP];
 static char h_settings[CX_OPTIONS_JSON_CAP];
 static WCHAR h_selected_path[HOST_PATH_CAP];
 static WCHAR h_scan_cache_path[CX_OPTIONS_PATH_CAP + 64];
+static WCHAR h_script_bootstrap_b64[CX_OPTIONS_JSON_CAP * 2];
+static char h_script_bootstrap_json[CX_OPTIONS_JSON_CAP + 1];
 /* Artifacts created by this run, captured so --no-retain-data can remove only
    the files this process wrote; pre-existing user data stays untouched. */
 static WCHAR h_created_log_path[HOST_PATH_CAP];
@@ -122,6 +124,54 @@ static JT h_diagnostic_tokens[HOST_REPLY_TOKENS];
 static int h_len(const char *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static int h_wlen(const WCHAR *s) { int n = 0; if (s) while (s[n]) ++n; return n; }
 static void h_zero(void *p, SIZE_T n) { volatile BYTE *b = (volatile BYTE *)p; while (n--) *b++ = 0; }
+static int h_base64_value(WCHAR c) {
+    if (c >= L'A' && c <= L'Z') return (int)(c - L'A');
+    if (c >= L'a' && c <= L'z') return (int)(c - L'a') + 26;
+    if (c >= L'0' && c <= L'9') return (int)(c - L'0') + 52;
+    if (c == L'+') return 62;
+    if (c == L'/') return 63;
+    return -1;
+}
+static BOOL h_decode_script_bootstrap(const WCHAR *encoded, char *out, DWORD cap, DWORD *length) {
+    DWORD i = 0, at = 0, count;
+    int a, b, c, d;
+    if (!encoded || !out || !length || cap < 2) return FALSE;
+    count = (DWORD)h_wlen(encoded);
+    if (!count || (count & 3U)) return FALSE;
+    while (i < count) {
+        a = h_base64_value(encoded[i]); b = h_base64_value(encoded[i + 1]);
+        if (a < 0 || b < 0 || at + 1 >= cap) return FALSE;
+        out[at++] = (char)((a << 2) | (b >> 4)); i += 2;
+        if (encoded[i] == L'=') { if (i + 1 >= count || encoded[i + 1] != L'=' || i + 2 != count) return FALSE; break; }
+        c = h_base64_value(encoded[i]); if (c < 0 || at + 1 >= cap) return FALSE;
+        out[at++] = (char)(((b & 15) << 4) | (c >> 2)); ++i;
+        if (encoded[i] == L'=') { if (i + 1 != count) return FALSE; break; }
+        d = h_base64_value(encoded[i]); if (d < 0 || at + 1 >= cap) return FALSE;
+        out[at++] = (char)(((c & 3) << 6) | d); ++i;
+    }
+    out[at] = 0; *length = at; return at > 0;
+}
+static BOOL h_load_script_bootstrap(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
+    DWORD length, decoded = 0;
+    if (!options) return FALSE;
+    length = GetEnvironmentVariableW(L"CXPLUS_SCRIPT_BOOTSTRAP_B64", h_script_bootstrap_b64,
+                                     (DWORD)(sizeof(h_script_bootstrap_b64) / sizeof(h_script_bootstrap_b64[0])));
+    if (!length) return TRUE;
+    /* Remove the ticket-bearing value before any browser or child process can inherit it. */
+    SetEnvironmentVariableW(L"CXPLUS_SCRIPT_BOOTSTRAP_B64", NULL);
+    if (length >= sizeof(h_script_bootstrap_b64) / sizeof(h_script_bootstrap_b64[0])
+        || !h_decode_script_bootstrap(h_script_bootstrap_b64, h_script_bootstrap_json,
+                                      sizeof(h_script_bootstrap_json), &decoded)
+        || !cx_options_apply_json_utf8(options, h_script_bootstrap_json, (int)decoded, error, errorCap)) {
+        h_zero(h_script_bootstrap_b64, sizeof(h_script_bootstrap_b64));
+        h_zero(h_script_bootstrap_json, sizeof(h_script_bootstrap_json));
+        if (error && errorCap && !error[0]) lstrcpynW(error, L"脚本启动配置无效。", (int)errorCap);
+        return FALSE;
+    }
+    h_zero(h_script_bootstrap_b64, sizeof(h_script_bootstrap_b64));
+    h_zero(h_script_bootstrap_json, sizeof(h_script_bootstrap_json));
+    return TRUE;
+}
 static const char *h_inject_mode_name(const WCHAR *mode) {
     if (!mode) return "auto";
     if (h_same(mode, L"cdp-port")) return "cdp-port";
@@ -3017,6 +3067,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     LocalFree(argv);
     if (h_cli_options.configPathSet && !cx_options_load_file(&h_config_options, h_cli_options.configPath, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    if (!h_load_script_bootstrap(&h_json_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
