@@ -1,0 +1,120 @@
+name: 虚拟机自毁环境验证
+
+# 这个工作流只在具备可快照 Windows 虚拟机（runner 标签 cx-vm）的环境运行。
+# 关机自毁、开机续删与强制关机保障无法在常驻托管 runner 上验证：
+# 托管 runner 不支持嵌套虚拟化，也不能重启或还原快照。
+#
+# 触发方式刻意保守，避免没有 VM runner 时让所有 PR 变红：
+#   - 手动触发
+#   - 每周一次夜间巡检
+#   - PR 打了 vm-test 标签
+# 需要仓库变量 CX_VM_ENABLED=true 才会真正执行，否则整作业 skipped。
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * 0'
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-vm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  vm-shutdown-destruct:
+    name: 关机自毁与开机续删（虚拟机）
+    # 三重保护：变量开启、事件类型匹配、runner 可用。
+    if: |
+      vars.CX_VM_ENABLED == 'true' && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'pull_request' && github.event.label.name == 'vm-test')
+      )
+    runs-on: [self-hosted, windows, cx-vm]
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 记录基线快照标记
+        shell: pwsh
+        run: |
+          # 快照本身由 runner 镜像层负责；这里只记录起点，便于失败时对照。
+          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          "CX_VM_SNAPSHOT_BASELINE=$stamp" | Out-File -FilePath "$env:RUNNER_TEMP\cx-vm-baseline.txt" -Encoding utf8
+          Write-Output "基线标记 $stamp"
+
+      - name: 断言起点干净（无残留登记与临时目录）
+        shell: pwsh
+        run: |
+          ./scripts/vm/assert-clean.ps1 -Stage baseline
+
+      - name: 构建原生测试产物
+        shell: pwsh
+        run: |
+          # 复用仓库既有构建脚本，不新增一套编译流程。
+          ./windows/native-source/build-windows.ps1 -Target tests
+        env:
+          CX_NATIVE_BUILD_ALLOW_UNSIGNED: '1'
+
+      - name: 关机自毁端到端
+        shell: pwsh
+        run: |
+          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 开机续删与强制关机保障
+        shell: pwsh
+        run: |
+          ./scripts/vm/run-shutdown-destruct.ps1 -Stage resume
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 断言终点干净（自毁后无残留）
+        if: always()
+        shell: pwsh
+        run: |
+          ./scripts/vm/assert-clean.ps1 -Stage teardown
+
+      - name: 上传证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-vm-destruct-evidence
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/cx-vm-*.txt
+            ${{ runner.temp }}/cx-purge-*.log
+            ${{ runner.temp }}/cx-purge-*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 还原虚拟机快照
+        if: always()
+        shell: pwsh
+        run: |
+          # 快照还原交给 runner 自身的 VM 管理层（Hyper-V / VMware / Proxmox），
+          # 由 VM_RESTORE_COMMAND 注入；未配置时只告警，不掩盖前面的失败。
+          if ([string]::IsNullOrWhiteSpace($env:VM_RESTORE_COMMAND)) {
+            Write-Warning '未配置 VM_RESTORE_COMMAND；本次运行后虚拟机不会自动还原，请人工核对。'
+            exit 0
+          }
+          Invoke-Expression $env:VM_RESTORE_COMMAND
+        env:
+          VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
