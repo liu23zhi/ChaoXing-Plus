@@ -91,8 +91,10 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length, WCHAR *error, 
     return TRUE;
 }
 
+static BOOL transportErrorMode;
 int net_ws_read(NET_WS *ws, char **text, DWORD *length, WCHAR *error, DWORD cap) {
     (void)ws; (void)error; (void)cap;
+    if (transportErrorMode) { *text = NULL; *length = 0; return -1; }
     *length = (DWORD)h_len(response);
     *text = (char *)HeapAlloc(GetProcessHeap(), 0, *length + 1);
     if (!*text) return -1;
@@ -456,6 +458,204 @@ int net_pipe_recv_frame(HANDLE readHandle, char **payload, DWORD *length, DWORD 
     if (length) *length = 0;
     return -1;
 }
+/* ---- auto 分派与注入判据（离线，不启动客户端） ---- */
+static BOOL write_pe_with_section(const WCHAR *path, const char *sectionName) {
+    HANDLE file;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS nt;
+    IMAGE_SECTION_HEADER section;
+    DWORD written = 0, i;
+    BOOL ok = FALSE;
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ZeroMemory(&dos, sizeof(dos));
+    dos.e_magic = IMAGE_DOS_SIGNATURE;
+    dos.e_lfanew = (LONG)sizeof(dos);
+    ZeroMemory(&nt, sizeof(nt));
+    nt.Signature = IMAGE_NT_SIGNATURE;
+    nt.FileHeader.NumberOfSections = 1;
+    nt.FileHeader.SizeOfOptionalHeader = 0;
+    ZeroMemory(&section, sizeof(section));
+    for (i = 0; i < 8 && sectionName[i]; ++i) section.Name[i] = (BYTE)sectionName[i];
+    ok = WriteFile(file, &dos, sizeof(dos), &written, NULL) && written == sizeof(dos)
+        && WriteFile(file, &nt, sizeof(nt), &written, NULL) && written == sizeof(nt)
+        && WriteFile(file, &section, sizeof(section), &written, NULL) && written == sizeof(section);
+    CloseHandle(file);
+    return ok;
+}
+static void touch_file(const WCHAR *path) {
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+}
+/* 写 marker 并指定载体名。注入测试用的最小 PE 不导入 winmm.dll，
+   因此这里只验证"未导入即不可复用"；导入成立的分支由
+   scripts/windows-native-inject-mode-matrix.test.mjs 用真导入 winmm.dll 的
+   carrier-fixture.exe 覆盖。 */
+static void write_marker(const WCHAR *dir, const char *carrier) {
+    WCHAR path[MAX_PATH];
+    HANDLE file;
+    DWORD written = 0;
+    char text[64];
+    int at = 0, k = 0;
+    static const char prefix[] = "cxhook-proxy\r\ncarrier=";
+    lstrcpyW(path, dir); lstrcatW(path, L"\\cxhook-proxy.marker");
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    while (prefix[at]) { text[at] = prefix[at]; ++at; }
+    while (carrier[k] && at < 56) text[at++] = carrier[k++];
+    text[at++] = '\r'; text[at++] = '\n';
+    WriteFile(file, text, (DWORD)at, &written, NULL);
+    CloseHandle(file);
+}
+static BOOL make_directory(const WCHAR *path) { CreateDirectoryW(path, NULL); return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES; }
+static BOOL file_exists(const WCHAR *path) { return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES; }
+
+static void test_inject_plan(void) {
+    WCHAR root[MAX_PATH], plainDir[MAX_PATH], packedDir[MAX_PATH], installedDir[MAX_PATH];
+    WCHAR plainClient[MAX_PATH], packedClient[MAX_PATH], installedClient[MAX_PATH];
+    WCHAR path[MAX_PATH];
+    H_INJECT_PLAN plan;
+    if (!GetEnvironmentVariableW(L"CX_INJECT_TEST_DIR", root, MAX_PATH)) {
+        WCHAR temp[MAX_PATH];
+        if (!GetTempPathW(MAX_PATH, temp)) ExitProcess(2);
+        lstrcpyW(root, temp);
+        lstrcatW(root, L"cx-inject-plan");
+    }
+    make_directory(root);
+    wsprintfW(plainDir, L"%s\\plain", root);
+    wsprintfW(packedDir, L"%s\\packed", root);
+    wsprintfW(installedDir, L"%s\\installed", root);
+    make_directory(plainDir); make_directory(packedDir); make_directory(installedDir);
+    wsprintfW(plainClient, L"%s\\CXExam.exe", plainDir);
+    wsprintfW(packedClient, L"%s\\CXExam.exe", packedDir);
+    wsprintfW(installedClient, L"%s\\CXExam.exe", installedDir);
+    if (!write_pe_with_section(plainClient, ".text")
+        || !write_pe_with_section(packedClient, ".themida")) ExitProcess(2);
+
+    /* 1) 未加壳且无代理 → cdp-port（不传/传 auto 都一样，auto 不额外安装） */
+    h_plan_inject(plainClient, FALSE, &plan);
+    check("plain client plans cdp-port", plan.channel == H_INJECT_CHANNEL_CDP_PORT
+        && plan.reason == H_INJECT_PLAN_PORTABLE && !plan.packed && !plan.proxyPresent);
+    h_plan_inject(plainClient, TRUE, &plan);
+    check("plain client stays on cdp-port in auto", plan.channel == H_INJECT_CHANNEL_CDP_PORT);
+
+    /* 2) 加壳 → dll-proxy（auto 与默认都要命中） */
+    h_plan_inject(packedClient, FALSE, &plan);
+    check("packed client plans dll-proxy without an explicit mode", plan.channel == H_INJECT_CHANNEL_DLL_PROXY
+        && plan.reason == H_INJECT_PLAN_PROXY_REQUIRED && plan.packed);
+    h_plan_inject(packedClient, TRUE, &plan);
+    check("packed client keeps dll-proxy in auto", plan.channel == H_INJECT_CHANNEL_DLL_PROXY);
+
+    /* 3) 已装代理 + marker：最小 PE 不导入 winmm，故不可复用；marker 缺失也不认。 */
+    lstrcpyW(path, installedDir); lstrcatW(path, L"\\cxhook-proxy.marker"); DeleteFileW(path);
+    lstrcpyW(path, installedDir); lstrcatW(path, L"\\winmm.dll"); touch_file(path);
+    h_plan_inject(installedClient, TRUE, &plan);
+    check("dll without marker is not reused", plan.channel == H_INJECT_CHANNEL_CDP_PORT && plan.proxyPresent && !plan.markerPresent);
+    write_marker(installedDir, "winmm");
+    h_plan_inject(installedClient, TRUE, &plan);
+    /* 有 DLL 有 marker，但客户端不导入该载体 → 不能声称可复用。 */
+    check("carrier that the client never imports is not reusable",
+        plan.channel == H_INJECT_CHANNEL_CDP_PORT && plan.proxyPresent && plan.markerPresent && !plan.proxyUsable);
+    /* 不传 --inject-mode 时保持历史默认：有代理也不自动切换 */
+    h_plan_inject(installedClient, FALSE, &plan);
+    check("default mode keeps cdp-port even with an installed proxy", plan.channel == H_INJECT_CHANNEL_CDP_PORT);
+
+    /* 4) 空/无效路径必须安全回落，不能崩 */
+    h_plan_inject(NULL, TRUE, &plan);
+    check("missing client path plans cdp-port", plan.channel == H_INJECT_CHANNEL_CDP_PORT && !plan.packed);
+    h_plan_inject(L"", TRUE, &plan);
+    check("empty client path plans cdp-port", plan.channel == H_INJECT_CHANNEL_CDP_PORT);
+    h_plan_inject(L"Z:\\no-such-dir\\CXExam.exe", TRUE, &plan);
+    check("nonexistent client path plans cdp-port", plan.channel == H_INJECT_CHANNEL_CDP_PORT && !plan.proxyPresent);
+}
+
+static void test_proxy_log_evidence(void) {
+    WCHAR path[MAX_PATH];
+    HANDLE file;
+    DWORD written = 0, pid = GetCurrentProcessId();
+    static const char confirmed[] = "winmm proxy loaded | C:\\x\\CXExam.exe\r\n"
+                                    "winmm proxy: settings-only mode (forced) | C:\\x\\CXExam.exe\r\n";
+    static const char failed[] = "winmm proxy loaded | C:\\x\\CXExam.exe\r\n"
+                                 "winmm proxy: no injection port | C:\\x\\CXExam.exe\r\n";
+    static const char unrelated[] = "winmm proxy loaded | C:\\x\\CXExam.exe\r\n";
+    path[0] = 0;
+    if (!h_proxy_log_path(pid, path, MAX_PATH)) ExitProcess(2);
+    check("proxy log path names the client pid", h_wcontains(path, L"cxhook-"));
+    DeleteFileW(path);
+    check("absent proxy log is unknown, not failed", h_proxy_hook_state(pid) == H_PROXY_HOOK_UNKNOWN);
+
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
+    WriteFile(file, confirmed, (DWORD)(sizeof(confirmed) - 1), &written, NULL);
+    CloseHandle(file);
+    check("proxy log with cef hook evidence is confirmed", h_proxy_hook_state(pid) == H_PROXY_HOOK_CONFIRMED);
+
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
+    WriteFile(file, failed, (DWORD)(sizeof(failed) - 1), &written, NULL);
+    CloseHandle(file);
+    check("proxy log without an injection port is failed", h_proxy_hook_state(pid) == H_PROXY_HOOK_FAILED);
+
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
+    WriteFile(file, unrelated, (DWORD)(sizeof(unrelated) - 1), &written, NULL);
+    CloseHandle(file);
+    check("proxy log without hook evidence stays unknown", h_proxy_hook_state(pid) == H_PROXY_HOOK_UNKNOWN);
+    DeleteFileW(path);
+}
+
+/* ---- 注入判据：页面主世界哨兵（三态） ---- */
+static void test_bundle_sentinel(void) {
+    WCHAR error[HOST_ERROR_CAP];
+    H_NATIVE_PAGE page;
+    DWORD before;
+    ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1;
+    page.nextId = 1;
+    page.state = NULL;
+    cx_options_init(&h_base_options);
+    error[0] = 0;
+
+    /* 确认：页面回答 boolean true → 注入落地 */
+    ZeroMemory(&h_report, sizeof(h_report));
+    scriptReplyMode = 0; calls = 0; failures = 0; cancelReadMode = 0;
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel confirms a true page acknowledgement", h_report.injectEvidence.bundleInPage
+        && !h_report.injectEvidence.bundleSentinelRejected);
+
+    /* 明确否定：页面回答 boolean false → 拒绝 */
+    ZeroMemory(&h_report, sizeof(h_report));
+    scriptReplyMode = 1; calls = 0;
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel records an explicit false acknowledgement", !h_report.injectEvidence.bundleInPage
+        && h_report.injectEvidence.bundleSentinelRejected);
+
+    /* 明确否定：脚本抛异常 */
+    ZeroMemory(&h_report, sizeof(h_report));
+    scriptReplyMode = 3; calls = 0;
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel records a page exception as rejection", !h_report.injectEvidence.bundleInPage
+        && h_report.injectEvidence.bundleSentinelRejected);
+
+    /* 无法判定：传输层错误不升级为否定 */
+    ZeroMemory(&h_report, sizeof(h_report));
+    scriptReplyMode = 0; calls = 0; transportErrorMode = TRUE;
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel transport failure is unknown, not rejected", !h_report.injectEvidence.bundleInPage
+        && !h_report.injectEvidence.bundleSentinelRejected);
+    transportErrorMode = FALSE;
+
+    /* 已确认后不重复探测 */
+    ZeroMemory(&h_report, sizeof(h_report));
+    h_report.injectEvidence.bundleInPage = TRUE;
+    before = calls;
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel probe runs once per run", calls == before);
+    scriptReplyMode = 0;
+    ZeroMemory(&h_report, sizeof(h_report));
+    error[0] = 0;
+}
+
 void __stdcall InjectionTestMain(void) {
     DWORD id = 2;
     int argc;
@@ -478,6 +678,14 @@ void __stdcall InjectionTestMain(void) {
     check("script exception falls back to runtime", run_replies(L"script", 0, 0, 3, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     check("script string true is not an execution acknowledgement", run_replies(L"script", 0, 0, 4, &id) && calls == 2 && lstrcmpA(methods, "SR") == 0);
     test_owned_target_refresh();
+    {
+        WCHAR gate[16];
+        gate[0] = 0;
+        GetEnvironmentVariableW(L"CX_INJECT_TEST_ONLY", gate, 16);
+        if (!gate[0] || lstrcmpW(gate, L"plan") == 0) test_inject_plan();
+        if (!gate[0] || lstrcmpW(gate, L"log") == 0) test_proxy_log_evidence();
+        if (!gate[0] || lstrcmpW(gate, L"sentinel") == 0) test_bundle_sentinel();
+    }
     test_http_deadline_budget();
     test_endpoint_probe();
     test_upgrade_deadline_budget();

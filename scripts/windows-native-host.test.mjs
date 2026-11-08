@@ -85,7 +85,29 @@ test('compiled native injection honors strategy order, retry limits and unique r
     'endpoint probe distinguishes rejected binding',
     'endpoint probe retains HTTP failure beside duration stop reason',
     'endpoint probe separates invalid version from browser mismatch',
-    'endpoint probe records valid but mismatched browser'
+    'endpoint probe records valid but mismatched browser',
+    // auto 三段式分派（离线，不启动客户端）
+    'plain client plans cdp-port',
+    'plain client stays on cdp-port in auto',
+    'packed client plans dll-proxy without an explicit mode',
+    'packed client keeps dll-proxy in auto',
+    'dll without marker is not reused',
+    'carrier that the client never imports is not reusable',
+    'default mode keeps cdp-port even with an installed proxy',
+    'missing client path plans cdp-port',
+    'empty client path plans cdp-port',
+    'nonexistent client path plans cdp-port',
+    // 注入成功判据
+    'proxy log path names the client pid',
+    'absent proxy log is unknown, not failed',
+    'proxy log with cef hook evidence is confirmed',
+    'proxy log without an injection port is failed',
+    'proxy log without hook evidence stays unknown',
+    'bundle sentinel confirms a true page acknowledgement',
+    'bundle sentinel records an explicit false acknowledgement',
+    'bundle sentinel records a page exception as rejection',
+    'bundle sentinel transport failure is unknown, not rejected',
+    'bundle sentinel probe runs once per run'
   ]) assert.ok(result.stdout.includes(`PASS ${regression}`), result.stdout);
 });
 

@@ -166,6 +166,7 @@ try {
             @{ Name = 'dpi-process-tests'; Entry = 'DpiProcessTestMain'; Objects = @('memory','process','dpi'); Resources = @() },
             @{ Name = 'process-check-tests'; Entry = 'ProcessCheckTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'process-fixture'; Entry = 'ProcessFixtureMain'; Objects = @('memory'); Resources = @() },
+            @{ Name = 'carrier-fixture'; Entry = 'CarrierFixtureMain'; Objects = @(); Resources = @(); ExtraLibs = @('winmm.lib') },
             @{ Name = 'cli-selection-tests'; Entry = 'CliSelectionTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','purge','wipe'); Resources = @($resourceObject) },
             @{ Name = 'silent-tests'; Entry = 'SilentTestMain'; Objects = @('memory','silent'); Resources = @() },
             @{ Name = 'purge-tests'; Entry = 'PurgeTestMain'; Objects = @('memory','purge'); Resources = @() }
@@ -179,7 +180,9 @@ try {
             $testResources = $test.Resources
             $testManifest = @()
             if ($test.ContainsKey('Manifest')) { $testManifest = @('/MANIFESTINPUT:' + (Join-Path $sourceRoot $test.Manifest)) }
-            & $linker @testArgs @testManifest ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
+            $extraLibs = @()
+            if ($test.ContainsKey('ExtraLibs')) { $extraLibs = @($test.ExtraLibs) }
+            & $linker @testArgs @testManifest ('/ENTRY:' + $test.Entry) ('/OUT:' + (Join-Path $bin ($test.Name + '.exe'))) @testObjects $testObject @testResources kernel32.lib user32.lib gdi32.lib comdlg32.lib shell32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib @extraLibs
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $bin ($test.Name + '.exe')) -PathType Leaf)) { throw "Native test link failed or output is missing: $($test.Name)" }
         }
         if ($BuildConsole) {

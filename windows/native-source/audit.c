@@ -260,6 +260,18 @@ static void json_endpoint_probe(CX_AUDIT_TEXT *out, const CX_ENDPOINT_PROBE *pro
     }
     append(out, "}}");
 }
+static void json_inject_evidence(CX_AUDIT_TEXT *out, const CX_INJECT_EVIDENCE *evidence) {
+    append(out, ",\"injectEvidence\":{\"endpointReady\":");
+    append(out, evidence->endpointReady ? "true" : "false");
+    json_bool(out, "proxyHook", evidence->proxyHook);
+    json_bool(out, "proxyHookRequired", evidence->proxyHookRequired);
+    json_bool(out, "bundleInPage", evidence->bundleInPage);
+    json_bool(out, "bundleSentinelRejected", evidence->bundleSentinelRejected);
+    json_bool(out, "verified", evidence->endpointReady && evidence->bundleInPage
+        && (!evidence->proxyHookRequired || evidence->proxyHook));
+    append(out, ",\"reason\":"); json_string(out, evidence->reason ? evidence->reason : "not-started");
+    append(out, "}");
+}
 BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
                            WCHAR *error, DWORD errorCap) {
     char *buffer, finishedAt[25]; CX_AUDIT_TEXT out; HANDLE file; BOOL ok; DWORD code;
@@ -283,6 +295,7 @@ BOOL cx_audit_write_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report,
     append(&out, ",\"stopReason\":"); json_string(&out, report->stopReason);
     append(&out, ",\"injectMode\":"); json_string(&out, report->injectMode ? report->injectMode : "unknown");
     append(&out, ",\"commandLineInjected\":"); append(&out, report->commandLineInjected ? "true" : "false");
+    json_inject_evidence(&out, &report->injectEvidence);
     json_endpoint_probe(&out, &report->endpointProbe);
     append(&out, ",\"totals\":{\"contexts\":"); number(&out, report->contexts, 0);
     json_number(&out, "bootstraps", report->bootstraps); json_number(&out, "bundles", report->bundles);

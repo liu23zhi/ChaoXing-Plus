@@ -77,6 +77,10 @@ static CX_SESSION_TASK h_current_task;
 static BOOL h_task_pending;
 static int h_current_context;
 static DWORD h_command_timeout = 10000;
+/* 最近一次 h_send_eval_checked 是否拿到页面给出的"明确否定"：
+   CDP 应答里带 error/exceptionDetails，或 boolean 结果不是 true。
+   超时/断连等传输问题不算否定，避免把一次抖动当成注入失败。 */
+static BOOL h_last_eval_rejected;
 static DWORD h_client_pid, h_started, h_duration;
 static DWORD h_bundles_completed;
 static int h_exit_code;
@@ -967,6 +971,8 @@ static BOOL h_selfheal_retry(const CX_OPTIONS *options, HANDLE clientProcess) {
     h_proxy_auto_installed = TRUE;
     h_dll_proxy_mode = TRUE;
     h_report.injectMode = "dll-proxy";
+    /* 自愈同样要按代理通道验收：没有 cef_initialize 钩子证据就不算注入成功。 */
+    h_report.injectEvidence.proxyHookRequired = TRUE;
     return TRUE;
 }
 static BOOL h_install_proxy(const CX_OPTIONS *options) {
@@ -1706,6 +1712,184 @@ static BOOL h_file_contains_ci(const WCHAR *path, const char *needle) {
     CloseHandle(file);
     return found;
 }
+/* ---------- 注入通道规划：唯一的 auto 分派真源 ---------- */
+
+/* auto 三段式（按三代真实客户端实测结论固定）：
+   1. 客户端目录已有我们的代理（载体 DLL + cxhook-proxy.marker）→ 直接复用 dll-proxy，绝不覆盖；
+   2. 客户端有 .themida 节（Themida 加壳吞掉命令行开关）→ 临时安装 dll-proxy，结束还原；
+   3. 其余 → cdp-port（--remote-debugging-port 只在 libcef 开关表，宿主 EXE 无命中，可外部传入）。
+   cdp-pipe 与 input 三代均不可用，auto 永不退回它们；显式选择会明确失败。 */
+typedef enum H_INJECT_CHANNEL {
+    H_INJECT_CHANNEL_CDP_PORT = 0,
+    H_INJECT_CHANNEL_DLL_PROXY = 1
+} H_INJECT_CHANNEL;
+
+typedef enum H_INJECT_PLAN_REASON {
+    H_INJECT_PLAN_PORTABLE = 0,      /* 未加壳：命令行端口 */
+    H_INJECT_PLAN_PROXY_INSTALLED,   /* 已有我们的代理：复用 */
+    H_INJECT_PLAN_PROXY_REQUIRED     /* 加壳：必须用代理 */
+} H_INJECT_PLAN_REASON;
+
+typedef struct H_INJECT_PLAN {
+    H_INJECT_CHANNEL channel;
+    H_INJECT_PLAN_REASON reason;
+    BOOL proxyPresent;
+    BOOL markerPresent;
+    BOOL proxyUsable;   /* 客户端真的导入该载体，DLL 才会被加载 */
+    BOOL packed;
+} H_INJECT_PLAN;
+
+static const char *h_inject_plan_reason_name(H_INJECT_PLAN_REASON reason) {
+    switch (reason) {
+        case H_INJECT_PLAN_PROXY_INSTALLED: return "proxy-installed";
+        case H_INJECT_PLAN_PROXY_REQUIRED: return "proxy-required";
+        default: return "portable";
+    }
+}
+static const char *h_inject_channel_name(H_INJECT_CHANNEL channel) {
+    return channel == H_INJECT_CHANNEL_DLL_PROXY ? "dll-proxy" : "cdp-port";
+}
+/* 从 cxhook-proxy.marker 读出载体名（"cxhook-proxy\r\ncarrier=winmm\r\n"）。
+   返回 FALSE 表示 marker 缺失或格式不符——那种情况下不能认定"这是我们的代理"。 */
+static BOOL h_read_proxy_carrier(const WCHAR *markerPath, WCHAR *carrier, DWORD cap) {
+    HANDLE file;
+    char text[64];
+    DWORD got = 0, at, k = 0;
+    static const char key[] = "carrier=";
+    if (!markerPath || !carrier || cap < 8) return FALSE;
+    carrier[0] = 0;
+    file = CreateFileW(markerPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ZeroMemory(text, sizeof(text));
+    if (!ReadFile(file, text, (DWORD)sizeof(text) - 1, &got, NULL) || !got) { CloseHandle(file); return FALSE; }
+    CloseHandle(file);
+    text[got] = 0;
+    for (at = 0; at + 8 <= got; ++at) {
+        int same = 1, i;
+        for (i = 0; key[i]; ++i) if (text[at + i] != key[i]) { same = 0; break; }
+        if (!same) continue;
+        at += 8;
+        while (at < got && text[at] != '\r' && text[at] != '\n' && k + 1 < cap) carrier[k++] = (WCHAR)text[at++];
+        carrier[k] = 0;
+        return k > 0;
+    }
+    return FALSE;
+}
+
+/* 载体名 → "winmm.dll"，用于核对客户端是否真的导入该 DLL。 */
+static BOOL h_carrier_dll_name(const WCHAR *carrier, WCHAR *out, DWORD cap) {
+    int at = 0;
+    if (!carrier || !*carrier || !out || cap < 8) return FALSE;
+    while (carrier[at] && at + 5 < cap) { out[at] = carrier[at]; ++at; }
+    out[at++] = L'.'; out[at++] = L'd'; out[at++] = L'l'; out[at++] = L'l'; out[at] = 0;
+    return TRUE;
+}
+
+/* reuseInstalled 只有显式 --inject-mode auto 才为真：不传该参数时保持"默认 cdp-port"
+   的历史语义（UAC 交接夹具依赖它），但加壳判断对两种情形都生效。 */
+static void h_plan_inject(const WCHAR *clientPath, BOOL reuseInstalled, H_INJECT_PLAN *plan) {
+    WCHAR dir[CX_CLEANUP_PATH_CAP], path[CX_CLEANUP_PATH_CAP], marker[CX_CLEANUP_PATH_CAP];
+    WCHAR carrier[32], carrierDll[40];
+    if (!plan) return;
+    h_zero(plan, sizeof(*plan));
+    plan->channel = H_INJECT_CHANNEL_CDP_PORT;
+    plan->reason = H_INJECT_PLAN_PORTABLE;
+    if (!clientPath || !*clientPath) return;
+    plan->packed = h_pe_section_named(clientPath, ".themida");
+    if (h_parent_dir(clientPath, dir, CX_CLEANUP_PATH_CAP)) {
+        /* 载体名以 marker 为准：--install-proxy 未指定 --proxy-target 时自动挑的载体
+           不一定是 winmm（实测可能是 version），按固定名字找 DLL 会漏判。 */
+        if (h_copy(marker, CX_CLEANUP_PATH_CAP, dir) && h_cat(marker, CX_CLEANUP_PATH_CAP, h_proxy_marker_suffix()))
+            plan->markerPresent = GetFileAttributesW(marker) != INVALID_FILE_ATTRIBUTES;
+        if (plan->markerPresent && h_read_proxy_carrier(marker, carrier, 32)
+            && h_carrier_dll_name(carrier, carrierDll, 40)) {
+            /* dir 不带结尾反斜杠，这里补一个再拼载体文件名。 */
+            if (h_copy(path, CX_CLEANUP_PATH_CAP, dir) && h_cat(path, CX_CLEANUP_PATH_CAP, L"\\")
+                && h_cat(path, CX_CLEANUP_PATH_CAP, carrierDll))
+                plan->proxyPresent = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+            /* 有 DLL 还不够：客户端必须真的导入该载体，否则 DLL 永远不会被加载。 */
+            plan->proxyUsable = plan->proxyPresent && h_pe_imports_dll(clientPath, carrierDll);
+        } else {
+            /* marker 缺失或读不出载体：退回按 winmm 检查，保持历史行为。 */
+            if (h_copy(path, CX_CLEANUP_PATH_CAP, dir) && h_cat(path, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()))
+                plan->proxyPresent = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+        }
+    }
+    if (reuseInstalled && plan->proxyUsable) {
+        plan->channel = H_INJECT_CHANNEL_DLL_PROXY;
+        plan->reason = H_INJECT_PLAN_PROXY_INSTALLED;
+        return;
+    }
+    if (plan->packed) {
+        plan->channel = H_INJECT_CHANNEL_DLL_PROXY;
+        plan->reason = H_INJECT_PLAN_PROXY_REQUIRED;
+    }
+}
+
+/* ---------- 注入成功判据 ---------- */
+
+/* 代理日志：<TEMP>\cxhook-<clientPid>.log。dll-proxy 生效的硬证据是里面出现
+   cef_initialize 被接管的行；"no injection port" / "hook failed" 则是失败证据。 */
+#define H_PROXY_LOG_CAP 65536
+/* 构建脚本用 /Gs9999999 关掉了栈探测，大缓冲区必须放静态区，不能放栈上。 */
+static WCHAR h_proxy_log_temp[HOST_PATH_CAP];
+static BOOL h_proxy_log_path(DWORD clientPid, WCHAR *out, DWORD cap) {
+    DWORD got, at = 0, digits[16], count = 0, i;
+    static const WCHAR prefix[] = L"cxhook-";
+    static const WCHAR suffix[] = L".log";
+    if (!clientPid || !out || cap < 32) return FALSE;
+    got = GetTempPathW(HOST_PATH_CAP, h_proxy_log_temp);
+    if (!got || got + 32 >= HOST_PATH_CAP || got + 32 >= cap) return FALSE;
+    if (!h_copy(out, cap, h_proxy_log_temp)) return FALSE;
+    at = (DWORD)h_wlen(out);
+    if (at >= cap) return FALSE;
+    for (i = 0; prefix[i] && at + 1 < cap; ++i) out[at++] = prefix[i];
+    while (clientPid) { digits[count++] = clientPid % 10; clientPid /= 10; }
+    if (!count) digits[count++] = 0;
+    while (count && at + 1 < cap) out[at++] = (WCHAR)(L'0' + digits[--count]);
+    for (i = 0; suffix[i] && at + 1 < cap; ++i) out[at++] = suffix[i];
+    out[at] = 0;
+    return TRUE;
+}
+typedef enum H_PROXY_HOOK_STATE {
+    H_PROXY_HOOK_UNKNOWN = 0, /* 日志不存在：不能据此判定失败 */
+    H_PROXY_HOOK_CONFIRMED,   /* 日志证明 cef_initialize 已被接管 */
+    H_PROXY_HOOK_FAILED       /* 日志证明代理没拿到端口或钩子失败 */
+} H_PROXY_HOOK_STATE;
+
+static H_PROXY_HOOK_STATE h_proxy_hook_state(DWORD clientPid) {
+    /* 同样是 /Gs9999999：大缓冲区只能在静态区。 */
+    static WCHAR path[HOST_PATH_CAP];
+    HANDLE file;
+    DWORD size;
+    if (!h_proxy_log_path(clientPid, path, HOST_PATH_CAP)) return H_PROXY_HOOK_UNKNOWN;
+    /* 文件存在才算"有证据"：不存在的日志不能当成失败。 */
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return H_PROXY_HOOK_UNKNOWN;
+    size = GetFileSize(file, NULL);
+    CloseHandle(file);
+    if (size == INVALID_FILE_SIZE || !size || size > H_PROXY_LOG_CAP) return H_PROXY_HOOK_UNKNOWN;
+    if (h_file_contains_ci(path, "cef_initialize patched (pushret)")
+        || h_file_contains_ci(path, "cef_initialize intercepted")
+        || h_file_contains_ci(path, "settings-only mode")
+        || h_file_contains_ci(path, "cef settings port applied"))
+        return H_PROXY_HOOK_CONFIRMED;
+    if (h_file_contains_ci(path, "no injection port")
+        || h_file_contains_ci(path, "hook failed")
+        || h_file_contains_ci(path, "patch skipped")
+        || h_file_contains_ci(path, "not exported"))
+        return H_PROXY_HOOK_FAILED;
+    return H_PROXY_HOOK_UNKNOWN;
+}
+
+/* 页面主世界哨兵：bundle 真的落地才算注入成功（CDP 接受命令不等于页面生效）。 */
+static const char h_bundle_sentinel[] =
+    "(function(){var h=window.__CX_WIN_HOST__;"
+    "return !!(h&&typeof h==='object'&&typeof h.requestBundle==='function'"
+    "&&window.__CX_WIN_BUNDLE_LOADED__===true);})()";
+
 static const WCHAR *h_probe_target_path;
 static const WCHAR *h_probe_path_global(void) { return h_probe_target_path ? h_probe_target_path : L""; }
 static BOOL h_probe_client(const WCHAR *clientPath) {
@@ -1755,6 +1939,17 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         if (h_copy(portFile, CX_CLEANUP_PATH_CAP, dir) && h_cat(portFile, CX_CLEANUP_PATH_CAP, L"\\cxhook-port.txt")) {
             portFilePresent = GetFileAttributesW(portFile) != INVALID_FILE_ATTRIBUTES;
         }
+        /* winmm= 行按 marker 记录的真实载体核对：自动挑的载体可能是 version 等。 */
+        {
+            WCHAR carrier[32], carrierDll[40], carrierPath[CX_CLEANUP_PATH_CAP];
+            if (markerPresent && h_read_proxy_carrier(marker, carrier, 32)
+                && h_carrier_dll_name(carrier, carrierDll, 40)
+                && h_copy(carrierPath, CX_CLEANUP_PATH_CAP, dir)
+                && h_cat(carrierPath, CX_CLEANUP_PATH_CAP, L"\\")
+                && h_cat(carrierPath, CX_CLEANUP_PATH_CAP, carrierDll)) {
+                proxyPresent = GetFileAttributesW(carrierPath) != INVALID_FILE_ATTRIBUTES;
+            }
+        }
         h_print(L"probe: winmm="); h_print(proxyPresent ? L"present" : L"absent");
         h_print(L" marker="); h_print(markerPresent ? L"present" : L"absent");
         h_print(L" portfile="); h_print(portFilePresent ? L"present" : L"absent");
@@ -1783,11 +1978,22 @@ static BOOL h_probe_client(const WCHAR *clientPath) {
         if (!printed) h_print(L"none");
     }
     h_print(L"\n");
+    /* suggested 复用 auto 分派所用的同一个规划器，保证"探测建议"与"实际行为"不会分叉。
+       reuseInstalled=TRUE：探测本来就是"如果交给 auto 会怎么做"。
+       加壳但目录里没有我们的代理时给出 dll-proxy-required，提示必须先装代理。 */
     h_print(L"probe: suggested=");
-    if (markerPresent && proxyUsable) h_print(L"dll-proxy");
-    else if (h_pe_section_named(clientPath, ".themida")) h_print(markerPresent ? L"dll-proxy" : L"dll-proxy-required");
-    else if (hasPipe && !hasPort) h_print(L"cdp-pipe");
-    else h_print(L"cdp-port");
+    {
+        H_INJECT_PLAN plan;
+        h_plan_inject(clientPath, TRUE, &plan);
+        if (plan.channel == H_INJECT_CHANNEL_DLL_PROXY) {
+            h_print(plan.reason == H_INJECT_PLAN_PROXY_INSTALLED ? L"dll-proxy" : L"dll-proxy-required");
+        } else if (hasPipe && !hasPort) {
+            /* libcef 里只有 pipe 没有 port 的极端情况：如实反映，但 auto 不会选它。 */
+            h_print(L"cdp-pipe");
+        } else {
+            h_print(L"cdp-port");
+        }
+    }
     h_print(L"\n");
     return TRUE;
 }
@@ -2269,6 +2475,7 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
     int received, count, result, exception, remote, type, value;
     if (replyOut) *replyOut = NULL;
     if (lengthOut) *lengthOut = 0;
+    h_last_eval_rejected = FALSE;
     tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * HOST_REPLY_TOKENS);
     if (!tokens) { h_error(error, errorCap, L"out of memory parsing CDP response"); return FALSE; }
     for (;;) {
@@ -2287,12 +2494,16 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
         result = jkey(reply, tokens, 0, "result");
         exception = result >= 0 ? jkey(reply, tokens, result, "exceptionDetails") : -1;
         if (jkey(reply, tokens, 0, "error") >= 0 || exception >= 0 || result < 0) {
+            /* 页面确实回了话，只是回了错误：这是明确否定，不是传输抖动。 */
+            h_last_eval_rejected = TRUE;
             h_error(error, errorCap, L"CDP command returned an error or exception"); net_free(reply); reply = NULL; break;
         }
         remote = result >= 0 ? jkey(reply, tokens, result, "result") : -1;
         type = remote >= 0 ? jkey(reply, tokens, remote, "type") : -1;
         value = remote >= 0 ? jkey(reply, tokens, remote, "value") : -1;
         if (requireTrue && (!jeq(reply, tokens, type, "boolean") || value < 0 || tokens[value].type != 'p' || !jeq(reply, tokens, value, "true"))) {
+            /* 页面回了应答但值不是 true：同样是明确否定。 */
+            h_last_eval_rejected = TRUE;
             h_error(error, errorCap, L"DOM script did not acknowledge execution (CSP, syntax or runtime failure)"); net_free(reply); reply = NULL; break;
         }
         if (replyOut) { *replyOut = reply; if (lengthOut) *lengthOut = length; }
@@ -2895,27 +3106,12 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         goto done;
     }
     if (trampolineLength > HOST_EVAL_SOURCE_CAP / 6 || bootstrapLength + 128 > HOST_EVAL_SOURCE_CAP || bundleLength + 128 > HOST_EVAL_SOURCE_CAP) { h_error(error, errorCap, L"native resource wrapper exceeds CDP capacity"); goto done; }
-    /* 注入方式分派：auto / cdp-port / dll-proxy 已接入主流程；
-   cdp-pipe 与 input 尚未接线，必须显式失败，不能静默退回端口模式。 */
+    /* 注入方式分派。cdp-pipe 在上面的独立分支里已接线（NUL 帧管道）；
+       cdp-port 与 dll-proxy 走下面这条三段式链路；input 未实现，必须显式失败，
+       绝不静默退回端口模式（否则加壳客户端会以"启动成功"掩盖注入失败）。 */
     h_report.injectMode = "auto";
     if (options->injectModeSet) h_report.injectMode = h_inject_mode_name(options->injectMode);
-    /* 显式 --inject-mode auto：若客户端目录存在我们安装的代理，则改走代理通道。
-       不传 --inject-mode 时保持 cdp-port，避免改变默认行为（elevation 夹具在不传该参数的情况下运行）。 */
-    if (options->injectModeSet && h_same(options->injectMode, L"auto") && !options->attachPortSet) {
-        static WCHAR autoDir[CX_CLEANUP_PATH_CAP], autoDll[CX_CLEANUP_PATH_CAP], autoMarker[CX_CLEANUP_PATH_CAP];
-        BOOL autoOk = h_parent_dir(h_selected_path, autoDir, CX_CLEANUP_PATH_CAP) &&
-                      h_copy(autoDll, CX_CLEANUP_PATH_CAP, autoDir) &&
-                      h_cat(autoDll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) &&
-                      GetFileAttributesW(autoDll) != INVALID_FILE_ATTRIBUTES &&
-                      h_copy(autoMarker, CX_CLEANUP_PATH_CAP, autoDir) &&
-                      h_cat(autoMarker, CX_CLEANUP_PATH_CAP, L"\\cxhook-proxy.marker") &&
-                      GetFileAttributesW(autoMarker) != INVALID_FILE_ATTRIBUTES;
-        if (autoOk) {
-            h_dll_proxy_mode = TRUE;
-            h_report.commandLineInjected = TRUE;
-            if (!options->quiet) { h_print(L"auto selected dll-proxy: proxy installed at "); h_print(autoDll); h_print(L"\n"); }
-        }
-    }    if (options->injectModeSet && h_same(options->injectMode, L"input")) {
+    if (options->injectModeSet && h_same(options->injectMode, L"input")) {
         if (!options->quiet) {
             h_print(L"input 模式未实现：请改用 cdp-port（4.1.4 客户端）或 dll-proxy（加壳客户端，如 4.3.0.4）\n");
         }
@@ -2923,42 +3119,9 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_exit_code = 4;
         goto done;
     }
-
-    if (options->injectModeSet && h_same(options->injectMode, L"dll-proxy")) {
-        WCHAR proxyDir[CX_CLEANUP_PATH_CAP], proxyDll[CX_CLEANUP_PATH_CAP];
-        BOOL dirOk = options->injectProxyDirSet
-            ? h_copy(proxyDir, CX_CLEANUP_PATH_CAP, options->injectProxyDir)
-            : h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP);
-        BOOL present = dirOk && h_copy(proxyDll, CX_CLEANUP_PATH_CAP, proxyDir) &&
-                       h_cat(proxyDll, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) &&
-                       GetFileAttributesW(proxyDll) != INVALID_FILE_ATTRIBUTES;
-        if (!present) {
-            /* 自动安装：本次运行临时装入，结束后（含失败路径）自动还原。 */
-            if (h_install_proxy(options)) {
-                h_proxy_auto_installed = TRUE;
-                present = TRUE;
-                if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
-            }
-        }
-        if (!present) {
-            if (!options->quiet) {
-                h_print(L"dll-proxy requires the proxy DLL at ");
-                if (dirOk) { h_print(proxyDir); h_print(L"\\winmm.dll"); }
-                h_print(L"; copy the winmm proxy there (administrator may be required)");
-            }
-            h_report.stopReason = "inject-proxy-missing";
-            h_exit_code = 4;
-            goto done;
-        }
-        h_dll_proxy_mode = TRUE;
-        h_report.commandLineInjected = TRUE;
-        if (!options->quiet) {
-            h_print(L"dll-proxy: proxy found at ");
-            h_print(proxyDll);
-            h_print(L"; launching without --remote-debugging-port and letting the proxy append it\n");
-        }
-    } else if (options->injectModeSet &&
-               !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port")) {
+    if (options->injectModeSet &&
+        !h_same(options->injectMode, L"auto") && !h_same(options->injectMode, L"cdp-port") &&
+        !h_same(options->injectMode, L"dll-proxy")) {
         if (!options->quiet) {
             h_print(L"inject mode is not implemented in this build: ");
             h_print(options->injectMode);
@@ -2968,54 +3131,70 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         h_exit_code = 4;
         goto done;
     }
-    /* 加壳客户端忽略命令行开关：auto 模式下自动切到 dll-proxy（需代理已安装）。 */
-    /* dll-proxy 模式下若客户端目录没有代理，自动安装并在本次运行结束（含错误路径）时还原。 */
-    if (h_dll_proxy_mode) {
-        WCHAR proxyPath[CX_CLEANUP_PATH_CAP];
-        BOOL present = FALSE;
-        if (h_copy(proxyPath, CX_CLEANUP_PATH_CAP, h_selected_path)) {
-            WCHAR dirOnly[CX_CLEANUP_PATH_CAP];
-            DWORD cut = 0, k;
-            for (k = 0; proxyPath[k]; ++k) if (proxyPath[k] == L'\\') cut = k;
-            for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = proxyPath[k];
-            dirOnly[k] = 0;
-            if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) present = TRUE;
+    if (!options->attachPortSet) {
+        /* 唯一的 auto 分派点。显式 --inject-mode auto 才复用已装代理；
+           不传该参数时保持历史默认（cdp-port），但加壳判断同样生效。 */
+        H_INJECT_PLAN plan;
+        BOOL explicitAuto = options->injectModeSet && h_same(options->injectMode, L"auto");
+        BOOL explicitProxy = options->injectModeSet && h_same(options->injectMode, L"dll-proxy");
+        h_plan_inject(h_selected_path, explicitAuto, &plan);
+        if (explicitProxy) {
+            plan.channel = H_INJECT_CHANNEL_DLL_PROXY;
+            plan.reason = plan.proxyPresent && plan.markerPresent ? H_INJECT_PLAN_PROXY_INSTALLED : H_INJECT_PLAN_PROXY_REQUIRED;
+        } else if (!explicitAuto && options->injectModeSet) {
+            /* 显式 cdp-port：即使加壳也尊重用户选择，但要说清风险。 */
+            plan.channel = H_INJECT_CHANNEL_CDP_PORT;
+            if (plan.packed && !options->quiet) {
+                h_print(L"注意：该客户端带 .themida 节（加壳），cdp-port 很可能被壳吞掉命令行；建议改用 --inject-mode auto 或 dll-proxy\n");
+            }
         }
-        if (!present && h_install_proxy(options)) {
-            h_proxy_auto_installed = TRUE;
-            if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
+        h_report.injectMode = h_inject_channel_name(plan.channel);
+        h_report.injectEvidence.proxyHookRequired = plan.channel == H_INJECT_CHANNEL_DLL_PROXY;
+        if (plan.channel == H_INJECT_CHANNEL_DLL_PROXY) {
+            BOOL present = plan.proxyPresent;
+            if (!present) {
+                /* 临时安装：本次运行装入，结束（含失败路径）自动还原。 */
+                if (h_install_proxy(options)) {
+                    h_proxy_auto_installed = TRUE;
+                    present = TRUE;
+                    if (!options->quiet) h_print(L"dll-proxy: 本次运行临时安装代理，结束后自动还原\n");
+                }
+            }
+            if (!present) {
+                /* 降级必须显式：加壳客户端退回端口模式等于注入失败，所以这里直接失败退出。 */
+                if (!options->quiet) {
+                    WCHAR proxyDir[CX_CLEANUP_PATH_CAP];
+                    h_print(L"dll-proxy 需要客户端目录里的代理 DLL：");
+                    if (h_parent_dir(h_selected_path, proxyDir, CX_CLEANUP_PATH_CAP)) {
+                        h_print(proxyDir); h_print(L"\\winmm.dll");
+                    } else h_print(L"<客户端目录>\\winmm.dll");
+                    h_print(L"\n");
+                    h_print(L"临时安装失败（目录写权限？）；已停止，不会静默退回 cdp-port。");
+                    h_print(L"可先手工执行 --install-proxy --client <CXExam.exe> 再重试。\n");
+                }
+                h_report.stopReason = "inject-proxy-install-failed";
+                h_report.injectEvidence.reason = "proxy-install-failed";
+                h_exit_code = 4;
+                goto done;
+            }
+            h_dll_proxy_mode = TRUE;
+            h_report.commandLineInjected = TRUE;
+            if (!options->quiet) {
+                if (plan.reason == H_INJECT_PLAN_PROXY_INSTALLED)
+                    h_print(L"auto: 复用客户端目录里已有的代理（不覆盖）→ dll-proxy\n");
+                else if (h_proxy_auto_installed)
+                    h_print(L"auto: 检测到加壳客户端，已自动安装代理并启用 dll-proxy（结束后还原）\n");
+                else
+                    h_print(L"auto: 检测到加壳客户端，已自动启用 dll-proxy\n");
+            }
+            h_audit_event("info", "inject", h_inject_plan_reason_name(plan.reason));
+        } else if (!options->quiet) {
+            if (explicitAuto) h_print(L"auto: 未加壳且无已装代理 → cdp-port\n");
+            h_audit_event("info", "inject", "portable");
         }
-    }
-    if (!options->attachPortSet && !h_dll_proxy_mode && ((!options->injectModeSet && !h_gui_mode_chosen) || h_same(options->injectMode, L"auto")) && !h_pe_section_named(h_selected_path, ".themida")) {
+    } else {
         h_report.injectMode = "cdp-port";
     }
-    if (!options->attachPortSet && !h_dll_proxy_mode && ((!options->injectModeSet && !h_gui_mode_chosen) || h_same(options->injectMode, L"auto")) && h_pe_section_named(h_selected_path, ".themida")) {
-        {
-            WCHAR probeWinmm[CX_CLEANUP_PATH_CAP];
-            BOOL proxyReady = FALSE;
-            if (h_copy(probeWinmm, CX_CLEANUP_PATH_CAP, h_selected_path)) {
-                WCHAR dirOnly[CX_CLEANUP_PATH_CAP];
-                DWORD cut = 0, k;
-                for (k = 0; probeWinmm[k]; ++k) if (probeWinmm[k] == L'\\') cut = k;
-                for (k = 0; k < cut && k + 1 < CX_CLEANUP_PATH_CAP; ++k) dirOnly[k] = probeWinmm[k];
-                dirOnly[k] = 0;
-                if (h_cat(dirOnly, CX_CLEANUP_PATH_CAP, h_proxy_dll_suffix()) && GetFileAttributesW(dirOnly) != INVALID_FILE_ATTRIBUTES) proxyReady = TRUE;
-            }
-            if (proxyReady) {
-            h_dll_proxy_mode = TRUE;
-            h_report.injectMode = "dll-proxy";
-                if (!options->quiet) h_print(L"auto: 检测到加壳客户端，已自动启用 dll-proxy\n");
-            } else if (h_install_proxy(options)) {
-                h_proxy_auto_installed = TRUE;
-                h_dll_proxy_mode = TRUE;
-                h_report.injectMode = "dll-proxy";
-                if (!options->quiet) h_print(L"auto: 检测到加壳客户端，已自动安装代理并启用 dll-proxy（结束后还原）\n");
-            } else if (!options->quiet) {
-                h_print(L"auto: 检测到加壳客户端，但代理安装失败；请检查客户端目录写权限或改用 --install-proxy\n");
-            }
-        }
-    }
-
 
     h_zero(auditError, sizeof(auditError));
     h_diagnostics = cx_diagnostics_create(options, auditError, 256);
@@ -3288,7 +3467,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
-    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（显式 auto 且已装代理时优先 dll-proxy；不带 --inject-mode 时等同 cdp-port）\n"
+    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto=三段式：已装代理→复用 dll-proxy，有 .themida 节→临时装 dll-proxy，否则 cdp-port；cdp-pipe/input 未接线，显式选择会以退出码 4 失败）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
     "注入: --show-inject-reasons（选择窗口显示注入方式不可用的原因；默认不显示）\n"
     "自毁: --self-destruct-key <shortcut>（可重复，最多 4 个） --self-destruct-on-fullscreen-exit\n"
@@ -3376,7 +3555,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             : "\"selfDestructReleaseFiles\":false,\"traceOnlyCleanup\":true,");
         h_print_utf8(
             "\"wipePolicies\":[\"retry\",\"background\",\"ignore\",\"abort\"],\"wipeRetries\":[1,20],\"wipeRetryDelayMs\":[50,5000],"
-            "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");
+            "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true},\"injectEvidence\":[\"endpoint-ready\",\"proxy-hook\",\"bundle-sentinel\"]}\n");
         h_out_flush();
         return 0;
     }

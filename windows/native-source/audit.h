@@ -28,6 +28,20 @@ typedef struct CX_ENDPOINT_PROBE {
     CX_ENDPOINT_REASON lastReason;
 } CX_ENDPOINT_PROBE;
 
+/* 注入成功判据：三个可观测信号，缺一不认"启动成功=注入成功"。
+   endpointReady   CDP 端点真的应答了 /json/version（端口通道成立）
+   proxyHook       dll-proxy 模式下代理日志证明 cef_initialize 被接管
+   bundleInPage    页面主世界的哨兵变量证明 bundle 真的落地
+   reason          固定代码，绝不序列化远端或用户文本 */
+typedef struct CX_INJECT_EVIDENCE {
+    BOOL endpointReady;
+    BOOL proxyHook;
+    BOOL proxyHookRequired;
+    BOOL bundleInPage;
+    BOOL bundleSentinelRejected;
+    const char *reason;
+} CX_INJECT_EVIDENCE;
+
 typedef struct CX_AUDIT_REPORT {
     DWORD durationMs;
     DWORD clientPid;
@@ -46,6 +60,7 @@ typedef struct CX_AUDIT_REPORT {
     const char *stopReason;
     const char *injectMode;
     BOOL commandLineInjected;
+    CX_INJECT_EVIDENCE injectEvidence;
     CX_ENDPOINT_PROBE endpointProbe;
 } CX_AUDIT_REPORT;
 

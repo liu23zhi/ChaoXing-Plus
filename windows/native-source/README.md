@@ -16,6 +16,31 @@
 | 静默生命周期 | [silent.c](silent.c)、[silent.h](silent.h)、[purge.c](purge.c)、[purge.h](purge.h) |
 | 测试与驱动 | [tests/](tests/)、[discovery-testdriver.c](discovery-testdriver.c) |
 
+## 注入通道与成功判据
+
+`--inject-mode` 支持 `auto`、`cdp-port`、`cdp-pipe`、`dll-proxy`、`input`。`auto` 是唯一的自动分派点（`h_plan_inject()`，`host.c`），按固定三段式判定，`--probe-client` 的 `suggested=` 行复用同一个规划器，因此"探测建议"与"实际行为"不会分叉：
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | 客户端目录已有我们的代理（载体 DLL + `cxhook-proxy.marker`，且客户端真的导入该载体） | 复用 `dll-proxy`，绝不覆盖 |
+| 2 | 客户端 PE 有 `.themida` 节（Themida 加壳吞掉命令行开关） | 临时安装 `dll-proxy`，运行结束（含失败路径）还原 |
+| 3 | 其余 | `cdp-port` |
+
+`auto` 永不退回 `cdp-pipe`。`input` 未实现，显式选择以退出码 4 失败；`cdp-pipe` 已接线（NUL 帧管道 + attach + 注入），但对非 Chromium 客户端必然失败，失败原因记为 `pipe-*` 而不会静默改走端口模式。`dll-proxy` 临时安装失败时以 `inject-proxy-install-failed`（退出码 4）明确停止，不做静默降级。
+
+"启动成功"不等于"注入成功"。运行报告新增 `injectEvidence`，三个可观测信号缺一不认：
+
+| 字段 | 含义 |
+| --- | --- |
+| `endpointReady` | CDP 端点真的应答了 `/json/version` |
+| `proxyHook` / `proxyHookRequired` | `dll-proxy` 模式下 `%TEMP%\cxhook-<pid>.log` 证明 `cef_initialize` 已被接管 |
+| `bundleInPage` / `bundleSentinelRejected` | 页面主世界哨兵（`__CX_WIN_HOST__` + `__CX_WIN_BUNDLE_LOADED__`）证明 bundle 真的落地 |
+| `verified` | `endpointReady && bundleInPage && (!proxyHookRequired || proxyHook)` |
+
+哨兵三态：确认 / 明确否定 / 无法判定。只有页面给出明确否定（`error`/`exceptionDetails`，或 `boolean` 不为 `true`）才升级为 `inject-bundle-unconfirmed` 失败；超时与断连只记为未验证，避免把一次抖动当成注入失败。代理日志缺失记为 unknown，日志里出现 `no injection port` 等明确失败证据才判失败。
+
+三代真实客户端回归见 [scripts/windows-native-inject-mode-matrix.test.mjs](../../scripts/windows-native-inject-mode-matrix.test.mjs)：参数级断言 `--probe-client` 的通道判定，样本不在本机时整组 skip。
+
 ## 构建与只读检查
 
 从仓库根执行。构建需要 Node.js 22+、MSVC x86 工具链与 Windows SDK；生成后的原生 EXE 运行时不依赖 Node 或 PowerShell。

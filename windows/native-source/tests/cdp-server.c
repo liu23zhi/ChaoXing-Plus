@@ -206,6 +206,21 @@ static void ws_send_events(SOCKET client) {
     write_frame(client, contextEvent, (int)lstrlenA(contextEvent));
     write_frame(client, navEvent, (int)lstrlenA(navEvent));
 }
+/* CX_CDP_SENTINEL：让夹具对页面主世界哨兵探针给出指定答复。
+   未设置时一律回 true（历史行为），设置 false/reject 用于验证注入判据。 */
+static const char *sentinel_mode(void) {
+    static char mode[16];
+    static BOOL loaded = FALSE;
+    if (!loaded) {
+        loaded = TRUE;
+        if (!GetEnvironmentVariableA("CX_CDP_SENTINEL", mode, 16)) mode[0] = 0;
+    }
+    return mode;
+}
+static BOOL payload_is_sentinel(const char *payload) {
+    return contains_a(payload, "__CX_WIN_BUNDLE_LOADED__") != 0;
+}
+
 static void ws_serve(SOCKET client, const char *request) {
     char key[128];
     char combined[256];
@@ -244,6 +259,13 @@ static void ws_serve(SOCKET client, const char *request) {
             }
         }
         wsprintfA(reply, "{\"id\":%d,\"result\":{\"result\":{\"type\":\"boolean\",\"value\":true},\"identifier\":\"1\",\"frameTree\":{\"frame\":{\"id\":\"CXFIXTURE\",\"url\":\"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/fixture\",\"mimeType\":\"text/html\",\"securityOrigin\":\"https://mooc1.chaoxing.com\",\"loaderId\":\"1\"},\"childFrames\":[]},\"frameId\":\"CXFIXTURE\",\"targetInfos\":[{\"targetId\":\"CXFIXTURE\",\"type\":\"page\",\"title\":\"fixture\",\"url\":\"https://mooc1.chaoxing.com/exam-ans/exam/test/examcode/fixture\",\"attached\":true}]}}", id);
+        if (payload_is_sentinel(payload)) {
+            const char *mode = sentinel_mode();
+            if (lstrcmpA(mode, "false") == 0)
+                wsprintfA(reply, "{\"id\":%d,\"result\":{\"result\":{\"type\":\"boolean\",\"value\":false}}}", id);
+            else if (lstrcmpA(mode, "reject") == 0)
+                wsprintfA(reply, "{\"id\":%d,\"result\":{\"exceptionDetails\":{\"text\":\"sentinel fixture threw\"}}}", id);
+        }
         if (!write_frame(client, reply, lstrlenA(reply))) break;
     }
 }

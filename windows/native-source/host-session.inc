@@ -178,6 +178,29 @@ static char *h_bundle_source(const char *bundle, DWORD length, DWORD *wrappedLen
     *wrappedLength = at; return source;
 }
 
+/* 页面主世界哨兵探针：CDP 收下命令不等于页面真的跑起来了。
+   只有 __CX_WIN_HOST__ 桥存在且 bundle 包装器写下的 __CX_WIN_BUNDLE_LOADED__ 为真，
+   才认定"bundle 真的注入到页面主世界"。
+   三态：确认 / 明确否定 / 无法判定。只有"明确否定"才升级为失败——
+   传输错误不能当成注入失败，否则会把一次抖动变成误报。 */
+static void h_probe_bundle_sentinel(H_NATIVE_PAGE *page) {
+    WCHAR error[256];
+    BOOL ok;
+    if (!page || !page->ws || h_report.injectEvidence.bundleInPage) return;
+    error[0] = 0;
+    ok = h_send_eval_checked(page->ws, page->nextId++, h_bundle_sentinel,
+                             (DWORD)(sizeof(h_bundle_sentinel) - 1), TRUE, error, 256);
+    if (ok) {
+        h_report.injectEvidence.bundleInPage = TRUE;
+        h_audit_event("info", "inject", "Bundle sentinel confirmed in the page main world");
+        return;
+    }
+    /* 只有页面回了明确否定（error/exception，或 boolean 不是 true）才记录；
+       超时、断连、预算到期都只是"无法判定"。 */
+    if (h_last_eval_rejected) h_report.injectEvidence.bundleSentinelRejected = TRUE;
+    h_audit_event("warn", "inject", "Bundle sentinel unconfirmed; the page did not prove the bundle ran");
+}
+
 static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength,
                         const char *bundle, DWORD bundleLength, const char *style, DWORD styleLength,
                         WCHAR *error, DWORD errorCap) {
@@ -217,7 +240,10 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
             }
             if (success && task.type == CX_SESSION_TASK_BUNDLE) {
                 ++h_bundles_completed;
-                if (task.top) h_collect_page_diagnostics(page);
+                if (task.top) {
+                    h_probe_bundle_sentinel(page);
+                    h_collect_page_diagnostics(page);
+                }
             }
             h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_CONFIG ? "config" : (task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap"),
                 task.type == CX_SESSION_TASK_CONFIG ? (success ? "Configuration acknowledged" : "Configuration delivery failed") : (success ? "Injection acknowledged" : "Injection failed"));
@@ -360,7 +386,11 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
                         ready = FALSE; h_probe_record(CX_ENDPOINT_HTTP_FAILED); break;
                     }
                     h_probe_record(versionReason);
-                    if (versionReason == CX_ENDPOINT_READY) h_ui_record("info", "endpoint-ready");
+                    if (versionReason == CX_ENDPOINT_READY) {
+                        h_ui_record("info", "endpoint-ready");
+                        /* 判据 1：CDP 端点真的应答了 /json/version。 */
+                        h_report.injectEvidence.endpointReady = TRUE;
+                    }
                 }
                 if (!ready) { h_report.stopReason = "browser-mismatch"; h_error(error, errorCap, L"CDP Browser does not match --expected-browser"); goto done; }
                 /* The CDP endpoint is ready and the owned client window now exists. */
@@ -414,6 +444,45 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     ok = !h_config_enabled(options) || h_bundles_completed > 0;
     h_report.stopReason = h_duration && GetTickCount() - h_started >= h_duration ? "duration" : "client-exit";
     if (!ok) h_error(error, errorCap, L"native session ended without any completed business injection");
+    /* 判据 2：dll-proxy 模式必须有代理日志证明 cef_initialize 被接管。
+       日志缺失记为 unknown（不误判失败），日志里明确失败则整轮判失败。 */
+    if (h_report.injectEvidence.proxyHookRequired && h_client_pid) {
+        H_PROXY_HOOK_STATE hook = h_proxy_hook_state(h_client_pid);
+        if (hook == H_PROXY_HOOK_CONFIRMED) {
+            h_report.injectEvidence.proxyHook = TRUE;
+            h_audit_event("info", "inject", "Proxy log confirms the cef_initialize hook");
+        } else if (hook == H_PROXY_HOOK_FAILED) {
+            h_report.injectEvidence.proxyHook = FALSE;
+            h_report.injectEvidence.reason = "proxy-hook-failed";
+            if (ok) {
+                h_report.stopReason = "inject-proxy-hook-failed";
+                h_error(error, errorCap, L"dll-proxy ran but the proxy log shows no cef_initialize hook");
+                ok = FALSE;
+            }
+            h_audit_event("error", "inject", "Proxy log shows the cef_initialize hook never applied");
+        } else {
+            h_audit_event("warn", "inject", "Proxy log unavailable; cef_initialize hook unverified");
+        }
+    }
+    /* 判据 3：页面主世界哨兵。业务 bundle 已 ACK、哨兵却拿到明确否定（页面回答 false 或
+       脚本抛异常），说明只是命令被接受，页面并没有真的跑起来——这不能算注入成功。
+       哨兵"无法判定"（连接抖动等）不升级为失败，只如实记录未验证。 */
+    if (ok && h_bundles_completed > 0 && !h_report.injectEvidence.bundleInPage
+        && h_report.injectEvidence.bundleSentinelRejected) {
+        h_report.stopReason = "inject-bundle-unconfirmed";
+        h_report.injectEvidence.reason = "bundle-sentinel-rejected";
+        h_error(error, errorCap, L"the page rejected the bundle: the main-world sentinel never became true");
+        ok = FALSE;
+    }
+    if (ok) {
+        h_report.injectEvidence.reason = h_report.injectEvidence.bundleInPage
+            ? (h_report.injectEvidence.proxyHookRequired && !h_report.injectEvidence.proxyHook
+                ? "bundle-confirmed-proxy-unverified"
+                : "verified")
+            : "bundle-unverified";
+    } else if (!h_report.injectEvidence.reason) {
+        h_report.injectEvidence.reason = "injection-failed";
+    }
 done:
     if (!ready && h_report.endpointProbe.attempts) {
         h_report.endpointProbe.elapsedMs = GetTickCount() - waitStart;
