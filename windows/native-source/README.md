@@ -49,8 +49,8 @@ if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 | [start-windows-silent-debug.cmd](../native-scripts/start-windows-silent-debug.cmd) | 既有单文件静默调试入口，不随新的原生多文件包发布 |
 | [start-windows-silent-no-full-scan-debug.cmd](../native-scripts/start-windows-silent-no-full-scan-debug.cmd) | 既有单文件静默常规扫描入口，不随新的原生多文件包发布 |
 
-这些启动器会进入实际运行；只读检查使用上面的版本与自检命令。源码启动器定位仓库根的构建产物；新的原生多文件包仅发布普通和调试两个入口，`single-file/` 直接运行 GUI EXE。多文件删除挂起、自毁、发布目录清除与 `--stage-boot` 暂存启动本轮不支持并明确拒绝。Node 兼容包的历史原生启动器与 `start-windows-node*.cmd` 保持原样，仍使用历史包根布局。
+这些启动器会进入实际运行；只读检查使用上面的版本与自检命令。源码启动器定位仓库根的构建产物；新的原生多文件包仅发布普通和调试两个入口，`single-file/` 直接运行 GUI EXE。多文件仍明确拒绝 `--stage-boot` 暂存启动与发布目录清除；自毁与启动清理现已在多文件生效，但只清理运行痕迹（不删除 `chaoxing_plus.exe`、`assets/*`、`winmm-proxy.dll` 等发布原件，也不改名自身）。Node 兼容包的历史原生启动器与 `start-windows-node*.cmd` 保持原样，仍使用历史包根布局。
 
-单文件自毁兜底由 [purge.c](purge.c) 提供：关机/注销（含强制结束会话）在隐藏顶层窗口的 `WM_QUERYENDSESSION`/`WM_ENDSESSION` 里同步收尾；删除前先把清单写进 `%TEMP%` 的续删脚本并登记 `HKCU` RunOnce，删净后自行撤销；同时尽力登记 `MOVEFILE_DELAY_UNTIL_REBOOT`（需要管理员权限）以覆盖断电与强制结束进程。回归为 `scripts/windows-native-purge.test.mjs`（含 `purge-tests.exe` 与真实 PowerShell 续删执行）。
+自毁兜底由 [purge.c](purge.c) 提供，单文件与多文件共用：关机/注销（含强制结束会话）在隐藏顶层窗口的 `WM_QUERYENDSESSION`/`WM_ENDSESSION` 里同步收尾；删除前先把清单写进 `%TEMP%` 的续删脚本并登记 `HKCU` RunOnce，删净后自行撤销；同时尽力登记 `MOVEFILE_DELAY_UNTIL_REBOOT`（需要管理员权限）以覆盖断电与强制结束进程。单文件可删除整棵程序树并改名自身；多文件通过 `cx_purge_set_traces_only()` 只登记本轮宿主产物与 `<data-dir>\chaoxing` 下登记的宿主数据，`cx_purge_add_root()` 在该模式下拒绝排队根目录。回归为 `scripts/windows-native-purge.test.mjs`（含 `purge-tests.exe` 与真实 PowerShell 续删执行）与 `scripts/windows-native-multi-restrictions.test.mjs`（含多文件真实自毁运行后发布原件逐字节不变）。
 
 原生默认运行数据位于进程工作目录下 `.data/`，与 Node 的 `windows/data/` 不同。共享模板和本机 `windows/local-features.json` 保持原位；插件共用源码、插件 `dist/` 与 Windows 构建输出目录也不随文档整理迁移。

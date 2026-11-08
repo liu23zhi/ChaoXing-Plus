@@ -44,6 +44,8 @@ typedef struct CX_PURGE {
     int truncated;
     /** root 本身已排队（非递归删除，留到最后）。 */
     BOOL rootQueued;
+    /** 只清理运行痕迹：多文件版保留发布原件，绝不动 EXE 与资源目录。 */
+    BOOL tracesOnly;
     /** 上次写入续删脚本时的条目数；0 表示尚未登记成功。 */
     int journalCount;
     BOOL journaled;
@@ -64,6 +66,8 @@ typedef struct CX_PURGE {
 
 /** 初始化：记录痕迹根目录与自身镜像路径，生成随机登记名与临时目录。 */
 BOOL cx_purge_init(CX_PURGE *purge, const WCHAR *root, const WCHAR *exe);
+/** 只清理运行痕迹（多文件版）：不删除发布原件，也不尝试删除痕迹根目录。 */
+void cx_purge_set_traces_only(CX_PURGE *purge, BOOL tracesOnly);
 /** 停止关机监视线程并释放临界区。 */
 void cx_purge_close(CX_PURGE *purge);
 /** 清空待删清单（保留 root/exe 与已登记的续删信息）。 */

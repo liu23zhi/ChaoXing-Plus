@@ -335,9 +335,18 @@ BOOL cx_purge_add(CX_PURGE *purge, const WCHAR *path, BOOL directory) {
 BOOL cx_purge_add_root(CX_PURGE *purge) {
     if (!purge || !purge->root[0]) return FALSE;
     if (purge->lockReady) EnterCriticalSection(&purge->lock);
-    purge->rootQueued = TRUE;
+    /* 只清理痕迹时发布目录必须保留：它下面还有 EXE 与 assets 原件。 */
+    purge->rootQueued = purge->tracesOnly ? FALSE : TRUE;
     if (purge->lockReady) LeaveCriticalSection(&purge->lock);
     return TRUE;
+}
+
+void cx_purge_set_traces_only(CX_PURGE *purge, BOOL tracesOnly) {
+    if (!purge) return;
+    if (purge->lockReady) EnterCriticalSection(&purge->lock);
+    purge->tracesOnly = tracesOnly ? TRUE : FALSE;
+    if (purge->tracesOnly) purge->rootQueued = FALSE;
+    if (purge->lockReady) LeaveCriticalSection(&purge->lock);
 }
 
 /* ---------- 开机续删 ---------- */

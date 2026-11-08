@@ -1906,6 +1906,13 @@ static BOOL h_clear_client_log(CX_OPTIONS *options, BOOL startup) {
 static void h_silent_cleanup_pass(BOOL finalize) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     int failed = 0;
+    /* 多文件版是外置资源布局：EXE 与 assets 是发布原件，任何情况下都不改名、不整目录清理。 */
+    BOOL publishLayout = cx_asset_resources_embedded() ? FALSE : TRUE;
+    if (publishLayout) {
+        h_audit_event("info", "cleanup",
+            h_silent_simulate ? "Trace cleanup planned (simulate)" : "Trace-only cleanup: release files are preserved");
+        return;
+    }
     if (!h_silent_plan) {
         if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) { h_audit_event("warn", "cleanup", "Program root is unavailable"); return; }
         if (!h_silent_simulate && !cx_cleanup_is_release_layout(root)) {
@@ -1973,8 +1980,9 @@ static void h_purge_add_runtime_artifacts(void) {
     }
 }
 
-/* 待删清单：发布布局收集整棵程序树（已排除 CXExam 与 runtime），
-   源码/构建目录只登记当前 EXE，行为与既有清理一致。 */
+/* 待删清单：
+   单文件版按发布布局收集整棵程序树（已排除 CXExam 与 runtime），源码/构建目录只登记当前 EXE；
+   多文件版是外置资源布局，EXE 与 assets 是发布原件，只能清理运行痕迹，绝不登记它们。 */
 static void h_purge_collect_items(void) {
     WCHAR root[CX_CLEANUP_PATH_CAP];
     CX_CLEANUP_PLAN *plan;
@@ -1982,6 +1990,11 @@ static void h_purge_collect_items(void) {
     if (!h_purge_ready) return;
     cx_purge_reset(&h_purge);
     if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) return;
+    if (h_purge.tracesOnly) {
+        /* 多文件：只清理本轮宿主产物与登记的宿主数据，发布原件保持不动。 */
+        h_purge_add_runtime_artifacts();
+        return;
+    }
     if (cx_cleanup_is_release_layout(root)) {
         plan = (CX_CLEANUP_PLAN *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLEANUP_PLAN));
         if (plan) {
@@ -2008,6 +2021,8 @@ static BOOL h_purge_prepare(BOOL journalNow) {
         h_audit_event("warn", "self-destruct", "Self-destruct fallback could not be initialised");
         return FALSE;
     }
+    /* 多文件版保留发布原件：同一套关机关联与开机续删，但清单只含运行痕迹。 */
+    cx_purge_set_traces_only(&h_purge, cx_asset_resources_embedded() ? FALSE : TRUE);
     h_purge_ready = TRUE;
     h_purge_collect_items();
     if (!cx_purge_watch_shutdown(&h_purge, h_force_destruct))
@@ -2716,10 +2731,10 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     int attempt = 0;
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
-    if (!cx_asset_resources_embedded() && (options->deleteSuspend || options->silentScenario
-        || options->stageRequest || options->stagedBoot || options->wipeOwnedFilesOnStart
-        || options->selfDestructKeyCount || options->selfDestructFullscreenExit)) {
-        h_error(error, errorCap, L"multi-file builds do not support release-file deletion or self-destruct; use ordinary startup (package launcher cleans only its own temporary files)");
+    /* 多文件版（外置资源）不能删除发布原件：EXE 与 assets 被删掉就再也起不来。
+       因此它只拒绝"删除发布文件"这一类意图，自毁与启动清理降级为"只清理运行痕迹"。 */
+    if (!cx_asset_resources_embedded() && (options->stageRequest || options->stagedBoot)) {
+        h_error(error, errorCap, L"multi-file builds do not support staged boot; use ordinary startup (package launcher cleans only its own temporary files)");
         if (!options->quiet) h_print(error);
         h_exit_code = 2;
         return FALSE;
@@ -2749,12 +2764,16 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_report.injectStrategy = h_equal(options->injectStrategy, L"runtime") ? "runtime" : (h_equal(options->injectStrategy, L"script") ? "script" : "hybrid");
     h_report.stopReason = "discovery-failed";
     if (options->deleteSuspend) {
-        WCHAR layoutRoot[CX_CLEANUP_PATH_CAP];
-        if (!h_silent_root(layoutRoot, CX_CLEANUP_PATH_CAP) || !cx_cleanup_is_release_layout(layoutRoot)) {
-            h_error(error, errorCap, L"delete-suspend requires the release layout (SHA256SUMS.txt next to the EXE)");
-            if (!options->quiet) h_print(error);
-            h_exit_code = 2;
-            return FALSE;
+        /* 单文件要求发布布局（含 SHA256SUMS.txt）才允许删除程序痕迹；
+           多文件是外置资源布局，只清理运行痕迹，不删除发布原件，因此不要求该标记。 */
+        if (cx_asset_resources_embedded()) {
+            WCHAR layoutRoot[CX_CLEANUP_PATH_CAP];
+            if (!h_silent_root(layoutRoot, CX_CLEANUP_PATH_CAP) || !cx_cleanup_is_release_layout(layoutRoot)) {
+                h_error(error, errorCap, L"delete-suspend requires the release layout (SHA256SUMS.txt next to the EXE)");
+                if (!options->quiet) h_print(error);
+                h_exit_code = 2;
+                return FALSE;
+            }
         }
     }
     if (!options->listClients || options->reportPath[0]) {
@@ -3233,12 +3252,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
-    /* External-resource builds never enter release-file deletion paths, including
-       startup wipe and staged-boot cleanup outside h_run. */
-    if (!cx_asset_resources_embedded() && (h_base_options.deleteSuspend || h_base_options.silentScenario
-        || h_base_options.stageRequest || h_base_options.stagedBoot || h_base_options.wipeOwnedFilesOnStart
-        || h_base_options.selfDestructKeyCount || h_base_options.selfDestructFullscreenExit)) {
-        if (!h_base_options.quiet) h_print(L"multi-file builds do not support release-file deletion or self-destruct; use ordinary startup (package launcher cleans only its own temporary files)");
+    /* 多文件版只保留暂存启动这一项拒绝；自毁与启动清理降级为"只清理运行痕迹"。 */
+    if (!cx_asset_resources_embedded() && (h_base_options.stageRequest || h_base_options.stagedBoot)) {
+        if (!h_base_options.quiet) h_print(L"multi-file builds do not support staged boot; use ordinary startup (package launcher cleans only its own temporary files)");
         return 2;
     }
     cx_wipe_init(&h_wipe); h_wipe_ready = TRUE;
@@ -3331,7 +3347,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         if (!cx_asset_resources_embedded()) h_print_utf8(
             "多文件版：主程序采用 GUI 子系统；PowerShell/cmd 请使用 chaoxing_plus.com 或省略扩展名，以等待完整输出。\n"
             "  资源由 EXE 同目录的 assets 与 winmm-proxy.dll 提供，缺失时报错。\n"
-            "  多文件版不支持发布文件删除、自毁或 stage-boot；打包启动器仅清理自己释放的临时文件。\n");
+            "  多文件版保留发布原件（EXE 与 assets 不删除、不改名）；自毁只清理运行痕迹，\n"
+            "  同样支持关机/注销触发、开机续删登记与重启后删除；--stage-boot 暂存启动仍拒绝。\n");
         h_out_flush();
         return 0;
     }
@@ -3353,7 +3370,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
         h_print_utf8(cx_asset_resources_embedded()
             ? ",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,\"selfDestructOnShutdown\":true,\"selfDestructBootResume\":true,\"selfDestructPendingDelete\":true,"
-            : ",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":false,\"wipe\":false,\"selfDestructOnShutdown\":false,\"selfDestructBootResume\":false,\"selfDestructPendingDelete\":false,");
+            : ",\"deleteSuspend\":false,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,\"selfDestructOnShutdown\":true,\"selfDestructBootResume\":true,\"selfDestructPendingDelete\":true,");
+        h_print_utf8(cx_asset_resources_embedded()
+            ? "\"selfDestructReleaseFiles\":true,\"traceOnlyCleanup\":false,"
+            : "\"selfDestructReleaseFiles\":false,\"traceOnlyCleanup\":true,");
         h_print_utf8(
             "\"wipePolicies\":[\"retry\",\"background\",\"ignore\",\"abort\"],\"wipeRetries\":[1,20],\"wipeRetryDelayMs\":[50,5000],"
             "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");

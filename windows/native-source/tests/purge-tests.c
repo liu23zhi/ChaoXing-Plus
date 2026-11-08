@@ -151,6 +151,29 @@ static void test_journal(CX_PURGE *purge, const WCHAR *root) {
     check(after > before, "a changed queue rewrites the resume script");
 }
 
+static void test_traces_only(CX_PURGE *purge, const WCHAR *root) {
+    WCHAR path[CX_PURGE_PATH_CAP];
+    int failed = 0;
+
+    /* 多文件版语义：发布原件必须保留，根目录不得进入删除计划。 */
+    cx_purge_set_traces_only(purge, TRUE);
+    check(purge->tracesOnly, "trace-only mode is recorded");
+    cx_purge_reset(purge);
+    check(cx_purge_add_root(purge), "queuing the root is accepted in trace-only mode");
+    check(!purge->rootQueued, "trace-only mode refuses to queue the program root");
+
+    lstrcpyW(path, root); lstrcatW(path, L"\\winmm-proxy.dll");
+    write_file(path, "release-file-must-survive");
+    check(cx_purge_add(purge, path, FALSE), "an explicitly listed trace is still queued");
+    cx_purge_run(purge, 1, &failed);
+    check(!file_exists(path), "trace-only mode deletes what was explicitly listed");
+    DeleteFileW(path);
+
+    /* 复位回完整模式，避免影响后续用例。 */
+    cx_purge_set_traces_only(purge, FALSE);
+    check(!purge->tracesOnly, "trace-only mode can be cleared again");
+}
+
 static void test_delete_and_settle(CX_PURGE *purge, const WCHAR *root) {
     WCHAR path[CX_PURGE_PATH_CAP], parked[CX_PURGE_PATH_CAP];
     HANDLE locked = INVALID_HANDLE_VALUE;
@@ -267,6 +290,7 @@ void __stdcall PurgeTestMain(void) {
     test_init_and_script_text(purge, root);
     check(cx_purge_set_run_key(purge, P_TEST_SUBKEY), "the run-once key is redirected for tests");
     test_journal(purge, root);
+    test_traces_only(purge, root);
     test_delete_and_settle(purge, root);
     test_shutdown_watch(purge);
     test_pending_delete(root);
