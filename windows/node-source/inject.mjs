@@ -1,6 +1,35 @@
 import { CdpConnection } from './cdp.mjs';
 
 const MESSAGE_PREFIX = '__CX_WIN_MSG__';
+const SCRIPT_SESSION_EXPIRY_BRIDGE = `
+;(function () {
+  try {
+    var win = window;
+    if (win.self !== win.top || typeof win.addEventListener !== 'function') return;
+    var instance = win.__CX_WIN_INSTANCE__;
+    var host = win.__CX_WIN_HOST__;
+    if (!instance || !host || host.instance !== instance || typeof host.send !== 'function') return;
+    var key = '__CX_WIN_SCRIPT_SESSION_EXPIRY_BRIDGE__';
+    var event = 'chaoxing-plus:script-session-expired';
+    var previous = win[key];
+    if (previous && previous.instance === instance) return;
+    if (previous && typeof win.removeEventListener === 'function') {
+      try { win.removeEventListener(event, previous.listener); } catch (error) { /* stale bridge stays inert */ }
+    }
+    var bridge = { instance: instance, listener: function () {
+      try {
+        var current = win.__CX_WIN_HOST__;
+        if (win[key] === bridge && win.__CX_WIN_INSTANCE__ === instance
+            && current && current.instance === instance && typeof current.send === 'function') {
+          current.send('script-session-expired', {});
+        }
+      } catch (error) { /* notice is best effort */ }
+    } };
+    win.addEventListener(event, bridge.listener);
+    win[key] = bridge;
+  } catch (error) { /* the optional bridge cannot break bootstrap */ }
+})();
+`;
 const CHROMIUM_75_ALLOWED_HOST_SUFFIX = 'chaoxing.com';
 
 function isChaoxingUrl(url) {
@@ -53,7 +82,7 @@ function targetWebSocketUrl(value, port) {
 }
 
 export class PageSession {
-  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected, diagnostics, silentControl = null, onSilentEvent = null }) {
+  constructor({ port, target, assets, configStore, instanceToken, injectBlankFrames, captureConsole, injectStrategy = 'hybrid', injectRetries = 2, bundleTimeoutMs = 120000, logger, onConfigSync, onBundleInjected, diagnostics, silentControl = null, onSilentEvent = null, onScriptSessionExpired = null }) {
     this.port = port;
     this.target = target;
     this.assets = assets;
@@ -69,6 +98,7 @@ export class PageSession {
     this.onBundleInjected = onBundleInjected;
     this.silentControl = silentControl && typeof silentControl === 'object' ? silentControl : null;
     this.onSilentEvent = typeof onSilentEvent === 'function' ? onSilentEvent : null;
+    this.onScriptSessionExpired = typeof onScriptSessionExpired === 'function' ? onScriptSessionExpired : null;
     this.diagnostics = diagnostics;
     this.diagnosticEvents = new Set();
     this.diagnosticDelivery = null;
@@ -387,7 +417,12 @@ export class PageSession {
       this.onConfigSync?.(detail, contextId);
       return;
     }
-    if (payload.kind === 'silent-hotkey' || payload.kind === 'silent-fullscreen' || payload.kind === 'script-session-expired') {
+    if (payload.kind === 'script-session-expired') {
+      // Cleanup notices must come from a confirmed top context, never from the generic silent fallback.
+      if (!this.closed && this.isTopContext(contextId) && this.getTopContextId() === contextId) this.onScriptSessionExpired?.();
+      return;
+    }
+    if (payload.kind === 'silent-hotkey' || payload.kind === 'silent-fullscreen') {
       // 只接受顶层文档的静默控制事件：答题页大量 about:blank iframe 各自上报
       // 全屏状态时，子 frame 的窗口尺寸必然小于屏幕，会把"已进入全屏"翻成
       // "退出全屏"并误触发自毁。frame 树未知时保持旧行为（不阻断功能）。
@@ -596,10 +631,10 @@ export class PageSession {
     const prefix = `window.__CX_WIN_CONFIG_JSON__=${configJson};`
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
       + silentPrefix
-      + `try{if(typeof window.addEventListener==='function')window.addEventListener('chaoxing-plus:script-session-expired',function(){try{console.log(${JSON.stringify(MESSAGE_PREFIX)}+JSON.stringify({kind:'script-session-expired',detail:{}}));}catch(e){}});}catch(e){};`
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
-      await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });
+      const bridge = this.onScriptSessionExpired ? SCRIPT_SESSION_EXPIRY_BRIDGE : '';
+      await this.injectSource(contextId, prefix + this.assets.bootstrap + bridge, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });
       if (this.closed || this.contexts.get(contextId) !== context) return;
       this.stats.bootstraps += 1;
       this.diagnosticsReadyContexts.add(contextId);

@@ -30,7 +30,7 @@ import { createConfigStore, defaultConfigPath, ensureConfigFile, ENABLED_KEY, me
 import { createWipeController, WipeAbortedError } from './wipe.mjs';
 import { listOwnedHostFiles } from './owned-files.mjs';
 import { createProgramCleanupController } from './program-cleanup.mjs';
-import { createSelfDestructController } from './self-destruct-control.mjs';
+import { createScriptSessionExpiryHandler, createSelfDestructController } from './self-destruct-control.mjs';
 import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateLaunchPort, validateSupportedJsonOptions } from './options.mjs';
 import { probeClientSelectionWindow } from './selection-window.mjs';
 import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
@@ -567,6 +567,7 @@ async function main() {
   let wipeController = null;
   let programCleanup = null;
   let selfDestructControl = null;
+  let onScriptSessionExpired = null;
   let cleanupAfterStartupFailure = null;
   let diagnosticsChanged = () => {};
   const diagnostics = createHostDiagnostics({ onChange: () => diagnosticsChanged() });
@@ -777,8 +778,14 @@ async function main() {
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
     if (scriptBootstrap) {
-      await activateScriptSessionFromSettings(config.settings);
-      logger.info('[script] 已激活 150 分钟内存答题会话');
+      const activation = await activateScriptSessionFromSettings(config.settings);
+      if (activation) {
+        onScriptSessionExpired = createScriptSessionExpiryHandler(activation.expiresAt, () => {
+          selfDestructControl?.request('script-session-expired');
+        });
+        logger.info('[script] 已激活内存脚本会话');
+        if (!onScriptSessionExpired) logger.warn('[script] 没有可验证的未来到期时间，未启用会话过期清理');
+      }
     }
     const configuredLogging = config.settings['common.settings.windows-log-enabled'] !== false;
     const loggingEnabled = options.noDiskWrite
@@ -1267,9 +1274,9 @@ async function main() {
             }
           },
           silentControl: programCleanupNeeded ? { clientPid: report.clientPid || 0, selfDestructKeys: options.selfDestructKeys } : null,
+          onScriptSessionExpired,
           onSilentEvent: (kind, detail) => {
             if (kind === 'silent-hotkey' && selfDestructControl) selfDestructControl.handleHotkey(detail && detail.shortcut);
-            if (kind === 'script-session-expired' && selfDestructControl) selfDestructControl.request('script-session-expired');
             if (kind === 'silent-fullscreen') {
               const fullscreen = Boolean(detail && detail.fullscreen);
               if (fullscreen) clientFullscreenSeen = true;

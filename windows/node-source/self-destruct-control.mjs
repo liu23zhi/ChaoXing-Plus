@@ -4,6 +4,27 @@ import { createSelfDestructMonitor, SELF_DESTRUCT_STATES } from './self-destruct
 // 确认、延迟与最终清理回调。确认只在交互控制台询问；无人值守时必须显式
 // 使用 --no-self-destruct-confirm，否则不执行破坏性操作。
 
+function parseActivationDeadline(expiresAt) {
+  const value = typeof expiresAt === 'string' || typeof expiresAt === 'number' ? String(expiresAt).trim() : '';
+  if (/^\d{10}$/u.test(value)) return Number(value) * 1000;
+  if (/^\d{13}$/u.test(value)) return Number(value);
+  const timestamp = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.exec(value);
+  if (!timestamp) return NaN;
+  const date = new Date(timestamp[1] + 'T00:00:00Z');
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== timestamp[1]) return NaN;
+  return Date.parse(value);
+}
+
+// The browser notice only wakes this check. The deadline is captured from
+// the host's successful activation response, not from mutable page settings.
+export function createScriptSessionExpiryHandler(expiresAt, request, now = Date.now) {
+  const deadline = parseActivationDeadline(expiresAt);
+  if (!Number.isFinite(deadline) || !(deadline > now())) return null;
+  return () => {
+    if (now() >= deadline) request();
+  };
+}
+
 export function createSelfDestructController({
   keys = [],
   fullscreenExit = false,
