@@ -596,7 +596,7 @@ export class PageSession {
     const prefix = `window.__CX_WIN_CONFIG_JSON__=${configJson};`
       + `window.__CX_WIN_INSTANCE__=${JSON.stringify(this.instanceToken)};`
       + silentPrefix
-      + `window.addEventListener('chaoxing-plus:script-session-expired',function(){try{console.log(${JSON.stringify(MESSAGE_PREFIX)}+JSON.stringify({kind:'script-session-expired',detail:{}}));}catch(e){}});`
+      + `try{if(typeof window.addEventListener==='function')window.addEventListener('chaoxing-plus:script-session-expired',function(){try{console.log(${JSON.stringify(MESSAGE_PREFIX)}+JSON.stringify({kind:'script-session-expired',detail:{}}));}catch(e){}});}catch(e){};`
       + `window.__CX_WIN_STYLE_TEXT__=${JSON.stringify(this.assets.style || '')};\n`;
     try {
       await this.injectSource(contextId, prefix + this.assets.bootstrap, 'bootstrap 执行失败', { timeoutMs: this.bundleTimeoutMs });
