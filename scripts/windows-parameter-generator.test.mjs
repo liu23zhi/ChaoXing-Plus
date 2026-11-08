@@ -427,7 +427,9 @@ test('原生 PowerShell 5.1/7 输出保留 JSON、中文、引号和工作目录
       await t.test(shell, (t) => {
         const script = `[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)\n${readOnlyCommand}\nexit $LASTEXITCODE`;
         const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
-          encoding: 'utf8', windowsHide: true, timeout: 15000,
+          // Windows PowerShell 5.1 on a shared runner can spend over 15s on cold start plus profile load
+          // (observed spawnSync ETIMEDOUT). That is interpreter startup, not the behaviour under test.
+          encoding: 'utf8', windowsHide: true, timeout: 45000,
           env: { ...process.env, CX_GENERATOR_SENTINEL: 'THIS_MUST_NOT_REPLACE_THE_LITERAL' }
         });
         if (shell === 'pwsh.exe' && result.error?.code === 'ENOENT') return t.skip('PowerShell 7 is not installed');
@@ -519,7 +521,9 @@ test('生成的 PowerShell 文本在 Windows PowerShell 5.1 和 PowerShell 7 保
     await t.test(shell, (t) => {
       const script = `[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)\n${output.powershell}\nexit $LASTEXITCODE`;
       const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
-        encoding: 'utf8', windowsHide: true, timeout: 15000, input: '\r\n',
+        // Windows PowerShell 5.1 on a shared runner can spend over 15s on cold start plus profile load
+        // (observed spawnSync ETIMEDOUT). That is interpreter startup, not the behaviour under test.
+        encoding: 'utf8', windowsHide: true, timeout: 45000, input: '\r\n',
         env: { ...process.env, CXPLUS_GENERATOR_SENTINEL: 'THIS_MUST_NOT_REPLACE_THE_LITERAL', NODE_OPTIONS: `--import=data:text/javascript;base64,${Buffer.from(preload).toString('base64')}` }
       });
       if (shell === 'pwsh.exe' && result.error?.code === 'ENOENT') return t.skip('PowerShell 7 is not installed');
