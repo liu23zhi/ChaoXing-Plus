@@ -74,7 +74,9 @@ after(async () => {
 
 async function openPage(enabled = true) {
   const page = await browser.newPage();
-  page.setDefaultTimeout(5000);
+  // 冷 profile 下首次导航要等 Chromium 把本地页面与扩展都挂起来；5s 在共享 runner 上
+  // 会偶发 'Navigation timeout of 5000 ms exceeded'（实测一次失败），给到 20s。
+  page.setDefaultTimeout(20000);
   await page.goto(url);
   await page.evaluate((key, enabled) => {
     localStorage.setItem(key, JSON.stringify(enabled));
@@ -119,7 +121,9 @@ test('saved enabled setting shows the panel at startup without a log or toggle',
 
 test('startup before body parsing keeps the panel and its controls alive', async () => {
   const page = await browser.newPage();
-  page.setDefaultTimeout(5000);
+  // 冷 profile 下首次导航要等 Chromium 把本地页面与扩展都挂起来；5s 在共享 runner 上
+  // 会偶发 'Navigation timeout of 5000 ms exceeded'（实测一次失败），给到 20s。
+  page.setDefaultTimeout(20000);
   try {
     await page.goto(`${url}early`);
     assert.notEqual(await page.$('#chaoxing-plus-debug-log-panel'), null);
@@ -257,7 +261,9 @@ test('large and accessor details are bounded without executing page getters', as
 
 test('nested cross-origin Chaoxing frames share one top-level debug log panel', async () => {
   const page = await browser.newPage();
-  page.setDefaultTimeout(5000);
+  // 冷 profile 下首次导航要等 Chromium 把本地页面与扩展都挂起来；5s 在共享 runner 上
+  // 会偶发 'Navigation timeout of 5000 ms exceeded'（实测一次失败），给到 20s。
+  page.setDefaultTimeout(20000);
   try {
     const topUrl = url.replace('127.0.0.1', 'a.chaoxing.com');
     await page.goto(topUrl);

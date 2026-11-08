@@ -206,7 +206,10 @@ jobs:
           if ($testFiles.Count -eq 0) { throw '单元测试清单为空' }
           Write-Host "单元测试文件数: $($testFiles.Count)"
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-unit-tests.tap'
-          node --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 @testFiles 2>&1 | Tee-Object -FilePath $tapPath
+          # 串行执行：并发 2 曾让 windows-native-purge 的 RunOnce 断言读到别的用例
+          # 刚登记的 cxplus-purge-* 项（实测一次失败：actual=['cxplus-purge-9d1bf31f'] expected=[]）。
+          # 这些用例共享 HKCU RunOnce 与 %TEMP%，不是隔离的，必须串行。
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 @testFiles 2>&1 | Tee-Object -FilePath $tapPath
           $exitCode = $LASTEXITCODE
           if (-not (Select-String -LiteralPath $tapPath -Pattern '^# skipped (\d+)$' | Select-Object -Last 1)) { throw '单元测试未产生 TAP 汇总' }
           if ($exitCode -ne 0) { exit $exitCode }

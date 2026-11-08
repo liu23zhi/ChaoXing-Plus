@@ -456,7 +456,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /'dist\/manifest\.json'/u, 'Windows 构建必须校验扩展 dist 产物');
   assert.match(workflow, /path:\s*\|[\s\S]*?dist\/[\s\S]*?dist-windows\//u, '拆分 Windows job 必须共享扩展 dist 产物');
   assert.match(workflow, /tab-answer-pause\.test\.mjs/u, '高并发全量测试必须包含并显式隔离标签页暂停浏览器回归');
-  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 @testFiles/u, '单元测试必须限制并发');
+  // 原生用例共享 HKCU RunOnce 与 %TEMP%，并发 2 会互相读到对方的登记项（实测 windows-native-purge
+  // 的模拟自毁断言读到别的用例刚写的 cxplus-purge-*），因此固定为串行。这里只要求并发有界，1 或 2 都满足。
+  assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=[12] --test-timeout=300000 @testFiles/u, '单元测试必须限制并发');
   assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 \$testFile/u, '标签页暂停浏览器回归必须串行执行');
   assert.match(workflow, /node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u, '浏览器回归必须在独立 runner 串行执行');
   assert.match(workflow, /npm run release:windows/u);

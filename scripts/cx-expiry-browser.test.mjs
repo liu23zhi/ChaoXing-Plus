@@ -97,7 +97,9 @@ after(async () => {
 
 async function openPage() {
   const page = await browser.newPage();
-  page.setDefaultTimeout(6000);
+  // 冷 profile 首次导航要等本地页面与扩展挂起来；6s 在共享 runner 上会偶发
+  // 'Navigation timeout of 6000 ms exceeded'（实测一次失败），给到 20s。
+  page.setDefaultTimeout(20000);
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.setRequestInterception(true);

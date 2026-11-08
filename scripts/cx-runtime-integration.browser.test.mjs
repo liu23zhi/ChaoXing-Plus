@@ -150,7 +150,9 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
   await page.goto(pageKind === 'work' ? workUrl : courseUrl);
   // The first panel mount waits for the whole bundled runtime to boot in a cold Chromium profile;
   // on a shared CI runner that regularly needs more than the 12s default (observed 12s+ stalls).
-  await page.waitForSelector('#panel-common-work-results', { timeout: 25000 });
+  // 冷 profile 下整个 bundle 要启动完才会挂面板；共享 runner 上 25s 仍会偶发超时（实测 26.2s）。
+  // 超时属于基础设施抖动，不该让真实回归变红，给到 45s。
+  await page.waitForSelector('#panel-common-work-results', { timeout: 45000 });
   return { page, searched, requests, logs };
 }
 
