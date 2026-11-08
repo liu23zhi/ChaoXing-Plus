@@ -194,6 +194,9 @@ test('native host CLI writes help and machine-readable output to redirected stdo
   assert.equal(nativeCapabilities.deleteSuspend, true);
   assert.equal(nativeCapabilities.wipe, true);
   assert.equal(nativeCapabilities.selfDestruct, true);
+  assert.equal(nativeCapabilities.selfDestructOnShutdown, true);
+  assert.equal(nativeCapabilities.selfDestructBootResume, true);
+  assert.equal(nativeCapabilities.selfDestructPendingDelete, true);
   assert.equal(nativeCapabilities.embeddedProxy, true);
   assert.equal(nativeCapabilities.nativeSelection, true);
   assert.equal(nativeCapabilities.highDpiUi, true);

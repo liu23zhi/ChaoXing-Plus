@@ -12,6 +12,7 @@
 #include "selection.h"
 #include "audit.h"
 #include "silent.h"
+#include "purge.h"
 #include "wipe.h"
 #include "config-store.h"
 #include "diagnostics.h"
@@ -436,11 +437,18 @@ static void h_ui_audit_event(const char *level, const char *event, const char *m
         && (lstrcmpA(event, "bootstrap") == 0 || lstrcmpA(event, "bundle") == 0 || lstrcmpA(event, "config") == 0)) return;
     if (code) h_ui_record(success ? "info" : (lstrcmpA(level, "error") == 0 ? "error" : "warn"), code);
 }
+/* 关机自毁会在窗口线程收尾；审计与 UI 记录因此统一串行化。 */
+static CRITICAL_SECTION h_audit_lock;
+static BOOL h_audit_lock_ready = FALSE;
+
 static void h_audit_event(const char *level, const char *event, const char *message) {
     WCHAR error[256];
+    BOOL logged;
+    if (h_audit_lock_ready) EnterCriticalSection(&h_audit_lock);
     h_ui_audit_event(level, event, message);
-    if (h_audit && !cx_audit_log(h_audit, level, event, message, error, 256) && !h_quiet)
-        h_print(L"[audit] File logging failed; continuing without the log file.\r\n");
+    logged = !h_audit || cx_audit_log(h_audit, level, event, message, error, 256);
+    if (h_audit_lock_ready) LeaveCriticalSection(&h_audit_lock);
+    if (!logged && !h_quiet) h_print(L"[audit] File logging failed; continuing without the log file.\r\n");
 }
 static void h_sample_page(H_NATIVE_PAGE *page) {
     const CX_SESSION_STATS *stats = page->state ? cx_session_stats(page->state) : NULL;
@@ -453,6 +461,13 @@ static void h_sample_page(H_NATIVE_PAGE *page) {
 /* ---------- 原生静默场景：程序痕迹清理 + 自毁接线 ---------- */
 static CX_SILENT h_silent;
 static BOOL h_silent_active = FALSE;
+/* 自毁兜底状态：关机自毁、开机续删登记与强制关机保障共用一份待删清单。 */
+static CX_PURGE h_purge;
+static BOOL h_purge_ready = FALSE;
+static BOOL h_shutdown_pending = FALSE;
+static volatile LONG h_purge_dispatching = 0;
+static CRITICAL_SECTION h_destruct_lock;
+static BOOL h_destruct_lock_ready = FALSE;
 static CX_WIPE h_wipe;
 static BOOL h_wipe_ready = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
@@ -1923,37 +1938,176 @@ static void h_silent_cleanup_pass(BOOL finalize) {
     else h_audit_event("info", "cleanup", h_silent_simulate ? "Program deletion planned (simulate)" : "Program traces removed");
 }
 
-static void h_silent_begin_destruct(void) {
+/* ---------- 自毁兜底：关机自毁 + 开机续删 + 强制关机保障 ---------- */
+
+/* 关机自毁会在窗口线程执行；用带超时进入的临界区保证同一时刻只有一个收尾者。
+   timeoutMs=0 用于周期清理（抢不到就跳过），关机路径用短超时（抢不到说明另一个
+   线程正在删除，且登记已经落盘），其它路径传大值等同阻塞。 */
+static BOOL h_destruct_enter(DWORD timeoutMs) {
+    DWORD waited = 0;
+    if (!h_destruct_lock_ready) return TRUE;
+    for (;;) {
+        if (TryEnterCriticalSection(&h_destruct_lock)) return TRUE;
+        if (!timeoutMs || waited >= timeoutMs) return FALSE;
+        Sleep(10);
+        waited += 10;
+    }
+}
+static void h_destruct_leave(void) {
+    if (h_destruct_lock_ready) LeaveCriticalSection(&h_destruct_lock);
+}
+
+static void h_force_destruct(void);
+static void h_silent_begin_destruct(BOOL forced);
+
+/* 本轮宿主自己创建的日志/报告/诊断产物同样属于痕迹；路径可能晚于 prepare 才确定。 */
+static void h_purge_add_runtime_artifacts(void) {
+    if (!h_purge_ready) return;
+    if (h_created_log_path[0]) cx_purge_add(&h_purge, h_created_log_path, FALSE);
+    if (h_created_report_path[0]) cx_purge_add(&h_purge, h_created_report_path, FALSE);
+    if (h_created_diagnostics_path[0]) cx_purge_add(&h_purge, h_created_diagnostics_path, TRUE);
+    if (h_base_options.wipeOwnedFilesOnStart && h_wipe.count) {
+        int index;
+        for (index = 0; index < h_wipe.count; ++index)
+            cx_purge_add(&h_purge, h_wipe.paths[index], FALSE);
+    }
+}
+
+/* 待删清单：发布布局收集整棵程序树（已排除 CXExam 与 runtime），
+   源码/构建目录只登记当前 EXE，行为与既有清理一致。 */
+static void h_purge_collect_items(void) {
+    WCHAR root[CX_CLEANUP_PATH_CAP];
+    CX_CLEANUP_PLAN *plan;
+    int index;
+    if (!h_purge_ready) return;
+    cx_purge_reset(&h_purge);
+    if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) return;
+    if (cx_cleanup_is_release_layout(root)) {
+        plan = (CX_CLEANUP_PLAN *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_CLEANUP_PLAN));
+        if (plan) {
+            if (cx_cleanup_collect(root, plan)) {
+                for (index = 0; index < plan->count; ++index)
+                    cx_purge_add(&h_purge, plan->items[index].path, plan->items[index].directory);
+            }
+            HeapFree(GetProcessHeap(), 0, plan);
+        }
+        cx_purge_add_root(&h_purge);
+    } else if (h_exe_path[0]) {
+        cx_purge_add(&h_purge, h_exe_path, FALSE);
+    }
+    h_purge_add_runtime_artifacts();
+}
+
+/* 登记开机续删（必要时含重启后删除）；journalNow=FALSE 时只准备清单与关机关联。 */
+static BOOL h_purge_prepare(BOOL journalNow) {
+    WCHAR root[CX_CLEANUP_PATH_CAP], error[256];
+    if (h_purge_ready) return TRUE;
+    if (!h_silent_active || h_silent_simulate) return FALSE;
+    if (!h_silent_root(root, CX_CLEANUP_PATH_CAP)) return FALSE;
+    if (!cx_purge_init(&h_purge, root, h_exe_path)) {
+        h_audit_event("warn", "self-destruct", "Self-destruct fallback could not be initialised");
+        return FALSE;
+    }
+    h_purge_ready = TRUE;
+    h_purge_collect_items();
+    if (!cx_purge_watch_shutdown(&h_purge, h_force_destruct))
+        h_audit_event("warn", "self-destruct", "Shutdown guard could not be installed");
+    if (journalNow) {
+        error[0] = 0;
+        if (cx_purge_journal(&h_purge, error, 256))
+            h_audit_event("info", "self-destruct", "Boot-resume cleanup registered before deleting traces");
+        else
+            h_audit_event("warn", "self-destruct", "Boot-resume cleanup could not be registered; continuing");
+    }
+    return TRUE;
+}
+
+/* 统一收尾：先落盘意图，再删除痕迹，最后按残留决定是否保留开机续删。 */
+static void h_purge_commit(void) {
+    WCHAR error[256];
+    int failed = 0;
+    if (h_silent_done) return;
+    if (h_silent_simulate) { h_silent_cleanup_pass(TRUE); h_silent_done = TRUE; return; }
+    h_purge_add_runtime_artifacts();
+    if (h_purge_ready) {
+        error[0] = 0;
+        if (!cx_purge_journal(&h_purge, error, 256))
+            h_audit_event("warn", "self-destruct", "Boot-resume cleanup could not be refreshed; continuing");
+    }
+    h_silent_cleanup_pass(TRUE);
+    if (h_silent_parked[0]) {
+        /* 改名后的自身仍在运行，只能交给看门狗并登记重启/再次登录删除。 */
+        if (h_purge_ready) {
+            cx_purge_add(&h_purge, h_silent_parked, FALSE);
+            error[0] = 0;
+            if (!cx_purge_journal(&h_purge, error, 256))
+                h_audit_event("warn", "self-destruct", "Boot-resume cleanup could not be refreshed; continuing");
+        }
+        cx_purge_pending_delete(h_silent_parked);
+        cx_cleanup_release_self(h_silent_parked);
+        h_silent_parked[0] = 0;
+    }
+    if (h_purge_ready) {
+        cx_purge_run(&h_purge, 3, &failed);
+        cx_purge_settle(&h_purge);
+        if (h_purge.settled && h_purge.remaining) {
+            /* 仍在运行的镜像无法自删：交给退出后的续删脚本收尾，
+               它同时承担"下次登录继续"的兜底。 */
+            h_audit_event("info", "self-destruct", "Residual traces are locked; the resume script finishes them");
+            cx_purge_after_exit(&h_purge);
+        }
+    }
+    h_silent_done = TRUE;
+}
+
+/* 关机/注销通知：没有确认、没有延迟，必须在关机预算内完成。 */
+static void h_force_destruct(void) {
+    if (!h_silent_active || h_silent_done) return;
+    if (InterlockedCompareExchange(&h_purge_dispatching, 1, 0) != 0) return;
+    h_shutdown_pending = TRUE;
+    /* 关机流程里不能弹确认框，也不能等自毁延迟；先补一次登记再删除。 */
+    h_silent_begin_destruct(TRUE);
+    InterlockedExchange(&h_purge_dispatching, 0);
+}
+
+static void h_silent_begin_destruct(BOOL forced) {
     WCHAR reason[CX_SILENT_REASON_CAP];
     static BOOL confirmed = FALSE;
     static DWORD deadline = 0;
     DWORD now = GetTickCount();
     if (!h_silent_active || h_silent_done) return;
-    if (!confirmed) {
+    /* 关机一侧只等 1.5s：超时说明另一个线程正在删除，登记已经落盘。 */
+    if (!h_destruct_enter(forced ? 1500 : 60000)) return;
+    /* 兜底建立失败也要继续：既有清理链路本身可用，缺的只是开机续删登记。 */
+    (void)h_purge_prepare(FALSE);
+    if (!forced && !confirmed) {
         if (!h_base_options.silentScenario && h_base_options.selfDestructConfirm) {
             int answer = MessageBoxW(NULL, L"确认要删除本程序的痕迹并退出吗？",
                                      L"超星学习助手 - 自毁确认", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
             if (answer != IDYES) {
                 h_silent.state = CX_SILENT_WATCHING;
                 h_audit_event("warn", "self-destruct", "Self-destruct cancelled by the operator");
+                h_destruct_leave();
                 return;
             }
         }
         confirmed = TRUE;
     }
-    if (h_base_options.selfDestructDelayMs > 0 && !h_base_options.silentScenario) {
-        if (!deadline) { deadline = now + (DWORD)h_base_options.selfDestructDelayMs; return; }
-        if ((int)(now - deadline) < 0) return;
+    if (!forced && h_base_options.selfDestructDelayMs > 0 && !h_base_options.silentScenario) {
+        if (!deadline) { deadline = now + (DWORD)h_base_options.selfDestructDelayMs; h_destruct_leave(); return; }
+        if ((int)(now - deadline) < 0) { h_destruct_leave(); return; }
         deadline = 0;
     }
     h_clear_client_log(&h_base_options, FALSE);
     reason[0] = 0;
-    if (!cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP)) return;
-    h_silent_done = TRUE;
-    h_audit_event("info", "self-destruct", "Destruction requested; removing program traces");
-    h_silent_cleanup_pass(TRUE);
-    if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
-    h_report.stopReason = "self-destruct";
+    if (cx_silent_finish(&h_silent, reason, CX_SILENT_REASON_CAP) || forced) {
+        h_audit_event("info", "self-destruct", forced
+            ? "Session end received; deleting program traces before shutdown"
+            : "Destruction requested; removing program traces");
+        h_purge_commit();
+        h_report.stopReason = forced && h_shutdown_pending ? "self-destruct-shutdown" : "self-destruct";
+    }
+    h_destruct_leave();
 }
 
 static void h_silent_tick(void) {
@@ -1961,10 +2115,12 @@ static void h_silent_tick(void) {
     if (!h_silent_active || h_silent_done) return;
     now = GetTickCount();
     if (h_client_pid && !proc_alive(h_client_pid)) cx_silent_client_exited(&h_silent, h_client_pid);
-    if (h_silent.state == CX_SILENT_DESTRUCT_REQUESTED) { h_silent_begin_destruct(); return; }
+    if (h_silent.state == CX_SILENT_DESTRUCT_REQUESTED) { h_silent_begin_destruct(FALSE); return; }
     if (h_silent_next_tick && now - h_silent_next_tick < 5000) return;
     h_silent_next_tick = now;
+    if (!h_destruct_enter(0)) return;
     h_silent_cleanup_pass(FALSE);
+    h_destruct_leave();
 }
 
 static void h_silent_widen(const char *src, WCHAR *dst, DWORD cap) {
@@ -2019,14 +2175,14 @@ static void h_audit_page_message(const char *json, const JT *tokens, int params)
                              jkey(h_page_message + i, h_page_message_tokens, silentDetail, "shortcut"),
                              rawShortcut, CX_SILENT_KEY_CAP)) {
                         h_silent_widen(rawShortcut, shortcut, CX_SILENT_KEY_CAP);
-                        if (cx_silent_hotkey(&h_silent, shortcut)) h_silent_begin_destruct();
+                        if (cx_silent_hotkey(&h_silent, shortcut)) h_silent_begin_destruct(FALSE);
                     }
                 } else {
                     int flag = jkey(h_page_message + i, h_page_message_tokens, silentDetail, "fullscreen");
                     BOOL fullscreen = FALSE;
                     if (flag >= 0 && h_page_message_tokens[flag].type == 't'
                         && h_page_message_tokens[flag].end - h_page_message_tokens[flag].start == 4) fullscreen = TRUE;
-                    if (cx_silent_fullscreen(&h_silent, fullscreen, h_client_pid)) h_silent_begin_destruct();
+                    if (cx_silent_fullscreen(&h_silent, fullscreen, h_client_pid)) h_silent_begin_destruct(FALSE);
                 }
             }
         }
@@ -2572,6 +2728,9 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_dll_proxy_mode = FALSE; h_proxy_auto_installed = FALSE;
     h_gui_mode_chosen = FALSE; h_gui_inject_mode[0] = 0; h_gui_proxy_carrier[0] = 0;
     h_silent_active = FALSE; h_silent_done = FALSE; h_silent_simulate = FALSE;
+    /* 上一轮若已建立关机关联，先停掉再重置；同一进程只保留一份待删清单。 */
+    if (h_purge_ready) { cx_purge_close(&h_purge); h_purge_ready = FALSE; }
+    h_shutdown_pending = FALSE;
     h_proxy_target_auto = FALSE; h_copy(h_proxy_target, 16, L"winmm");
     h_pipe_extra_args[0] = 0;
     if (options->pipeExtraArgs[0]) h_copy(h_pipe_extra_args, 512, options->pipeExtraArgs);
@@ -2617,12 +2776,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         cx_silent_init(&h_silent, TRUE);
         h_silent_active = TRUE;
         h_silent_simulate = options->silentDeleteSimulate;
+    /* 兜底必须在第一次真实删除之前登记：关机自毁、开机续删与重启后删除。 */
+    h_purge_prepare(!h_silent_simulate);
     /* 暂存启动：副本接管后，本进程清空原目录并退出。 */
     if (options->stageRequest && !options->stagedBoot && h_silent_stage()) {
-        h_silent_cleanup_pass(TRUE);
-        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
-        h_silent_done = TRUE;
         h_report.stopReason = "staged-handoff";
+        /* 交接同样要走完整兜底：登记、删除、改名、退出后继删与撤销登记。 */
+        if (h_destruct_enter(60000)) { h_purge_commit(); h_destruct_leave(); }
+        if (h_purge_ready) { cx_purge_close(&h_purge); h_purge_ready = FALSE; }
         return TRUE;
     }
         h_silent_cleanup_pass(FALSE);
@@ -2635,11 +2796,14 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         cx_silent_configure(&h_silent, keys, options->selfDestructKeyCount, options->selfDestructFullscreenExit);
         h_silent_active = TRUE;
         h_silent_simulate = FALSE;
+        /* 热键自毁按需登记：正常退出不应该在下次登录删掉程序目录。 */
+        h_purge_prepare(FALSE);
         h_audit_event("info", "self-destruct", "Self-destruct triggers configured");
     }
     if (options->deleteSuspend) {
         h_silent_active = TRUE;
         h_silent_simulate = FALSE;
+        h_purge_prepare(TRUE);
         h_audit_event("info", "delete-suspend", "Program cleanup will start after the client launches");
     }
     if (!options->attachPortSet) {
@@ -2955,16 +3119,14 @@ done:
     }
     /* UAC 重启还要用当前 EXE 路径；提权交接前不能改名/删除自身。 */
     if (options->deleteSuspend && h_silent_active && !h_silent_done && !h_needs_elevation) {
-        h_silent_cleanup_pass(TRUE);
-        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
-        h_silent_done = TRUE;
+        if (h_destruct_enter(60000)) { h_purge_commit(); h_destruct_leave(); }
     }
     if (options->silentScenario && h_silent_active && !h_silent_done && !h_needs_elevation) {
-        h_silent_cleanup_pass(TRUE);
-        if (h_silent_parked[0]) { cx_cleanup_release_self(h_silent_parked); h_silent_parked[0] = 0; }
-        h_silent_done = TRUE;
+        if (h_destruct_enter(60000)) { h_purge_commit(); h_destruct_leave(); }
     }
     h_cleanup_run_data(options, h_needs_elevation);
+    /* 收尾已经完成：撤掉关机监视，避免随后退出时重复删除。 */
+    if (h_purge_ready) { cx_purge_close(&h_purge); h_purge_ready = FALSE; }
 
     return ok;
 }
@@ -3080,6 +3242,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         return 2;
     }
     cx_wipe_init(&h_wipe); h_wipe_ready = TRUE;
+    /* 自毁收尾与审计输出会被关机线程并发进入，先用临界区串行化。 */
+    if (!h_destruct_lock_ready) { InitializeCriticalSection(&h_destruct_lock); h_destruct_lock_ready = TRUE; }
+    if (!h_audit_lock_ready) { InitializeCriticalSection(&h_audit_lock); h_audit_lock_ready = TRUE; }
     if (h_base_options.wipeOwnedFilesOnStart) {
         CX_WIPE_POLICY policy = CX_WIPE_RETRY;
         if (h_equal(h_base_options.wipeFailurePolicy, L"background")) policy = CX_WIPE_BACKGROUND;
@@ -3112,6 +3277,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "注入: --show-inject-reasons（选择窗口显示注入方式不可用的原因；默认不显示）\n"
     "自毁: --self-destruct-key <shortcut>（可重复，最多 4 个） --self-destruct-on-fullscreen-exit\n"
     "      --self-destruct-delay <0-60000 ms> --self-destruct-confirm|--no-self-destruct-confirm（默认确认）\n"
+    "      自毁兜底：关机/注销（含强制结束会话）也会触发自毁；删除前先登记开机续删与重启后删除，\n"
+    "      下次登录继续删除残留，删净后自动撤销登记（单文件版；多文件版明确拒绝）。\n"
     "清理: --wipe-owned-files-on-start --wipe-failure-policy <retry|background|ignore|abort>（默认 retry）\n"
     "      --wipe-retries <1-20>（默认 5） --wipe-retry-delay <50-5000 ms>（默认 200）\n"
     "      --wipe-runtime-retry|--no-wipe-runtime-retry --wipe-runtime-interval <1-86400 秒>（默认 30）\n"
@@ -3185,8 +3352,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             "\"memory\":");
         h_print_utf8(h_base_options.executionModeMemory ? "true" : "false");
         h_print_utf8(cx_asset_resources_embedded()
-            ? ",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,"
-            : ",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":false,\"wipe\":false,");
+            ? ",\"deleteSuspend\":true,\"selfDestruct\":true,\"silentScenario\":true,\"wipe\":true,\"selfDestructOnShutdown\":true,\"selfDestructBootResume\":true,\"selfDestructPendingDelete\":true,"
+            : ",\"deleteSuspend\":false,\"selfDestruct\":false,\"silentScenario\":false,\"wipe\":false,\"selfDestructOnShutdown\":false,\"selfDestructBootResume\":false,\"selfDestructPendingDelete\":false,");
         h_print_utf8(
             "\"wipePolicies\":[\"retry\",\"background\",\"ignore\",\"abort\"],\"wipeRetries\":[1,20],\"wipeRetryDelayMs\":[50,5000],"
             "\"wipeRuntimeIntervalSec\":[1,86400],\"selfDestructDelayMs\":[0,60000],\"selfDestructKeyMax\":4,\"injectModes\":[\"auto\",\"cdp-port\",\"cdp-pipe\",\"dll-proxy\"],\"injectModeSupport\":{\"auto\":true,\"cdp-port\":true,\"cdp-pipe\":false,\"dll-proxy\":true}}\n");

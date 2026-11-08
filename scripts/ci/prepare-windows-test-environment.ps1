@@ -27,6 +27,7 @@ function Set-CiEnvironment([string] $name, [string] $value) {
 $executables = [ordered]@{
   CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver.exe'
   CX_NATIVE_SILENT_EXE = 'silent-tests.exe'
+  CX_NATIVE_PURGE_EXE = 'purge-tests.exe'
   CX_NATIVE_HOST_EXE = 'chaoxing_plus.exe'
   CX_NATIVE_INJECTION_EXE = 'injection-tests.exe'
   CX_NATIVE_ASSETS_EXE = 'assets-tests.exe'
