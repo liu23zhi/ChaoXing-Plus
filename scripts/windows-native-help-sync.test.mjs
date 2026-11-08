@@ -29,8 +29,10 @@ const INTERNAL_FLAGS = new Set([
   '--silent-client'
 ]);
 
-// 用户可见参数必须同时出现在文档参数表中。
-const MUST_BE_IN_DOCS = [
+// 用户可见且容易漏写的参数：必须在 --help 文本里出现。
+// 以前这条断言读 docs/windows.md；文档迁到 TikuDoc 后改为直接断言 host.c 内嵌的
+// --help 字符串——那是随代码走的唯一权威来源，测试不再依赖任何文档。
+const MUST_BE_IN_HELP = [
   '--inject-mode',
   '--inject-proxy-dir',
   '--show-inject-reasons',
@@ -48,7 +50,7 @@ const MUST_BE_IN_DOCS = [
 ];
 
 const optionsSource = resolve('windows/native-source/options.c');
-const docsPath = resolve('docs/windows.md');
+const hostSource = resolve('windows/native-source/host.c');
 const hostExe = process.env.CX_NATIVE_HOST_EXE ? resolve(process.env.CX_NATIVE_HOST_EXE) : resolve('windows/native-build/bin/chaoxing_plus.exe');
 
 async function acceptedFlags() {
@@ -71,8 +73,8 @@ test('每个用户可见开关都出现在 --help 中', { skip: process.platform
   assert.deepEqual(missing, [], `以下开关未出现在 --help：${missing.join(', ')}`);
 });
 
-test('注入相关的用户可见开关都写进了文档参数表', async () => {
-  const docs = await readFile(docsPath, 'utf8');
-  const missing = MUST_BE_IN_DOCS.filter((flag) => !docs.includes(flag));
-  assert.deepEqual(missing, [], `以下开关未出现在 docs/windows.md：${missing.join(', ')}`);
+test('注入相关的用户可见开关都写进了 host.c 的 --help 文本', async () => {
+  const source = await readFile(hostSource, 'utf8');
+  const missing = MUST_BE_IN_HELP.filter((flag) => !source.includes(flag));
+  assert.deepEqual(missing, [], `以下开关未出现在 host.c 的 --help 文本：${missing.join(', ')}`);
 });
