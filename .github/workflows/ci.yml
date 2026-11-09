@@ -40,7 +40,10 @@ jobs:
           set -o pipefail
           mapfile -t testFiles < <(find scripts -maxdepth 1 -name '*.test.mjs' -type f | sort)
           echo "测试文件数: ${#testFiles[@]}"
-          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 --experimental-test-coverage "${testFiles[@]}" > coverage.tap || true
+          # --import 注册 src 的 .ts 解析 hook：构建产物来自 .ts（build.mjs 的
+          # resolve.extensions 把 .ts 排在 .js 前，PR #19），不加它 src 组会去统计
+          # 不进产物的影子 .js。windows/ 两组统计 .mjs，不受影响。
+          node --import ./scripts/ci/coverage-register.mjs --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 --experimental-test-coverage "${testFiles[@]}" > coverage.tap || true
           echo '--- 测试结果摘要 ---'
           grep -E '^# (tests|pass|fail|skipped)' coverage.tap || true
           echo '--- 覆盖率门禁 ---'

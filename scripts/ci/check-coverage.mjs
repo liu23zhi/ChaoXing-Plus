@@ -12,8 +12,22 @@
 //
 //   A. windows/node-source/**   Node 宿主（已冻结，但仍是可执行代码）
 //   B. windows/share-file/**    构建/打包/参数生成等共享脚本
-//   C. src/**                   只有 src/core/utils/request.js 会被统计到 —— 因为有几个
-//                               测试直接 import 它。src 的其余部分进不了这里的统计。
+//   C. src/**                   统计的是 **.ts 源码**，不是同名 .js 影子文件（见下）
+//
+//   ── 关于 src 组为什么是 .ts ─────────────────────────────────────────────
+//   build.mjs 的 resolve.extensions 把 .ts 排在 .js 前面（PR #19 定的），
+//   因此**进构建产物的是 .ts**。但历史测试仍 `import '../src/core/utils/request.js'`，
+//   Node 默认会去加载同名的影子 .js —— 于是门禁在给一份**不会上线**的文件打分。
+//
+//   实测差异（同一批测试）：
+//     影子 request.js  96.81 / 72.22 / 80.00
+//     实际 request.ts  97.02 / 85.05 / 100.00
+//   数字不同不是重点，"测的不是要上线的那份"才是。
+//
+//   所以覆盖率作业通过 `--import ./scripts/ci/coverage-register.mjs` 注册一个
+//   resolve hook（scripts/ci/ts-source-hooks.mjs），把指向 src/**/*.js 的解析改指
+//   同名 .ts，与构建的解析顺序对齐。同一逻辑不会算两遍：影子 .js 根本不会被加载。
+//   hook 只影响 src/ 下的解析，windows/ 两组统计的是 .mjs，不受影响。
 //
 //   src/projects/** 与 src/runtime/** 的覆盖率由浏览器回归覆盖，
 //   它们的正确性靠行为断言而不是行覆盖率 —— 这是本仓库的既有策略，不是本门禁的疏漏。
@@ -22,8 +36,11 @@
 //   node scripts/ci/check-coverage.mjs <coverage-tap-file>
 //
 // TAP 文件由 CI 这样生成（先 npm run build，否则 manifest 相关测试会假失败）：
-//   node --test --experimental-test-coverage --test-concurrency=1 --test-reporter=tap \
+//   node --import ./scripts/ci/coverage-register.mjs \
+//     --test --experimental-test-coverage --test-concurrency=1 --test-reporter=tap \
 //     @testFiles > coverage.tap
+//
+// 注意 --import：它注册 src 的 .ts 解析 hook，缺了它 src 组会退回统计影子 .js。
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -38,11 +55,19 @@ const ROW = /^#( +)(.+?)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|/u;
 const DIR = /^#( +)(.+?)\s*\|\s*\|\s*\|\s*\|?\s*$/u;
 
 const THRESHOLDS = {
-  // 按 2026-11-09 实测值向下留 3 个百分点余量。改这些数字要在 PR 里写依据。
+  // 按 2026-11-09 实测值向下留 3-5 个百分点余量。改这些数字要在 PR 里写依据。
+  //
+  // windows 两组统计的是 .mjs，不受 src 的 .ts 解析 hook 影响；下面是本轮
+  // 用 `--import ./scripts/ci/coverage-register.mjs` 重测后的实际值，未漂移：
+  //   windows/node-source  line 90.65 / branch 78.80 / funcs 84.61
+  //   windows/share-file   line 92.38 / branch 86.19 / funcs 93.52
   'windows/node-source': { line: 83, branch: 71, funcs: 77 },
   'windows/share-file': { line: 89, branch: 73, funcs: 90 },
-  // src 只有单个文件被统计，阈值等同该文件，留同样余量。
-  src: { line: 93, branch: 68, funcs: 76 },
+  // src 组改为统计 .ts 源码后重测（3 个文件：request.ts / string.ts / tiku-adapter-error.ts）
+  //   line 99.01 / branch 90.25 / funcs 100.00
+  // 阈值按"向下留余量"设：line 95（-4）、branch 85（-5）、funcs 95（-5）。
+  // 注意：funcs 实测已是 100%，留 95 是给"新增函数先写实现后补测试"的正常节奏留空间。
+  src: { line: 95, branch: 85, funcs: 95 },
 };
 
 function groupOf(fullPath) {
@@ -170,7 +195,7 @@ function main() {
   console.log('未纳入统计（设计如此）：');
   console.log('  src/projects/**   跑在构建产物里，由浏览器回归覆盖，Node 覆盖率工具看不到');
   console.log('  src/runtime/**    同上');
-  console.log('  src/core/*.ts     测试直接 import .js 影子文件，统计口径与产物不一致');
+  console.log('  （src 组统计的是 .ts 源码，经 coverage-register.mjs 的 resolve hook 对齐构建解析顺序）');
 
   if (failures.length > 0) {
     console.log('');
