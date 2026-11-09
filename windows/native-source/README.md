@@ -1,6 +1,6 @@
 # 原生宿主导航
 
-本目录存放 Windows 原生宿主、C 测试、MSVC 编译脚本及原生构建/启动入口。运行时为 x86 Win32、无 CRT；单文件 GUI 内嵌资源，多文件 GUI 使用同目录外置资源。Windows 总目录说明见 [共享目录导航](../share-file/README.md)，配置与验收范围见 [Windows 使用文档](../../docs/windows.md)。
+本目录存放 Windows 原生宿主、C 测试、MSVC 编译脚本及原生构建/启动入口。运行时为 x86 Win32、无 CRT；单文件 GUI 内嵌资源，多文件 GUI 使用同目录外置资源。Windows 总目录说明见 [共享目录导航](../share-file/README.md)，配置与验收范围见 [仓库约定](../../AGENTS.md) 的 Windows 端章节（`docs/` 已迁出本仓库，不再有仓库内设计文档）。
 
 ## 模块分组
 
