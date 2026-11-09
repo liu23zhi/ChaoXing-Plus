@@ -139,7 +139,7 @@ async function fixture({ preview = true, pageCount = 2, holdUpload = false, coun
   const code = [scope.replace(/^export /gmu, ''), declaration(cx, 'replaceCurrentWorkResults', 'cx.ts'), declaration(cx, 'workOrExam', 'cx.ts'),
     declaration(common, 'clearAndRetryWorkResults', 'common.ts')].join('\n');
   vm.runInContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
-  context.workOrExam('work', { preview_mode: preview, answererWrappers: [], period: 0, thread: 1, upload: 'save',
+  context.workOrExam('work', { preview_mode: preview, answererWrappers: [], searchDelaySeconds: 0, thread: 1, upload: 'save',
     stopSecondWhenFinish: 10, redundanceWordsText: '', answerSeparators: '#', answerMatchMode: 'exact',
     enableRandomFallbackAnswer: false, enableAIFallbackAnswer: false, deepThinking: false, aiFallbackFailureAction: 'pause' });
   await new Promise((done) => setImmediate(done));

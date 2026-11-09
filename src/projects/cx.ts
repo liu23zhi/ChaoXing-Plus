@@ -905,7 +905,10 @@ function getCurrentChapterCompletionDiagnostics() {
 }
 
 const defaultWorkOptions: CommonWorkOptions = {
+  // 历史遗留，从未接线：真实答题路径（OCSWorker）不读此值，详见接口注释。
   period: 3,
+  // 搜题请求发出前的等待（秒），保持既有 3 秒节奏不变。
+  searchDelaySeconds: 3,
   thread: DEFAULT_WORKER_THREAD_COUNT,
   upload: 'submit',
   enableExamAutoSubmit: false,
@@ -3032,7 +3035,7 @@ export const CXProject = Project.create({
           commonWork(
             CXProject.scripts.work,
             {
-              start_delay_seconds: workOptions.period,
+              start_delay_seconds: workOptions.searchDelaySeconds,
               enable_control_panel: true,
               workerProvider: (opts) => workOrExam('exam', { ...opts, preview_mode: false })
             },
@@ -4831,7 +4834,7 @@ const JobRunner = {
   ): Promise<ChapterTaskResult> {
     const {
       answererWrappers,
-      period,
+      searchDelaySeconds,
       upload,
       thread,
       stopSecondWhenFinish,
@@ -4977,7 +4980,7 @@ const JobRunner = {
 
           const provider = async () => {
             const request = async () => {
-              await sleep((period ?? 3) * 1000);
+              await sleep((searchDelaySeconds ?? 3) * 1000);
               const baseInfos = workerOptions.forceAIFallbackOnly
                 ? []
                 : await defaultAnswerWrapperHandler(answererWrappers, {
@@ -5715,7 +5718,7 @@ function workOrExam(
   type: 'work' | 'exam' = 'work',
   {
     answererWrappers,
-    period,
+    searchDelaySeconds,
     thread,
     upload,
     enableExamAutoSubmit,
@@ -6245,7 +6248,7 @@ function workOrExam(
 
         const provider = async () => {
           const request = async () => {
-            await sleep((period ?? 3) * 1000);
+            await sleep((searchDelaySeconds ?? 3) * 1000);
             const baseInfos = await defaultAnswerWrapperHandler(answererWrappers, {
               type: questionType,
               title,

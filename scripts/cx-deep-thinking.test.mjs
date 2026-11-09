@@ -119,7 +119,9 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
         chapterTestTaskQuestionTitleTransform: (titles) => titles[0].innerText,
         workOrExamQuestionTitleTransform: (titles) => titles[0].innerText,
         sleep: async () => {},
-        period: 3,
+        // 这里注入的是 answerer 里搜题前等待所读的自由变量（秒），
+        // 与已废弃的 CommonWorkOptions.period（从未接线）无关。
+        searchDelaySeconds: 3,
         resolveChapterQuestionType: (root) => root.questionType,
         resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
         resolveAnswerSearchType: (root) => root.questionType,

@@ -37,7 +37,24 @@ import {
 } from './tiku-adapter-config.js';
 
 export interface CommonWorkOptions {
+  /**
+   * @deprecated 历史遗留字段，**从未接线**。
+   *
+   * 它只被 `CustomOCSWorker`（死类，全仓无实例化）读取；真实答题路径
+   * `OCSWorker` 内部既不读此值，也没有任何 `sleep`。保留是为了不破坏公开接口。
+   *
+   * **不要用它调答题节奏。** 答题节拍实际由 `searchDelaySeconds`
+   * （搜题前等待，默认 3 秒）与网络往返共同决定。
+   */
   period: number;
+  /**
+   * 搜题请求发出前的等待，单位**秒**。
+   *
+   * 与 `period` 分开是因为二者原本共用一个字段却按不同单位解释：搜题链路
+   * （`cx.ts`）把它当秒并 `* 1000`，而 `CustomOCSWorker` 把同一个值当毫秒裸用。
+   * 分开后两个旋钮各自单一单位，改一个不会误伤另一个。
+   */
+  searchDelaySeconds: number;
   thread: number;
   upload: WorkUploadType | 'submit';
   enableExamAutoSubmit: boolean;
@@ -574,7 +591,10 @@ const panelPinkTheme: PanelPalette = new Proxy({} as PanelPalette, {
 });
 
 const defaultWorkOptions: CommonWorkOptions = {
+  // 历史遗留，从未接线：真实答题路径（OCSWorker）不读此值，详见接口注释。
   period: 3,
+  // 搜题请求发出前的等待（秒），保持既有 3 秒节奏不变。
+  searchDelaySeconds: 3,
   thread: DEFAULT_WORKER_THREAD_COUNT,
   upload: 'submit',
   enableExamAutoSubmit: false,

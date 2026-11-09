@@ -93,7 +93,8 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
     for (const [key, value] of Object.entries({
       'common.settings.tiku-adapter.baseurl': 'https://provider.chaoxing.com/',
       'common.settings.tiku-adapter.key': 'local-fixture-key',
-      'common.settings.work-options': { period: 0, thread: 1, stopSecondWhenFinish: 0, upload: 'save',
+      // searchDelaySeconds 才是 answerer 搜题前等待（秒）；0 = 不等待，加速夹具。
+      'common.settings.work-options': { searchDelaySeconds: 0, thread: 1, stopSecondWhenFinish: 0, upload: 'save',
         redundanceWordsText: '', answerSeparators: '#,|', answerMatchMode: 'includes', deepThinking: false },
       'cx.new.study.mode': 'manually',
       'cx.new.study.upload': 'save',

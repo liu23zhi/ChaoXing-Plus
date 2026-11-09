@@ -244,7 +244,8 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
         const call = ++sleepCalls;
         if (call === 1) await firstSleep.promise;
       },
-      period: 3,
+      // answerer 搜题前等待读的自由变量（秒）。
+      searchDelaySeconds: 3,
       resolveChapterQuestionType: (root) => root.questionType,
       resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
       resolveAnswerSearchType: (root) => root.questionType,
@@ -316,7 +317,7 @@ for (const factoryName of ['createChapterWorker', 'createWorkOrExamWorker']) {
       createSearchRequestDeduplicator: helperModule.createSearchRequestDeduplicator,
       chapterTestTaskQuestionTitleTransform: (titles) => titles[0].innerText,
       workOrExamQuestionTitleTransform: (titles) => titles[0].innerText,
-      sleep: async () => {}, period: 0,
+      sleep: async () => {}, searchDelaySeconds: 0,
       resolveChapterQuestionType: () => 'single',
       resolveWorkOrExamQuestionTypeRoot: (elements) => elements.root,
       resolveAnswerSearchType: () => 'single',
