@@ -150,7 +150,9 @@ switch ($Stage) {
         # purge-tests 的 resume 阶段做原生断言：目标已删 + 真实 RunOnce 登记已撤销。
         # 目标路径必须与 shutdown 阶段一致，缺了它 C 侧会拒绝执行。
         if (-not (Test-Path -LiteralPath $purgeExe)) {
-            throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -Target tests）"
+            # -BuildTests 与 -Target tests 等价（后者在 build-windows.ps1 里只是把开关置真）；
+            # 这里统一用 -BuildTests，与 ci-vm.yml 的实际调用保持一致。
+            throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -BuildTests）"
         }
         $target = Join-Path $workRoot 'shutdown-target.txt'
         $run = Invoke-PurgeTest -Exe (Resolve-Path -LiteralPath $purgeExe).Path -Environment @{

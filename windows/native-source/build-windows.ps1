@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    # Build target selector used by the VM workflow: 'tests' builds the native
-    # hosts plus every compiled test EXE, 'host' skips the test EXEs.
+    # Build target selector: 'tests' also compiles every test EXE, 'host' skips them.
+    # ci-vm.yml currently calls -BuildTests; the two are equivalent.
     [ValidateSet('host', 'tests')]
     [string]$Target = 'host',
     [switch]$SkipAssetCopy,
@@ -11,8 +11,8 @@ param(
     [switch]$BuildConsole = $true
 )
 $ErrorActionPreference = 'Stop'
-# -Target tests is the documented entry point for the CI test binaries;
-# it is an alias for the older -BuildTests switch, which stays supported.
+# -Target tests is an alias for -BuildTests, kept for existing callers
+# (package.json build:native and scripts/vm/*.ps1 use -BuildTests).
 if ($Target -eq 'tests') { $BuildTests = $true }
 $scriptRoot = $PSScriptRoot
 # The compile script and native sources share the same directory.
