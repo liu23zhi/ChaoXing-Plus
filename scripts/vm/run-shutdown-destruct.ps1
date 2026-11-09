@@ -90,7 +90,7 @@ function Invoke-PurgeTest {
 switch ($Stage) {
     'shutdown' {
         if (-not (Test-Path -LiteralPath $purgeExe)) {
-            throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -Target tests）"
+            throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -BuildTests）"
         }
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
         $target = Join-Path $workRoot 'shutdown-target.txt'

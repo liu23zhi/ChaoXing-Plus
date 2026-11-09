@@ -49,6 +49,14 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      # build-windows.ps1 依赖 dist-windows 下的页面资源与 windows/native-build/hook
+      # 的代理产物；缺任何一项都会直接 throw「Missing injection asset」。
+      # 与主 CI 一致：先扩展包，再 Windows 注入资源（发布口径用 --release）。
+      - name: 构建扩展包与 Windows 注入资源
+        run: |
+          npm run build
+          npm run build:windows -- --release
+
       - name: 记录基线快照标记
         shell: pwsh
         run: |
@@ -66,10 +74,17 @@ jobs:
         shell: pwsh
         run: |
           # 复用仓库既有构建脚本，不新增一套编译流程。
-          ./windows/native-source/build-windows.ps1 -Target tests
-        env:
-          CX_NATIVE_BUILD_ALLOW_UNSIGNED: '1'
+          # -BuildTests 是 switch（不带值）；与 package.json 的 build:native 同口径调用。
+          # 测试产物（injection-tests.exe / purge-tests.exe 等）不签名，脚本内没有 signtool 环节，
+          # 因此这里不需要任何「允许未签名」开关。
+          ./windows/native-source/build-windows.ps1 -BuildTests
 
+      # 缺陷 c（CX_PURGE_TEST_STAGE / CX_PURGE_TEST_TARGET 无人读取）与
+      # 缺陷 d（注册表断言位置不匹配）都不在本分支修，属 fix/purge-wiring-261109 的范围：
+      # 该分支在 purge-tests.c 里新增 GetEnvironmentVariableW(CX_PURGE_TEST_STAGE/TARGET)
+      # 的分阶段入口，并在分阶段路径上刻意不做 run key 重定向，以对齐下面
+      # run-shutdown-destruct.ps1 断言的真实 HKCU\...\RunOnce。
+      # 顺序依赖：必须先合并 fix/purge-wiring-261109，本工作流的下两个步骤才可能通过。
       - name: 关机自毁端到端
         shell: pwsh
         run: |
@@ -118,3 +133,72 @@ jobs:
           Invoke-Expression $env:VM_RESTORE_COMMAND
         env:
           VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
+
+  # 接线就绪度探针：不依赖 cx-vm runner，在托管 windows-latest 上只跑「不关机」的那半条链路。
+  #
+  # 为什么可以加：只由 workflow_dispatch 触发，PR 与夜间巡检都不会调用它；
+  # 再叠加 job 级 continue-on-error，即使失败也不会把主 CI 或本工作流判红。
+  #
+  # 为什么必须标 continue-on-error：缺陷 c（purge-tests.c 不读 CX_PURGE_TEST_STAGE/
+  # CX_PURGE_TEST_TARGET）与缺陷 d（注册表断言位置不匹配）目前都由
+  # fix/purge-wiring-261109 处理。在该分支合并前，重放步骤必然失败，
+  # 这个作业只是「构建段已接通」的证据，不是功能验收。
+  # 合并后请去掉 continue-on-error，让它变成真正的门禁。
+  wiring-probe:
+    name: 接线就绪度探针（不关机，托管 runner）
+    if: github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建扩展包与 Windows 注入资源
+        run: |
+          npm run build
+          npm run build:windows -- --release
+
+      - name: 构建原生测试产物（同一接线）
+        shell: pwsh
+        run: |
+          ./windows/native-source/build-windows.ps1 -BuildTests
+
+      - name: 断言 purge-tests.exe 已生成
+        shell: pwsh
+        run: |
+          $exe = 'windows\native-build\bin\purge-tests.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "缺少 purge 测试产物: $exe" }
+          $item = Get-Item -LiteralPath $exe
+          Write-Output "purge-tests.exe = $($item.Length) 字节"
+
+      # 这一步就是缺陷 c/d 的验收点：在 fix/purge-wiring-261109 合并前会红。
+      - name: 重放关机阶段（跳过真实关机）
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown -NoShutdown
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 上传探针证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-vm-wiring-probe
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/cx-purge-*.log
+            ${{ runner.temp }}/cx-purge-*.txt
+          if-no-files-found: warn
+          retention-days: 7
