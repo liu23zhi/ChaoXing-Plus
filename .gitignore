@@ -16,4 +16,5 @@ windows/data/
 /.claude/worktrees/
 release-ci/
 /.data/
-
+# 覆盖率 TAP（CI 产物，不入库）
+coverage.tap

@@ -32,7 +32,26 @@ jobs:
         run: npm run typecheck
       - name: Linux 扩展构建
         run: npm run build
-
+      - name: 单元测试与覆盖率门禁
+        shell: bash
+        run: |
+          # 覆盖率只能统计被 Node 模块加载器加载过的文件，所以在 Ubuntu 上跑。
+          # 必须先 build：缺 dist/ 时 manifest 相关用例会假失败，与覆盖率无关。
+          set -o pipefail
+          mapfile -t testFiles < <(find scripts -maxdepth 1 -name '*.test.mjs' -type f | sort)
+          echo "测试文件数: ${#testFiles[@]}"
+          node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 --experimental-test-coverage "${testFiles[@]}" > coverage.tap || true
+          echo '--- 测试结果摘要 ---'
+          grep -E '^# (tests|pass|fail|skipped)' coverage.tap || true
+          echo '--- 覆盖率门禁 ---'
+          node scripts/ci/check-coverage.mjs coverage.tap
+      - name: 上传覆盖率 TAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-tap
+          path: coverage.tap
+          retention-days: 7
   windows-build:
     name: Windows 构建共享测试产物
     runs-on: windows-latest
