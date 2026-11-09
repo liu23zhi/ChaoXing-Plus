@@ -1,0 +1,126 @@
+name: KVM 能力巡检（托管 runner）
+
+# 目的：把「GitHub 托管 Ubuntu runner 有没有把 /dev/kvm 开放给作业用户」
+# 这个外部事实变成每天一条可追溯的记录，而不是一次性的探测残留。
+#
+# 已知基线（2026-11-09 实测，run 42588732951 / 42590175761）：
+#   /dev/kvm       存在，crw-rw---- 1 root kvm 10, 232
+#   作业用户       uid=1001(runner)，**不在 kvm 组**
+#   -r / -w        均失败 → KVM_ACCESSIBLE=no
+#   kvm 模块       kvm_amd / kvm / irqbypass 已加载（宿主已开嵌套虚拟化）
+#   sudo           免密可用；chmod 666 /dev/kvm 实测 8 ms 生效
+# ⇒ 结论是「有设备、无权限」，不是「没有嵌套虚拟化」。这条区分是本巡检的意义：
+#   一旦 GitHub 改了 runner 镜像的组或 udev 规则，KVM_ACCESSIBLE 会从 no 变 yes，
+#   日志与 Step Summary 会直接看出来。
+#
+# 成本上限（硬约束）：
+#   · timeout-minutes: 5，实测单次 < 40 秒
+#   · 不 apt 安装、不下载镜像、不启动任何虚拟机 —— 那是 ci/probe-qemu-261109
+#     上的一次性探测做的事（冷启动到 Windows Setup 约 9.7 分钟，绝不适合每天都跑）
+#
+# 这不是门禁：不挂 pull_request / pull_request_target，作业红叉不会影响任何
+# PR 的必需检查。它只产出日志与 Step Summary。
+#
+# 论证与数据出处：task_doc/06-CI升级与虚拟机测试.md §4.2 / §5.5，
+# 索引：task_doc/00-总览与任务索引.md §8「PLUS KVM 探测结论」、§9 第 12 条。
+
+on:
+  schedule:
+    # 每天 03:17 UTC（避开整点排队高峰）。
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-kvm-daily
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: 巡检 /dev/kvm 权限（只读）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 设备节点与作业用户
+        run: |
+          set -u
+          echo '=== 设备节点 ==='
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm
+            stat -c 'STAT_MODE=%A STAT_OWNER=%U STAT_GROUP=%G STAT_DEV=%t,%T' /dev/kvm
+            echo 'KVM_DEVICE_EXISTS=yes'
+          else
+            echo 'KVM_DEVICE_EXISTS=no'
+          fi
+          echo
+          echo '=== 作业用户与组（看是否在 kvm 组）==='
+          id
+          echo
+          echo '=== 直接读写检查 ==='
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo 'KVM_ACCESSIBLE=yes'
+          else
+            echo 'KVM_ACCESSIBLE=no'
+            # 分开报告，方便区分「设备没有」和「有设备但没权限」。
+            [ -e /dev/kvm ] && echo 'KVM_DENIED_BY_PERMISSION=yes' || echo 'KVM_DENIED_BY_PERMISSION=no'
+          fi
+
+      - name: 虚拟化标志与内核模块
+        run: |
+          set -u
+          echo '=== CPU 虚拟化标志 ==='
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(vmx|svm|hypervisor)$' || echo '（未找到 vmx/svm/hypervisor）'
+          echo
+          echo '=== CPU 与内存 ==='
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "NPROC=$(nproc)"
+          free -h
+          echo
+          echo '=== kvm 模块 ==='
+          lsmod | grep -i '^kvm' || echo '（kvm 模块未加载）'
+          ls -d /sys/module/kvm* 2>/dev/null || echo '（无 kvm 模块目录）'
+
+      - name: sudo 可用性（不改设备权限）
+        run: |
+          set -u
+          # 只探测是否免密，不改 /dev/kvm 的 mode —— 巡检作业不做任何变更，
+          # 「sudo chmod 666 能在毫秒级解决权限」这条已有一次性实测证据。
+          if sudo -n true 2>/dev/null; then
+            echo 'SUDO_NOPASSWD=yes'
+          else
+            echo 'SUDO_NOPASSWD=no'
+          fi
+
+      - name: 汇总并记录结论
+        run: |
+          set -u
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            VERDICT='可读写'
+            DETAIL='`/dev/kvm` **存在且可读写** → 可以走 KVM 硬件加速'
+            echo '::warning title=KVM 能力变化::托管 runner 的 /dev/kvm 变为可读写，与 2026-11-09 基线（KVM_ACCESSIBLE=no）不一致，请复核 06-*.md §4.2 / §5.5 的结论。'
+          elif [ -e /dev/kvm ]; then
+            VERDICT='有设备无权限'
+            DETAIL='`/dev/kvm` 存在但**作业用户无权限**（与 2026-11-09 基线一致）'
+            echo "::notice title=KVM 能力::KVM_ACCESSIBLE=no（已知基线，非故障）"
+          else
+            VERDICT='无设备'
+            DETAIL='`/dev/kvm` **不存在** → 只能 TCG 软件模拟'
+            echo '::warning title=KVM 能力变化::托管 runner 不再提供 /dev/kvm，与 2026-11-09 基线不一致，请复核 06-*.md §4.2 / §5.5 的结论。'
+          fi
+
+          echo "KVM_VERDICT=$VERDICT"
+          {
+            echo '## KVM 能力巡检'
+            echo ''
+            echo "- 结论：$DETAIL"
+            echo "- KVM 设备：$( [ -e /dev/kvm ] && echo 存在 || echo 不存在 )"
+            echo "- 作业用户：$(id -u)/$(id -un)，组 $(id -Gn | tr ' ' ',')"
+            echo "- CPU：$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+            echo "- 核数：$(nproc)"
+            echo "- 内存：$(free -g | awk '/^Mem:/{print $2}') GiB"
+            echo "- kvm 模块：$(lsmod | grep -ci '^kvm') 条"
+            echo ''
+            echo '> 本作业只巡检，不安装、不下载镜像、不启动虚拟机；红叉不影响任何 PR 的必需检查。'
+          } >> "$GITHUB_STEP_SUMMARY"

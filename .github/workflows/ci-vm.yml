@@ -1,8 +1,25 @@
 name: 虚拟机自毁环境验证
 
 # 这个工作流只在具备可快照 Windows 虚拟机（runner 标签 cx-vm）的环境运行。
-# 关机自毁、开机续删与强制关机保障无法在常驻托管 runner 上验证：
-# 托管 runner 不支持嵌套虚拟化，也不能重启或还原快照。
+#
+# 为什么仍然必须是 self-hosted + cx-vm（2026-11-09 实测修订）：
+#   早先这里写的是「托管 runner 不支持嵌套虚拟化」。这条**已被实测推翻**，
+#   不是本工作流留在 self-hosted 的理由。实测事实（run 42588732951 / 42590175761）：
+#     · 托管 ubuntu-24.04 runner **确实有** /dev/kvm（crw-rw---- root kvm 10,232）
+#     · kvm_amd / kvm / irqbypass 模块**已加载**，宿主开了嵌套虚拟化
+#     · 但作业用户 uid=1001(runner) **不在 kvm 组**，-r / -w 都失败 → KVM_ACCESSIBLE=no
+#   所以真正卡住的是下面两条，而不是「没有嵌套虚拟化」：
+#     (1) 直接形态下作业要跑的正是宿主自身的 shutdown /s：托管 runner 是
+#         「一次作业一台一次性 VM」，关机一执行 runner agent 连同宿主一起消失，
+#         作业立刻被判失败，后续 resume 步骤永远不会执行。作业内无法在不杀死
+#         自己的前提下真重启宿主，也没有外部快照 API 可还原。
+#     (2) 想绕开 (1) 就得用 ubuntu + QEMU 跑 Windows guest（重启发生在 guest 内层），
+#         那条路实测「能成」但成本不可接受：Windows Server 2025 ISO 5.60 GiB、
+#         下载 520 s，冷启动到 Setup 画面已耗时 9.7 分钟 —— 只适合每日跑，
+#         不适合每次 PR。每日只做权限巡检的作业见 probe-kvm-daily.yml。
+#   结论：self-hosted + 可快照 VM 依然是「验证最完整、每次 PR 都能跑」的那条路。
+#   论证与数据出处：task_doc/06-CI升级与虚拟机测试.md §4.2 / §5.5，
+#   索引：task_doc/00-总览与任务索引.md §8「PLUS KVM 探测结论」、§9 第 12 条。
 #
 # 触发方式刻意保守，避免没有 VM runner 时让所有 PR 变红：
 #   - 手动触发
