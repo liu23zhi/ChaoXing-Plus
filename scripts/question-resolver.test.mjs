@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
@@ -10,8 +10,23 @@ import { createTestDirectory, resolveTestPath } from './test-helpers/temp-direct
 const execFileAsync = promisify(execFile);
 const resolverSourcePath = resolveTestPath('src', 'core', 'worker', 'question.resolver.ts');
 const outDir = createTestDirectory('question-resolver-cjs');
-const resolverModulePath = resolve(outDir, 'worker', 'question.resolver.js');
 const tscCliPath = resolveTestPath('scripts', 'test-helpers', 'tsc-compat.mjs');
+
+// tsc infers rootDir from the whole import graph, so the emitted directory depth
+// changes whenever the resolver gains an import from another top-level folder.
+// Locate the artifact instead of hard-coding a depth.
+async function findCompiledFile(root, fileName) {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const full = join(root, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await findCompiledFile(full, fileName);
+      if (nested) return nested;
+    } else if (entry.name === fileName) {
+      return full;
+    }
+  }
+  return undefined;
+}
 
 async function compileResolverHelper() {
   await mkdir(outDir, { recursive: true });
@@ -33,9 +48,24 @@ async function compileResolverHelper() {
 
 async function loadResolverModule() {
   await compileResolverHelper();
+  const compiledModulePath = await findCompiledFile(outDir, 'question.resolver.js');
+  assert.ok(compiledModulePath, `编译产物 question.resolver.js 未生成于 ${outDir}`);
   const require = createRequire(import.meta.url);
-  delete require.cache[resolverModulePath];
-  return require(resolverModulePath);
+  delete require.cache[compiledModulePath];
+  return require(compiledModulePath);
+}
+
+/** Capture the runtime log lines the resolver emits while a callback runs. */
+async function captureWarnings(run) {
+  const lines = [];
+  const original = console.warn;
+  console.warn = (...args) => lines.push(args.map(String).join(' '));
+  try {
+    await run();
+  } finally {
+    console.warn = original;
+  }
+  return lines;
 }
 
 function createOption(text) {
@@ -235,8 +265,75 @@ for (const fixture of [
 
 test('letter mapping does not interpret English content as a label or bypass missing explicit labels', async () => {
   const mod = await loadResolverModule();
-  assert.equal(mod.resolveOptionByDisplayLabel([createOption('Beta'), createOption('A variable')], 'A')?.innerText, 'Beta');
   assert.equal(mod.resolveOptionByDisplayLabel([createOption('B. Beta'), createOption('C. Gamma')], 'A'), undefined);
+});
+
+test('label-less options are never mapped by array position, and the refusal is logged', async () => {
+  const mod = await loadResolverModule();
+  // Option text without an A–Z label prefix used to fall through to
+  // `options[letter - 65]`, silently picking whatever sat in that slot.
+  const options = [createOption('Beta'), createOption('A variable')];
+  let resolved;
+  const warnings = await captureWarnings(() => {
+    resolved = mod.resolveOptionByDisplayLabel(options, 'A');
+  });
+
+  assert.equal(resolved, undefined, '无可见标签时不得按下标硬映射');
+  assert.equal(warnings.length, 1, `应产生一条可观测告警，实际: ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0], /\[option-label\]/u);
+  assert.match(warnings[0], /positional fallback/u);
+  assert.match(warnings[0], /label=A/u);
+});
+
+test('a label that matches no option, or several, abstains with a distinct reason', async () => {
+  const mod = await loadResolverModule();
+
+  const noMatch = [createOption('B. Beta'), createOption('C. Gamma')];
+  let missing;
+  const missingWarnings = await captureWarnings(() => {
+    missing = mod.resolveOptionByDisplayLabel(noMatch, 'A');
+  });
+  assert.equal(missing, undefined);
+  assert.equal(missingWarnings.length, 1);
+  assert.match(missingWarnings[0], /no option carries the answer letter/u);
+
+  const duplicates = [createLabeledOption('A', '甲'), createLabeledOption('A', '乙')];
+  let ambiguous;
+  const duplicateWarnings = await captureWarnings(() => {
+    ambiguous = mod.resolveOptionByDisplayLabel(duplicates, 'A');
+  });
+  assert.equal(ambiguous, undefined);
+  assert.equal(duplicateWarnings.length, 1);
+  assert.match(duplicateWarnings[0], /several options carry the answer letter/u);
+});
+
+test('a readable label still resolves without emitting a warning', async () => {
+  const mod = await loadResolverModule();
+  const options = [createLabeledOption('A', '甲'), createLabeledOption('B', '乙')];
+  let resolved;
+  const warnings = await captureWarnings(() => {
+    resolved = mod.resolveOptionByDisplayLabel(options, 'B');
+  });
+  assert.equal(resolved?.innerText, '乙');
+  assert.deepEqual(warnings, []);
+});
+
+test('a single letter answer only accepts one A–Z character', async () => {
+  const mod = await loadResolverModule();
+  const options = [createLabeledOption('A', '甲'), createLabeledOption('B', '乙')];
+
+  // Anything that is not exactly one letter is not a label request at all; the
+  // resolver returns undefined without touching the option list.
+  for (const answer of ['', '   ', 'AB', 'A1', '1', '选项', '答案：']) {
+    assert.equal(mod.resolveOptionByDisplayLabel(options, answer), undefined, `不应把 ${JSON.stringify(answer)} 当标签`);
+  }
+
+  // Single letters outside A–Z (e.g. Chinese option numbers) are not letters.
+  assert.equal(mod.resolveOptionByDisplayLabel(options, '甲'), undefined);
+
+  for (const [answer, expected] of [['A', '甲'], ['B', '乙'], ['a', '甲'], ['答案：B', '乙'], ['B.', '乙'], ['B、', '乙'], ['B：', '乙']]) {
+    assert.equal(mod.resolveOptionByDisplayLabel(options, answer)?.innerText, expected, answer);
+  }
 });
 
 test('exact mode rejects incomplete multiple answer groups and conflicting single answers', async () => {

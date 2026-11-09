@@ -64,8 +64,8 @@ const workPage = `<!doctype html><html><head><title>Local chapter test</title></
   <form id="form1"><input id="jobid" name="jobid" value="job-A"><input name="courseId" value="course"><input name="clazzid" value="class">
     <div class="singleQuesId"><div class="TiMu"><input type="hidden" name="answertype1" value="0">
       <div class="Zy_TItle"><div class="clearfix">1. Fixture question</div></div><ul>
-        <li><input type="radio" name="answer1" value="A"><label class="after">Alpha</label></li>
-        <li><input type="radio" name="answer1" value="B"><label class="after">Beta</label></li>
+        <li><input type="radio" name="answer1" value="A"><span class="num_option">A</span><label class="after">Alpha</label></li>
+        <li><input type="radio" name="answer1" value="B"><span class="num_option">B</span><label class="after">Beta</label></li>
       </ul></div></div>
   </form></div>
 </body></html>`;

@@ -1,6 +1,7 @@
 import { QuestionResolver, QuestionTypes, WorkContext } from './interface';
 import { resolvePlainAnswer, splitAnswer } from './utils';
 import { answerSimilar, removeRedundant, clearString, answerExactMatch, Rating } from '../utils/string';
+import { runtimeLog } from '../../runtime/logger.js';
 
 function nowrap(value: string, replacement = ''): string {
   return value.replace(/\s+/g, replacement);
@@ -24,24 +25,72 @@ function readDisplayLabel(value: string): string | undefined {
   return match?.[1];
 }
 
-/** Find an option by its visible label; Chaoxing data values may be remapped. */
+/**
+ * Find the visible-label scope for an option element.
+ *
+ * `work.ts` reads the visible label from `.answerBg, li`; the resolver used to
+ * look only at `.answerBg, .clearfix`, so chapter-test options (`ul li .after`)
+ * never exposed a label. The silent positional fallback hid that: the label was
+ * unreadable and the answer was still "found".
+ */
+function optionLabelScope(option: HTMLElement): Element | null | undefined {
+  return option.closest?.('.answerBg, .clearfix, li');
+}
+
+/** Read one option's visible label, falling back to its own text prefix. */
+function readOptionDisplayLabel(option: HTMLElement): string | undefined {
+  const optionRoot = optionLabelScope(option);
+  const visibleLabel = optionRoot?.querySelector<HTMLElement>('.num_option, .option_label, [data-option-label]');
+  const explicitLabel = readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '');
+  return explicitLabel ?? readDisplayLabel(option.textContent || option.innerText);
+}
+
+/**
+ * Report why a letter answer could not be mapped onto an option.
+ *
+ * Abstaining is only useful if it is observable: a silent `undefined` looks the
+ * same as "the answer letter is simply wrong", and a silent array index looks
+ * like success. Everything this resolver refuses to map must leave a trace.
+ */
+function warnUnresolvedOptionLabel(reason: string, label: string, options: HTMLElement[]): void {
+  const preview = options
+    .map((option, index) => `${index}:${nowrap(option.textContent || option.innerText || '').slice(0, 24)}`)
+    .join(' | ');
+  runtimeLog('warn', `[option-label] ${reason}`, `label=${label}`, `optionCount=${options.length}`, preview);
+}
+
+/**
+ * Find an option by its visible label; Chaoxing data values may be remapped.
+ *
+ * The visible label (`.num_option` / `.option_label` / `[data-option-label]`) and
+ * the platform submit value (`.answerBg[data]`) are different things and may be
+ * misaligned, so an answer letter may only be resolved through a label that was
+ * actually read off the page. When no option exposes a label, the array position
+ * carries no meaning: returning `options[letter - 65]` used to pick an option
+ * that merely sat in that slot, with no warning and no trace on a wrong answer.
+ */
 export function resolveOptionByDisplayLabel(options: HTMLElement[], answer: string): HTMLElement | undefined {
   const label = readDisplayLabel(answer);
   if (!label) {
     return undefined;
   }
 
-  const labels = options.map((option) => {
-    const optionRoot = option.closest?.('.answerBg, .clearfix');
-    const visibleLabel = optionRoot?.querySelector<HTMLElement>('.num_option, .option_label, [data-option-label]');
-    const explicitLabel = readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '');
-    return explicitLabel ?? readDisplayLabel(option.textContent || option.innerText);
-  });
+  const labels = options.map((option) => readOptionDisplayLabel(option));
   if (!labels.some(Boolean)) {
-    return options[label.charCodeAt(0) - 65];
+    warnUnresolvedOptionLabel('no visible option label; refusing positional fallback', label, options);
+    return undefined;
   }
+
   const matches = options.filter((_, index) => labels[index] === label);
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  warnUnresolvedOptionLabel(
+    matches.length === 0 ? 'no option carries the answer letter' : 'several options carry the answer letter',
+    label,
+    options
+  );
+  return undefined;
 }
 
 /** 默认答案题目处理器 */
@@ -126,14 +175,7 @@ export function createDefaultQuestionResolver<E>(
       const plainLabelCandidates = new Map<string, { options: HTMLElement[]; votes: number }>();
       const optionIndexes = new Map(options.map((option, index) => [option, index]));
       let hasResolvedPlainLabelAnswer = false;
-      const hasExplicitLabels = options.some((option) => {
-        const optionRoot = option.closest?.('.answerBg, .clearfix');
-        const visibleLabel = optionRoot?.querySelector<HTMLElement>('.num_option, .option_label, [data-option-label]');
-        return Boolean(
-          readDisplayLabel(visibleLabel?.textContent || visibleLabel?.innerText || '') ||
-          readDisplayLabel(option.textContent || option.innerText)
-        );
-      });
+      const hasExplicitLabels = options.some((option) => Boolean(readOptionDisplayLabel(option)));
       const hasUnlabelledExactTextAnswer = !hasExplicitLabels && results.some((result) =>
         options.some((option) => answerExactMatch(
           [nowrap(result.answer, '').trim()],

@@ -152,6 +152,18 @@ export const cases = [
     note: 'Single Latin letter must map to the option labelled B'
   },
   {
+    id: 'single-letter-answer-without-any-visible-label',
+    kind: 'single',
+    mode: 'similar',
+    options: [
+      { text: 'Beta', dataValue: 'B' },
+      { text: 'Alpha', dataValue: 'A' }
+    ],
+    answers: [['A']],
+    expect: 'abstain',
+    note: 'No option exposes a visible label; the letter must not be mapped by array position'
+  },
+  {
     id: 'single-empty-answer',
     kind: 'single',
     mode: 'similar',
