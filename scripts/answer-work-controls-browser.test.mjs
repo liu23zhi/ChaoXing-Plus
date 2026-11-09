@@ -15,7 +15,11 @@ before(async () => {
   const parsed = ts.createSourceFile('common.ts', source, ts.ScriptTarget.Latest, true);
   const names = new Set([
     'createElement', 'createWorkResultsPanel', 'renderWorkResultsPanel', 'getWorkResultStats',
-    'applyActionButtonStyle', 'applySectionCardStyle', 'createWorkResultsDetail'
+    'applyActionButtonStyle', 'applySectionCardStyle', 'createWorkResultsDetail',
+    // 面板表现层 helper：createWorkResultsPanel 直接调用它们，缺一个就 ReferenceError。
+    'applySectionTitleStyle', 'applyHintTextStyle', 'applyControlChrome',
+    'applyThinScrollbar', 'applyScrollPaneStyle', 'ensurePanelStyleSheet',
+    'createPanelStatusStrip', 'resolvePanelOuterWidth'
   ]);
   const resetNames = new Set(['clearAndRetryWorkResults', 'patchWorkResult', 'mergeIncomingWorkResults',
     'shouldPreserveExistingWorkResult', 'hasUsableWorkResultAnswer']);
@@ -38,6 +42,11 @@ before(async () => {
   assert.ok(pauseSubscription);
   runtime = ts.transpileModule(`(() => {
     ${pauseRuntime}
+    // 面板表现层常量：与 common.ts 同名同值（顺带把红线钉死在测试里）。
+    const PANEL_TOUCH_TARGET_MIN_HEIGHT = '32px';
+    const PANEL_SCROLL_STYLE_ID = 'chaoxing-plus-panel-scroll-style';
+    const PANEL_NARROW_VIEWPORT_PX = 400;
+    const PANEL_MIN_VIEWPORT_MARGIN = 12;
     const state = {
       panels: { workResults: { root: document.querySelector('#panel'), body: document.querySelector('#body') } },
       workResults: { results: [], type: 'numbers', currentResultIndex: 0, runtimeControls: undefined,
@@ -58,6 +67,8 @@ before(async () => {
     const formatQuestionTypeLabel = (type) => type;
     const createStatusBadge = () => document.createElement('span');
     const createErrorSummaryBlock = (error) => createElement('div', { text: error });
+    const resolvePanelActivityState = () => ({ state: 'idle', label: '空闲', detail: 'detail', tone: 'idle', pulse: false });
+    const describeSearchErrorNextStep = () => '下一步：重试。';
     const resolveWorkResultTone = () => 'success';
     const formatWorkResultStatus = () => '已完成';
     const setWorkResultsView = (type) => { state.workResults.type = type; renderWorkResultsPanel(); };

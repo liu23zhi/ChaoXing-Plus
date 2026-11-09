@@ -532,8 +532,10 @@ function isExamRelatedUrl(url) {
     header.style.gap = '12px';
     header.style.margin = '-14px -14px 0';
     header.style.padding = '14px 14px 12px';
+    // 先用 pink 占位；applyPanelShellTheme 会按当前 --panel-theme 覆盖为同主题色，
+    // 避免蓝/绿主题下展开前后出现粉色头。
     header.style.borderBottom = '1px solid rgba(244, 114, 182, 0.24)';
-    header.style.background = '#fff5fa';
+    header.style.background = '#fffafd';
     header.style.boxShadow = '0 6px 16px rgba(190, 24, 93, 0.08)';
     header.style.borderRadius = '24px 24px 0 0';
     header.style.cursor = 'pointer';
@@ -542,13 +544,13 @@ function isExamRelatedUrl(url) {
     title.textContent = '超星学习助手';
     title.style.fontSize = '13px';
     title.style.fontWeight = '800';
-    title.style.color = '#831843';
+    title.style.color = '#7a1039';
     title.style.letterSpacing = '0.02em';
 
     var hint = doc.createElement('div');
     hint.textContent = '点击展开 · 可拖动';
     hint.style.fontSize = '12px';
-    hint.style.color = '#9d174d';
+    hint.style.color = '#8a1a4d';
 
     header.appendChild(title);
     header.appendChild(hint);
@@ -580,13 +582,17 @@ function isExamRelatedUrl(url) {
       root.style.top = getPanelNumber('common.settings.windows-panel-top', 16, 0, 10000) + 'px';
       root.style.right = getPanelNumber('common.settings.windows-panel-right', 16, 0, 10000) + 'px';
       root.style.zIndex = '2147483645';
-      root.style.width = getPanelNumber('common.settings.windows-panel-width', 460, 320, 800) + 'px';
+      // 与业务侧一致用 border-box 并限制不超过视口：小屏下折叠壳同样不能溢出。
+      var shellWidth = getPanelNumber('common.settings.windows-panel-width', 460, 320, 800);
+      root.style.width = shellWidth + 'px';
+      root.style.maxWidth = 'calc(100vw - 24px)';
       root.style.padding = '14px';
-      root.style.boxSizing = 'content-box';
+      root.style.boxSizing = 'border-box';
       root.style.borderRadius = '24px';
-      applyPanelShellTheme(root);
       root.style.fontFamily = '"Microsoft YaHei", "PingFang SC", -apple-system, sans-serif';
       root.appendChild(createShellHeader());
+      // 主题必须在 header 挂上之后再应用：头部颜色也由色板决定。
+      applyPanelShellTheme(root);
       var parent = doc.body || doc.documentElement;
       if (!parent) {
         return;
@@ -752,24 +758,31 @@ function isExamRelatedUrl(url) {
 
   // 与 src/projects/common.ts 的 pink/blue/green 色板保持一致；bootstrap 先于业务包
   // 挂载折叠壳，必须用当前主题着色，避免展开前出现粉色闪壳。未知名称回退 pink。
+  // text/muted 必须与业务侧同值：折叠壳在展开前是唯一的可见文字面。
   var PANEL_THEME_STYLES = {
     pink: {
       gradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
       border: '1px solid rgba(219, 39, 119, 0.34)',
       shadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)',
-      text: '#831843'
+      text: '#7a1039',
+      muted: '#8a1a4d',
+      headerBackground: '#fffafd'
     },
     blue: {
       gradient: 'linear-gradient(145deg, #f0f6ff 0%, #fbfdff 48%, #eaf2ff 100%)',
       border: '1px solid rgba(37, 99, 235, 0.34)',
       shadow: '0 10px 28px rgba(30, 64, 175, 0.16), 0 2px 8px rgba(30, 64, 175, 0.10)',
-      text: '#1e3a8a'
+      text: '#152e6b',
+      muted: '#1a3fa0',
+      headerBackground: '#f8fbff'
     },
     green: {
       gradient: 'linear-gradient(145deg, #ecfdf5 0%, #f9fffc 48%, #d1fae5 100%)',
       border: '1px solid rgba(5, 150, 105, 0.34)',
       shadow: '0 10px 28px rgba(6, 78, 59, 0.16), 0 2px 8px rgba(6, 78, 59, 0.10)',
-      text: '#064e3b'
+      text: '#04392b',
+      muted: '#035743',
+      headerBackground: '#f7fffb'
     }
   };
 
@@ -788,6 +801,19 @@ function isExamRelatedUrl(url) {
     root.style.border = style.border;
     root.style.boxShadow = style.shadow;
     root.style.color = style.text;
+    // 折叠壳的头部与业务侧 header 同色，展开前后不跳色。
+    var header = root.firstChild;
+    if (header && header.style) {
+      header.style.background = style.headerBackground;
+      header.style.borderBottom = '1px solid ' + style.border.replace(/^1px solid /, '');
+      var children = header.children || [];
+      if (children[0] && children[0].style) {
+        children[0].style.color = style.text;
+      }
+      if (children[1] && children[1].style) {
+        children[1].style.color = style.muted;
+      }
+    }
   }
 
   function onMessageFromHost(payload) {

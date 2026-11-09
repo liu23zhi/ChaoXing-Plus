@@ -18,10 +18,11 @@
     .section { border-top: 1px solid var(--line); padding-top: 15px; margin-top: 18px; } .section:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; } .full { grid-column: 1 / -1; }
     label { display: block; font-weight: 600; margin: 0 0 4px; } label small { font-weight: 400; color: var(--muted); }
-    input, select, textarea { width: 100%; border: 1px solid #c8d0da; border-radius: 8px; padding: 8px 9px; background: #fff; color: var(--ink); font: inherit; }
-    textarea { min-height: 145px; resize: vertical; } input:disabled, select:disabled, textarea:disabled { background: #eef1f4; color: #88929d; }
-    .checks { display: flex; flex-wrap: wrap; gap: 8px 14px; } .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
-    .check input { width: auto; } button { border: 0; border-radius: 8px; padding: 8px 12px; background: #edf1f5; color: var(--ink); font: inherit; cursor: pointer; } button:hover { filter: brightness(.97); }
+    /* 表单控件最小高度 32px：键盘/低精度指针下更容易命中。 */
+    input, select, textarea { width: 100%; border: 1px solid #c8d0da; border-radius: 8px; padding: 8px 9px; min-height: 32px; background: #fff; color: var(--ink); font: inherit; }
+    textarea { min-height: 145px; resize: vertical; } input:disabled, select:disabled, textarea:disabled { background: #eef1f4; color: #6b7683; }
+    .checks { display: flex; flex-wrap: wrap; gap: 8px 14px; } .check { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; font-weight: 400; }
+    .check input { width: auto; min-height: 0; } button { border: 0; border-radius: 8px; padding: 8px 12px; min-height: 32px; background: #edf1f5; color: var(--ink); font: inherit; cursor: pointer; } button:hover { filter: brightness(.97); }
     button.primary { background: var(--accent); color: #fff; } button.primary:hover { background: var(--accent-dark); } button.danger { background: #fde6e6; color: var(--bad); }
     .buttons, .preset-list { display: flex; flex-wrap: wrap; gap: 8px; } .preset-list button { background: #fff; border: 1px solid #e9b5c6; color: var(--accent-dark); }
     .out { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 16px; align-self: start; } .out textarea { font: 12px/1.45 Consolas, "Courier New", monospace; min-height: 128px; }

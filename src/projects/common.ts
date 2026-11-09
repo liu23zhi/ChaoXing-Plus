@@ -18,6 +18,8 @@ import {
 import {
   formatQuestionTypeLabel,
   formatWorkResultStatus,
+  resolvePanelActivityState,
+  describeSearchErrorNextStep,
   resolveWorkResultTone,
   summarizeSearchInfoError
 } from './work-results-status.js';
@@ -115,6 +117,12 @@ const SHARED_STUDY_SETTINGS_PREFIX = 'cx.new.study.';
 const SHARED_STORE_ATTRIBUTE_PREFIX = 'data-chaoxing-plus-shared-';
 const lastSharedAttributeValues = new Map<string, string | null>();
 
+// 滚动条样式节点 id（内部标识，不是用户可见标题）。
+const PANEL_SCROLL_STYLE_ID = 'chaoxing-plus-panel-scroll-style';
+// 小屏断点：面板在小屏下必须收窄，不能溢出视口。
+const PANEL_NARROW_VIEWPORT_PX = 400;
+const PANEL_MIN_VIEWPORT_MARGIN = 12;
+
 function getSharedStoreAttributeName(key: string) {
   return `${SHARED_STORE_ATTRIBUTE_PREFIX}${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 }
@@ -173,6 +181,25 @@ interface PanelPalette {
   borderStrong: string;
   text: string;
   muted: string;
+  /**
+   * 链接色：`primary` 在 green 主题下对白底只有 3.77:1，不能直接当文字色用。
+   * 这里给每个主题一个达标的深色，仅供 anchor 文字使用。
+   */
+  link: string;
+  /**
+   * 三级文字：用于空状态、占位说明、辅助提示。必须同时在 surfaceStrong、
+   * sectionGradient 底部与 primarySoft 上达到 WCAG AA 4.5:1，因此不再使用
+   * `#94a3b8` 或半透明文字（实测分别只有 2.56:1 与 3.5:1）。
+   */
+  subtle: string;
+  successFg: string;
+  successBg: string;
+  warningFg: string;
+  warningBg: string;
+  dangerFg: string;
+  dangerBg: string;
+  infoFg: string;
+  infoBg: string;
   shadow: string;
   heroShadow: string;
   shellShadow: string;
@@ -187,7 +214,7 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     primary: '#db2777',
     primaryDeep: '#be185d',
     primarySoft: 'rgba(244, 114, 182, 0.14)',
-    primaryGradient: 'linear-gradient(135deg, #db2777 0%, #f472b6 55%, #fb7185 100%)',
+    primaryGradient: 'linear-gradient(135deg, #be185d 0%, #db2777 100%)',
     // Windows / CEF75 与软件渲染环境下，半透明底色 + backdrop-filter + 大半径阴影会让悬浮窗周围
     // 出现模糊光晕；这里统一改成不透明底色 + 紧凑阴影，保证面板边缘与页面内容清晰。
     shellGradient: 'linear-gradient(145deg, #fff0f7 0%, #fffafd 48%, #ffecf4 100%)',
@@ -197,8 +224,18 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     surfaceStrong: '#ffffff',
     border: 'rgba(244, 114, 182, 0.24)',
     borderStrong: 'rgba(219, 39, 119, 0.34)',
-    text: '#831843',
-    muted: '#9d174d',
+    text: '#7a1039',
+    muted: '#8a1a4d',
+    link: '#be185d',
+    subtle: '#7d2f52',
+    successFg: '#14663b',
+    successBg: 'rgba(34, 197, 94, 0.14)',
+    warningFg: '#7a4c00',
+    warningBg: 'rgba(250, 204, 21, 0.18)',
+    dangerFg: '#a11818',
+    dangerBg: 'rgba(239, 68, 68, 0.12)',
+    infoFg: '#8a1a4d',
+    infoBg: 'rgba(244, 114, 182, 0.16)',
     shadow: '0 8px 20px rgba(190, 24, 93, 0.10)',
     heroShadow: '0 8px 22px rgba(190, 24, 93, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
     shellShadow: '0 10px 28px rgba(190, 24, 93, 0.16), 0 2px 8px rgba(190, 24, 93, 0.10)',
@@ -208,7 +245,7 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     primary: '#2563eb',
     primaryDeep: '#1d4ed8',
     primarySoft: 'rgba(96, 165, 250, 0.14)',
-    primaryGradient: 'linear-gradient(135deg, #2563eb 0%, #60a5fa 55%, #38bdf8 100%)',
+    primaryGradient: 'linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%)',
     shellGradient: 'linear-gradient(145deg, #f0f6ff 0%, #fbfdff 48%, #eaf2ff 100%)',
     heroGradient: 'radial-gradient(circle at 18% 0%, rgba(191, 219, 254, 0.82) 0%, transparent 32%), linear-gradient(135deg, #f2f7ff 0%, #f9fcff 54%, #e6efff 100%)',
     sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #eff6ff 100%)',
@@ -216,8 +253,18 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     surfaceStrong: '#ffffff',
     border: 'rgba(96, 165, 250, 0.26)',
     borderStrong: 'rgba(37, 99, 235, 0.34)',
-    text: '#1e3a8a',
-    muted: '#1d4ed8',
+    text: '#152e6b',
+    muted: '#1a3fa0',
+    link: '#1d4ed8',
+    subtle: '#2b3f6b',
+    successFg: '#14663b',
+    successBg: 'rgba(34, 197, 94, 0.14)',
+    warningFg: '#7a4c00',
+    warningBg: 'rgba(250, 204, 21, 0.18)',
+    dangerFg: '#a11818',
+    dangerBg: 'rgba(239, 68, 68, 0.12)',
+    infoFg: '#1a3fa0',
+    infoBg: 'rgba(96, 165, 250, 0.16)',
     shadow: '0 8px 20px rgba(30, 64, 175, 0.10)',
     heroShadow: '0 8px 22px rgba(30, 64, 175, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
     shellShadow: '0 10px 28px rgba(30, 64, 175, 0.16), 0 2px 8px rgba(30, 64, 175, 0.10)',
@@ -227,7 +274,7 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     primary: '#059669',
     primaryDeep: '#047857',
     primarySoft: 'rgba(52, 211, 153, 0.14)',
-    primaryGradient: 'linear-gradient(135deg, #059669 0%, #34d399 55%, #6ee7b7 100%)',
+    primaryGradient: 'linear-gradient(135deg, #065f46 0%, #047857 100%)',
     shellGradient: 'linear-gradient(145deg, #ecfdf5 0%, #f9fffc 48%, #d1fae5 100%)',
     heroGradient: 'radial-gradient(circle at 18% 0%, rgba(167, 243, 208, 0.82) 0%, transparent 32%), linear-gradient(135deg, #effcf6 0%, #f8fffb 54%, #dcfce7 100%)',
     sectionGradient: 'linear-gradient(180deg, #ffffff 0%, #ecfdf5 100%)',
@@ -235,8 +282,18 @@ const panelThemes: Record<PanelThemeName, PanelPalette> = {
     surfaceStrong: '#ffffff',
     border: 'rgba(52, 211, 153, 0.26)',
     borderStrong: 'rgba(5, 150, 105, 0.34)',
-    text: '#064e3b',
-    muted: '#047857',
+    text: '#04392b',
+    muted: '#035743',
+    link: '#035743',
+    subtle: '#2b4a3f',
+    successFg: '#12593a',
+    successBg: 'rgba(34, 197, 94, 0.16)',
+    warningFg: '#6d4300',
+    warningBg: 'rgba(250, 204, 21, 0.18)',
+    dangerFg: '#961616',
+    dangerBg: 'rgba(239, 68, 68, 0.12)',
+    infoFg: '#035743',
+    infoBg: 'rgba(52, 211, 153, 0.16)',
     shadow: '0 8px 20px rgba(6, 78, 59, 0.10)',
     heroShadow: '0 8px 22px rgba(6, 78, 59, 0.14), inset 0 1px 0 rgba(255,255,255,0.72)',
     shellShadow: '0 10px 28px rgba(6, 78, 59, 0.16), 0 2px 8px rgba(6, 78, 59, 0.10)',
@@ -257,6 +314,172 @@ function resolvePanelThemeName(): PanelThemeName {
 function panelShadowColor(alpha: number): string {
   return `rgba(${panelPinkTheme.shadowRgb}, ${alpha})`;
 }
+
+// ---------------------------------------------------------------------------
+// 面板视觉 token：字号 / 字重 / 间距 / 触控目标集中定义，保证同类控件在面板各处一致。
+// 只使用 Chrome 75 支持的属性（无 :has()、无 aspect-ratio、无容器查询）。
+// ---------------------------------------------------------------------------
+
+/** 触控目标最小高度：低于 32px 时小屏与触摸板容易点错。 */
+const PANEL_TOUCH_TARGET_MIN_HEIGHT = '32px';
+
+/**
+ * 面板唯一的注入样式表：滚动条外观 + 进行中状态的脉冲提示。
+ * 内容随主题变化重建；只用 Chrome 75 支持的选择器与属性，
+ * 不引入外部 CSS/字体，也不使用 :has()、aspect-ratio、容器查询。
+ */
+function ensurePanelStyleSheet(ownerDocument: Document) {
+  try {
+    const doc = ownerDocument ?? document;
+    let style = doc.getElementById(PANEL_SCROLL_STYLE_ID) as HTMLStyleElement | null;
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = PANEL_SCROLL_STYLE_ID;
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+    const thumb = panelPinkTheme.borderStrong;
+    const nextText = `[data-cx-scroll-pane="true"] { scrollbar-width: thin; scrollbar-color: ${thumb} transparent; }
+[data-cx-scroll-pane="true"]::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-cx-scroll-pane="true"]::-webkit-scrollbar-thumb { background: ${thumb}; border-radius: 8px; }
+[data-cx-scroll-pane="true"]::-webkit-scrollbar-track { background: transparent; }
+@keyframes cx-panel-status-pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+[data-cx-panel-pulse="true"] { animation: cx-panel-status-pulse 1.6s ease-in-out infinite; }`;
+    if (style.textContent !== nextText) {
+      style.textContent = nextText;
+    }
+  } catch {
+    // 插入失败只影响滚动条与脉冲外观，不影响任何功能。
+  }
+}
+
+function applyThinScrollbar(element: HTMLElement) {
+  element.dataset.cxScrollPane = 'true';
+  element.style.scrollbarWidth = 'thin';
+  ensurePanelStyleSheet(element.ownerDocument);
+}
+
+/** 长列表容器：最大高度 + 内部滚动，避免题目/答案/日志把面板撑爆。 */
+function applyScrollPaneStyle(element: HTMLElement, maxHeight: number) {
+  element.style.maxHeight = `${Math.max(120, Math.round(maxHeight))}px`;
+  element.style.overflowY = 'auto';
+  element.style.overflowX = 'hidden';
+  element.style.overscrollBehavior = 'contain';
+  element.style.paddingRight = '4px';
+  applyThinScrollbar(element);
+}
+
+/** 分组/区块标题：字号、字重、行高三项同时区分，不只靠颜色。 */
+function applySectionTitleStyle(element: HTMLElement, level: 'hero' | 'section' | 'group') {
+  if (level === 'hero') {
+    element.style.fontSize = '17px';
+    element.style.fontWeight = '800';
+    element.style.lineHeight = '1.35';
+    element.style.letterSpacing = '0.01em';
+  } else if (level === 'section') {
+    element.style.fontSize = '15px';
+    element.style.fontWeight = '800';
+    element.style.lineHeight = '1.4';
+  } else {
+    element.style.fontSize = '13px';
+    element.style.fontWeight = '700';
+    element.style.lineHeight = '1.45';
+    element.style.letterSpacing = '0.02em';
+  }
+  element.style.color = panelPinkTheme.text;
+}
+
+/** 说明性小字：使用三级文字色（subtle），三主题下均 ≥ 4.5:1。 */
+function applyHintTextStyle(element: HTMLElement) {
+  element.style.fontSize = '12px';
+  element.style.lineHeight = '1.6';
+  element.style.color = panelPinkTheme.subtle;
+}
+
+/** 输入框 / 下拉框 / 文本框的统一外观，保证同类控件在面板各处一致。 */
+function applyControlChrome(element: HTMLElement) {
+  element.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  element.style.padding = '8px 10px';
+  element.style.borderRadius = '10px';
+  element.style.border = `1px solid ${panelPinkTheme.border}`;
+  element.style.background = panelPinkTheme.surfaceStrong;
+  element.style.color = panelPinkTheme.text;
+  element.style.fontSize = '13px';
+  element.style.lineHeight = '1.5';
+  element.style.boxSizing = 'border-box';
+}
+
+/**
+ * 「当前在做什么」状态条：七个状态互斥，颜色 + 文字双重表达（不只靠颜色），
+ * 进行中的状态带脉冲，切换时用户能立刻看到变化。
+ */
+function createPanelStatusStrip(input: { results: SimplifyWorkResult[]; paused: boolean; running: boolean }) {
+  const snapshot = resolvePanelActivityState(input);
+  // 状态条底色必须是纯白不透明：彩色半透明底会把正文对比度拉到 4.04:1（pink 实测），
+  // 状态差异改由 4px 左边框色 + 圆点 + 文字共同表达（三重编码，不只靠颜色）。
+  const accentByTone: Record<string, string> = {
+    idle: panelPinkTheme.muted,
+    active: panelPinkTheme.primary,
+    paused: panelPinkTheme.warningFg,
+    manual: panelPinkTheme.warningFg,
+    success: panelPinkTheme.successFg,
+    danger: panelPinkTheme.dangerFg
+  };
+  const accent = accentByTone[snapshot.tone] ?? accentByTone.idle;
+
+  const strip = createElement('div');
+  strip.dataset.cxPanelStatus = snapshot.state;
+  strip.setAttribute('role', 'status');
+  strip.setAttribute('aria-live', 'polite');
+  strip.style.display = 'grid';
+  strip.style.gap = '4px';
+  strip.style.padding = '10px 12px';
+  strip.style.borderRadius = '12px';
+  strip.style.background = panelPinkTheme.surfaceStrong;
+  strip.style.border = `1px solid ${panelPinkTheme.border}`;
+  strip.style.borderLeft = `4px solid ${accent}`;
+
+  const labelRow = createElement('div');
+  labelRow.style.display = 'flex';
+  labelRow.style.alignItems = 'center';
+  labelRow.style.gap = '8px';
+
+  const dot = createElement('span');
+  dot.style.display = 'inline-block';
+  dot.style.width = '8px';
+  dot.style.height = '8px';
+  dot.style.borderRadius = '999px';
+  dot.style.background = accent;
+  dot.style.flex = '0 0 auto';
+  if (snapshot.pulse) {
+    dot.dataset.cxPanelPulse = 'true';
+  }
+
+  const label = createElement('div', { text: snapshot.label });
+  label.style.fontSize = '13px';
+  label.style.fontWeight = '800';
+  label.style.lineHeight = '1.4';
+  // 白底上用状态专用深色，四态对比度均 ≥ 4.5:1（见 scripts/panel-ui-contrast.test.mjs）。
+  label.style.color = snapshot.tone === 'danger' ? panelPinkTheme.dangerFg
+    : snapshot.tone === 'success' ? panelPinkTheme.successFg
+      : snapshot.tone === 'paused' || snapshot.tone === 'manual' ? panelPinkTheme.warningFg
+        : panelPinkTheme.text;
+
+  labelRow.append(dot, label);
+
+  const detail = createElement('div', { text: snapshot.detail });
+  detail.style.fontSize = '12px';
+  detail.style.lineHeight = '1.6';
+  detail.style.color = panelPinkTheme.text;
+
+  strip.append(labelRow, detail);
+  return strip;
+}
+
+
 
 // 保留既有调用点：所有 `panelPinkTheme.<prop>` 读取都解析为当前主题色板，
 // 主题在配置热更新后由共享设置 observer 触发重渲染并重新取色。
@@ -1124,45 +1347,56 @@ function createErrorSummaryBlock(errorText: string, extraDetails: string[] = [])
   container.style.gap = '8px';
   container.style.padding = '10px 12px';
   container.style.borderRadius = '12px';
-  container.style.background = 'rgba(254, 242, 242, 0.95)';
+  container.style.background = panelPinkTheme.dangerBg;
   container.style.border = '1px solid rgba(248, 113, 113, 0.2)';
 
   const title = createElement('div', { text: `摘要：${summary.title}` });
   title.style.fontWeight = '700';
-  title.style.color = '#b91c1c';
+  title.style.color = panelPinkTheme.dangerFg;
   applyQuestionTextWrapStyle(title);
   container.append(title);
+
+  // 只给错误码是不够的：必须直接告诉用户下一步该做什么。
+  const nextStep = createElement('div', { text: describeSearchErrorNextStep(errorText) });
+  nextStep.style.fontSize = '12px';
+  nextStep.style.fontWeight = '700';
+  nextStep.style.lineHeight = '1.6';
+  nextStep.style.color = panelPinkTheme.dangerFg;
+  applyQuestionTextWrapStyle(nextStep);
+  container.append(nextStep);
 
   const details = Array.from(new Set([...summary.details, ...extraDetails]));
   for (const text of details) {
     const detail = createElement('div', { text });
     detail.style.fontSize = '12px';
-    detail.style.color = '#991b1b';
+    detail.style.color = panelPinkTheme.dangerFg;
     applyQuestionTextWrapStyle(detail);
     container.append(detail);
   }
 
+  // 原文默认折叠：错误 JSON 可能很长，展开才看，并且限制最大高度内部滚动。
   const original = createElement('details');
-  original.open = true;
+  original.open = false;
 
-  const originalTitle = createElement('summary', { text: '原文' });
+  const originalTitle = createElement('summary', { text: '查看原始错误' });
   originalTitle.style.cursor = 'pointer';
   originalTitle.style.fontSize = '12px';
   originalTitle.style.fontWeight = '600';
-  originalTitle.style.color = '#b91c1c';
+  originalTitle.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  originalTitle.style.lineHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  originalTitle.style.color = panelPinkTheme.dangerFg;
 
   const originalText = createElement('pre', { text: errorText });
-  originalText.style.margin = '8px 0 0';
+  originalText.style.margin = '4px 0 0';
   originalText.style.padding = '8px 10px';
   originalText.style.borderRadius = '10px';
   originalText.style.background = 'rgba(255,255,255,0.86)';
-  originalText.style.color = '#7f1d1d';
+  originalText.style.color = panelPinkTheme.dangerFg;
   originalText.style.fontSize = '11px';
   originalText.style.lineHeight = '1.5';
-  originalText.style.maxHeight = '220px';
-  originalText.style.overflow = 'auto';
   originalText.style.whiteSpace = 'pre-wrap';
-  originalText.style.overflowWrap = 'anywhere';
+  applyQuestionTextWrapStyle(originalText);
+  applyScrollPaneStyle(originalText, 180);
 
   original.append(originalTitle, originalText);
   container.append(original);
@@ -1185,14 +1419,23 @@ function applySectionCardStyle(
 }
 
 function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'primary' | 'danger' = 'default') {
+  // 触控目标 ≥ 32px：小屏与触摸板下 7px 内边距只有 ~28px 高，容易点错。
+  button.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
   button.style.padding = '7px 12px';
   button.style.borderRadius = '10px';
   button.style.cursor = 'pointer';
   button.style.fontSize = '12px';
   button.style.fontWeight = '600';
+  button.style.lineHeight = '1.4';
+  button.style.boxSizing = 'border-box';
   button.style.transition = 'all 0.2s ease';
 
   if (tone === 'primary') {
+    // 主操作：实心渐变 + 更重的字重 + 更大内边距，视觉权重明显高于次要操作。
+    button.style.minHeight = '36px';
+    button.style.padding = '8px 16px';
+    button.style.fontSize = '13px';
+    button.style.fontWeight = '800';
     button.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
     button.style.background = panelPinkTheme.primaryGradient;
     button.style.color = '#fff';
@@ -1201,13 +1444,14 @@ function applyActionButtonStyle(button: HTMLButtonElement, tone: 'default' | 'pr
   }
 
   if (tone === 'danger') {
-    button.style.border = '1px solid rgba(239, 68, 68, 0.18)';
+    button.style.border = `1px solid ${panelPinkTheme.dangerFg}`;
     button.style.background = 'rgba(255,255,255,0.96)';
-    button.style.color = '#b91c1c';
+    button.style.color = panelPinkTheme.dangerFg;
     button.style.boxShadow = '0 6px 18px rgba(15, 23, 42, 0.06)';
     return;
   }
 
+  // 次要操作：浅底描边，与主操作形成明确的权重差。
   button.style.border = `1px solid ${panelPinkTheme.border}`;
   button.style.background = panelPinkTheme.surfaceStrong;
   button.style.color = panelPinkTheme.text;
@@ -1248,22 +1492,24 @@ function createStatusBadge(result: SimplifyWorkResult) {
   badge.style.borderRadius = '999px';
   badge.style.fontSize = '12px';
   badge.style.fontWeight = '700';
+  badge.style.lineHeight = '1.4';
 
+  // 状态色一律取自色板：三主题下前景/背景对比度均 ≥ 4.5:1（见 scripts/panel-ui-contrast.test.mjs）。
   if (tone === 'manual') {
-    badge.style.background = 'rgba(250, 204, 21, 0.14)';
-    badge.style.color = '#a16207';
+    badge.style.background = panelPinkTheme.warningBg;
+    badge.style.color = panelPinkTheme.warningFg;
     return badge;
   }
 
   if (tone === 'success') {
-    badge.style.background = 'rgba(34, 197, 94, 0.12)';
-    badge.style.color = '#15803d';
+    badge.style.background = panelPinkTheme.successBg;
+    badge.style.color = panelPinkTheme.successFg;
     return badge;
   }
 
   if (tone === 'danger') {
-    badge.style.background = 'rgba(239, 68, 68, 0.12)';
-    badge.style.color = '#b91c1c';
+    badge.style.background = panelPinkTheme.dangerBg;
+    badge.style.color = panelPinkTheme.dangerFg;
     return badge;
   }
 
@@ -1382,7 +1628,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
 
   if (result.searchInfos.length === 0) {
     const empty = createElement('div', { text: '题库没有返回答案。' });
-    empty.style.color = '#94a3b8';
+    empty.style.color = panelPinkTheme.subtle;
     empty.style.padding = '6px 0';
     container.append(empty);
     return container;
@@ -1413,7 +1659,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
       text: info.error ? '错误' : `结果数：${info.results.length}`
     });
     sub.style.fontSize = '12px';
-    sub.style.color = info.error ? '#c0392b' : panelPinkTheme.muted;
+    sub.style.color = info.error ? panelPinkTheme.dangerFg : panelPinkTheme.muted;
     applyQuestionTextWrapStyle(sub);
 
     headerRow.append(header, sub);
@@ -1431,7 +1677,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
       link.textContent = info.homepage;
       link.style.display = 'block';
       link.style.fontSize = '12px';
-      link.style.color = panelPinkTheme.primary;
+      link.style.color = panelPinkTheme.link;
       link.style.wordBreak = 'break-all';
       block.append(link);
     }
@@ -1440,6 +1686,8 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
       const list = createElement('div');
       list.style.display = 'grid';
       list.style.gap = '8px';
+      // 单个题库可能返回很多条答案：限制高度 + 内部滚动，避免把整个面板拉长。
+      applyScrollPaneStyle(list, 240);
 
       for (const entry of info.results) {
         const item = createElement('div');
@@ -1454,8 +1702,7 @@ function createWorkResultsDetail(result: SimplifyWorkResult | undefined) {
         answer.style.color = panelPinkTheme.text;
 
         const question = createElement('div', { text: entry[0] || '' });
-        question.style.fontSize = '12px';
-        question.style.color = panelPinkTheme.muted;
+        applyHintTextStyle(question);
         question.style.marginTop = '6px';
         applyQuestionTextWrapStyle(question);
 
@@ -1520,8 +1767,7 @@ function createConfigField(
       selectedBadge.style.fontWeight = '700';
 
       const wrapHint = createElement('div', { text: '倍率选项会根据可用宽度自动换行显示。' });
-      wrapHint.style.fontSize = '12px';
-      wrapHint.style.color = panelPinkTheme.muted;
+      applyHintTextStyle(wrapHint);
       wrapHint.style.lineHeight = '1.5';
 
       optionGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(72px, 1fr))';
@@ -1547,7 +1793,7 @@ function createConfigField(
       option.style.borderRadius = '12px';
       option.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
       option.style.background = selected
-        ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
+        ? panelPinkTheme.primarySoft
         : panelPinkTheme.surfaceStrong;
       option.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
       option.style.fontSize = '12px';
@@ -1582,9 +1828,7 @@ function createConfigField(
     toggle.style.textAlign = 'left';
     toggle.style.transition = 'all 0.2s ease';
     toggle.style.border = checked ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
-    toggle.style.background = checked
-      ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.96) 0%, rgba(255, 241, 248, 0.98) 100%)'
-      : 'linear-gradient(135deg, rgba(255, 250, 253, 0.96) 0%, rgba(255,255,255,0.98) 100%)';
+    toggle.style.background = checked ? panelPinkTheme.primarySoft : panelPinkTheme.surfaceStrong;
     toggle.style.boxShadow = checked ? `0 10px 24px ${panelShadowColor(0.12)}` : `0 6px 18px ${panelShadowColor(0.05)}`;
 
     const stateText = createElement('div', { text: checked ? '已开启' : '已关闭' });
@@ -1596,7 +1840,7 @@ function createConfigField(
       text: checked ? '点击关闭此项设置' : '点击开启此项设置'
     });
     stateDesc.style.fontSize = '12px';
-    stateDesc.style.color = checked ? panelPinkTheme.muted : 'rgba(157, 23, 77, 0.62)';
+    stateDesc.style.color = checked ? panelPinkTheme.muted : panelPinkTheme.subtle;
     stateDesc.style.lineHeight = '1.5';
 
     toggle.append(stateText, stateDesc);
@@ -1640,6 +1884,8 @@ function createConfigField(
     input.type = isVolumeField ? 'number' : inputType === 'range' ? 'range' : 'text';
     input.style.flex = '1';
     input.style.minWidth = '0';
+    // 输入控件本体也必须是 ≥ 32px 的触控目标：外层容器有 padding 不代表控件可点。
+    input.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
     input.style.border = 'none';
     input.style.outline = 'none';
     input.style.background = 'transparent';
@@ -1725,7 +1971,7 @@ function createConfigField(
       const applyQuickButtonStyle = (button: HTMLButtonElement, selected: boolean) => {
         button.style.border = selected ? `1px solid ${panelPinkTheme.borderStrong}` : `1px solid ${panelPinkTheme.border}`;
         button.style.background = selected
-          ? 'linear-gradient(135deg, rgba(252, 231, 243, 0.98) 0%, rgba(255, 241, 248, 0.98) 100%)'
+          ? panelPinkTheme.primarySoft
           : panelPinkTheme.surfaceStrong;
         button.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.text;
         button.style.fontWeight = selected ? '700' : '600';
@@ -1984,9 +2230,7 @@ function createStudySettingsPanel() {
     titleRow.style.flexWrap = 'wrap';
 
     const sectionTitle = createElement('div', { text: groupTitle });
-    sectionTitle.style.fontSize = '13px';
-    sectionTitle.style.fontWeight = '800';
-    sectionTitle.style.color = panelPinkTheme.text;
+    applySectionTitleStyle(sectionTitle, 'group');
 
     const sectionPill = createElement('div', { text: summaryText });
     sectionPill.style.padding = '5px 9px';
@@ -1997,9 +2241,7 @@ function createStudySettingsPanel() {
     sectionPill.style.fontWeight = '700';
 
     const sectionDesc = createElement('div', { text: groupDescription });
-    sectionDesc.style.fontSize = '12px';
-    sectionDesc.style.color = panelPinkTheme.muted;
-    sectionDesc.style.lineHeight = '1.6';
+    applyHintTextStyle(sectionDesc);
 
     titleRow.append(sectionTitle, sectionPill);
     sectionHeader.append(titleRow, sectionDesc);
@@ -2018,6 +2260,9 @@ function createStudySettingsPanel() {
       field.style.background = panelPinkTheme.surfaceStrong;
       field.style.border = `1px solid ${panelPinkTheme.border}`;
       field.style.boxShadow = `0 8px 20px ${panelShadowColor(0.05)}`;
+      // 密集表单控件之间留足点击间距：同一网格里控件最小高度 32px、行距 10px。
+      field.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+      field.style.boxSizing = 'border-box';
       if (key === 'playbackRate' || key === 'volume' || key === 'mode') {
         field.style.gridColumn = '1 / -1';
       }
@@ -2071,18 +2316,14 @@ function createTikuAdapterConfigSection() {
   header.style.gap = '6px';
 
   const title = createElement('div', { text: '题库配置' });
-  title.style.fontSize = '15px';
-  title.style.fontWeight = '800';
-  title.style.color = panelPinkTheme.text;
+  applySectionTitleStyle(title, 'section');
 
   const description = createElement('div', {
     text: isWindowsHostRuntime()
       ? '用于考试答题的题库适配器配置。'
       : '这里的设置会直接作用于当前学习流程。'
   });
-  description.style.fontSize = '12px';
-  description.style.color = panelPinkTheme.muted;
-  description.style.lineHeight = '1.7';
+  applyHintTextStyle(description);
 
   header.append(title, description);
 
@@ -2105,11 +2346,9 @@ function createTikuAdapterConfigSection() {
   baseurlInput.value = stored.baseurl || DEFAULT_TIKU_BASE_URL;
   baseurlInput.placeholder = DEFAULT_TIKU_BASE_URL || 'https://your-tiku.example.com';
   baseurlInput.style.flex = '1';
-  baseurlInput.style.minWidth = '220px';
-  baseurlInput.style.padding = '10px 12px';
-  baseurlInput.style.borderRadius = '12px';
-  baseurlInput.style.border = `1px solid ${panelPinkTheme.border}`;
-  baseurlInput.style.background = panelPinkTheme.surfaceStrong;
+  baseurlInput.style.minWidth = '180px';
+  // 输入框统一外观：与设置区控件一致，触控目标 ≥ 32px。
+  applyControlChrome(baseurlInput);
 
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
@@ -2147,10 +2386,7 @@ function createTikuAdapterConfigSection() {
   keyInput.type = 'password';
   keyInput.value = stored.key;
   keyInput.placeholder = '请输入访问令牌';
-  keyInput.style.padding = '10px 12px';
-  keyInput.style.borderRadius = '12px';
-  keyInput.style.border = `1px solid ${panelPinkTheme.border}`;
-  keyInput.style.background = panelPinkTheme.surfaceStrong;
+  applyControlChrome(keyInput);
 
   const actionsRow = createElement('div');
   actionsRow.style.display = 'flex';
@@ -2206,23 +2442,15 @@ function createWorkResultsPanel() {
   const titleGroup = createElement('div');
   titleGroup.style.display = 'grid';
   titleGroup.style.gap = '6px';
+  titleGroup.style.minWidth = '0';
 
   const heroTitle = createElement('div', { text: windowsExamOnly ? '考试答题助手' : '答题结果与学习控制' });
-  heroTitle.style.fontSize = '17px';
-  heroTitle.style.fontWeight = '800';
-  heroTitle.style.color = panelPinkTheme.text;
+  applySectionTitleStyle(heroTitle, 'hero');
+  applyQuestionTextWrapStyle(heroTitle);
 
   titleGroup.append(heroTitle);
 
-  const badge = createElement('div', { text: state.workResults.results.length === 0 ? '空闲中' : '运行中' });
-  badge.style.padding = '7px 12px';
-  badge.style.borderRadius = '999px';
-  badge.style.background = panelPinkTheme.primarySoft;
-  badge.style.color = state.workResults.results.length === 0 ? panelPinkTheme.muted : panelPinkTheme.primaryDeep;
-  badge.style.fontSize = '12px';
-  badge.style.fontWeight = '700';
-
-  heroTop.append(titleGroup, badge);
+  heroTop.append(titleGroup);
 
   const metricRow = createElement('div');
   metricRow.style.display = 'grid';
@@ -2357,12 +2585,14 @@ function createWorkResultsPanel() {
   heroActions.style.display = 'flex';
   heroActions.style.gap = '8px';
   heroActions.style.flexWrap = 'wrap';
+  heroActions.style.alignItems = 'center';
 
   syncWorkResultsControlDocument();
   const runtimeControls = state.workResults.runtimeControls;
   const isRunning = runtimeControls?.isRunning() ?? false;
   if (isRunning && tabAnswerPause.isPaused() && !runtimeControls!.isStopped()) runtimeControls!.stop();
   const isPaused = tabAnswerPause.isPaused() || (isRunning && runtimeControls!.isStopped());
+
   const pauseButton = createElement('button', { text: isPaused ? '继续答题' : '暂停答题' });
   pauseButton.title = isPaused ? '继续当前标签页的自动答题' : '暂停当前标签页的自动答题';
   pauseButton.onclick = () => {
@@ -2396,11 +2626,51 @@ function createWorkResultsPanel() {
   clearButton.title = '取消当前轮次，清除页面全部作答痕迹，并重新作答';
   clearButton.onclick = clearAndRetryWorkResults;
 
-  applyActionButtonStyle(typeButton, 'primary');
+  // 主操作（暂停/继续答题）用实心渐变；次要操作（切换视图、清空结果）用浅底描边，
+  // 视觉权重明确分开，但入口一个都不少（只重排，不删功能）。
+  applyActionButtonStyle(typeButton, 'default');
   applyActionButtonStyle(clearButton, 'danger');
   heroActions.append(typeButton, clearButton);
 
+  const statusStrip = createPanelStatusStrip({
+    results: state.workResults.results,
+    paused: isPaused,
+    running: isRunning
+  });
+
   hero.append(heroTop, aiAnswerRow, actionModeRow, examAndDebugRow, metricRow, heroActions);
+
+  // 实测问题：设置卡片把「暂停答题」挤到折叠线以下，主操作要滚动才看得见。
+  // 处理方式是「折叠但保留」——设置项收进默认折叠的 details，一个入口都不少。
+  const heroSettings = createElement('details');
+  heroSettings.dataset.cxPanelSettings = 'true';
+  const heroSettingsSummary = createElement('summary', {
+    text: windowsExamOnly ? '答题设置（AI 搜题 / 考试 / 缓存）' : '答题设置（自动答题 / AI 兜底 / 完成动作 / 缓存）'
+  });
+  heroSettingsSummary.style.cursor = 'pointer';
+  heroSettingsSummary.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  heroSettingsSummary.style.lineHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  heroSettingsSummary.style.fontSize = '13px';
+  heroSettingsSummary.style.fontWeight = '700';
+  heroSettingsSummary.style.color = panelPinkTheme.text;
+  heroSettingsSummary.style.padding = '0 2px';
+  const heroSettingsBody = createElement('div');
+  heroSettingsBody.style.display = 'grid';
+  heroSettingsBody.style.gap = '12px';
+  heroSettingsBody.style.paddingTop = '10px';
+  heroSettings.append(heroSettingsSummary, heroSettingsBody);
+
+  // 用 order 把「状态 → 主操作 → 指标」提到首屏，设置区排在其后。
+  heroTop.style.order = '0';
+  statusStrip.style.order = '1';
+  heroActions.style.order = '2';
+  metricRow.style.order = '3';
+  heroSettings.style.order = '4';
+  hero.insertBefore(heroSettings, metricRow);
+  heroSettingsBody.append(aiAnswerRow, actionModeRow, examAndDebugRow);
+  // 状态条紧跟标题下方：先看到「现在在做什么」，再看操作。
+  hero.insertBefore(statusStrip, heroTop.nextSibling);
+
   container.append(hero);
 
   const resultsSection = createElement('div');
@@ -2420,22 +2690,20 @@ function createWorkResultsPanel() {
   resultsHeader.style.flexWrap = 'wrap';
 
   const resultsTitle = createElement('div', { text: '答题结果' });
-  resultsTitle.style.fontSize = '14px';
-  resultsTitle.style.fontWeight = '700';
-  resultsTitle.style.color = panelPinkTheme.text;
+  applySectionTitleStyle(resultsTitle, 'section');
 
   const summary = createElement('div', {
     text: `当前共 ${stats.totalQuestionCount} 题，已完成 ${stats.resolvedCount} 题。`
   });
-  summary.style.fontSize = '12px';
-  summary.style.color = panelPinkTheme.muted;
+  applyHintTextStyle(summary);
 
   resultsHeader.append(resultsTitle, summary);
   resultsSection.append(resultsHeader);
 
   if (state.workResults.results.length === 0) {
     const empty = createElement('div', { text: '暂无搜索结果。开始答题后，结果会实时显示在这里。' });
-    empty.style.color = '#94a3b8';
+    // 三级文字色：三主题下 ≥ 4.5:1；旧值 #94a3b8 只有 2.56:1。
+    empty.style.color = panelPinkTheme.subtle;
     empty.style.textAlign = 'center';
     empty.style.padding = '20px 12px';
     empty.style.borderRadius = '14px';
@@ -2447,9 +2715,8 @@ function createWorkResultsPanel() {
     list.dataset.workResultsList = 'true';
     list.style.display = 'grid';
     list.style.gap = '10px';
-    list.style.maxHeight = '260px';
-    list.style.overflow = 'auto';
-    list.style.paddingRight = '2px';
+    // 长题目列表不撑爆面板：限制高度、内部滚动、滚动条收窄。
+    applyScrollPaneStyle(list, 260);
 
     const selectResult = (index: number) => {
       state.workResults.currentResultIndex = index;
@@ -2482,17 +2749,17 @@ function createWorkResultsPanel() {
           button.style.borderColor = panelPinkTheme.primary;
           button.style.color = '#fff';
         } else if (tone === 'manual') {
-          button.style.background = 'rgba(254, 249, 195, 0.96)';
-          button.style.borderColor = '#facc15';
-          button.style.color = '#854d0e';
+          button.style.background = panelPinkTheme.warningBg;
+          button.style.borderColor = panelPinkTheme.warningFg;
+          button.style.color = panelPinkTheme.warningFg;
         } else if (tone === 'success') {
-          button.style.background = 'rgba(240, 253, 244, 0.96)';
-          button.style.borderColor = '#4ade80';
-          button.style.color = '#15803d';
+          button.style.background = panelPinkTheme.successBg;
+          button.style.borderColor = panelPinkTheme.successFg;
+          button.style.color = panelPinkTheme.successFg;
         } else if (tone === 'danger') {
-          button.style.background = 'rgba(254, 242, 242, 0.96)';
-          button.style.borderColor = '#f87171';
-          button.style.color = '#b91c1c';
+          button.style.background = panelPinkTheme.dangerBg;
+          button.style.borderColor = panelPinkTheme.dangerFg;
+          button.style.color = panelPinkTheme.dangerFg;
         } else {
           button.style.background = panelPinkTheme.surfaceStrong;
           button.style.color = panelPinkTheme.text;
@@ -2509,6 +2776,7 @@ function createWorkResultsPanel() {
         const tone = resolveWorkResultTone(result, index === state.workResults.currentResultIndex);
         item.style.textAlign = 'left';
         item.style.padding = '12px';
+        item.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
         item.style.borderRadius = '14px';
         item.style.cursor = 'pointer';
         item.style.boxShadow = `0 8px 22px ${panelShadowColor(0.06)}`;
@@ -2516,16 +2784,16 @@ function createWorkResultsPanel() {
 
         if (tone === 'selected') {
           item.style.border = `1px solid ${panelPinkTheme.borderStrong}`;
-          item.style.background = 'rgba(252, 231, 243, 0.98)';
+          item.style.background = panelPinkTheme.primarySoft;
         } else if (tone === 'manual') {
-          item.style.border = '1px solid rgba(250, 204, 21, 0.45)';
-          item.style.background = 'rgba(254, 252, 232, 0.96)';
+          item.style.border = `1px solid ${panelPinkTheme.warningFg}`;
+          item.style.background = panelPinkTheme.warningBg;
         } else if (tone === 'success') {
-          item.style.border = '1px solid rgba(74, 222, 128, 0.45)';
-          item.style.background = 'rgba(240, 253, 244, 0.96)';
+          item.style.border = `1px solid ${panelPinkTheme.successFg}`;
+          item.style.background = panelPinkTheme.successBg;
         } else if (tone === 'danger') {
-          item.style.border = '1px solid rgba(248, 113, 113, 0.4)';
-          item.style.background = 'rgba(254, 242, 242, 0.96)';
+          item.style.border = `1px solid ${panelPinkTheme.dangerFg}`;
+          item.style.background = panelPinkTheme.dangerBg;
         } else {
           item.style.border = `1px solid ${panelPinkTheme.border}`;
           item.style.background = panelPinkTheme.surfaceStrong;
@@ -2575,13 +2843,10 @@ function createWorkResultsPanel() {
   cacheTitleWrap.style.gap = '4px';
 
   const cacheTitle = createElement('div', { text: `题库缓存 · ${state.apps.localQuestionCaches.length}` });
-  cacheTitle.style.fontSize = '14px';
-  cacheTitle.style.fontWeight = '700';
-  cacheTitle.style.color = panelPinkTheme.text;
+  applySectionTitleStyle(cacheTitle, 'section');
 
   const cacheDesc = createElement('div', { text: '答题成功后会自动写入本地缓存，方便后续题目直接命中。' });
-  cacheDesc.style.fontSize = '12px';
-  cacheDesc.style.color = panelPinkTheme.muted;
+  applyHintTextStyle(cacheDesc);
 
   cacheTitleWrap.append(cacheTitle, cacheDesc);
 
@@ -2599,7 +2864,7 @@ function createWorkResultsPanel() {
 
   if (state.apps.localQuestionCaches.length === 0) {
     const emptyCache = createElement('div', { text: '暂无题库缓存。答题成功后会自动写入这里。' });
-    emptyCache.style.color = '#94a3b8';
+    emptyCache.style.color = panelPinkTheme.subtle;
     emptyCache.style.textAlign = 'center';
     emptyCache.style.padding = '18px 12px';
     emptyCache.style.borderRadius = '14px';
@@ -2610,9 +2875,8 @@ function createWorkResultsPanel() {
     const cacheList = createElement('div');
     cacheList.style.display = 'grid';
     cacheList.style.gap = '8px';
-    cacheList.style.maxHeight = '220px';
-    cacheList.style.overflow = 'auto';
-    cacheList.style.paddingRight = '2px';
+    // 长缓存列表同样限制高度并内部滚动，不撑爆面板。
+    applyScrollPaneStyle(cacheList, 220);
 
     state.apps.localQuestionCaches.slice(0, 20).forEach((cache) => {
       const item = createElement('div');
@@ -2706,7 +2970,7 @@ function createAppsPanel() {
 
   if (state.apps.localQuestionCaches.length === 0) {
     const empty = createElement('div', { text: '暂无题库缓存。答题成功后会自动写入这里。' });
-    empty.style.color = 'rgba(157, 23, 77, 0.62)';
+    empty.style.color = panelPinkTheme.subtle;
     empty.style.textAlign = 'center';
     empty.style.padding = '12px 0';
     container.append(empty);
@@ -2750,7 +3014,7 @@ function createAppsPanel() {
       link.style.display = 'block';
       link.style.fontSize = '12px';
       link.style.marginTop = '4px';
-      link.style.color = panelPinkTheme.primary;
+      link.style.color = panelPinkTheme.link;
       applyQuestionTextWrapStyle(link);
       item.append(link);
     }
@@ -2768,6 +3032,24 @@ function renderAppsPanel() {
   panel.body.replaceChildren(createAppsPanel());
 }
 
+/**
+ * 小屏（< 400px 视口）下面板必须收窄，不能越过视口边缘：
+ * 返回本次可用的外宽（含左右各一份安全边距）。
+ */
+function resolvePanelOuterWidth(kind: 'workResults' | 'apps') {
+  const desired = kind === 'workResults' ? state.workResultsPanelWidth : 360;
+  const viewport = window.innerWidth || 0;
+  if (!Number.isFinite(viewport) || viewport <= 0) {
+    return `${desired}px`;
+  }
+  if (viewport >= PANEL_NARROW_VIEWPORT_PX) {
+    return `${desired}px`;
+  }
+  // 小屏：宽度压到视口内，同时保证仍有可用宽度（最低 240px，避免控件被挤爆）。
+  const available = Math.max(240, viewport - PANEL_MIN_VIEWPORT_MARGIN * 2);
+  return `${Math.min(desired, available)}px`;
+}
+
 function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 'apps') {
   if (!panel) return;
 
@@ -2781,7 +3063,9 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
     panel.root.style.top = '108px';
   }
   panel.root.style.zIndex = kind === 'workResults' ? '2147483645' : '2147483644';
-  panel.root.style.width = kind === 'workResults' ? `${state.workResultsPanelWidth}px` : '360px';
+  panel.root.style.width = resolvePanelOuterWidth(kind);
+  panel.root.style.boxSizing = 'border-box';
+  panel.root.style.maxWidth = 'calc(100vw - 24px)';
   panel.root.style.maxHeight = kind === 'workResults' ? '76vh' : '50vh';
   panel.root.style.overflow = 'auto';
   panel.root.style.overscrollBehavior = 'contain';

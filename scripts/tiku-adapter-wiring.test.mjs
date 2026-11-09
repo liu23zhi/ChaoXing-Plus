@@ -62,7 +62,9 @@ test('common panel shows a tiku error summary while preserving the original erro
   assert.equal(source.includes('block.append(createErrorSummaryBlock(info.error));'), true);
   assert.equal(source.includes('function createErrorSummaryBlock(errorText: string, extraDetails: string[] = [])'), true);
   assert.equal(source.includes("text: `摘要：${summary.title}`"), true);
-  assert.equal(source.includes("createElement('summary', { text: '原文' })"), true);
+  // 原文默认折叠，并给出「下一步」提示（只显示错误码不够，用户不知道要做什么）。
+  assert.equal(source.includes("createElement('summary', { text: '查看原始错误' })"), true);
+  assert.equal(source.includes('describeSearchErrorNextStep(errorText)'), true);
   assert.equal(source.includes("createElement('pre', { text: errorText })"), true);
   assert.equal(source.includes('applyQuestionTextWrapStyle(sub);'), true);
 });
