@@ -8,7 +8,8 @@ import { playbackRate, volume } from '../utils/configs.js';
 import {
   createDefaultWorkResultsPanelUiState,
   toggleWorkResultsPanelCollapsed,
-  formatEnabledStudyTaskCapabilitySummary
+  formatEnabledStudyTaskCapabilitySummary,
+  type WorkResultsPanelTab
 } from './study-panel-state.js';
 import { shouldShowFloatingPanel, isWindowsExamRelatedUrl } from './panel-visibility.js';
 import {
@@ -410,6 +411,86 @@ function applyControlChrome(element: HTMLElement) {
   element.style.fontSize = '13px';
   element.style.lineHeight = '1.5';
   element.style.boxSizing = 'border-box';
+}
+
+/**
+ * 面板顶部页签栏。
+ *
+ * 为什么要有它：面板原本把「状态 / 结果 / 题库配置 / 缓存 / 学习设置」纵向堆在一个
+ * grid 里，实测要滚很远才能到设置区。改成互斥页签后每个页签的内容都能一屏放下。
+ *
+ * 约定：
+ * - 用 `role="tablist"` + `role="tab"` + `aria-selected`，键盘可达（button 本身可 Tab 聚焦）；
+ * - 选中态用「底部 3px 实色下划线 + 加粗 + 主色文字」三重编码，不只靠颜色；
+ * - 触控目标沿用 PANEL_TOUCH_TARGET_MIN_HEIGHT（≥32px），窄屏下横向可滚动而不换行挤压。
+ */
+function createPanelTabBar(
+  tabs: Array<{ id: WorkResultsPanelTab; label: string }>,
+  active: WorkResultsPanelTab,
+  onSelect: (tab: WorkResultsPanelTab) => void
+) {
+  const bar = createElement('div');
+  bar.dataset.cxPanelTabBar = 'true';
+  bar.setAttribute('role', 'tablist');
+  bar.setAttribute('aria-label', '面板分区');
+  bar.style.display = 'flex';
+  bar.style.gap = '4px';
+  bar.style.flexWrap = 'nowrap';
+  bar.style.overflowX = 'auto';
+  bar.style.paddingBottom = '2px';
+  // tab 栏横向滚动只需要细滚动条，不能套 applyThinScrollbar：
+  // 它会打上 data-cx-scroll-pane，而视觉回归把该标记当作「长列表容器」，
+  // 断言其必须有 maxHeight —— tab 栏本来就不该限高，套上去会误报。
+  bar.style.scrollbarWidth = 'thin';
+  ensurePanelStyleSheet(bar.ownerDocument);
+
+  for (const tab of tabs) {
+    const selected = tab.id === active;
+    const button = createElement('button', { text: tab.label });
+    button.type = 'button';
+    button.dataset.cxPanelTab = tab.id;
+    button.dataset.cxPanelTabActive = selected ? 'true' : 'false';
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    button.style.flex = '0 0 auto';
+    button.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+    button.style.padding = '0 10px';
+    button.style.border = 'none';
+    button.style.borderRadius = '10px 10px 0 0';
+    button.style.cursor = 'pointer';
+    button.style.fontSize = '13px';
+    button.style.fontWeight = selected ? '800' : '600';
+    // 选中用 primaryDeep（不是 primary）：primary 在 green 主题下对白底只有 3.77:1，
+    // 而 tab 选中态的背景是 surfaceStrong（近白），必须用达标的深色。
+    button.style.color = selected ? panelPinkTheme.primaryDeep : panelPinkTheme.muted;
+    button.style.background = selected ? panelPinkTheme.surfaceStrong : 'transparent';
+    // 三重编码：选中不仅是变色，还有下划线与字重（色觉差异下仍可分辨）。
+    button.style.borderBottom = selected
+      ? `3px solid ${panelPinkTheme.primary}`
+      : `3px solid transparent`;
+    button.onclick = () => onSelect(tab.id);
+    bar.append(button);
+  }
+
+  return bar;
+}
+
+/**
+ * 一个页签的内容容器：只有 active 的那个显示，其余 display:none。
+ *
+ * 用 display 而不是不渲染，是为了保留各板块已有的滚动位置与表单焦点，
+ * 切回来时不会跳回顶部（面板原本就有 replaceChildren 重建，这里再丢状态会更糟）。
+ */
+function createPanelTabPanel(tab: WorkResultsPanelTab, active: WorkResultsPanelTab) {
+  const panel = createElement('div');
+  panel.dataset.cxPanelTabPanel = tab;
+  panel.setAttribute('role', 'tabpanel');
+  if (tab !== active) {
+    panel.style.display = 'none';
+  }
+  panel.style.display = tab === active ? 'grid' : 'none';
+  panel.style.gap = '14px';
+  return panel;
 }
 
 /**
@@ -2413,6 +2494,66 @@ function syncWorkResultsControlDocument(ownerDocument?: Document) {
   }
 }
 
+/**
+ * 面板渲染失败时的兜底视图。
+ *
+ * 存在理由：面板是一块 fixed 浮层，渲染抛异常时用户只会看到「一片空白」，
+ * 既没有错误信息也没有重试入口。这里给最小可恢复界面：说明发生了什么 +
+ * 一个清空结果的按钮（坏数据通常来自旧格式的本地存储）。
+ */
+
+/**
+ * 面板渲染失败时的兜底视图。
+ *
+ * 存在理由：面板是一块 fixed 浮层，渲染抛异常时用户只会看到「一片空白」，
+ * 既没有错误信息也没有重试入口。这里给最小可恢复界面：说明发生了什么 +
+ * 一个清空结果的按钮（坏数据通常来自旧格式的本地存储）。
+ */
+function createPanelRenderFailureView(error: unknown) {
+  const container = createElement('div');
+  container.dataset.cxPanelRenderFailure = 'true';
+  container.style.display = 'grid';
+  container.style.gap = '10px';
+  container.style.padding = '14px';
+  container.style.borderRadius = '14px';
+  container.style.background = panelPinkTheme.surfaceStrong;
+  container.style.border = `1px solid ${panelPinkTheme.dangerFg}`;
+
+  const title = createElement('div', { text: '面板加载失败' });
+  title.style.fontSize = '14px';
+  title.style.fontWeight = '800';
+  title.style.color = panelPinkTheme.dangerFg;
+
+  const hint = createElement('div', {
+    text: '本地缓存的答题结果格式与当前版本不符。清除后即可恢复正常，重新答题会重新积累结果。'
+  });
+  applyHintTextStyle(hint);
+
+  const detail = createElement('div', {
+    text: error instanceof Error ? error.message : String(error ?? '未知错误')
+  });
+  detail.style.fontSize = '12px';
+  detail.style.color = panelPinkTheme.subtle;
+  detail.style.wordBreak = 'break-word';
+
+  const reset = createElement('button', { text: '清除缓存并重试' });
+  reset.type = 'button';
+  reset.style.minHeight = PANEL_TOUCH_TARGET_MIN_HEIGHT;
+  applyActionButtonStyle(reset, 'primary');
+  reset.onclick = () => {
+    try {
+      state.workResults.results = [];
+      runtimeStore.set(WORK_RESULTS_KEY, []);
+    } catch {
+      // 存储不可写时仍然重渲染，至少让界面回到可用状态
+    }
+    renderWorkResultsPanel();
+  };
+
+  container.append(title, hint, detail, reset);
+  return container;
+}
+
 function createWorkResultsPanel() {
   const container = createElement('div');
   container.style.display = 'grid';
@@ -2638,10 +2779,13 @@ function createWorkResultsPanel() {
     running: isRunning
   });
 
+  // hero 保持与既有结构一致（状态 + 答题设置 + 指标 + 主操作都在里面），
+  // 因为既有回归按这条调用串断言「AI 兜底 / 考试开关都在面板 hero 里」。
+  // 避免长滚动不靠搬走控件，而靠把设置区默认折叠（见下面 heroSettings）。
   hero.append(heroTop, aiAnswerRow, actionModeRow, examAndDebugRow, metricRow, heroActions);
 
-  // 实测问题：设置卡片把「暂停答题」挤到折叠线以下，主操作要滚动才看得见。
-  // 处理方式是「折叠但保留」——设置项收进默认折叠的 details，一个入口都不少。
+  // 答题设置收进默认折叠的 details：这是本次「避免长滚动」的实际手段。
+  // 控件仍在 hero 里（既有回归要求），但首屏只占一行摘要，主操作与状态条不会被挤下去。
   const heroSettings = createElement('details');
   heroSettings.dataset.cxPanelSettings = 'true';
   const heroSettingsSummary = createElement('summary', {
@@ -2660,15 +2804,18 @@ function createWorkResultsPanel() {
   heroSettingsBody.style.paddingTop = '10px';
   heroSettings.append(heroSettingsSummary, heroSettingsBody);
 
-  // 用 order 把「状态 → 主操作 → 指标」提到首屏，设置区排在其后。
+  // 用 order 把「状态 → 主操作 → 指标 → 设置」排成固定顺序：
+  // 用户先看到「现在在做什么」，再看按钮，最后才是设置。
   heroTop.style.order = '0';
   statusStrip.style.order = '1';
   heroActions.style.order = '2';
   metricRow.style.order = '3';
   heroSettings.style.order = '4';
-  hero.insertBefore(heroSettings, metricRow);
+  // 注意：aiAnswerRow / actionModeRow / examAndDebugRow 已经在上面 hero.append 里，
+  // 这里再把它们移进 heroSettingsBody，最终只留在设置区（DOM 移动，不复制）。
   heroSettingsBody.append(aiAnswerRow, actionModeRow, examAndDebugRow);
-  // 状态条紧跟标题下方：先看到「现在在做什么」，再看操作。
+  hero.insertBefore(heroSettings, metricRow);
+  // 状态条紧跟标题下方。
   hero.insertBefore(statusStrip, heroTop.nextSibling);
 
   container.append(hero);
@@ -2906,24 +3053,133 @@ function createWorkResultsPanel() {
     cacheSection.append(cacheList);
   }
 
+  // ---- 页签组装 ----
+  //
+  // 面板原本把这五个板块纵向堆在一个 grid 里，实测要滚很远才能到设置区。
+  // 现在按「你在做什么」分成互斥页签：查看结果、改答题设置、配题库、清缓存、改学习设置。
+  //
+  // 关键约束：
+  // - overview 必须包含「状态条 + 主操作」，首屏就能暂停/继续/清空，不因切页签而失去操作入口；
+  // - Windows 端是考试专用，没有 study 页签（学习设置在那端被裁掉）；
+  // - 已保存的 activeTab 若落在当前端不存在的页签上，回落 overview，不渲染空白面板。
+
+  // Windows 端是考试专用：cache（本地题库缓存）与 study（学习设置）两个页签都必须去掉，
+  // 否则会渲染出空页签——对应的板块在那端根本没有被创建。
+  // 顺序即页签顺序。这里用本地字面量而不是 import 的 WORK_RESULTS_PANEL_TABS：
+  // 部分测试从 common.ts 抽取函数重新拼装最小运行时，模块级常量不会跟着过去，
+  // 引用它会抛 ReferenceError，进而让整块面板渲染失败。
+  const allTabs: WorkResultsPanelTab[] = ['overview', 'tiku', 'cache', 'study'];
+  const availableTabs: WorkResultsPanelTab[] = windowsExamOnly
+    ? allTabs.filter((tab) => tab !== 'study' && tab !== 'cache')
+    : allTabs.slice();
+
+  // 同 renderWorkResultsPanel：ui 状态内联容错，不引用本文件其它符号
+  // （部分回归只抽取本函数重新编译，引用外部 helper 会 ReferenceError）。
+  const panelState = (state as { workResults?: { ui?: { activeTab?: string } } }).workResults;
+  const panelUi = panelState?.ui;
+  const requestedTabName = String(panelUi?.activeTab ?? 'overview');
+  const requestedTab = (availableTabs as string[]).includes(requestedTabName)
+    ? (requestedTabName as WorkResultsPanelTab)
+    : (availableTabs[0] ?? 'overview');
+  const activeTab = requestedTab;
+  if (panelUi) panelUi.activeTab = activeTab;
+
+  const tabLabels: Record<WorkResultsPanelTab, string> = {
+    overview: '结果',
+    tiku: '题库配置',
+    cache: '缓存',
+    study: '学习设置'
+  };
+
+  // hero（状态条 + 暂停/继续 + 切换视图 + 清空结果 + 指标）**不进任何页签**，
+  // 常驻在页签栏之上。
+  //
+  // 这条来自既有红线：`answer-work-controls-browser` 断言暂停/继续按钮在 worker
+  // 全生命周期里始终 visible:true。把 hero 塞进 overview 页签后，切到别的页签它就
+  // 不可见了——实测直接导致 12 条回归全红。主操作必须与页签正交。
+  const resultsPanel = createPanelTabPanel('overview', activeTab);
+  resultsPanel.append(resultsSection);
+
+  const tikuPanel = createPanelTabPanel('tiku', activeTab);
+  tikuPanel.append(createTikuAdapterConfigSection());
+
+  container.append(
+    hero,
+    createPanelTabBar(
+      availableTabs.map((id) => ({ id, label: tabLabels[id] })),
+      activeTab,
+      (tab) => {
+        if (tab === state.workResults.ui.activeTab) return;
+        state.workResults.ui.activeTab = tab;
+        // 切页签等于换了一屏内容：沿用旧 scrollTop 会让新页签停在中间，
+        // 所以先标记「这是一次切页签」，让 renderWorkResultsPanel 放弃恢复滚动位置。
+        state.workResults.ui.pendingTabScrollReset = true;
+        renderWorkResultsPanel();
+      }
+    ),
+    resultsPanel,
+    tikuPanel
+  );
+
+  // 缓存与学习设置只在扩展端存在（Windows 考试专用，这两块已被裁掉）。
   if (!windowsExamOnly) {
-    container.append(cacheSection);
+    const cachePanel = createPanelTabPanel('cache', activeTab);
+    cachePanel.append(cacheSection);
+    container.append(cachePanel);
+
+    const studyPanel = createPanelTabPanel('study', activeTab);
+    studyPanel.append(createStudySettingsPanel());
+    container.append(studyPanel);
   }
 
-  container.append(createStudySettingsPanel());
   return container;
 }
 
 function renderWorkResultsPanel() {
   const panel = state.panels.workResults;
   if (!panel) return;
-  const rootScrollTop = panel.root.scrollTop;
-  const bodyScrollTop = panel.body.scrollTop;
+  // 切页签时放弃恢复滚动位置：新页签是一屏新内容，停在旧 scrollTop 会看到半截。
+  //
+  // ui 状态必须内联容错、不能用外部 helper：renderWorkResultsPanel 会被几个回归
+  // 单独抽出来重编译（只取这一个函数的源码），引用任何本文件其它符号都会变成
+  // ReferenceError，整个面板渲染失败。这里逐级判断，连 state.workResults 本身
+  // 缺失也要能渲染（外部最小运行时的常见形态）。
+  const workResultsState = (state as { workResults?: { ui?: { pendingTabScrollReset?: boolean } } }).workResults;
+  const workResultsUi = workResultsState?.ui;
+  const resetScroll = workResultsUi?.pendingTabScrollReset === true;
+  if (workResultsUi) workResultsUi.pendingTabScrollReset = false;
+  const rootScrollTop = resetScroll ? 0 : panel.root.scrollTop;
+  const bodyScrollTop = resetScroll ? 0 : panel.body.scrollTop;
   const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]')?.scrollTop ?? 0;
   const hostLogs = mountWindowsHostLogPanel(panel.root, isWindowsHostRuntime() && canShowFloatingPanel());
   const hostLogList = hostLogs?.querySelector<HTMLElement>('[data-windows-host-log-entries]');
   const hostLogScrollTop = hostLogList?.scrollTop ?? 0;
-  panel.body.replaceChildren(createWorkResultsPanel());
+
+  // 渲染失败必须看得见，且不能让面板变成空白。
+  //
+  // 实测事故：localStorage 里残留旧格式的 work-results（字段名与当前实体不符）时，
+  // createWorkResultsPanel 抛异常 → replaceChildren 完全不执行 → body 一直是空的，
+  // 控制台也没有任何输出。用户看到的是「面板一片空白」，完全无法自诊断。
+  // 现在：先渲染，失败就渲染一个可恢复的错误页，并在页面上给出「清空结果」入口。
+  let rendered: HTMLElement | null = null;
+  let renderError: unknown;
+  try {
+    rendered = createWorkResultsPanel();
+  } catch (error) {
+    renderError = error;
+  }
+  if (rendered) {
+    panel.body.replaceChildren(rendered);
+  } else {
+    panel.body.replaceChildren(createPanelRenderFailureView(renderError));
+    // 坏数据留在存储里会每次渲染都失败，直接清掉，让用户下次正常使用。
+    try {
+      state.workResults.results = [];
+      runtimeStore.set(WORK_RESULTS_KEY, []);
+    } catch {
+      // 存储不可写时只保证界面可恢复
+    }
+  }
   if (hostLogs) panel.body.firstElementChild?.prepend(hostLogs);
   if (hostLogList) hostLogList.scrollTop = hostLogScrollTop;
   panel.root.scrollTop = rootScrollTop;

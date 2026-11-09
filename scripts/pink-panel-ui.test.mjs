@@ -119,7 +119,13 @@ test('Windows 面板只保留考试/答题相关功能，扩展保持完整面�
   assert.equal(source.includes("text: isWindowsHostRuntime()"), true);
   assert.equal(source.includes("createSettingsGroup('考试与诊断', '控制考试自动交卷权限。', ['enableExamAutoSubmit'])"), true);
   const normalizedSource = source.replace(/\r\n/g, '\n');
-  assert.equal(normalizedSource.includes('if (!windowsExamOnly) {\n    container.append(cacheSection);'), true);
+  // 缓存板块（连同它所在的页签）只能在扩展端出现。断言的是这个语义，
+  // 不是某一段具体写法的字样——面板改成分页签后，判断条件仍在 `if (!windowsExamOnly) {` 之内。
+  const cacheGateIndex = normalizedSource.indexOf('if (!windowsExamOnly) {');
+  assert.notEqual(cacheGateIndex, -1, '必须保留「缓存只在扩展端」的判断');
+  const cacheGateBlock = normalizedSource.slice(cacheGateIndex, cacheGateIndex + 600);
+  assert.equal(cacheGateBlock.includes("createPanelTabPanel('cache'"), true, '缓存页签必须挂在扩展分支里');
+  assert.equal(cacheGateBlock.includes('cacheSection'), true, '缓存板块必须挂在扩展分支里');
 
   // 学习相关设置组只能出现在扩展分支，不能进入 Windows 分支。
   const settingsStart = source.indexOf('function createStudySettingsPanel');

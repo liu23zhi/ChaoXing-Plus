@@ -42,7 +42,15 @@ test('common preserves work result scroll and retrying state across result refre
   assert.equal(source.includes('retrying: item.retrying ?? false'), false);
   assert.equal(source.includes("list.dataset.workResultsList = 'true';"), true);
   assert.equal(source.includes("const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list=\"true\"]')?.scrollTop ?? 0;"), true);
-  assert.equal(source.includes('panel.body.replaceChildren(createWorkResultsPanel());'), true);
+  // 渲染结果仍然要求「整块替换」，但现在是 try/catch 包起来的：
+  // 坏数据（旧格式本地存储）曾让 replaceChildren 完全不执行 → 面板永久空白，
+  // 所以这里断言的是「有 replaceChildren(render) 或走失败兜底视图」，
+  // 而不是固定那一行的字样。
+  const replaceIndex = source.indexOf('panel.body.replaceChildren(rendered);');
+  assert.notEqual(replaceIndex, -1, '必须整块替换面板内容');
+  assert.equal(source.includes('rendered = createWorkResultsPanel();'), true);
+  assert.equal(source.includes('panel.body.replaceChildren(createPanelRenderFailureView(renderError));'), true,
+    '渲染失败必须有可恢复的兜底视图，不能让面板空白');
   assert.equal(source.includes('panel.root.scrollTop = rootScrollTop;'), true);
   assert.equal(source.includes('panel.body.scrollTop = bodyScrollTop;'), true);
   assert.equal(source.includes('nextWorkResultsList.scrollTop = workResultsListScrollTop;'), true);

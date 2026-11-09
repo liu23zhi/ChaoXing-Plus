@@ -19,7 +19,9 @@ before(async () => {
     // 面板表现层 helper：createWorkResultsPanel 直接调用它们，缺一个就 ReferenceError。
     'applySectionTitleStyle', 'applyHintTextStyle', 'applyControlChrome',
     'applyThinScrollbar', 'applyScrollPaneStyle', 'ensurePanelStyleSheet',
-    'createPanelStatusStrip', 'resolvePanelOuterWidth'
+    'createPanelStatusStrip', 'resolvePanelOuterWidth',
+    // 面板顶部页签：createWorkResultsPanel 现在用它们把板块收进互斥页签。
+    'createPanelTabBar', 'createPanelTabPanel', 'createPanelRenderFailureView'
   ]);
   const resetNames = new Set(['clearAndRetryWorkResults', 'patchWorkResult', 'mergeIncomingWorkResults',
     'shouldPreserveExistingWorkResult', 'hasUsableWorkResultAnswer']);
