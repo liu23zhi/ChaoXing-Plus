@@ -86,6 +86,15 @@ function copyStaticFiles() {
 async function main() {
   await build({
     configFile: false,
+    // src/core 下同时存在 .ts 与 .js，而 .js 是历史上手工分叉出来的影子文件：
+    // 它们停留在 2026-05 到 2026-10 的不同时间点，缺了 .ts 后来新增的逻辑
+    // （最严重的是 request.ts 里 tikuAdapter 的余额封锁前置、错误码映射与
+    // 响应体 error 识别，这三段从来没进过构建产物）。
+    //
+    // vite 默认把 .js 排在 .ts 前面，所以源码里 'from "./x.js"' 一律解析到影子
+    // 文件。这里显式让 .ts 优先，让源码只认 .ts；.js 影子保留是因为有测试直接
+    // 引用它们当源码文本夹具，删掉要连带改测试，另行处理。
+    resolve: { extensions: ['.ts', '.mts', '.js', '.mjs', '.json'] },
     define: {
       __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
       __CXPLUS_WINDOWS_INJECTION_LOG__: 'false'
