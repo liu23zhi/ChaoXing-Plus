@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
+// 生成的 harness 必须带 UTF-8 BOM：仓库路径含中文时，无 BOM 的 .ps1 会被
+// Windows PowerShell 5.1 按 ANSI 解码，dot-source 的路径变乱码后直接失败，
+// 表现为"拿不到前台窗口"这类下游症状（详见 helpers 注释）。
+import { writePowerShellScript, runPowerShellScript } from './test-helpers/windows-script.mjs';
 
 const windowsOnly = process.platform === 'win32' ? undefined : 'Win32 dialog window regression';
 const entryScript = process.env.CX_CLIENT_ENTRY_SCRIPT || resolveTestPath('scripts', 'windows-client-entry.ps1');
@@ -15,7 +17,7 @@ const quote = (value) => `'${String(value).replace(/'/gu, "''")}'`;
 function runDialog(scenario, { reacquire = false } = {}) {
   const directory = createTestDirectory('client-dialog');
   const harness = path.join(directory, 'harness.ps1');
-  writeFileSync(harness, `
+  writePowerShellScript(harness, `
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 . ${quote(entryScript)}
@@ -68,9 +70,7 @@ try {
   [ClientDialogFixture]::Stop()
 }
 `);
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', harness], {
-    encoding: 'utf8', windowsHide: true, timeout: 45_000
-  });
+  const result = runPowerShellScript(harness, { timeout: 45_000 });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const line = result.stdout.split(/\r?\n/u).findLast((value) => value.startsWith('{'));
   assert.ok(line, `${result.stdout}\n${result.stderr}`);

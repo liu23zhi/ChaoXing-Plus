@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
+// harness 与桩脚本都交给带 UTF-8 BOM 的写法：仓库路径含中文时，无 BOM 的 .ps1 会被
+// Windows PowerShell 5.1 按 ANSI 解码，dot-source 的路径变乱码后直接失败。
+import { writePowerShellScript, runPowerShellScript } from './test-helpers/windows-script.mjs';
 
 const windowsOnly = process.platform === 'win32' ? undefined : 'Windows PowerShell cleanup regression';
 const source = resolveTestPath('scripts', 'windows-real-client-injection.ps1');
@@ -24,8 +26,8 @@ function runCleanupCase({ early = false, logs = false, artifactFailure = false, 
   const host = path.join(directory, 'host.fixture');
   if (!early) writeFileSync(installer, 'fixture only');
   writeFileSync(host, 'must not launch');
-  writeFileSync(path.join(directory, 'windows-client-entry.ps1'), '');
-  writeFileSync(path.join(directory, 'windows-client-cdp.ps1'), `
+  writePowerShellScript(path.join(directory, 'windows-client-entry.ps1'), '');
+  writePowerShellScript(path.join(directory, 'windows-client-cdp.ps1'), `
 function Get-CdpPageTarget { param([int] $Port, [int] $TimeoutSeconds) return $null }
 function Invoke-CdpCommand { param([string] $WebSocketUrl, [string] $ParamsJson, [int] $CommandId, [int] $TimeoutSeconds) return $null }
 function Save-CdpPageScreenshot {
@@ -34,7 +36,7 @@ function Save-CdpPageScreenshot {
   return $null
 }
 `);
-  writeFileSync(path.join(directory, 'windows-client-database.ps1'), `
+  writePowerShellScript(path.join(directory, 'windows-client-database.ps1'), `
 function Install-ClientDatabase {
   param([string] $ClientDirectory, [string] $Base64)
   if ($env:CX_CLEANUP_LOGS -eq '1') {
@@ -44,13 +46,13 @@ function Install-ClientDatabase {
   throw 'ORIGINAL_INSTALL_FAILURE'
 }
 `);
-  writeFileSync(path.join(directory, 'sevenzip-fixture.ps1'), `
+  writePowerShellScript(path.join(directory, 'sevenzip-fixture.ps1'), `
 $destination = $args[2].Substring(2)
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $destination 'CXExam.exe'), 'must not launch')
 $global:LASTEXITCODE = 0
 `);
-  writeFileSync(path.join(directory, 'windows-client-shell.ps1'), `
+  writePowerShellScript(path.join(directory, 'windows-client-shell.ps1'), `
 function Get-Command {
   [CmdletBinding()] param([string] $Name)
   if ($Name -eq '7z.exe') { return [pscustomobject]@{ Source = (Join-Path $PSScriptRoot 'sevenzip-fixture.ps1') } }
@@ -63,7 +65,7 @@ function Repair-ShellDesktop {
   return [pscustomobject]@{ Action = 'fixture'; Restarted = $false; Tray = $true; OwnerPid = 0; OldPids = ''; ManualStart = $false; Forced = $Force.IsPresent }
 }
 `);
-  writeFileSync(path.join(directory, 'windows-client-diagnostics.ps1'), `
+  writePowerShellScript(path.join(directory, 'windows-client-diagnostics.ps1'), `
 function Get-DesktopEnvironment { return @{ Fixture = $true } }
 function Save-DesktopScreenshot {
   param([string] $Path, [int] $ScalePercent)
@@ -71,7 +73,7 @@ function Save-DesktopScreenshot {
   return $null
 }
 `);
-  writeFileSync(path.join(directory, 'windows-client-input.ps1'), `
+  writePowerShellScript(path.join(directory, 'windows-client-input.ps1'), `
 function Get-InputState { return [pscustomobject]@{ LayoutHandles = @('fixture'); ActiveLayout = 'fixture'; Preload = @{ '1' = 'fixture' } } }
 function Compare-InputState { param($Before, $After) return @() }
 function Restore-InputState {
@@ -81,7 +83,7 @@ function Restore-InputState {
 }
 `);
   const harness = path.join(directory, 'harness.ps1');
-  writeFileSync(harness, `
+  writePowerShellScript(harness, `
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -Force
@@ -92,8 +94,8 @@ try {
   [pscustomobject]@{ Error = $_.Exception.Message } | ConvertTo-Json -Compress
 }
 `);
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', harness], {
-    encoding: 'utf8', windowsHide: true, timeout: 30_000,
+  const result = runPowerShellScript(harness, {
+    timeout: 30_000,
     env: {
       ...process.env, RUNNER_TEMP: runner,
       CX_CLEANUP_LOGS: logs ? '1' : '0',
