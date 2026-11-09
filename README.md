@@ -50,7 +50,7 @@ dist-windows/                # Windows 端宿主注入资源（gitignore）
 
 ## Windows 端（CEF 75 客户端注入）
 
-Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 提供配置水合、资源注入和 Chrome75 API 补丁。原生宿主源码与入口位于 `windows/native-source/`；已弃用的 Node 宿主及其备用入口位于 `windows/node-source/`，两者共用的 Windows 文件位于 `windows/share-file/`。与插件共用的 `src/`、插件构建脚本 `build.mjs` 与输出目录 `dist/` 保留原位；完整目录说明见 [Windows 文件说明](docs/windows.md#目录)。
+Windows 端以 CEF 官方 `--remote-debugging-port` 参数启动超星考试客户端，通过本地 CDP 把业务 bundle 注入网页主世界，并用 `windows/share-file/windows-bootstrap.js` 提供配置水合、资源注入和 Chrome75 API 补丁。原生宿主源码与入口位于 `windows/native-source/`；已弃用的 Node 宿主及其备用入口位于 `windows/node-source/`，两者共用的 Windows 文件位于 `windows/share-file/`。与插件共用的 `src/`、插件构建脚本 `build.mjs` 与输出目录 `dist/` 保留原位；各子目录说明见 windows/native-source/README.md、windows/node-source/README.md 与 windows/share-file/README.md。
 
 ```powershell
 npm run build:windows      # 注入资源（dist-windows）
@@ -66,7 +66,7 @@ npm run build:native       # 原生单文件/多文件 GUI、Console helper 与�
 .\windows\native-scripts\start-windows-debug.cmd
 ```
 
-原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-scripts\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 [docs/windows.md](docs/windows.md)。
+原生宿主启动诊断默认位于工作目录下的 `.data/`；Node 宿主继续使用 `windows/data/`。排查系统缩放导致的模糊时，可用 `.\windows\native-scripts\start-windows.cmd --dpi-aware` 普通启动。Windows 悬浮面板只服务考试答题场景，默认折叠为标题条；Chrome 扩展保持完整面板与默认展开。详细配置、验证步骤与故障排查见 AGENTS.md 的 Windows 端章节。
 
 可独立分发的原生 GUI 为 `windows/native-build/release/single-file/chaoxing_plus.exe`，内嵌四项页面资源与 winmm 代理。`multi-file/chaoxing_plus.exe` 仍为 GUI 主程序，使用四项 `assets/` 资源和根目录 `winmm-proxy.dll`，不含这些 RCDATA；同级 `chaoxing_plus.com` 是等待 GUI 并保留输出/退出码的 Console helper。PowerShell 显式调用 `.exe` 不保证等待；命令行需要等待时使用省略扩展名的 `chaoxing_plus`、显式 `.com` 或 `Start-Process -Wait`。`BuildConsole` 默认 `true`，包含多文件变体与 `multi-file/package-to-single/chaoxing_plus.exe` 普通临时释放包；`-BuildConsole:$false` 仅生成单文件 GUI。释放包每次释放到自建临时目录，等待 GUI 退出后仅清理该目录，发布原件不删除。原生 `bin/` 中的宿主与调试/测试 EXE 保留。Node 备用 EXE 仍为 `windows/node-build/release/chaoxing_plus_node.exe`，其运行时、资源与冻结行为不变。
 
@@ -106,7 +106,6 @@ chaoxing_plus/
 ├── build.mjs                    # 扩展注入脚本构建
 ├── build-browser.sh             # 扩展完整构建入口
 ├── scripts/                     # 扩展和 Windows 回归测试
-├── docs/windows.md              # Windows 端使用与设计说明
 ├── package.json
 └── tsconfig.json
 ```
