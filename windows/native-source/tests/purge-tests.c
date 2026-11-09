@@ -1,10 +1,18 @@
 /* 自毁兜底单元测试：关机关联、开机续删登记与待删清单（不关机、不碰发布包）。
- * 续删登记使用测试专用 RunOnce 子键，不写真实自启动项。 */
+ * 单元套件把续删登记重定向到测试专用 RunOnce 子键，不写真实自启动项；
+ * 分阶段驱动（CX_PURGE_TEST_STAGE=shutdown/resume，由 scripts/vm/run-shutdown-destruct.ps1
+ * 写入）刻意不重定向：CI 虚拟机要验证的就是真实 HKCU RunOnce 的登记与撤销链路。
+ * 分阶段驱动的用法见 windows/native-source/README.md 的「自毁兜底」一节。 */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "purge.h"
 
 #define P_TEST_SUBKEY L"Software\\cxplus-native-purge-tests"
+/* 真实登记位置：与 purge.c 的默认 run key 一致，分阶段驱动不得改写。 */
+#define P_RUN_ONCE_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+#define P_PURGE_VALUE_PREFIX L"cxplus-purge-"
+#define P_TEST_STAGE_ENV L"CX_PURGE_TEST_STAGE"
+#define P_TEST_TARGET_ENV L"CX_PURGE_TEST_TARGET"
 
 static DWORD failures;
 static DWORD shutdownHits;
@@ -96,7 +104,130 @@ static BOOL ascii_only(const WCHAR *text) {
     return TRUE;
 }
 
+static BOOL starts_with(const WCHAR *text, const WCHAR *prefix) {
+    DWORD i = 0;
+    if (!text || !prefix) return FALSE;
+    while (prefix[i]) { if (text[i] != prefix[i]) return FALSE; ++i; }
+    return TRUE;
+}
+
+/* 环境变量读取：缓冲一律走 HeapAlloc（无 CRT 构建没有栈探针，大缓冲不能上栈）。 */
+static WCHAR *env_value(const WCHAR *name) {
+    DWORD cap = 512;
+    for (;;) {
+        WCHAR *buffer = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)cap * sizeof(WCHAR));
+        DWORD got;
+        if (!buffer) return NULL;
+        SetLastError(0);
+        got = GetEnvironmentVariableW(name, buffer, cap);
+        if (got > 0 && got < cap) return buffer;
+        HeapFree(GetProcessHeap(), 0, buffer);
+        if (got == 0) return NULL;         /* 未定义或空值：都当作没传 */
+        if (got > 64u * 1024u) return NULL; /* 异常长度，拒绝 */
+        cap = got + 1;
+    }
+}
+
+/* 列出真实 RunOnce 里的 cxplus-purge-* 残留并返回条数：resume 阶段的断言依据。 */
+static int report_prefix_values(const WCHAR *subKey, const WCHAR *prefix) {
+    HKEY key = NULL;
+    int count = 0, index = 0;
+    DWORD cap = 2048;
+    WCHAR *name;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, subKey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return 0;
+    /* RunOnce 里可能有别人写的长值：名字缓冲走堆，不用固定小数组。 */
+    name = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)cap * sizeof(WCHAR));
+    if (!name) { RegCloseKey(key); return 0; }
+    for (;;) {
+        DWORD size = cap;
+        DWORD status = RegEnumValueW(key, (DWORD)index, name, &size, NULL, NULL, NULL, NULL);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        ++index;
+        if (status == ERROR_MORE_DATA) continue;
+        if (status != ERROR_SUCCESS) break;
+        if (!starts_with(name, prefix)) continue;
+        ++count;
+        wide_output(L"  residual: ");
+        wide_output(name);
+        output("\n");
+    }
+    HeapFree(GetProcessHeap(), 0, name);
+    RegCloseKey(key);
+    return count;
+}
+
 static void count_shutdown(void) { ++shutdownHits; }
+
+/* ---------- 分阶段驱动（scripts/vm/run-shutdown-destruct.ps1） ----------
+ * shutdown：建目标文件 -> 登记真实 HKCU RunOnce 续删项 -> 扣留不删，等真关机。
+ * resume：  重启后断言目标已删、真实 RunOnce 登记已自行撤销。
+ * 这两个阶段刻意不做 run key 重定向：CI 虚拟机验证的就是生产登记链路。 */
+
+static int stage_shutdown(const WCHAR *target) {
+    CX_PURGE *purge;
+    WCHAR error[256];
+    int code;
+
+    failures = 0;
+    if (!target || !target[0]) {
+        output("FAIL - CX_PURGE_TEST_TARGET is required for the shutdown stage\n");
+        return 1;
+    }
+    purge = (CX_PURGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CX_PURGE));
+    if (!purge) { output("FAIL - purge state allocation failed\n"); return 1; }
+
+    /* root 留空：只处理显式登记的待删文件，绝不删任何目录。 */
+    check(cx_purge_init(purge, L"", NULL), "purge state initialises for the staged run");
+    if (!file_exists(target)) check(write_file(target, "shutdown-destruct-target"), "the pending target is created");
+    check(file_exists(target), "the pending target exists before registration");
+    check(cx_purge_add(purge, target, FALSE), "the pending target is queued");
+
+    error[0] = 0;
+    check(cx_purge_journal(purge, error, 256), "the boot-resume journal is registered");
+    if (error[0]) { wide_output(L"  journal error: "); wide_output(error); output("\n"); }
+    check(lstrcmpiW(cx_purge_run_key(purge), P_RUN_ONCE_KEY) == 0,
+        "the staged run registers the real HKCU RunOnce key (no test redirection)");
+    check(value_exists(cx_purge_run_key(purge), cx_purge_value_name(purge)),
+        "the run-once value points at the resume script");
+
+    wide_output(L"registered=");
+    wide_output(cx_purge_value_name(purge));
+    output("\n");
+    wide_output(L"runKey=");
+    wide_output(cx_purge_run_key(purge));
+    output("\n");
+    wide_output(L"journal=");
+    wide_output(cx_purge_script_path(purge));
+    output("\n");
+    wide_output(L"target=");
+    wide_output(target);
+    output("\n");
+    output("stage=shutdown\n");
+
+    /* 扣留：这里不调用 cx_purge_run / cx_purge_settle，登记与删除必须分开验证。 */
+    code = failures ? 1 : 0;
+    cx_purge_close(purge);
+    HeapFree(GetProcessHeap(), 0, purge);
+    output(code ? "NATIVE PURGE STAGE FAIL\n" : "NATIVE PURGE STAGE PASS\n");
+    return code;
+}
+
+static int stage_resume(const WCHAR *target) {
+    int residual;
+
+    failures = 0;
+    if (!target || !target[0]) {
+        output("FAIL - CX_PURGE_TEST_TARGET is required for the resume stage\n");
+        return 1;
+    }
+    check(!file_exists(target), "the pending target was deleted across the reboot");
+    residual = report_prefix_values(P_RUN_ONCE_KEY, P_PURGE_VALUE_PREFIX);
+    check(residual == 0, "the run-once entry was removed once the traces were gone");
+    output("stage=resume\n");
+    output(failures ? "NATIVE PURGE STAGE FAIL\n" : "NATIVE PURGE STAGE PASS\n");
+    return failures ? 1 : 0;
+}
 
 static void test_init_and_script_text(CX_PURGE *purge, const WCHAR *root) {
     /* 无 CRT 构建关闭了栈探针（/Gs9999999）：大缓冲必须静态或堆分配。 */
@@ -271,6 +402,32 @@ void __stdcall PurgeTestMain(void) {
     WCHAR temp[CX_PURGE_PATH_CAP], root[CX_PURGE_PATH_CAP], path[CX_PURGE_PATH_CAP];
     CX_PURGE *purge;
     DWORD length;
+    WCHAR *stage;
+    WCHAR *target;
+    int staged;
+
+    /* 分阶段驱动优先：由 scripts/vm/run-shutdown-destruct.ps1 写环境变量调用。
+       这两条路径不重定向 run key，也不跑单元套件。 */
+    stage = env_value(P_TEST_STAGE_ENV);
+    target = env_value(P_TEST_TARGET_ENV);
+    staged = 1;
+    if (stage && lstrcmpiW(stage, L"shutdown") == 0) {
+        staged = stage_shutdown(target);
+    } else if (stage && lstrcmpiW(stage, L"resume") == 0) {
+        staged = stage_resume(target);
+    } else {
+        if (stage && stage[0]) {
+            wide_output(L"FAIL - unknown CX_PURGE_TEST_STAGE: ");
+            wide_output(stage);
+            output("\n");
+            staged = 1;
+        } else {
+            staged = -1;
+        }
+    }
+    if (stage) HeapFree(GetProcessHeap(), 0, stage);
+    if (target) HeapFree(GetProcessHeap(), 0, target);
+    if (staged >= 0) ExitProcess((UINT)staged);
 
     clear_test_key();
     length = GetTempPathW(CX_PURGE_PATH_CAP - 32, temp);

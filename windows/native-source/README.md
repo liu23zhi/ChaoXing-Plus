@@ -50,7 +50,7 @@ npm run build:windows -- --release
 npm run build:native
 ```
 
-[build-windows.ps1](build-windows.ps1) 只负责编译。`BuildConsole` 默认 `true`，生成内嵌资源 GUI `release/single-file/chaoxing_plus.exe`，以及 `release/multi-file/` 下的外置资源 GUI `chaoxing_plus.exe`、Console helper `chaoxing_plus.com` 和普通临时释放包 `package-to-single/chaoxing_plus.exe`；`-BuildConsole:$false` 仅生成单文件 GUI。`-BuildTests` 同时生成 C 测试，`bin/` 保留宿主与调试/测试 EXE，多文件编译输入位于 `bin/multi-file/`。共享 [app-icon.ico](../share-file/assets/app-icon.ico) 仍内嵌到各程序。单文件以 RCDATA 保存四项页面资源和 winmm 代理；多文件不含这些 RCDATA，只按 EXE 目录加载 `assets/windows-bootstrap.js`、`assets/chaoxing-plus.windows.js`、`assets/trampoline.js`、`assets/vendor/sweetalert2.min.css` 与根目录 `winmm-proxy.dll`，首次校验/加载后缓存到内存，缺失或为空明确失败，不回退工作目录、源码或其他构建目录。
+[build-windows.ps1](build-windows.ps1) 只负责编译。`BuildConsole` 默认 `true`，生成内嵌资源 GUI `release/single-file/chaoxing_plus.exe`，以及 `release/multi-file/` 下的外置资源 GUI `chaoxing_plus.exe`、Console helper `chaoxing_plus.com` 和普通临时释放包 `package-to-single/chaoxing_plus.exe`；`-BuildConsole:$false` 仅生成单文件 GUI。`-BuildTests` 同时生成 C 测试（等价于 `-Target tests`，VM 工作流使用后者），`bin/` 保留宿主与调试/测试 EXE，多文件编译输入位于 `bin/multi-file/`。共享 [app-icon.ico](../share-file/assets/app-icon.ico) 仍内嵌到各程序。单文件以 RCDATA 保存四项页面资源和 winmm 代理；多文件不含这些 RCDATA，只按 EXE 目录加载 `assets/windows-bootstrap.js`、`assets/chaoxing-plus.windows.js`、`assets/trampoline.js`、`assets/vendor/sweetalert2.min.css` 与根目录 `winmm-proxy.dll`，首次校验/加载后缓存到内存，缺失或为空明确失败，不回退工作目录、源码或其他构建目录。
 
 显式 `.exe` 在 PowerShell 中不保证等待；多文件命令行可使用扩展省略的 `chaoxing_plus`（默认 `.com`）或显式 `.com`，helper 等待 GUI 并传回退出码。以下 `Start-Process -Wait` 命令等待单文件 GUI 并检查真实退出码；直接宿主的版本和自检不会扫描客户端、申请 UAC、启动考试客户端、连接 CDP 或写入宿主数据。普通临时释放包则每次写入自建临时目录，等待 GUI 后只清理该目录，不删除发布原件，不能称为零落盘入口。
 
@@ -77,5 +77,15 @@ if ($check.ExitCode -ne 0) { throw "Self-check failed: $($check.ExitCode)" }
 这些启动器会进入实际运行；只读检查使用上面的版本与自检命令。源码启动器定位仓库根的构建产物；新的原生多文件包仅发布普通和调试两个入口，`single-file/` 直接运行 GUI EXE。多文件仍明确拒绝 `--stage-boot` 暂存启动与发布目录清除；自毁与启动清理现已在多文件生效，但只清理运行痕迹（不删除 `chaoxing_plus.exe`、`assets/*`、`winmm-proxy.dll` 等发布原件，也不改名自身）。Node 兼容包的历史原生启动器与 `start-windows-node*.cmd` 保持原样，仍使用历史包根布局。
 
 自毁兜底由 [purge.c](purge.c) 提供，单文件与多文件共用：关机/注销（含强制结束会话）在隐藏顶层窗口的 `WM_QUERYENDSESSION`/`WM_ENDSESSION` 里同步收尾；删除前先把清单写进 `%TEMP%` 的续删脚本并登记 `HKCU` RunOnce，删净后自行撤销；同时尽力登记 `MOVEFILE_DELAY_UNTIL_REBOOT`（需要管理员权限）以覆盖断电与强制结束进程。单文件可删除整棵程序树并改名自身；多文件通过 `cx_purge_set_traces_only()` 只登记本轮宿主产物与 `<data-dir>\chaoxing` 下登记的宿主数据，`cx_purge_add_root()` 在该模式下拒绝排队根目录。回归为 `scripts/windows-native-purge.test.mjs`（含 `purge-tests.exe` 与真实 PowerShell 续删执行）与 `scripts/windows-native-multi-restrictions.test.mjs`（含多文件真实自毁运行后发布原件逐字节不变）。
+
+`purge-tests.exe` 有两套入口。直接运行为单元套件，续删登记重定向到 `HKCU\Software\cxplus-native-purge-tests`，不写真实自启动项。设置环境变量后进入分阶段驱动，供 [scripts/vm/run-shutdown-destruct.ps1](../../scripts/vm/run-shutdown-destruct.ps1) 在一次性虚拟机里验证生产登记链路（**刻意不重定向**，会真的写 `HKCU` RunOnce）：
+
+```powershell
+$env:CX_PURGE_TEST_TARGET = '<待删文件绝对路径>'
+$env:CX_PURGE_TEST_STAGE  = 'shutdown'   # 建目标 + 登记真实 RunOnce + 扣留，不删除
+$env:CX_PURGE_TEST_STAGE  = 'resume'     # 断言目标已删、RunOnce 登记已撤销
+```
+
+`purge-tests.exe` 与宿主同源编译为 GUI 子系统，PowerShell 里必须用 `Start-Process -Wait -PassThru` 取退出码，`& $exe` 不会等待也拿不到 `$LASTEXITCODE`。`-NoShutdown` 自检仍会留下真实登记，跑完须按报告里的登记名清理。
 
 原生默认运行数据位于进程工作目录下 `.data/`，与 Node 的 `windows/data/` 不同。共享模板和本机 `windows/local-features.json` 保持原位；插件共用源码、插件 `dist/` 与 Windows 构建输出目录也不随文档整理迁移。

@@ -1,12 +1,19 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
+    # Build target selector used by the VM workflow: 'tests' builds the native
+    # hosts plus every compiled test EXE, 'host' skips the test EXEs.
+    [ValidateSet('host', 'tests')]
+    [string]$Target = 'host',
     [switch]$SkipAssetCopy,
     [switch]$BuildTests,
     [switch]$SkipProxy,
     [switch]$BuildConsole = $true
 )
 $ErrorActionPreference = 'Stop'
+# -Target tests is the documented entry point for the CI test binaries;
+# it is an alias for the older -BuildTests switch, which stays supported.
+if ($Target -eq 'tests') { $BuildTests = $true }
 $scriptRoot = $PSScriptRoot
 # The compile script and native sources share the same directory.
 $sourceRoot = $scriptRoot

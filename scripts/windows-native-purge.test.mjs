@@ -117,6 +117,30 @@ test('原生自毁兜底暴露关机关联、开机续删与强制关机契约',
   const script = await readFile(buildScript, 'utf8');
   assert.match(script, /'purge'/u);
   assert.match(script, /'purge-tests'/u);
+  // VM 工作流用 -Target tests 调用构建；缺少该开关时整个自毁验证在 CI 里第一步就失败。
+  assert.match(script, /\[ValidateSet\('host', 'tests'\)\]/u);
+  assert.match(script, /\$Target -eq 'tests'/u);
+
+  // 分阶段驱动必须真的读环境变量，否则 run-shutdown-destruct.ps1 的登记与断言无从生效。
+  const purgeTestsSource = await readFile(path.join(sourceRoot, 'tests', 'purge-tests.c'), 'utf8');
+  assert.match(purgeTestsSource, /GetEnvironmentVariableW/u, 'purge-tests 必须读取 CX_PURGE_TEST_* 环境变量');
+  assert.match(purgeTestsSource, /CX_PURGE_TEST_TARGET/u);
+  assert.match(purgeTestsSource, /CX_PURGE_TEST_STAGE/u);
+  // 分阶段驱动不得把登记重定向到测试子键：VM 验证的是真实 RunOnce 链路。
+  assert.match(purgeTestsSource, /Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\RunOnce/u);
+  assert.match(purgeTestsSource, /P_RUN_ONCE_KEY/u);
+
+  const vmScript = await readFile(path.join(root, 'scripts', 'vm', 'run-shutdown-destruct.ps1'), 'utf8');
+  assert.match(vmScript, /CX_PURGE_TEST_STAGE\s*=\s*'shutdown'/u);
+  assert.match(vmScript, /CX_PURGE_TEST_TARGET\s*=\s*\$target/u);
+  assert.match(vmScript, /Start-Process[^\n]*-Wait[^\n]*-PassThru/u, 'GUI 子系统测试产物必须显式等待');
+  assert.doesNotMatch(vmScript, /Get-PurgeRunOnceValues -join/u, '数组插值必须包成子表达式');
+  // 本地没有 RUNNER_TEMP：直接 Join-Path 会抛参数绑定错误，必须回退到 %TEMP%。
+  assert.match(vmScript, /IsNullOrWhiteSpace\(\$env:RUNNER_TEMP\)/u);
+
+  const cleanScript = await readFile(path.join(root, 'scripts', 'vm', 'assert-clean.ps1'), 'utf8');
+  assert.match(cleanScript, /IsNullOrWhiteSpace\(\$env:RUNNER_TEMP\)/u);
+  assert.doesNotMatch(cleanScript, /Join-Path \$env:RUNNER_TEMP/u);
 });
 
 test('原生续删单元测试通过（未构建时跳过）', { skip: process.platform !== 'win32' }, (t) => {

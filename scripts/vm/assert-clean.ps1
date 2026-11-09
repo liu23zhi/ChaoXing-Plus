@@ -23,6 +23,9 @@ $ErrorActionPreference = 'Stop'
 $runOnceKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 $valuePrefix = 'cxplus-purge-'
 $tempPrefix = 'cx-purge-'
+# GitHub runner 提供 RUNNER_TEMP；本地自检时它不存在，回退到 %TEMP%，
+# 否则 Join-Path 收到空值会直接抛参数绑定错误。
+$tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }
 
 function Get-PurgeRunOnceValues {
     if (-not (Test-Path -LiteralPath $runOnceKey)) { return @() }
@@ -54,7 +57,7 @@ Write-Output "临时目录残留: $($tempDirs.Count)"
 $tempDirs | ForEach-Object { Write-Output "  $_" }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$report = Join-Path $env:RUNNER_TEMP "cx-vm-assert-$Stage-$stamp.txt"
+$report = Join-Path $tempRoot "cx-vm-assert-$Stage-$stamp.txt"
 @(
     "stage=$Stage"
     "runOnceCount=$($runOnce.Count)"
