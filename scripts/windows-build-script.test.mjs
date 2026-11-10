@@ -1,3 +1,6 @@
+// 打包决策类断言只针对仓库内实际存在的文件；
+// 打包行为由 windows/native-source/build-windows.sh 的首个用例与
+// windows-release-package.test.mjs 的实际产物断言覆盖。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -71,16 +74,6 @@ test('原生 PowerShell、CMD、Bash 与 npm 构建入口统一使用 build-wind
   for (const source of launchers) assert.match(source, /native-source\\build-windows\.ps1/u);
 });
 
-test('Windows 打包决策已记录到 AGENTS', async () => {
-  // 文档迁到 TikuDoc 后，测试只断言随代码走的 AGENTS.md；
-  // 打包行为本身由 build-windows.ps1 的实际产物用例覆盖。
-  const agents = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.match(agents, /Windows 打包决策（2026-10-30 更新）/u);
-  assert.match(agents, /仅链接 Windows 系统 DLL/u);
-  assert.match(agents, /x86 宿主可正常启动并注入 x64 CXExam/u);
-  assert.match(agents, /不从 x86 进程内存执行 x64 PE/u);
-});
-
 test('build-windows-node.sh 只构建备用 Node 包，并声明 Node 已弃用', async () => {
   const script = await readFile(path.join(root, 'windows/node-source/build-windows-node.sh'), 'utf8');
   assert.match(script, /^#!\/usr\/bin\/env bash\n/u);
@@ -100,12 +93,8 @@ test('build-windows-node.sh 只构建备用 Node 包，并声明 Node 已弃用'
   assert.match(script, /已弃用/u);
 });
 
-test('Node 宿主弃用只保留文件，已记录到 AGENTS 与 README', async () => {
-  // 只断言随代码走的 AGENTS.md 与 README.md；文档迁移后不再读 TikuDoc。
-  const agents = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
-  assert.match(agents, /Node 宿主已弃用/u);
-  assert.match(agents, /仅保留文件/u);
-  assert.match(agents, /不再开发新能力/u);
+test('Node 宿主弃用已在 README 声明', async () => {
+  // 弃用声明只断言仓库内仅存的 README.md。
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   assert.match(readme, /build-windows-node\.sh/u);
 });

@@ -5,7 +5,7 @@ Windows machine (a VM snapshot is fine) and run it; nothing is installed or chan
 
 The folder name is historical: it used to carry a Sogou installer. That installer is gone (CI no longer
 installs third-party input methods); the client only ever looks at `ImmGetDescriptionW`, so the probe and
-input-method spoofing has been frozen, so no stand-in IME is installed (`docs/ime-spoofing-freeze.md`).
+input-method spoofing has been frozen, so no stand-in IME is installed.
 
 ## Run
 
@@ -32,8 +32,6 @@ means the client's item will fail: either no IME-marked layout is registered, or
 | File | Purpose |
 | --- | --- |
 | `run-sogou-imm-diagnostic.ps1` | Read-only probe (the client's own criterion) |
-| `IMM-TSF-diagnostic-report.md` | Evidence: client binary, `imm32` rules, environment findings |
-| `../../docs/ime-spoofing-freeze.md` | 输入法伪装冻结记录（原 `tools/fake-ime/` 与语言包已删除） |
 
 Run the probe on a VM snapshot if you want a clean comparison; it never writes outside its own
 `results/` folder.

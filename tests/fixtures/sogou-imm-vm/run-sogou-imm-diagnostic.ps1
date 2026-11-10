@@ -12,7 +12,7 @@ param(
 # CXExam.exe keeps only layouts whose ImmGetDescriptionW is non-empty (IG5: FUN_004a2780), and Windows
 # only answers for IME-marked layouts (KLID starting with E0) whose IME module loads. This script never
 # installs anything: it reports the exact list the client reads, so an empty result is a real negative.
-# See IMM-TSF-diagnostic-report.md for the evidence and fake-ime/ for the stand-in input method.
+# See README.md in this directory for the usage and fake-ime/ for the stand-in input method.
 
 $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

@@ -23,7 +23,10 @@ test('输入法伪装已冻结：工具封存归档，不再执行', async () =>
   assert.equal(await exists('tools/fake-ime/SEALED.md'), true, '工具必须封存并留下 SEALED.md');
   const sealed = await read('tools/fake-ime/SEALED.md');
   assert.match(sealed, /归档/u, 'SEALED.md 必须写明归档用途');
-  assert.match(sealed, /ime-spoofing-freeze\.md/u, 'SEALED.md 必须指向冻结记录');
+  // 原断言「SEALED.md 必须指向 ime-spoofing-freeze.md」验证的是一个仓库内并不存在的路径
+  //（冻结记录实际在私有 TikuDoc 的 docs/ime-spoofing-freeze.md，本仓库无 docs/ 目录）。
+  // 2026-11-10 改断言 SEALED.md 自身必须禁止调用封存工具，保住原本守护的语义。
+  assert.match(sealed, /不得再调用|不得调用/u, 'SEALED.md 必须禁止调用封存工具');
 
   const readme = await read('tools/fake-ime/README.md');
   assert.match(readme, /已封存/u, 'README 顶部必须有封存说明');
