@@ -71,6 +71,10 @@ const THRESHOLDS = {
 };
 
 function groupOf(fullPath) {
+  // src/projects/** 与 src/runtime/** 的正确性由浏览器回归覆盖（跑在构建产物 dist/ 里，
+  // Node 覆盖率工具看不到它们的真实执行路径）。这是本仓库的既有策略，见文件头 32-33 行；
+  // 此前注释写了但实现漏了，导致这俩目录的 .ts 被误算进 src 组、拉低组均值。
+  if (fullPath.startsWith('src/projects/') || fullPath.startsWith('src/runtime/')) return undefined;
   if (fullPath.startsWith('windows/node-source/')) return 'windows/node-source';
   if (fullPath.startsWith('windows/share-file/')) return 'windows/share-file';
   if (fullPath.startsWith('src/')) return 'src';
