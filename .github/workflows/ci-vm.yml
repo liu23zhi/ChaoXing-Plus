@@ -119,19 +119,22 @@ jobs:
             echo "今天(UTC)=$today_utc → 调用方 force=true，运行"
             exit 0
           fi
-
-          # CI 调用 → 查今天是否已有有效记录（排除 cancelled / skipped / queued）
-          count=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci-vm.yml/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=100" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled" and .conclusion != "skipped" and .status != "queued")] | length')
-          echo "今天(UTC)=$today_utc，已有 $count 条有效验证记录"
-          if [ "$count" -gt 0 ]; then
-            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)已有 $count 条验证记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
-          else
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)还没有验证记录，执行" >> "$GITHUB_OUTPUT"
-          fi
+          # ⚠️ workflow_call 的调用**不会**在 ci-vm.yml 自己的 runs 列表里产生记录，
+          # 所以不能查本 workflow 的 runs（那样永远返回 0，判重恒失效）。
+          # 正确做法：查调用方 ci.yml 今天的 runs，逐个看里面有没有成功的 KVM 巡检 job。
+          count=0
+          run_ids=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=30" \
+            --jq '.workflow_runs[].id' 2>/dev/null || true)
+          for rid in $run_ids; do
+            # 只看已完成的 run（in_progress 的还没产出结果，不能算「已跑过」）
+            rstatus=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}" --jq '.status' 2>/dev/null || echo unknown)
+            [ "$rstatus" = "completed" ] || continue
+            hit=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name | test("KVM 能力巡检")) | select(.conclusion == "success")] | length' 2>/dev/null || echo 0)
+            count=$((count + hit))
+          done
+          echo "今天(UTC)=$today_utc，调用方 ci.yml 中已成功的 KVM 巡检 job 数 = $count"
 
       - name: 跳过说明
         if: steps.gate.outputs.SKIP == 'yes'
