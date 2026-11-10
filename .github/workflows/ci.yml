@@ -679,11 +679,13 @@ jobs:
             exit 0
           fi
 
-          # 调用方显式要求强制 → 运行
+          # 手动触发时显式勾选 force → 运行（合并进 ci.yml 后已无 workflow_call 调用方，
+          # 此分支只服务 workflow_dispatch 的 force 输入；push/PR 下 github.event.inputs.force
+          # 为空字符串，走 ${FORCE:-false} 兜底为 false，不会误入。）
           if [ "${FORCE:-false}" = "true" ]; then
             echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=调用方要求强制执行" >> "$GITHUB_OUTPUT"
-            echo "今天(UTC)=$today_utc → 调用方 force=true，运行"
+            echo "REASON=手动触发时勾选了 force" >> "$GITHUB_OUTPUT"
+            echo "今天(UTC)=$today_utc → force=true，运行"
             exit 0
           fi
           # 2026-11-10：ci-vm.yml 已并入本文件，原「workflow_call 的调用不在 callee
@@ -721,9 +723,9 @@ jobs:
         if: steps.gate.outputs.SKIP == 'yes'
         run: |
           set -eu
-          echo "::notice title=虚拟机环境验证已跳过::${{ steps.gate.outputs.REASON }}"
+          echo "::notice title=KVM 能力巡检已跳过::${{ steps.gate.outputs.REASON }}"
           {
-            echo '## 虚拟机环境验证（已跳过）'
+            echo '## KVM 能力巡检（已跳过）'
             echo ''
             echo "- 原因：${{ steps.gate.outputs.REASON }}"
             echo ''
@@ -743,7 +745,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   kvm-probe:
-    name: KVM 能力巡检（托管 runner，只读）
+    name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
     needs: gate
     if: needs.gate.outputs.skip != 'yes'
     runs-on: ubuntu-24.04
@@ -851,6 +853,12 @@ jobs:
       vars.CX_VM_ENABLED == 'true' &&
       (github.event_name != 'pull_request' || github.event.inputs.include_vm_destruct != 'false')
     runs-on: [self-hosted, windows, cx-vm]
+    # ⚠️ 独立 concurrency + 不取消：本作业会真关机。若被新 push 中途取消，
+    # -Stage shutdown 已登记的 RunOnce 永不执行 -Stage resume，
+    # 虚拟机将停在「已登记、未续删」状态。宁可排队也不能取消。
+    concurrency:
+      group: cx-vm-destruct-${{ github.ref }}
+      cancel-in-progress: false
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -984,6 +992,11 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
+    # 同上：两阶段必须跑完（shutdown 登记 → resume 重放断言）。
+    # 被取消会留下「登记了但没验证续删」的半成品，判据失真。
+    concurrency:
+      group: cx-wiring-probe-${{ github.ref }}
+      cancel-in-progress: false
     timeout-minutes: 40
     # 刻意不设 CXPLUS_NO_LOG_FILE：它只被 windows/node-source/main.mjs 读取，
     # 本作业既不跑 Node 宿主也不跑原生宿主（只跑 purge-tests.exe + PowerShell），
@@ -1083,7 +1096,7 @@ jobs:
             "- 运行后 RunOnce 残留：$(if ($leftover.Count -eq 0) { '无' } else { $leftover -join ', ' })"
             "- 运行后临时目录残留：$(if ($tempDirs.Count -eq 0) { '无' } else { $tempDirs -join ', ' })"
             ''
-            '> 覆盖范围见 `ci-vm.yml` 中 `wiring-probe` 的注释：验证「RunOnce 命令串可执行且执行后删净并自撤销」，'
+            '> 覆盖范围见本文件 `wiring-probe` 的注释：验证「RunOnce 命令串可执行且执行后删净并自撤销」，'
             '> **不覆盖**真实重启语义（`WM_QUERYENDSESSION` 时序、`MOVEFILE_DELAY_UNTIL_REBOOT` 重启后消失）。'
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
@@ -1103,7 +1116,10 @@ jobs:
   qemu-shutdown-destruct:
     name: 关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）
     runs-on: ubuntu-24.04
-    # 只在手动触发时出现：CI 调用不拉这条（45 分钟且要求客机镜像可用）。
+    # 独立 concurrency：45 分钟的客机两阶段不该被新 push 打断。
+    concurrency:
+      group: cx-qemu-destruct-${{ github.ref }}
+      cancel-in-progress: false
     needs: gate
     # 只在 push 到 main 与手动触发时出现：45 分钟且要求客机镜像可用。
     # PR 不跑（成本太高）；镜像未配置时作业内部会 skip 而不是 fail。
@@ -1531,7 +1547,7 @@ jobs:
           $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" || REPLAY_RC=$?
           echo "REPLAY_EXIT_CODE=$REPLAY_RC"
 
-          # 收尾自毁断言：与 ci-vm.yml 的 teardown 同口径 —— 只读检查，不替自毁擦屁股；
+          # 收尾自毁断言：与 vm-shutdown-destruct 的 teardown 同口径 —— 只读检查，不替自毁擦屁股；
           # 而且**必须真的判红**（这里不能 `|| true`，否则「自毁没清干净」会被静默吞掉，
           # 那正是这条作业存在的意义）。
           CLEAN_RC=0
@@ -1740,9 +1756,9 @@ jobs:
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
             if [[ "$KVM_PROBE_SKIPPED" == "yes" ]]; then
-              printf '| 虚拟机环境验证 | 跳过（%s） |\n' "$KVM_PROBE_REASON"
+              printf '| KVM 能力巡检（只读，非关机自毁） | 跳过（%s） |\n' "$KVM_PROBE_REASON"
             else
-              printf '| 虚拟机环境验证 | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
+              printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             fi
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
             printf '| 关机自毁（self-hosted cx-vm） | %s |\n' "$(result_label "$VM_DESTRUCT_RESULT")"
