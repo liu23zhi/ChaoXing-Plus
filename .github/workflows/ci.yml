@@ -693,8 +693,15 @@ jobs:
           # 今天的 runs。同时必须排除当前这次 run 自己（$GITHUB_RUN_ID）：
           # 否则将来若放宽「只看 completed」的条件，正在跑的自己会被数成「已跑过」。
           count=0
-          workflow_file="${GITHUB_WORKFLOW_REF##*/}"
-          workflow_file="${workflow_file%%@*}"
+          # ⚠️ 顺序不能反：GITHUB_WORKFLOW_REF 形如
+          #   .github/workflows/ci.yml@refs/heads/main
+          #   .github/workflows/ci.yml@refs/pull/42/merge
+          # 必须先去掉 @<ref> 再取 basename。反过来做会得到 main / merge / foo，
+          # gh api 拿它查 /workflows/main/runs 会 404，被 `|| true` 吞掉 → count 恒 0，
+          # 判重静默失效（kvm-probe 每天都跑，等于没有日判重）。
+          #   先 %% @* 后 ##*/：三种 ref 都得 ci.yml
+          workflow_file="${GITHUB_WORKFLOW_REF%%@*}"
+          workflow_file="${workflow_file##*/}"
           run_ids=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=30" \
             --jq '.workflow_runs[].id' 2>/dev/null || true)

@@ -460,11 +460,25 @@ test('gate 用 GITHUB_RUN_ID 排除当前 run 自己', async () => {
     'gate 必须逐条跳过当前 run：否则正在跑的自己会被数成「今天已跑过」',
   );
   // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  assert.match(
+  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
+  //
+  // ⚠️ 推导顺序不能反（2026-11-10 独立终验抓到）：GITHUB_WORKFLOW_REF 形如
+  //   .github/workflows/ci.yml@refs/heads/main
+  // 必须先 %% @* 再去 basename，顺序颠倒会得到 main / merge / foo，
+  // gh api 查 /workflows/main/runs 404 → 被 || true 吞 → count 恒 0 → 判重静默失效。
+  const wfSection = section;
+  const stripAt = wfSection.indexOf('${GITHUB_WORKFLOW_REF%%@*}');
+  const stripSlash = wfSection.indexOf('${workflow_file##*/}');
+  assert.notEqual(stripAt, -1,
+    'gate 必须先用 %% @* 去掉 @<ref> 再取 basename：顺序反了会得到 main/merge/foo，判重恒失效');
+  assert.notEqual(stripSlash, -1,
+    'gate 必须第二步用 ##*/ 取 basename');
+  assert.ok(stripAt < stripSlash,
+    '推导顺序必须先是 %% @* 再是 ##*/，实际相反 —— 这会让 gh api 404、判重恒不生效');
+  assert.doesNotMatch(
     section,
-    /workflow_file="\$\{GITHUB_WORKFLOW_REF##\*\/\}"/u,
-    'gate 必须从 GITHUB_WORKFLOW_REF 推导本 workflow 文件名',
-  );
+    /GITHUB_WORKFLOW_REF##\*\/\}/u,
+    '不得再出现「先 ##*/ 后 %%@*」的错误顺序');
   assert.doesNotMatch(
     section,
     /actions\/workflows\/ci-vm\.yml/u,
