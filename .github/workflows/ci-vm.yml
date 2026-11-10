@@ -135,6 +135,13 @@ jobs:
             count=$((count + hit))
           done
           echo "今天(UTC)=$today_utc，调用方 ci.yml 中已成功的 KVM 巡检 job 数 = $count"
+          if [ "$count" -gt 0 ]; then
+            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)已有 $count 条成功的 KVM 巡检记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
+          else
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)还没有成功的巡检记录，执行" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 跳过说明
         if: steps.gate.outputs.SKIP == 'yes'
