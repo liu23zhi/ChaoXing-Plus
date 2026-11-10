@@ -15,7 +15,8 @@ Stage resume：验证开机续删与强制关机保障
 两个阶段都由 purge-tests.exe 的分阶段驱动执行（环境变量
 CX_PURGE_TEST_STAGE / CX_PURGE_TEST_TARGET），脚本负责过程断言与证据落盘。
 
-注意：本脚本只由 ci-vm.yml 在一次性虚拟机上调用。不要在开发机上跑 shutdown。
+注意：本脚本只由 .github/workflows/ci.yml 在一次性虚拟机上调用
+（2026-11-10：原 ci-vm.yml 已整体并入 ci.yml）。不要在开发机上跑 shutdown。
 -NoShutdown 只做「登记 + 断言」，仍会真的写 HKCU RunOnce，跑完请按报告里的
 登记名清理（shutdown 阶段失败时登记不会被撤销）。
 #>
@@ -204,7 +205,7 @@ switch ($Stage) {
         # 目标路径必须与 shutdown 阶段一致，缺了它 C 侧会拒绝执行。
         if (-not (Test-Path -LiteralPath $purgeExe)) {
             # -BuildTests 与 -Target tests 等价（后者在 build-windows.ps1 里只是把开关置真）；
-            # 这里统一用 -BuildTests，与 ci-vm.yml 的实际调用保持一致。
+            # 这里统一用 -BuildTests，与 ci.yml 里自毁作业的实际调用保持一致。
             throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -BuildTests）"
         }
         $target = Join-Path $workRoot 'shutdown-target.txt'

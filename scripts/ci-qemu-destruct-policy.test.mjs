@@ -6,6 +6,16 @@ import path from 'node:path';
 
 const root = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 
+// ============================================================================
+// 2026-11-10：QEMU 自毁作业所在的 ci-vm.yml 已**整体并入 ci.yml**
+// （用户要求「把 ci-vm.yml 合并到 ci.yml，完整 ci 添加上完整的关机自毁测试」），
+// ci-vm.yml 已从仓库删除。因此断言对象统一改为 .github/workflows/ci.yml，
+// 并按作业段（qemuJobSection）切出来断言 —— 合并后一个文件里 15 个 job，
+// 整文件断言会把别的 job 的行为误算成本作业的。
+// ============================================================================
+
+const WORKFLOW = '.github/workflows/ci.yml';
+
 async function read(relative) {
   return readFile(path.join(root, relative), 'utf8');
 }
@@ -31,65 +41,71 @@ function withoutPsComments(text) {
     .join('\n');
 }
 
-// 这一组断言锁的是「托管 Ubuntu + QEMU + KVM 的自毁验证作业」的形态约束：
-//   · 它是每周巡检 + 手动触发，永不当门禁 —— 单次成本上限 45 分钟，进 PR 就是灾难；
-//   · KVM 拿不到要 skip 而不是 fail —— 那是 runner 能力问题，不是仓库代码问题；
-//   · 不许下载 Windows ISO —— 体积（5.6 GiB 级）、许可与冷启动时间都不合适；
-//   · 两阶段语义必须与 ci-vm.yml 一致，且不得引用不存在的 -ReplayRunOnce。
-//
-// 已知：本作业自 2026-11-10 落地以来**尚未在真实 Actions 上运行过**（本地没有
-// QEMU / KVM / 客机镜像）。策略测试只能证明「文件形态正确」，不能证明「作业能跑通」。
-// 第一次真跑之后请把 run id 补在这段注释里，并把实测结论同步到
-// probe-kvm-daily.yml 的基线说明。
-
-
-// 2026-11-10：QEMU 自毁作业已**并入 ci-vm.yml**（用户要求合并成单一虚拟机验证入口）。
-// 因此本文件的断言对象从「独立文件」改为「ci-vm.yml 里的 qemu-shutdown-destruct 段」，
-// 语义不变：仍然锁定该作业的形态约束，只是不再假设它独占一个文件。
-async function qemuJobSection() {
-  const raw = withoutComments(await read('.github/workflows/ci-vm.yml'));
-  const lines = raw.split('\n');
-  const start = lines.findIndex((line) => /^\s{2}qemu-shutdown-destruct:\s*$/u.test(line));
-  assert.notEqual(start, -1, 'ci-vm.yml 必须包含 qemu-shutdown-destruct 作业');
-  // 取到下一个 2 空格缩进的 job 名为止，保证断言只作用于这个 job。
+// 从去注释文本里切出某个 job 的段落：ci.yml 的 job 名固定 2 空格缩进，
+// job 内的键至少 4 空格，所以「下一个 2 空格缩进的 key」就是段落边界。
+function jobSection(source, name) {
+  const lines = source.split('\n');
+  const start = lines.findIndex((line) => new RegExp(`^ {2}${name}:\\s*$`, 'u').test(line));
+  assert.notEqual(start, -1, `ci.yml 必须包含 ${name} 作业`);
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i += 1) {
-    if (/^\s{2}[a-z][a-z0-9-]*:\s*$/u.test(lines[i])) { end = i; break; }
+    if (/^ {2}[a-z][a-z0-9-]*:\s*$/u.test(lines[i])) { end = i; break; }
   }
   return lines.slice(start, end).join('\n');
 }
 
-test('QEMU 自毁作业的触发只来自手动与 CI 调用，绝不进 PR 检查', async () => {
-  // 合并后触发统一在 ci-vm.yml 的 workflow 级，且**已移除 schedule**（用户 2026-11-10 定：
-  // 虚拟机验证改手动 + CI 自动拉起，同一天只跑一次）。所以这条断言的对象是 workflow 级 on: 段。
-  const workflow = withoutComments(await read('.github/workflows/ci-vm.yml'));
+// 这一组断言锁的是「托管 Ubuntu + QEMU + KVM 的自毁验证作业」的形态约束：
+//   · 它不参与 PR，只在 push 到 main 与手动触发时尝试 —— 单次成本上限 45 分钟；
+//   · KVM 拿不到要 skip 而不是 fail —— 那是 runner 能力问题，不是仓库代码问题；
+//   · 不许下载 Windows ISO —— 体积（5.6 GiB 级）、许可与冷启动时间都不合适；
+//   · 两阶段语义必须与 shutdown 作业一致，且不得引用不存在的 -ReplayRunOnce。
+//
+// 已知：本作业自 2026-11-10 落地以来**尚未在真实 Actions 上运行过**（本地没有
+// QEMU / KVM / 客机镜像）。策略测试只能证明「文件形态正确」，不能证明「作业能跑通」。
+// 第一次真跑之后请把 run id 补在这段注释里。
 
-  assert.doesNotMatch(workflow, /^\s*pull_request:/mu, '不得挂 pull_request 触发');
+async function qemuJobSection() {
+  const raw = withoutComments(await read(WORKFLOW));
+  return jobSection(raw, 'qemu-shutdown-destruct');
+}
+
+test('QEMU 自毁作业只由 push 到 main 与手动触发，绝不进 PR 检查', async () => {
+  const workflow = withoutComments(await read(WORKFLOW));
+  const job = await qemuJobSection();
+
+  // 触发已统一在 ci.yml 的 workflow 级（它同时服务日常构建，必须挂 pull_request），
+  // 所以「不挂 pull_request」这条约束的对象只能是**作业自身的 if**。
+  // 原意是「45 分钟的 QEMU 链路不得压到每个 PR 上」，这里按事件白名单断言。
+  assert.match(job, /github\.event_name == 'push'/u, 'QEMU 作业必须在 push 到 main 时尝试');
+  assert.match(job, /github\.event_name == 'workflow_dispatch'/u, 'QEMU 作业必须支持手动触发');
+  assert.doesNotMatch(job, /github\.event_name == 'pull_request'/u, 'QEMU 作业不得在 pull_request 上运行');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
-  assert.match(workflow, /^\s{2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
-  assert.match(workflow, /^\s{2}workflow_call:\s*$/mu, '必须允许 CI 调用');
-  assert.doesNotMatch(workflow, /^\s{2}schedule:\s*$/mu, '不得再有 schedule（已改手动 + CI 拉起）');
+  assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
+  // ci.yml 现在是唯一入口，不再是 callee，不得再声明 workflow_call。
+  assert.doesNotMatch(workflow, /^ {2}workflow_call:\s*$/mu, 'ci.yml 已是唯一入口，不得再声明 workflow_call');
+  assert.doesNotMatch(workflow, /^ {2}schedule:\s*$/mu, '不得再有 schedule（已改 push + 手动）');
   assert.doesNotMatch(workflow, /cron:/u, '不得残留任何 cron 表达式');
 
-  // QEMU 作业自身只能在手动触发时出现（CI 调用不拉这条：45 分钟且要求客机镜像可用）。
-  const job = await qemuJobSection();
-  assert.match(job, /github\.event_name == 'workflow_dispatch'/u, 'QEMU 作业必须限定为手动触发');
   assert.match(job, /needs: gate/u, 'QEMU 作业必须经过日判重闸');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 必须跑在托管 ubuntu-24.04 上，不得退回 self-hosted', async () => {
-  const workflow = await qemuJobSection();
-  assert.match(workflow, /runs-on: ubuntu-24\.04/u, '目标必须是实测过的托管 ubuntu-24.04');
-  assert.doesNotMatch(workflow, /runs-on:.*self-hosted/u, '不得依赖自托管 runner（那正是 ci-vm.yml 的约束）');
-  // contents: read 在 workflow 级 permissions，不在 job 段内 —— 合并后单独断言。
-  assert.match(withoutComments(await read('.github/workflows/ci-vm.yml')), /^\s{2}contents: read$/mu, '权限只能是只读');
+test('ci.yml#qemu-shutdown-destruct 必须跑在托管 ubuntu-24.04 上，不得退回 self-hosted', async () => {
+  // ⚠️ 这条必须只对 qemu 段断言。合并前它读整个 ci-vm.yml，而那时文件里也有
+  // `runs-on: [self-hosted, windows, cx-vm]`（vm-shutdown-destruct），能过只是
+  // 因为正则 /runs-on:.*self-hosted/ 的行内匹配恰好没命中那段（`[self-hosted`
+  // 前面还有别的字符，但 `.` 不跨行，且当时那段的行文与现在不同）。
+  // 合并后 ci.yml 里 self-hosted 段落明确存在，整文件断言必然误报。
+  const job = await qemuJobSection();
+  assert.match(job, /runs-on: ubuntu-24\.04/u, '目标必须是实测过的托管 ubuntu-24.04');
+  assert.doesNotMatch(job, /runs-on:.*self-hosted/u, '不得依赖自托管 runner（那正是 QEMU 这条路的约束）');
+  // contents: read 在 workflow 级 permissions，不在 job 段内 —— 单独断言。
+  assert.match(withoutComments(await read(WORKFLOW)), /^ {2}contents: read$/mu, '权限只能是只读');
 });
 
-
-test('ci-vm.yml#qemu-shutdown-destruct 每个作业都必须有 timeout-minutes 且不超过 45 分钟', async () => {
+test('ci.yml#qemu-shutdown-destruct 每个作业都必须有 timeout-minutes 且不超过 45 分钟', async () => {
   const workflow = await qemuJobSection();
 
-  const jobNames = [...workflow.matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gmu)].map((match) => match[1]);
+  const jobNames = [...workflow.matchAll(/^ {2}([A-Za-z0-9_-]+):\s*$/gmu)].map((match) => match[1]);
   assert.ok(jobNames.length > 0, '必须至少有一个作业');
 
   const timeouts = [...workflow.matchAll(/timeout-minutes:\s*(\d+)/gu)].map((match) => Number(match[1]));
@@ -99,7 +115,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 每个作业都必须有 timeout-minutes 
   }
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 必须自己提权 /dev/kvm 并在提权后复核', async () => {
+test('ci.yml#qemu-shutdown-destruct 必须自己提权 /dev/kvm 并在提权后复核', async () => {
   const workflow = await qemuJobSection();
 
   // 事实来源：2026-11-09 实测 run 42588732951 / 42590175761 ——
@@ -114,7 +130,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 必须自己提权 /dev/kvm 并在提权�
   assert.match(workflow, /KVM_ACCESSIBLE=yes/u, '必须打印 KVM_ACCESSIBLE 结论');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 拿不到 KVM 时必须走 skip 而不是 fail', async () => {
+test('ci.yml#qemu-shutdown-destruct 拿不到 KVM 时必须走 skip 而不是 fail', async () => {
   const workflow = await qemuJobSection();
 
   // skip 的实现方式：KVM 步骤把结论写成 output，后续重活以它为门。
@@ -132,13 +148,18 @@ test('ci-vm.yml#qemu-shutdown-destruct 拿不到 KVM 时必须走 skip 而不是
   assert.doesNotMatch(kvmStep, /exit 1/u, 'KVM 探测步骤不得以 exit 1 结束');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不得下载 Windows ISO', async () => {
+test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不得下载 Windows ISO', async () => {
   const workflow = await qemuJobSection();
 
   // 镜像来源：手动输入优先，其次 repo variable；两者都空 → skip。
   assert.match(workflow, /CX_QEMU_GUEST_IMAGE/u, '必须用 CX_QEMU_GUEST_IMAGE 作为镜像占位变量');
   assert.match(workflow, /vars\.CX_QEMU_GUEST_IMAGE/u, '必须支持仓库变量');
-  assert.match(workflow, /inputs\.guest_image/u, '必须支持手动触发时覆盖（统一用 inputs.* 写法，workflow_dispatch 与 workflow_call 通用）');
+  // ci.yml 是普通 workflow：push 事件下 inputs.* 上下文为 null，
+  // 因此必须写 github.event.inputs.*（写成裸 inputs.* 会在非手动触发下取到空值）。
+  assert.match(workflow, /github\.event\.inputs\.guest_image/u,
+    '必须支持手动触发时覆盖（用 github.event.inputs.guest_image，push 下 inputs.* 为 null）');
+  assert.doesNotMatch(workflow, /[^.]inputs\.guest_image/u,
+    '不得残留裸 inputs.* 写法（push 事件下为 null）');
   assert.match(workflow, /未配置客机镜像/u, '镜像未配置时必须 skip 并说明');
   assert.match(workflow, /if:\s*steps\.image\.outputs\.image_ok\s*==\s*'yes'/u, '客机步骤必须以 image_ok 为门');
 
@@ -151,7 +172,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且�
     assert.match(
       entry.line,
       /skip|拒绝|不合适/u,
-      `第 ${entry.index} 行提到 .iso 但不是拒绝语句：${entry.line.trim()}`,
+      `qemu 段第 ${entry.index} 行提到 .iso 但不是拒绝语句：${entry.line.trim()}`,
     );
   }
   assert.doesNotMatch(workflow, /https?:\/\/\S*\.iso/iu, '不得出现 ISO 下载地址');
@@ -177,7 +198,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且�
   assert.doesNotMatch(workflow, /-drive file="\$RUNNER_TEMP\/guest-base\.qcow2"/u, '不得直接以读写方式挂母镜像');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让重启后客机永远不再上电）', async () => {
+test('ci.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让重启后客机永远不再上电）', async () => {
   const workflow = await qemuJobSection();
   // 这条不是风格问题：QEMU 加 -no-reboot 时，客机一重启进程就退出，
   // 「登记 → 重启 → 重放」会断在第二步，而 Step Summary 会误报成「重启后未回连」。
@@ -187,7 +208,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会
   assert.match(workflow, /-enable-kvm/u, 'QEMU 必须显式 -enable-kvm');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 的两阶段语义与 ci-vm.yml 一致，且不引用不存在的开关', async () => {
+test('ci.yml#qemu-shutdown-destruct 的两阶段语义与 shutdown 作业一致，且不引用不存在的开关', async () => {
   const workflow = await qemuJobSection();
 
   // 工作流本身只负责「调客机驱动脚本」+「由宿主发起重启」。
@@ -211,8 +232,9 @@ test('ci-vm.yml#qemu-shutdown-destruct 的两阶段语义与 ci-vm.yml 一致，
   );
   // 重启由宿主经命令通道发起，不是脚本参数。
   assert.match(workflow, /shutdown \/r \/f \/t 5/u, '客机重启必须由宿主经命令通道发起');
-  // run-shutdown-destruct.ps1 全文没有 -ReplayRunOnce，引用它等于引用不存在的接口。
-  assert.doesNotMatch(workflow, /-ReplayRunOnce/u, '不得引用不存在的 -ReplayRunOnce 参数');
+  // run-shutdown-destruct.ps1 全文没有 -ReplayRunOnce 的这条路（那是 wiring-probe 的），
+  // 在 QEMU 客机链路里引用它等于引用不存在的接口。
+  assert.doesNotMatch(workflow, /-ReplayRunOnce/u, 'QEMU 客机链路不得引用 -ReplayRunOnce 参数');
   // 重启必须发生在 register 之后、replay 之前：顺序写反则断言针对的是上一次启动。
   const registerAt = workflow.indexOf('-Phase register');
   const rebootAt = workflow.indexOf('shutdown /r /f /t 5');
@@ -254,7 +276,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 的两阶段语义与 ci-vm.yml 一致，
   assert.match(guest, /shutdown-target\.txt/u, '两阶段必须共用固定的待删目标名');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM、镜像、跳过原因、执行到哪一步', async () => {
+test('ci.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM、镜像、跳过原因、执行到哪一步', async () => {
   const workflow = await qemuJobSection();
 
   assert.match(workflow, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
@@ -266,7 +288,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM
   assert.match(workflow, /停在：/u, '摘要必须写明停在哪一段');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 必须显式证明 Linux pwsh 不能跑两阶段', async () => {
+test('ci.yml#qemu-shutdown-destruct 必须显式证明 Linux pwsh 不能跑两阶段', async () => {
   const workflow = await qemuJobSection();
 
   // run-shutdown-destruct.ps1 依赖 HKCU:\...\RunOnce；Linux pwsh 没有 Registry provider。
@@ -279,7 +301,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 必须显式证明 Linux pwsh 不能跑�
   assert.match(workflow, /scripts\/vm\/qemu-guest-destruct\.ps1/u, '新增的客机驱动脚本必须纳入接线检查');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 的 teardown 断言必须真的能判红，不得被 || true 吞掉', async () => {
+test('ci.yml#qemu-shutdown-destruct 的 teardown 断言必须真的能判红，不得被 || true 吞掉', async () => {
   const workflow = await qemuJobSection();
 
   // 这条作业存在的意义就是「抓自毁没清干净」。把 teardown 断言写成
@@ -297,7 +319,7 @@ test('ci-vm.yml#qemu-shutdown-destruct 的 teardown 断言必须真的能判红�
   assert.match(workflow, /未完成（不是通过）/u, '两阶段未走完时摘要必须明确「不是通过」');
 });
 
-test('ci-vm.yml#qemu-shutdown-destruct 的 purge 产物路径必须穿过 SSH 边界显式传参', async () => {
+test('ci.yml#qemu-shutdown-destruct 的 purge 产物路径必须穿过 SSH 边界显式传参', async () => {
   const workflow = await qemuJobSection();
   const guest = withoutPsComments(await read('scripts/vm/qemu-guest-destruct.ps1'));
 
@@ -305,10 +327,13 @@ test('ci-vm.yml#qemu-shutdown-destruct 的 purge 产物路径必须穿过 SSH �
   // 进入客机。之前那种「在 workflow 里写 CX_NATIVE_PURGE_EXE 就以为客机读得到」
   // 的做法会让客机侧永远读到空值 → 两阶段必然假失败。
   assert.match(workflow, /-PurgeExe/u, '工作流必须把 purge 产物路径作为参数传进客机脚本');
+  // ⚠️ 这条负向断言必须只对 qemu 段生效：合并后 ci.yml 的 vm-shutdown-destruct 与
+  // wiring-probe 两段**合法地**用 env: 给本机进程设 CX_NATIVE_PURGE_EXE
+  // （那边不跨 SSH，是正确的），整文件断言会误报。
   assert.doesNotMatch(
     workflow,
     /^\s+CX_NATIVE_PURGE_EXE:/mu,
-    '不得在 workflow 里用 env: 假装给客机设 purge 产物路径（env 不跨 SSH）',
+    '不得在 qemu 作业里用 env: 假装给客机设 purge 产物路径（env 不跨 SSH）',
   );
   // 客机脚本必须接收这个参数，并把它提升成 run-shutdown-destruct.ps1 认的变量名。
   assert.match(guest, /\[string\]\$PurgeExe/u, '客机脚本必须接收 -PurgeExe');
