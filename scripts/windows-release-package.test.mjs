@@ -443,7 +443,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
   assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境并报告结果');
+  // kvm-probe 自 2026-11-10 起由 ci.yml 调用（用户要求「CI 自动拉起虚拟机验证」），
+  // 因此汇总 job 也必须等它，否则 Step Summary 里的 KVM 结果行会是空值。
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, kvm-probe\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 kvm-probe）并报告结果');
   assert.doesNotMatch(workflow, /windows-fake-ime|Install-FakeInputMethod|cx-fake-ime-modules|Language\.Basic~~~zh-CN/u,
     '输入法伪装已冻结：CI 不得再安装或验证输入法');
   assert.match(workflow, /runs-on: windows-latest/u);

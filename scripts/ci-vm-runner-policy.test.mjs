@@ -53,8 +53,9 @@ test('ci-vm.yml 必须写清留在 self-hosted 的真实理由', async () => {
   assert.match(workflow, /KVM_ACCESSIBLE=no|不在 kvm 组/u, '必须写明权限而不是「没有设备」');
   // 必须指向 QEMU 备选与它的成本，避免读者以为没试过。
   assert.match(workflow, /QEMU/u, '必须提到 QEMU + Windows guest 这条备选路径');
-  // 必须指向数据出处，不留悬空断言。
-  assert.match(workflow, /06-CI升级与虚拟机测试\.md/u, '必须指向论证出处');
+  // 论证必须留在仓库内可达的位置：本文件头部已把两条实测结论就地写全，
+  // 不再外链 task_doc 的编号文档（那是跨轮次记忆目录，不在本仓库、对外不可达）。
+  assert.match(workflow, /嵌套虚拟化|KVM_ACCESSIBLE=no/u, '必须就地写明实测结论，不得只给外部出处');
 });
 
 test('ci-vm.yml 的 runner 标签与必要检查名保持不变', async () => {
@@ -65,43 +66,53 @@ test('ci-vm.yml 的 runner 标签与必要检查名保持不变', async () => {
   assert.match(workflow, /vars\.CX_VM_ENABLED == 'true'/u, '三重保护不变');
 });
 
-test('每日 KVM 巡检只由定时与手动触发，不进 PR 检查', async () => {
-  const workflow = withoutComments(await read('.github/workflows/probe-kvm-daily.yml'));
+// 2026-11-10：原先独立的 probe-kvm-daily.yml 已并入 ci-vm.yml（用户要求合并成单一
+// 虚拟机验证入口），因此这两条断言对象改为 ci-vm.yml 里的 kvm-probe 作业段。
+// 语义不变：巡检仍是「轻量、只读、不进 PR 门禁」的那条链路。
+async function kvmProbeSection() {
+  const raw = withoutComments(await read('.github/workflows/ci-vm.yml'));
+  const lines = raw.split('\n');
+  const start = lines.findIndex((line) => /^\s{2}kvm-probe:\s*$/u.test(line));
+  assert.notEqual(start, -1, 'ci-vm.yml 必须包含 kvm-probe 作业');
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^\s{2}[a-z][a-z0-9-]*:\s*$/u.test(lines[i])) { end = i; break; }
+  }
+  return lines.slice(start, end).join('\n');
+}
 
-  const crons = [...workflow.matchAll(/^\s*-\s*cron:\s*'([^']+)'\s*$/gmu)].map((match) => match[1]);
-  assert.equal(crons.length, 1, `只允许一个 cron，实际 ${crons.length} 个`);
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = crons[0].split(/\s+/u);
-  assert.match(minute, /^\d+$/u, 'cron 分钟位必须是数字');
-  assert.match(hour, /^\d+$/u, 'cron 小时位必须是数字');
-  assert.equal(dayOfMonth, '*', 'cron 必须是每日一次（日期不限）');
-  assert.equal(month, '*', 'cron 必须是每日一次（月份不限）');
-  assert.equal(dayOfWeek, '*', 'cron 必须是每日一次（星期不限）');
+test('KVM 巡检段：轻量只读，不进 PR 门禁', async () => {
+  const workflow = withoutComments(await read('.github/workflows/ci-vm.yml'));
+  const job = await kvmProbeSection();
 
-  // 成本红线：任何作业超时都不得超过 5 分钟。
-  const timeouts = [...workflow.matchAll(/timeout-minutes:\s*(\d+)/gu)].map((match) => Number(match[1]));
-  assert.ok(timeouts.length > 0, '必须显式声明 timeout-minutes');
+  // 绝不参与 PR 检查 —— 任何时候都不会把 PR 判红。
+  assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
+  assert.doesNotMatch(workflow, /^\s{2}pull_request:/mu, '不得挂 pull_request 触发');
+  // 触发只有手动 + CI 调用；已移除 schedule（用户 2026-11-10 定）。
+  assert.match(workflow, /^\s{2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
+  assert.match(workflow, /^\s{2}workflow_call:\s*$/mu, '必须允许 CI 调用');
+  assert.doesNotMatch(workflow, /^\s{2}schedule:\s*$/mu, '不得再有 schedule');
+
+  // 成本红线：巡检作业本身超时不得超过 5 分钟。
+  const timeouts = [...job.matchAll(/timeout-minutes:\s*(\d+)/gu)].map((m) => Number(m[1]));
+  assert.ok(timeouts.length > 0, 'kvm-probe 必须显式声明 timeout-minutes');
   for (const value of timeouts) {
-    assert.ok(value <= 5, `单作业超时 ${value} 分钟超过红线 5 分钟`);
+    assert.ok(value <= 5, `kvm-probe 超时 ${value} 分钟超过红线 5 分钟`);
   }
 
-  // 不参与 PR 检查，任何时候都不会把 PR 判红。
-  assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
-  assert.doesNotMatch(workflow, /^\s*pull_request:/mu, '不得挂 pull_request 触发');
-  assert.match(workflow, /^\s*schedule:/mu, '必须有 schedule 触发');
-  assert.match(workflow, /^\s*workflow_dispatch:/mu, '必须保留手动触发');
-  assert.match(workflow, /runs-on: ubuntu-24\.04/u, '巡检目标必须是实测过的 ubuntu-24.04');
-  assert.match(workflow, /contents: read/u, '权限只能是只读');
+  // 目标必须是实测过的托管 ubuntu-24.04。
+  assert.match(job, /runs-on: ubuntu-24\.04/u, '巡检目标必须是实测过的 ubuntu-24.04');
 });
 
-test('每日 KVM 巡检不得真装机、下载镜像或改设备权限', async () => {
-  const workflow = withoutComments(await read('.github/workflows/probe-kvm-daily.yml'));
-  // 实测冷启动到 Windows Setup 已 9.7 分钟，装机路径绝不能进每日作业。
-  assert.doesNotMatch(workflow, /qemu-system|qemu-img|virt-install/u, '不得启动虚拟机');
-  assert.doesNotMatch(workflow, /apt-get\s+install|apt\s+install|apt-cache\s+policy/u, '不得安装软件包');
-  assert.doesNotMatch(workflow, /https?:\/\/\S*\.iso|curl\s[^\n]*\.iso|wget\s[^\n]*\.iso/u, '不得下载镜像');
-  assert.doesNotMatch(workflow, /chmod\s+[0-7]+\s+\/dev\/kvm/u, '巡检不得修改 /dev/kvm 权限');
-  assert.doesNotMatch(workflow, /usermod|gpasswd\s+-a/u, '巡检不得改组成员关系');
+test('KVM 巡检段不得真装机、下载镜像或改设备权限', async () => {
+  const job = await kvmProbeSection();
+  // 实测冷启动到 Windows Setup 已 9.7 分钟，装机路径绝不能进巡检。
+  assert.doesNotMatch(job, /qemu-system|qemu-img|virt-install/u, '巡检段不得启动虚拟机');
+  assert.doesNotMatch(job, /apt-get\s+install|apt\s+install|apt-cache\s+policy/u, '巡检段不得安装软件包');
+  assert.doesNotMatch(job, /https?:\/\/\S*\.iso|curl\s[^\n]*\.iso|wget\s[^\n]*\.iso/u, '巡检段不得下载镜像');
+  assert.doesNotMatch(job, /chmod\s+[0-7]+\s+\/dev\/kvm/u, '巡检段不得修改 /dev/kvm 权限');
+  assert.doesNotMatch(job, /usermod|gpasswd\s+-a/u, '巡检段不得改组成员关系');
   // 必须把结论打出来。
-  assert.match(workflow, /KVM_ACCESSIBLE=/u, '必须输出 KVM_ACCESSIBLE 结论');
-  assert.match(workflow, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
+  assert.match(job, /KVM_ACCESSIBLE=/u, '必须输出 KVM_ACCESSIBLE 结论');
+  assert.match(job, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
 });
