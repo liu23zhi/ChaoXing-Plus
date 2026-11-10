@@ -470,7 +470,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   // 所以汇总 job 必须把它们全部列进 needs —— 少一个，Step Summary 里对应的结果行
   // 就会取不到 needs.*.result（渲染成空值或直接报错）。
   // 顺带守住「summary 必须无条件运行（if: always()）」：它是唯一汇总出口。
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与三条关机自毁作业）并报告结果');
+  // 2026-11-11：新增 qemu-destruct-linux-guest（Linux guest 关机自毁）。
+  // 它同样必须进 needs，否则 Step Summary 里那一行取不到 needs.*.result。
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与四条关机自毁作业）并报告结果');
   // 三条关机自毁作业的结果必须真的进 Step Summary，否则「完整 CI 有关机自毁测试」
   // 只体现在 JSON 里，看摘要的人看不到。
   assert.match(workflow, /WIRING_PROBE_RESULT: \$\{\{ needs\.wiring-probe\.result \}\}/u,

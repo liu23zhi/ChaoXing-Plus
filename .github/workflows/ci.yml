@@ -809,29 +809,65 @@ jobs:
         run: |
           set -u
           # 只探测是否免密，不改 /dev/kvm 的 mode —— 巡检作业不做任何变更，
-          # 「sudo chmod 666 能在毫秒级解决权限」这条已有一次性实测证据。
+          # 「sudo chmod 666 能在毫秒级解决权限」这条已有实测证据
+          # （2026-11-10 run 42811100800：KVM_CHMOD_ELAPSED_MS=7 → KVM_ACCESSIBLE=yes）。
           if sudo -n true 2>/dev/null; then
             echo 'SUDO_NOPASSWD=yes'
           else
             echo 'SUDO_NOPASSWD=no'
           fi
 
+      - name: 提权后可否读写（只读探测，不落改动）
+        id: escalation
+        run: |
+          set -u
+          # 这一条是 kvm-probe 从「有设备无权限」升级为「能判断真实可用性」的关键：
+          # 2026-11-09 的基线只测了**未提权**时的 -r/-w，于是巡检结论一直是 no，
+          # 而 CI 里真正要跑客机的作业早已靠 sudo 提权拿到 yes。巡检与实况脱节。
+          #
+          # 本步骤同样不改设备权限：判定方式是把「提权后是否可读写」作为一个**推得出来
+          # 的结论**报出来（设备在 + 免密 sudo 可用 ⇒ 可提权），并把提权实测留给
+          # 真正要用的作业去做。
+          # 用显式 if 块而不是 `X=no; [ cond ] && X=yes`：后者在**作为 step 最后一条
+          # 语句**时，条件为假会让整条 step 以退出码 1 判红（bash -e 的已知行为，
+          # 实测 `bash -e -c 'X=no; [ -e /nope ] && X=yes'` → exit 1）。
+          # 现在这两行虽然不在末尾、暂不会触发，但排版一动就可能变成末尾 ——
+          # 统一用 if 块，消掉这个隐患。
+          DEVICE=no
+          if [ -e /dev/kvm ]; then DEVICE=yes; fi
+          SUDO=no
+          if sudo -n true 2>/dev/null; then SUDO=yes; fi
+          if [ "$DEVICE" = yes ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            ESCALATION=not-needed
+          elif [ "$DEVICE" = yes ] && [ "$SUDO" = yes ]; then
+            ESCALATION=available
+          else
+            ESCALATION=unavailable
+          fi
+          echo "KVM_ESCALATION=$ESCALATION"
+          echo "escalation=$ESCALATION" >> "$GITHUB_OUTPUT"
+
       - name: 汇总并记录结论
         id: verdict
         run: |
           set -u
+          ESCALATION="${{ steps.escalation.outputs.escalation }}"
           if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
             VERDICT='可读写'
-            DETAIL='`/dev/kvm` **存在且可读写** → 可以走 KVM 硬件加速'
-            echo '::warning title=KVM 能力变化::托管 runner 的 /dev/kvm 变为可读写，与 2026-11-09 基线（KVM_ACCESSIBLE=no）不一致，请复核本文件头部的 (1)(2) 两条结论。'
+            DETAIL='`/dev/kvm` **存在且可直接读写** → 可以走 KVM 硬件加速（无需提权）'
+            echo '::notice title=KVM 能力::KVM_ACCESSIBLE=yes（未提权即可读写）'
+          elif [ -e /dev/kvm ] && [ "$ESCALATION" = available ]; then
+            VERDICT='有设备、需提权'
+            DETAIL='`/dev/kvm` 存在但作业用户无权限；**免密 sudo 可用**（`chmod 666` 实测 7 ms 生效）→ 提权后可用 KVM'
+            echo '::notice title=KVM 能力::KVM_ACCESSIBLE=no，但 KVM_ESCALATION=available（提权后可用，非故障）'
           elif [ -e /dev/kvm ]; then
             VERDICT='有设备无权限'
-            DETAIL='`/dev/kvm` 存在但**作业用户无权限**（与 2026-11-09 基线一致）'
-            echo "::notice title=KVM 能力::KVM_ACCESSIBLE=no（已知基线，非故障）"
+            DETAIL='`/dev/kvm` 存在、作业用户无权限，且**免密 sudo 不可用** → 无法提权'
+            echo '::warning title=KVM 能力::有 /dev/kvm 但既无权限也无法提权'
           else
             VERDICT='无设备'
             DETAIL='`/dev/kvm` **不存在** → 只能 TCG 软件模拟'
-            echo '::warning title=KVM 能力变化::托管 runner 不再提供 /dev/kvm，与 2026-11-09 基线不一致，请复核本文件头部的 (1)(2) 两条结论。'
+            echo '::warning title=KVM 能力::托管 runner 不提供 /dev/kvm'
           fi
 
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
@@ -841,6 +877,7 @@ jobs:
             echo ''
             echo "- 结论：$DETAIL"
             echo "- KVM 设备：$( [ -e /dev/kvm ] && echo 存在 || echo 不存在 )"
+            echo "- 提权可用性：${ESCALATION:-unknown}（available=免密 sudo 可提权）"
             echo "- 作业用户：$(id -u)/$(id -un)，组 $(id -Gn | tr ' ' ',')"
             echo "- CPU：$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
             echo "- 核数：$(nproc)"
@@ -849,6 +886,8 @@ jobs:
             echo "- 触发方式：${{ github.event_name }}"
             echo ''
             echo '> 本作业只巡检，不安装、不下载镜像、不启动虚拟机；红叉不影响任何 PR 的必需检查。'
+            echo '> 「未提权不可读写」不等于「KVM 不可用」：真实可用性由 qemu-destruct-linux-guest'
+            echo '> 与 qemu-shutdown-destruct 两个作业提权后实测。'
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
@@ -1719,10 +1758,192 @@ jobs:
             echo '红叉不影响任何 PR 的必需检查。'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ---------------------------------------------------------------------------
+  # 关机自毁 / 开机续删：Linux cloud image 客机，走真实重启。
+  #
+  # 为什么要有这条（它补的是上面两条都补不上的那一格）：
+  #   · vm-shutdown-destruct 要 self-hosted cx-vm，本仓库**一个 runner 都没有**
+  #     （gh api /actions/runners 返回 total_count=0），所以它永远 skipped。
+  #   · wiring-probe 用 -ReplayRunOnce 在托管 windows-latest 上执行 RunOnce 命令串，
+  #     这条真的在跑，但它**没有重启**，「开机才续删」这一半无从验证。
+  #   · qemu-shutdown-destruct 有真实重启，但需要 Windows qcow2（repo variable
+  #     CX_QEMU_GUEST_IMAGE），未配置就 skip。
+  #
+  # 本作业用 ~260 MB 的 Ubuntu cloud image 把「真实重启」这一格补上：
+  #   KVM 提权 → 起 QEMU 客机 → guest 内登记待删目标 + 开机续删单元
+  #   → guest 内真实重启 → 断言「boot_id 变了 + 目标已删 + 续删确实在本次启动执行 + 单元自撤销」
+  #
+  # 已验证的前提（2026-11-10 run 42811100800，job 129812540883，不是推测）：
+  #   STAT_MODE=crw-rw---- STAT_OWNER=root STAT_GROUP=kvm
+  #   RUNNER_GROUPS=runner,adm,users,docker,systemd-journal  → runner **不在** kvm 组
+  #   sudo chmod 666 /dev/kvm → KVM_CHMOD_ELAPSED_MS=7，随后 KVM_ACCESSIBLE=yes
+  #   QEMU_KVM_ACCEL=yes（apt 装的 qemu-system-x86 8.2.2 自带 kvm 加速器）
+  # 所以「有设备、无权限」这个卡点已经在提权后消失了，剩下只缺客机镜像。
+  #
+  # 它能证明什么 / 不能证明什么（不许把 Linux 客机说成 Windows RunOnce 已覆盖）：
+  #   能：QEMU 在托管 runner 上真跑得起来、guest 真能重启、重启后的自动化真会执行、
+  #       执行完真会删目标并自撤销。
+  #   不能：HKCU\...\RunOnce 的登记/撤销；WM_QUERYENDSESSION 时序；
+  #         MOVEFILE_DELAY_UNTIL_REBOOT 重启后消失。那三条仍只有 qemu-shutdown-destruct
+  #         的 Windows 客机链路能覆盖。
+  # ---------------------------------------------------------------------------
+
+  qemu-destruct-linux-guest:
+    name: 关机销毁与开机续删（托管 Ubuntu + QEMU + Linux 客机，真实重启）
+    needs: gate
+    # 与 qemu-shutdown-destruct 同口径：push 到 main 与手动触发时跑，PR 不跑。
+    # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
+    if: |
+      needs.gate.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    # 硬上限：30 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
+    # + 客机冷启动（≤7 min）+ 登记/重启/断言（~5 min），再留余量。
+    timeout-minutes: 30
+    # 独立 concurrency + 不取消：中途被新 push 取消会留下「已登记、未续删」的客机，
+    # 与 vm-shutdown-destruct 的理由一致。宁可排队也不取消。
+    concurrency:
+      group: cx-qemu-linux-destruct-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      CX_LINUX_GUEST_SSH_PORT: '2223'
+      CX_LINUX_GUEST_BOOT_TIMEOUT_SEC: '420'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境基线
+        run: |
+          set -u
+          uname -a
+          . /etc/os-release && echo "PRETTY=$PRETTY_NAME"
+          echo "NPROC=$(nproc)"
+          free -h
+          echo
+          echo '=== CPU 虚拟化标志 ==='
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(vmx|svm|hypervisor)$' || echo '（未找到 vmx/svm/hypervisor）'
+          echo
+          echo '=== kvm 模块 ==='
+          lsmod | grep -i '^kvm' || echo '（kvm 模块未加载）'
+          echo
+          echo '=== 磁盘余量 ==='
+          df -h "$RUNNER_TEMP"
+
+      # KVM 提权 + 断言。拿不到就**真的失败**（不是 skip）：
+      # 这条作业存在的唯一目的就是「在 KVM 上跑客机」，没有 KVM 它证明不了任何事。
+      # 与 qemu-shutdown-destruct 的 skip 策略不同是刻意的 —— 那条还有
+      # 「宿主能力探测」的价值，这条没有。
+      - name: KVM 提权并断言可读写
+        id: kvm
+        run: |
+          set -eu
+          accessible() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+
+          if [ ! -e /dev/kvm ]; then
+            echo '::error title=无 /dev/kvm::托管 runner 未提供 KVM 设备，本作业无法验证'
+            exit 1
+          fi
+          ls -l /dev/kvm
+          stat -c 'STAT_MODE=%A STAT_OWNER=%U STAT_GROUP=%G' /dev/kvm
+          echo "RUNNER_GROUPS=$(id -Gn | tr ' ' ',')"
+
+          if accessible; then
+            echo 'KVM_ALREADY_ACCESSIBLE=yes'
+          else
+            echo 'KVM_ALREADY_ACCESSIBLE=no'
+            if sudo -n true 2>/dev/null; then
+              echo 'SUDO_NOPASSWD=yes'
+            else
+              echo '::error title=sudo 不可用::无法提权 /dev/kvm'
+              exit 1
+            fi
+            START_MS=$(date +%s%3N)
+            sudo chmod 666 /dev/kvm
+            END_MS=$(date +%s%3N)
+            echo "KVM_CHMOD_ELAPSED_MS=$((END_MS - START_MS))"
+            stat -c 'STAT_MODE_AFTER=%A' /dev/kvm
+          fi
+
+          if ! accessible; then
+            echo '::error title=KVM 仍不可读写::提权后复核失败'
+            exit 1
+          fi
+          echo 'KVM_ACCESSIBLE=yes'
+          {
+            echo '## 关机销毁与开机续删（QEMU + Linux 客机）'
+            echo ''
+            echo "- KVM 可读写：**是**（提权后复核）"
+            echo "- 作业用户组：$(id -Gn | tr ' ' ',')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # QEMU 必须能装、且必须真的有 kvm 加速器。这条也是硬失败：
+      # TCG 下冷启动会远超 30 分钟上限，静默降级等于交付一个假的通过。
+      - name: 安装 QEMU 并确认 kvm 加速器
+        run: |
+          set -eu
+          if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 qemu-utils
+          fi
+          qemu-system-x86_64 --version | head -2
+          qemu-img --version | head -1
+          echo '=== 加速器列表 ==='
+          qemu-system-x86_64 -accel help || true
+          if ! qemu-system-x86_64 -accel help 2>/dev/null | grep -qx 'kvm'; then
+            echo '::error title=QEMU 无 kvm 加速器::只有 TCG 会让冷启动超出 30 分钟上限'
+            exit 1
+          fi
+          echo 'QEMU_KVM_ACCEL=yes'
+          {
+            echo "- QEMU：$(qemu-system-x86_64 --version | head -1)"
+            echo "- kvm 加速器：**有**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 客机脚本断言自测（不需要 QEMU，秒级）
+        run: |
+          # 先跑这一条：它用 ssh 垫片把 replay 阶段的四条断言逐条验证一遍
+          # （全绿→0，每个断言各配一个应当判红的 fixture）。放在起客机之前，
+          # 是为了让「脚本本身写错了」和「环境跑不起来」在日志里可区分 —— 否则
+          # 客机启动失败时看不出到底是断言逻辑坏了还是 KVM/镜像的问题。
+          bash scripts/ci/qemu-guest-destruct-linux.test.sh
+
+      - name: 准备客机镜像与 cloud-init
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase prepare
+
+      - name: 启动客机并等待 SSH 回连
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase boot
+
+      - name: 阶段一：客机内登记待删目标与开机续删单元
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase register
+
+      - name: 阶段二前半：客机内真实重启并等待回连
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase reboot
+
+      - name: 阶段二后半：断言重启过、已续删、已自撤销
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase replay
+
+      - name: 上传客机证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-qemu-linux-guest-evidence
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/cx-linux-guest/user-data
+            ${{ runner.temp }}/cx-linux-guest/meta-data
+            ${{ runner.temp }}/cx-linux-guest/resume.sh
+            ${{ runner.temp }}/cx-linux-guest/unit.service
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 关停客机并清理临时密钥
+        if: always()
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase teardown
+
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -1742,6 +1963,7 @@ jobs:
           WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.outcome }}
           VM_DESTRUCT_RESULT: ${{ needs.vm-shutdown-destruct.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
+          QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
           GATE_REASON: ${{ needs.gate.outputs.reason }}
           KVM_PROBE_SKIPPED: ${{ needs.kvm-probe.outputs.skipped }}
           KVM_PROBE_REASON: ${{ needs.kvm-probe.outputs.reason }}
@@ -1780,6 +2002,7 @@ jobs:
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
             printf '| 关机自毁（self-hosted cx-vm） | %s |\n' "$(result_label "$VM_DESTRUCT_RESULT")"
             printf '| 关机自毁（托管 Ubuntu + QEMU + KVM） | %s |\n' "$(result_label "$QEMU_DESTRUCT_RESULT")"
+            printf '| 关机销毁/开机续删（QEMU + Linux 客机，真实重启） | %s |\n' "$(result_label "$QEMU_LINUX_DESTRUCT_RESULT")"
             if [[ -n "$GATE_REASON" ]]; then
               printf '| 判重闸说明 | %s |\n' "$GATE_REASON"
             fi
