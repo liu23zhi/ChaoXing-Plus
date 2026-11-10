@@ -435,17 +435,50 @@ test('打包脚本对缺失资源、内部原型和外部依赖失败关闭', as
 });
 
 test('CI 工作流与发布脚本入口已接入仓库', async () => {
+  const ciYml = await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
   const workflow = [
-    await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8'),
+    ciYml,
     await fs.readFile(path.join(root, 'scripts', 'ci', 'prepare-windows-test-environment.ps1'), 'utf8'),
     await fs.readFile(path.join(root, 'scripts', 'windows-real-client-injection.ps1'), 'utf8')
   ].join('\n');
+  // 2026-11-10：ci-vm.yml 并入 ci.yml 后，本文件里多出 gate / kvm-probe / 三条关机自毁
+  // 作业。其中 gate 合法地用 `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` 读 workflow run
+  // 列表做日判重（那是内置 token，不是额外凭据）。下面「真实客户端流程不得依赖额外
+  // 凭据」这条负向断言的原意只针对真实客户端链路，因此必须收窄到那两个作业段，
+  // 否则会把 gate 的合法用法误判成违规。
+  const realClientScope = (() => {
+    const lines = ciYml.split(/\r?\n/u);
+    const start = lines.findIndex((line) => /^ {2}windows-real-client-discovery:\s*$/u.test(line));
+    if (start < 0) return '';
+    // 一直取到 windows-real-client 作业结束：两者在文件里相邻，
+    // 中间只隔着 windows-real-client 自己，所以按「下一个 2 空格 job 键」收尾。
+    let seenRealClient = false;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^ {2}windows-real-client:\s*$/u.test(lines[i])) { seenRealClient = true; continue; }
+      if (seenRealClient && /^ {2}[a-z][a-z0-9-]*:\s*$/u.test(lines[i])) { end = i; break; }
+    }
+    return lines.slice(start, end).join('\n');
+  })();
+  assert.ok(realClientScope.includes('windows-real-client:'), '真实客户端段的切分必须包含两个作业');
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
   assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
-  // kvm-probe 自 2026-11-10 起由 ci.yml 调用（用户要求「CI 自动拉起虚拟机验证」），
-  // 因此汇总 job 也必须等它，否则 Step Summary 里的 KVM 结果行会是空值。
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, kvm-probe\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 kvm-probe）并报告结果');
+  // 2026-11-10：ci-vm.yml 已整体并入 ci.yml（用户要求「完整 ci 添加上完整的关机自毁
+  // 测试」）。原来 kvm-probe 是 workflow_call 的 callee，现在 gate / kvm-probe /
+  // vm-shutdown-destruct / wiring-probe / qemu-shutdown-destruct 全是本文件的 job，
+  // 所以汇总 job 必须把它们全部列进 needs —— 少一个，Step Summary 里对应的结果行
+  // 就会取不到 needs.*.result（渲染成空值或直接报错）。
+  // 顺带守住「summary 必须无条件运行（if: always()）」：它是唯一汇总出口。
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与三条关机自毁作业）并报告结果');
+  // 三条关机自毁作业的结果必须真的进 Step Summary，否则「完整 CI 有关机自毁测试」
+  // 只体现在 JSON 里，看摘要的人看不到。
+  assert.match(workflow, /WIRING_PROBE_RESULT: \$\{\{ needs\.wiring-probe\.result \}\}/u,
+    '汇总必须引用 wiring-probe 的结果');
+  assert.match(workflow, /VM_DESTRUCT_RESULT: \$\{\{ needs\.vm-shutdown-destruct\.result \}\}/u,
+    '汇总必须引用 vm-shutdown-destruct 的结果');
+  assert.match(workflow, /QEMU_DESTRUCT_RESULT: \$\{\{ needs\.qemu-shutdown-destruct\.result \}\}/u,
+    '汇总必须引用 qemu-shutdown-destruct 的结果');
   assert.doesNotMatch(workflow, /windows-fake-ime|Install-FakeInputMethod|cx-fake-ime-modules|Language\.Basic~~~zh-CN/u,
     '输入法伪装已冻结：CI 不得再安装或验证输入法');
   assert.match(workflow, /runs-on: windows-latest/u);
@@ -520,8 +553,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     '发现步骤必须掩码 Base64 变量值');
   assert.match(workflow, /\$databaseVars = @\(\)[\s\S]*?\$databaseVars \+= \[pscustomobject\]/u,
     '发现步骤必须显式收集变量对象；Write-Output 掩码命令不能混入矩阵，否则会生成空数据库名的用例');
-  assert.doesNotMatch(workflow, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN/u,
-    '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据');
+  assert.doesNotMatch(realClientScope, /actions\/variables|GH_TOKEN:|CI_VARIABLES_READ_TOKEN|secrets\./u,
+    '真实客户端流程不得依赖无权访问的 Actions variables API 或额外凭据（gate 用内置 GITHUB_TOKEN 判重不算违规）');
   assert.match(workflow, /fromJSON\(needs\.windows-real-client-discovery\.outputs\.matrix\)/u, '真实客户端 job 必须使用发现结果生成矩阵');
   assert.match(workflow, /DATABASE_VARIABLE_NAME:\s*\$\{\{\s*matrix\.database_var\s*\}\}/u, '矩阵只应传递数据库变量名');
   assert.match(workflow, /::add-mask::\$compactDb/u, '真实客户端数据库内容必须在使用前规范化并掩码');
@@ -592,7 +625,25 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.doesNotMatch(workflow, /node \(Join-Path \$package 'windows\\node-source\\main\.mjs'\)/u, '原生发布包里没有 Node 宿主，CI 不应再运行它');
   assert.match(workflow, /原生发布包不应包含 Node 产物/u, 'CI 必须拒绝混入 Node 产物的原生包');
   assert.match(workflow, /verify-release\.mjs/u, 'CI must run the packaged checksum verifier');
-  assert.doesNotMatch(workflow, /secrets\./u);
+  // 2026-11-10：ci-vm.yml 并入后，ci.yml 新增两处 secrets 引用，都属于「可选」：
+  //   · gate 的 `secrets.GITHUB_TOKEN` —— GitHub 自动注入的内置凭据，
+  //     不是需要人工配置的 secret，用途是读 workflow run 列表做日判重。
+  //   · qemu-shutdown-destruct 的 `secrets.CX_QEMU_GUEST_SSH_KEY` —— 客机 SSH 通道。
+  //     它是**可选**的：未配置时该作业内 `解析客机镜像` 步骤会 skip（不是失败），
+  //     整条 QEMU 链路在镜像/密钥缺失时按设计跳过，不会阻塞任何 PR 或主干。
+  // 原意是「CI 不得依赖需要人工配置的 secret 才能跑通」，因此改成允许清单 +
+  // 明确「允许项必须是可缺省的」，而不是无条件放行所有 secrets.*。
+  const optionalSecrets = new Set(['GITHUB_TOKEN', 'CX_QEMU_GUEST_SSH_KEY']);
+  const secretRefs = [...workflow.matchAll(/secrets\.([A-Za-z0-9_]+)/gu)].map((m) => m[1]);
+  const unexpectedSecrets = [...new Set(secretRefs)].filter((name) => !optionalSecrets.has(name));
+  assert.deepEqual(
+    unexpectedSecrets,
+    [],
+    `CI 不得依赖额外的人工 secret（只允许可缺省的 ${[...optionalSecrets].join(' / ')}），发现：${unexpectedSecrets.join(', ')}`,
+  );
+  // 允许项也必须真的可缺省：QEMU 缺密钥时必须走 skip 分支而不是 throw。
+  assert.match(ciYml, /缺少 secret CX_QEMU_GUEST_SSH_KEY/u,
+    'QEMU 客机密钥缺失必须走 skip 并说明，不能把作业判红');
   const nativeExecutables = [
     'CX_NATIVE_HOST_EXE', 'CX_NATIVE_INJECTION_EXE', 'CX_NATIVE_ASSETS_EXE', 'CX_NATIVE_OPTIONS_EXE',
     'CX_NATIVE_SESSION_EXE', 'CX_NATIVE_SELECTION_EXE', 'CX_NATIVE_TRANSPORT_EXE', 'CX_NATIVE_AUDIT_EXE',

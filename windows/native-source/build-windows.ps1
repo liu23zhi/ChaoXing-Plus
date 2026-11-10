@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory,
     # Build target selector: 'tests' also compiles every test EXE, 'host' skips them.
-    # ci-vm.yml currently calls -BuildTests; the two are equivalent.
+    # ci.yml currently calls -BuildTests; the two are equivalent.
     [ValidateSet('host', 'tests')]
     [string]$Target = 'host',
     [switch]$SkipAssetCopy,

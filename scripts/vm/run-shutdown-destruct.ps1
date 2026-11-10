@@ -15,7 +15,8 @@ Stage resume：验证开机续删与强制关机保障
 两个阶段都由 purge-tests.exe 的分阶段驱动执行（环境变量
 CX_PURGE_TEST_STAGE / CX_PURGE_TEST_TARGET），脚本负责过程断言与证据落盘。
 
-注意：本脚本只由 ci-vm.yml 在一次性虚拟机上调用。不要在开发机上跑 shutdown。
+注意：本脚本只由 .github/workflows/ci.yml 在一次性虚拟机上调用
+（2026-11-10：原 ci-vm.yml 已整体并入 ci.yml）。不要在开发机上跑 shutdown。
 -NoShutdown 只做「登记 + 断言」，仍会真的写 HKCU RunOnce，跑完请按报告里的
 登记名清理（shutdown 阶段失败时登记不会被撤销）。
 #>
@@ -204,7 +205,7 @@ switch ($Stage) {
         # 目标路径必须与 shutdown 阶段一致，缺了它 C 侧会拒绝执行。
         if (-not (Test-Path -LiteralPath $purgeExe)) {
             # -BuildTests 与 -Target tests 等价（后者在 build-windows.ps1 里只是把开关置真）；
-            # 这里统一用 -BuildTests，与 ci-vm.yml 的实际调用保持一致。
+            # 这里统一用 -BuildTests，与 ci.yml 里自毁作业的实际调用保持一致。
             throw "缺少 purge 测试产物: $purgeExe（先跑 windows/native-source/build-windows.ps1 -BuildTests）"
         }
         $target = Join-Path $workRoot 'shutdown-target.txt'
@@ -231,8 +232,14 @@ switch ($Stage) {
             $problems.Add("RunOnce 登记未撤销: $($registered -join ', ')")
         }
 
-        # 强制关机保障：MOVEFILE_DELAY_UNTIL_REBOOT 的项由系统在启动时删除，
-        # 这里只能确认「重启后不再有该登记」——即 PendingFileRenameOperations 无本产品项。
+        # 强制关机保障：MOVEFILE_DELAY_UNTIL_REBOOT 的项由**系统在下次启动时**消费并删除，
+        # 所以「重启后不再有该登记」这个断言只在真的重启过时成立。
+        #
+        # ⚠️ -ReplayRunOnce 模式不重启：它只把 RunOnce 里存的命令串按原文执行一遍
+        # （模拟「登录时 Windows 执行 RunOnce」）。不重启 ⇒ Session Manager 从未启动
+        # ⇒ 那条 pending rename 项必然还在。这不是自毁逻辑坏了，是这条检查的适用范围问题。
+        # 2026-11-10 完整 CI 首次真跑（run 42806707711）就是在这里假红的：
+        # `NATIVE PURGE STAGE PASS` 已通过，只有本条因为没重启而残留。
         $pendingKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
         $pending = @()
         if (Test-Path -LiteralPath $pendingKey) {
@@ -242,7 +249,13 @@ switch ($Stage) {
             }
         }
         if ($pending.Count -gt 0) {
-            $problems.Add("重启后仍有延迟删除登记: $($pending -join ', ')")
+            if ($ReplayRunOnce) {
+                # 未重启：记录但不判红。真重启路径（cx-vm 的关机作业）仍会严格判。
+                $pendingNote = '本模式未重启（-ReplayRunOnce），该项由系统在下次启动时消费，残留属预期'
+                Write-Output "提示: 延迟删除登记仍在（$pendingNote）: $($pending -join ', ')"
+            } else {
+                $problems.Add("重启后仍有延迟删除登记: $($pending -join ', ')")
+            }
         }
 
         Write-StageReport -Name 'resume' -Lines @(
