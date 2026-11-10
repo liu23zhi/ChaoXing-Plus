@@ -1,37 +1,21 @@
-# IMM diagnostic fixture
+# IMM 诊断夹具
 
-Self-contained, read-only diagnostic for the exam client's "input method" check. Copy the folder to a
-Windows machine (a VM snapshot is fine) and run it; nothing is installed or changed.
+自包含的只读诊断工具，原用于检查考试客户端的输入法相关行为。把整个目录复制到 Windows 机器（虚拟机快照亦可）运行即可，不安装也不修改系统。
 
-The folder name is historical: it used to carry a Sogou installer. That installer is gone (CI no longer
-installs third-party input methods); the client only ever looks at `ImmGetDescriptionW`, so the probe and
-input-method spoofing has been frozen, so no stand-in IME is installed.
+文件夹名称为历史遗留。客户端侧的输入法伪装方案已封存，不再安装任何替身输入法。
 
-## Run
+## 运行
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\run-sogou-imm-diagnostic.ps1              # 30 second window, 3 second samples
+.\run-sogou-imm-diagnostic.ps1              # 30 秒窗口，3 秒采样
 .\run-sogou-imm-diagnostic.ps1 -TimeoutSeconds 5
 ```
 
-Each run writes `results/<timestamp>/events.jsonl` and `summary.json` under this folder. Every sample
-contains:
+每次运行在本目录下写入 `results/<timestamp>/events.jsonl` 与 `summary.json`。它只在自身 `results/` 目录内写文件。
 
-- `ImmDescriptions` - `GetKeyboardLayoutList` + `ImmGetDescriptionW` for every loaded HKL, exactly the
-  pair `CXExam.exe` uses (`FUN_004a2780`);
-- `ReadyDescriptions` - the subset with a non-empty description, i.e. what the client would count;
-- `RegisteredImeLayouts` - `HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layouts` entries that carry an
-  `IME file` value (an `E0xxxxxx` KLID is the only way to get a description).
+## 文件
 
-`RESULT=IMM_READY` means at least one loaded layout returned a description. `RESULT=PROBE_TIMEOUT_IMM_NOT_READY`
-means the client's item will fail: either no IME-marked layout is registered, or none is loaded.
-
-## Files
-
-| File | Purpose |
+| 文件 | 用途 |
 | --- | --- |
-| `run-sogou-imm-diagnostic.ps1` | Read-only probe (the client's own criterion) |
-
-Run the probe on a VM snapshot if you want a clean comparison; it never writes outside its own
-`results/` folder.
+| `run-sogou-imm-diagnostic.ps1` | 只读探针 |
