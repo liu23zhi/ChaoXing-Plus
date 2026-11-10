@@ -1,8 +1,30 @@
-name: 虚拟机自毁环境验证
+name: 虚拟机环境验证（KVM 巡检 + 关机自毁）
 
-# 这个工作流只在具备可快照 Windows 虚拟机（runner 标签 cx-vm）的环境运行。
+# ============================================================================
+# 本工作流由两条旧工作流合并而成（2026-11-10，用户要求）：
+#   · probe-kvm-daily.yml   KVM 能力巡检（托管 runner，只读）
+#   · ci-vm.yml             虚拟机自毁环境验证（self-hosted cx-vm）
+# 合并理由：两者验证的是同一件事的两半 ——「宿主有没有 KVM 能力」与
+# 「拿到能力后自毁链路是否真的работа」。分两个文件导致 CI 要拉两个 workflow、
+# 产两份记录，而它们的时间语义完全相同（都是「每天最多一次」）。
+# ============================================================================
 #
-# 为什么仍然必须是 self-hosted + cx-vm（2026-11-09 实测修订）：
+# ## 触发方式（2026-11-10 起）
+#
+#   · workflow_dispatch —— 手动。**一定运行**，不受「今天跑过没有」限制。
+#                          手动还会额外拉起自毁验证（若 CX_VM_ENABLED=true）与接线探针。
+#   · workflow_call     —— 由 ci.yml 调用。先查今天是否已有有效记录，
+#                          有则跳过；且**只跑轻量的 KVM 巡检**，不拉自毁验证。
+#   · 已**移除** schedule（原先每周日 0 18 * * 0）与 pull_request[labeled]。
+#
+# ## 「同一个日历日只跑一次」的语义
+#
+#   手动 → 一定要跑（哪怕今天已经跑过）
+#   CI 调用 → 今天已跑过就跳过
+#
+# ============================================================================
+# ## 为什么自毁验证仍然必须是 self-hosted + cx-vm（2026-11-09 实测修订）
+#
 #   早先这里写的是「托管 runner 不支持嵌套虚拟化」。这条**已被实测推翻**，
 #   不是本工作流留在 self-hosted 的理由。实测事实（run 42588732951 / 42590175761）：
 #     · 托管 ubuntu-24.04 runner **确实有** /dev/kvm（crw-rw---- root kvm 10,232）
@@ -15,42 +37,233 @@ name: 虚拟机自毁环境验证
 #         自己的前提下真重启宿主，也没有外部快照 API 可还原。
 #     (2) 想绕开 (1) 就得用 ubuntu + QEMU 跑 Windows guest（重启发生在 guest 内层），
 #         那条路实测「能成」但成本不可接受：Windows Server 2025 ISO 5.60 GiB、
-#         下载 520 s，冷启动到 Setup 画面已耗时 9.7 分钟 —— 只适合每日跑，
-#         不适合每次 PR。每日只做权限巡检的作业见 probe-kvm-daily.yml。
-#   结论：self-hosted + 可快照 VM 依然是「验证最完整、每次 PR 都能跑」的那条路。
-#   论证与数据出处：task_doc/06-CI升级与虚拟机测试.md §4.2 / §5.5，
-#   索引：task_doc/00-总览与任务索引.md §8「PLUS KVM 探测结论」、§9 第 12 条。
+#         下载 520 s，冷启动到 Setup 画面已耗时 9.7 分钟 —— 不适合每次 PR。
+#   结论：self-hosted + 可快照 VM 依然是「验证最完整」的那条路。
 #
-# 触发方式刻意保守，避免没有 VM runner 时让所有 PR 变红：
-#   - 手动触发
-#   - 每周一次夜间巡检
-#   - PR 打了 vm-test 标签
-# 需要仓库变量 CX_VM_ENABLED=true 才会真正执行，否则整作业 skipped。
+# → KVM 巡检（kvm-probe job）跑在托管 ubuntu，负责把「托管 runner 的 KVM 权限」
+#   这个外部事实变成可追溯记录；它的基线结论是「有设备、无权限」，一旦
+#   KVM_ACCESSIBLE 从 no 变 yes 就说明 GitHub 改了 runner 镜像，需要复核上面 (1)(2)。
+#
+# ============================================================================
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 18 * * 0'
-  pull_request:
-    types: [labeled]
+    inputs:
+      force:
+        description: '强制运行（手动触发恒为 true，不受「今天跑过」限制）'
+        type: boolean
+        default: true
+      include_vm_destruct:
+        description: '同时运行虚拟机自毁验证（需 self-hosted cx-vm 与 CX_VM_ENABLED=true）'
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      force:
+        description: '强制运行（即使今天已经验证过）'
+        type: boolean
+        default: false
+    outputs:
+      skipped:
+        description: '本次是否因「今天已跑过」而跳过（yes/no）'
+        value: ${{ jobs.gate.outputs.skip }}
+      reason:
+        description: '跳过或执行的原因'
+        value: ${{ jobs.gate.outputs.reason }}
+      kvm_verdict:
+        description: 'KVM 能力结论（可读写 / 有设备无权限 / 无设备）'
+        value: ${{ jobs.kvm-probe.outputs.verdict }}
 
 permissions:
   contents: read
+  actions: read          # gate 需要读本仓库 workflow run 列表判断「今天跑过没有」
 
 concurrency:
   group: ci-vm-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 日判重闸：手动恒放行，CI 调用时才查「今天是否已跑过」。
+  # ---------------------------------------------------------------------------
+  gate:
+    name: 是否今天已验证过（手动恒运行，CI 调用才判重）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.gate.outputs.SKIP }}
+      reason: ${{ steps.gate.outputs.REASON }}
+    steps:
+      - name: 日判重
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -eu
+          today_utc=$(date -u +%Y-%m-%d)
+
+          # 手动触发 → 一定运行（用户要求：手动拉起则一定要跑）
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=手动触发（workflow_dispatch），一定运行" >> "$GITHUB_OUTPUT"
+            echo "今天(UTC)=$today_utc → 手动触发，运行"
+            exit 0
+          fi
+
+          # 调用方显式要求强制 → 运行
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=调用方要求强制执行" >> "$GITHUB_OUTPUT"
+            echo "今天(UTC)=$today_utc → 调用方 force=true，运行"
+            exit 0
+          fi
+
+          # CI 调用 → 查今天是否已有有效记录（排除 cancelled / skipped / queued）
+          count=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci-vm.yml/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled" and .conclusion != "skipped" and .status != "queued")] | length')
+          echo "今天(UTC)=$today_utc，已有 $count 条有效验证记录"
+          if [ "$count" -gt 0 ]; then
+            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)已有 $count 条验证记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
+          else
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)还没有验证记录，执行" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 跳过说明
+        if: steps.gate.outputs.SKIP == 'yes'
+        run: |
+          set -eu
+          echo "::notice title=虚拟机环境验证已跳过::${{ steps.gate.outputs.REASON }}"
+          {
+            echo '## 虚拟机环境验证（已跳过）'
+            echo ''
+            echo "- 原因：${{ steps.gate.outputs.REASON }}"
+            echo ''
+            echo '> 要强制运行：在 Actions 页面选本 workflow 点 `Run workflow`（手动触发一定运行）。'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # KVM 能力巡检：托管 ubuntu-24.04，只读，不安装/不下载/不启动虚拟机。
+  #
+  # 已知基线（2026-11-09 实测，run 42588732951 / 42590175761）：
+  #   /dev/kvm       存在，crw-rw---- 1 root kvm 10, 232
+  #   作业用户       uid=1001(runner)，**不在 kvm 组**
+  #   -r / -w        均失败 → KVM_ACCESSIBLE=no
+  #   kvm 模块       kvm_amd / kvm / irqbypass 已加载（宿主已开嵌套虚拟化）
+  #   sudo           免密可用；chmod 666 /dev/kvm 实测 8 ms 生效
+  # ⇒ 结论是「有设备、无权限」，不是「没有嵌套虚拟化」。
+  # ---------------------------------------------------------------------------
+  kvm-probe:
+    name: KVM 能力巡检（托管 runner，只读）
+    needs: gate
+    if: needs.gate.outputs.skip != 'yes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
+    steps:
+      - name: 设备节点与作业用户
+        run: |
+          set -u
+          echo '=== 设备节点 ==='
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm
+            stat -c 'STAT_MODE=%A STAT_OWNER=%U STAT_GROUP=%G STAT_DEV=%t,%T' /dev/kvm
+            echo 'KVM_DEVICE_EXISTS=yes'
+          else
+            echo 'KVM_DEVICE_EXISTS=no'
+          fi
+          echo
+          echo '=== 作业用户与组（看是否在 kvm 组）==='
+          id
+          echo
+          echo '=== 直接读写检查 ==='
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo 'KVM_ACCESSIBLE=yes'
+          else
+            echo 'KVM_ACCESSIBLE=no'
+            # 分开报告，方便区分「设备没有」和「有设备但没权限」。
+            [ -e /dev/kvm ] && echo 'KVM_DENIED_BY_PERMISSION=yes' || echo 'KVM_DENIED_BY_PERMISSION=no'
+          fi
+
+      - name: 虚拟化标志与内核模块
+        run: |
+          set -u
+          echo '=== CPU 虚拟化标志 ==='
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(vmx|svm|hypervisor)$' || echo '（未找到 vmx/svm/hypervisor）'
+          echo
+          echo '=== CPU 与内存 ==='
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "NPROC=$(nproc)"
+          free -h
+          echo
+          echo '=== kvm 模块 ==='
+          lsmod | grep -i '^kvm' || echo '（kvm 模块未加载）'
+          ls -d /sys/module/kvm* 2>/dev/null || echo '（无 kvm 模块目录）'
+
+      - name: sudo 可用性（不改设备权限）
+        run: |
+          set -u
+          # 只探测是否免密，不改 /dev/kvm 的 mode —— 巡检作业不做任何变更，
+          # 「sudo chmod 666 能在毫秒级解决权限」这条已有一次性实测证据。
+          if sudo -n true 2>/dev/null; then
+            echo 'SUDO_NOPASSWD=yes'
+          else
+            echo 'SUDO_NOPASSWD=no'
+          fi
+
+      - name: 汇总并记录结论
+        id: verdict
+        run: |
+          set -u
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            VERDICT='可读写'
+            DETAIL='`/dev/kvm` **存在且可读写** → 可以走 KVM 硬件加速'
+            echo '::warning title=KVM 能力变化::托管 runner 的 /dev/kvm 变为可读写，与 2026-11-09 基线（KVM_ACCESSIBLE=no）不一致，请复核本文件头部的 (1)(2) 两条结论。'
+          elif [ -e /dev/kvm ]; then
+            VERDICT='有设备无权限'
+            DETAIL='`/dev/kvm` 存在但**作业用户无权限**（与 2026-11-09 基线一致）'
+            echo "::notice title=KVM 能力::KVM_ACCESSIBLE=no（已知基线，非故障）"
+          else
+            VERDICT='无设备'
+            DETAIL='`/dev/kvm` **不存在** → 只能 TCG 软件模拟'
+            echo '::warning title=KVM 能力变化::托管 runner 不再提供 /dev/kvm，与 2026-11-09 基线不一致，请复核本文件头部的 (1)(2) 两条结论。'
+          fi
+
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "KVM_VERDICT=$VERDICT"
+          {
+            echo '## KVM 能力巡检'
+            echo ''
+            echo "- 结论：$DETAIL"
+            echo "- KVM 设备：$( [ -e /dev/kvm ] && echo 存在 || echo 不存在 )"
+            echo "- 作业用户：$(id -u)/$(id -un)，组 $(id -Gn | tr ' ' ',')"
+            echo "- CPU：$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+            echo "- 核数：$(nproc)"
+            echo "- 内存：$(free -g | awk '/^Mem:/{print $2}') GiB"
+            echo "- kvm 模块：$(lsmod | grep -ci '^kvm') 条"
+            echo "- 触发方式：${{ github.event_name }}"
+            echo ''
+            echo '> 本作业只巡检，不安装、不下载镜像、不启动虚拟机；红叉不影响任何 PR 的必需检查。'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 关机自毁端到端：需要 self-hosted cx-vm + 仓库变量 CX_VM_ENABLED=true。
+  # 只在**手动触发**时出现（CI 调用不拉这条，因为它要 60 分钟且依赖特定 runner）。
+  # ---------------------------------------------------------------------------
   vm-shutdown-destruct:
     name: 关机自毁与开机续删（虚拟机）
-    # 三重保护：变量开启、事件类型匹配、runner 可用。
+    needs: gate
+    # 三重保护：日判重放行、手动触发、变量开启。
     if: |
-      vars.CX_VM_ENABLED == 'true' && (
-        github.event_name == 'workflow_dispatch' ||
-        github.event_name == 'schedule' ||
-        (github.event_name == 'pull_request' && github.event.label.name == 'vm-test')
-      )
+      needs.gate.outputs.skip != 'yes' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.include_vm_destruct == true) &&
+      vars.CX_VM_ENABLED == 'true'
     runs-on: [self-hosted, windows, cx-vm]
     timeout-minutes: 60
     steps:
@@ -96,12 +309,6 @@ jobs:
           # 因此这里不需要任何「允许未签名」开关。
           ./windows/native-source/build-windows.ps1 -BuildTests
 
-      # 缺陷 c（CX_PURGE_TEST_STAGE / CX_PURGE_TEST_TARGET 无人读取）与
-      # 缺陷 d（注册表断言位置不匹配）都不在本分支修，属 fix/purge-wiring-261109 的范围：
-      # 该分支在 purge-tests.c 里新增 GetEnvironmentVariableW(CX_PURGE_TEST_STAGE/TARGET)
-      # 的分阶段入口，并在分阶段路径上刻意不做 run key 重定向，以对齐下面
-      # run-shutdown-destruct.ps1 断言的真实 HKCU\...\RunOnce。
-      # 顺序依赖：必须先合并 fix/purge-wiring-261109，本工作流的下两个步骤才可能通过。
       - name: 关机自毁端到端
         shell: pwsh
         run: |
@@ -151,19 +358,21 @@ jobs:
         env:
           VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
 
+  # ---------------------------------------------------------------------------
   # 接线就绪度探针：不依赖 cx-vm runner，在托管 windows-latest 上只跑「不关机」的那半条链路。
-  #
-  # 为什么可以加：只由 workflow_dispatch 触发，PR 与夜间巡检都不会调用它；
-  # 再叠加 job 级 continue-on-error，即使失败也不会把主 CI 或本工作流判红。
   #
   # 为什么必须标 continue-on-error：缺陷 c（purge-tests.c 不读 CX_PURGE_TEST_STAGE/
   # CX_PURGE_TEST_TARGET）与缺陷 d（注册表断言位置不匹配）目前都由
   # fix/purge-wiring-261109 处理。在该分支合并前，重放步骤必然失败，
   # 这个作业只是「构建段已接通」的证据，不是功能验收。
   # 合并后请去掉 continue-on-error，让它变成真正的门禁。
+  # ---------------------------------------------------------------------------
   wiring-probe:
     name: 接线就绪度探针（不关机，托管 runner）
-    if: github.event_name == 'workflow_dispatch'
+    needs: gate
+    if: |
+      needs.gate.outputs.skip != 'yes' &&
+      github.event_name == 'workflow_dispatch'
     continue-on-error: true
     runs-on: windows-latest
     timeout-minutes: 40

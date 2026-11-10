@@ -564,11 +564,10 @@ jobs:
 
 
   kvm-probe:
-    name: KVM probe (called by CI)
-    uses: ./.github/workflows/probe-kvm-daily.yml
+    name: 虚拟机环境验证（由 CI 调用，只跑 KVM 巡检）
+    uses: ./.github/workflows/ci-vm.yml
     with:
       force: false
-    secrets: inherit
 
   summary:
     name: 持续集成汇总
@@ -619,9 +618,9 @@ jobs:
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
             if [[ "$KVM_PROBE_SKIPPED" == "yes" ]]; then
-              printf '| KVM 能力巡检 | 跳过（%s） |\n' "$KVM_PROBE_REASON"
+              printf '| 虚拟机环境验证 | 跳过（%s） |\n' "$KVM_PROBE_REASON"
             else
-              printf '| KVM 能力巡检 | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
+              printf '| 虚拟机环境验证 | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             fi
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
