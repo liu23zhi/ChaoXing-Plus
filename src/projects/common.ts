@@ -2,6 +2,7 @@ import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUpload
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
+import { ensurePanelGlassLayer } from '../runtime/panel-glass.js';
 import { mountWindowsHostLogPanel } from '../runtime/windows-host-log.js';
 import type { ScriptPanel, ConfigDefinition } from '../runtime/types.js';
 import { playbackRate, volume } from '../utils/configs.js';
@@ -3354,6 +3355,11 @@ function applyPanelVisual(panel: ScriptPanel | undefined, kind: 'workResults' | 
   panel.root.style.boxShadow = panelPinkTheme.shellShadow;
   panel.root.style.borderRadius = kind === 'workResults' ? '24px' : '18px';
   panel.root.style.padding = kind === 'workResults' ? '14px' : '12px';
+  // 干玻璃表面层（78-*.md §6.2，用户裁决 Q78-2）：只保留半透明底 + 高光描边，
+  // 默认不含任何模糊。做成独立层而不是改 root 的 background/border —— 那三行与
+  // root 的 borderTopColor 已被 pink-panel-ui.test.mjs:160-162 与
+  // windows-panel-theme.browser.mjs:77/80/83 逐字符钉死为主题判据。
+  ensurePanelGlassLayer(panel.root);
   panel.configsContainer.style.display = '';
   panel.body.style.display = '';
   bindPanelDrag(panel, kind);
