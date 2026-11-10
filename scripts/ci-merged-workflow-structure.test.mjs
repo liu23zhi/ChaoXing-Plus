@@ -273,9 +273,17 @@ test('wiring-probe 的 if 覆盖 push / pull_request / workflow_dispatch 三种�
     `三种触发必须并列（||），不能只留其中一种，实际：\n${condition}`,
   );
   // 日判重闸不能被顺手删掉：删了 kvm-probe 就会和自毁作业重复跑。
+  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，**不约束三条自毁作业**。
+  // 因为用户要求「完整 CI 里必须有完整关机自毁测试」，若自毁作业也被日判重跳过，
+  // 就退回了「关机自毁从未在 CI 里跑过」的老状态。
+  // 所以这里断言的是「只受 gate.result 约束，不看 gate.outputs.skip」。
   assert.ok(
-    condition.includes("needs.gate.outputs.skip != 'yes'"),
-    `wiring-probe 必须保留 gate 闸，实际：\n${condition}`,
+    condition.includes("needs.gate.result == 'success'"),
+    `wiring-probe 必须受 gate.result 约束（gate 跑挂了才不跑），实际：\n${condition}`,
+  );
+  assert.ok(
+    !condition.includes("needs.gate.outputs.skip"),
+    `wiring-probe 不得被日判重跳过 —— 那会让「完整 CI 有自毁测试」失效，实际：\n${condition}`,
   );
 });
 
@@ -306,13 +314,15 @@ test('vm-shutdown-destruct 由仓库变量开启，不再要求手动触发', as
     condition.includes("vars.CX_VM_ENABLED == 'true'"),
     `vm-shutdown-destruct 必须保留 CX_VM_ENABLED 变量门（托管 runner 没有 cx-vm 标签，硬跑会永久排队），实际：\n${condition}`,
   );
+  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，不约束自毁作业。
+  // 真关机是「完整 CI 里必须有」的那部分，被日判重跳过等于退回「从未跑过」。
   assert.ok(
-    !condition.includes("github.event_name == 'workflow_dispatch'"),
-    `vm-shutdown-destruct 不能只在手动触发时运行，实际：\n${condition}`,
+    condition.includes("needs.gate.result == 'success'"),
+    `vm-shutdown-destruct 必须受 gate.result 约束，实际：\n${condition}`,
   );
   assert.ok(
-    condition.includes("needs.gate.outputs.skip != 'yes'"),
-    `vm-shutdown-destruct 必须保留 gate 闸，实际：\n${condition}`,
+    !condition.includes("needs.gate.outputs.skip"),
+    `vm-shutdown-destruct 不得被日判重跳过，实际：\n${condition}`,
   );
 });
 

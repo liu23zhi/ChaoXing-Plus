@@ -752,6 +752,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       verdict: ${{ steps.verdict.outputs.verdict }}
+      # 2026-11-10 合并前这两个值来自 ci-vm.yml 的 workflow_call outputs
+      # （jobs.gate.outputs.skip|reason）。合并后 workflow_call 层消失，
+      # kvm-probe 必须自己转发；否则 summary 的「跳过（原因）」恒为空，
+      # 「因日判重而跳过」与「压根没执行」无法区分。
+      skipped: ${{ needs.gate.outputs.skip }}
+      reason: ${{ needs.gate.outputs.reason }}
     steps:
       - name: 设备节点与作业用户
         run: |
@@ -846,10 +852,12 @@ jobs:
   vm-shutdown-destruct:
     name: 关机自毁与开机续删（虚拟机）
     needs: gate
-    # 三重保护：日判重放行、变量开启、（不再要求手动触发）。
+    # 三重保护：变量开启、非 PR、（不再要求手动触发）。
     # 托管 runner 没有 cx-vm 标签，硬跑会永久排队，所以变量门必须留。
+    # ⚠️ 刻意**不看** gate.outputs.skip：日判重只省 kvm-probe 的成本，
+    # 自毁作业是「完整 CI 里必须有」的那部分，跳过等于退回「从未在 CI 里跑过」。
     if: |
-      needs.gate.outputs.skip != 'yes' &&
+      needs.gate.result == 'success' &&
       vars.CX_VM_ENABLED == 'true' &&
       (github.event_name != 'pull_request' || github.event.inputs.include_vm_destruct != 'false')
     runs-on: [self-hosted, windows, cx-vm]
@@ -987,8 +995,9 @@ jobs:
     # 这是「完整 CI 也跑关机自毁测试」的落地链路，因此 push / PR / 手动都跑。
     # PR 上挂 continue-on-error：它约 40 分钟且受宿主环境影响，不该阻塞代码评审；
     # push 到 main 与手动触发时严格（失败即红），这样真正的回归会被抓住。
+    # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁语义验证。
     if: |
-      needs.gate.outputs.skip != 'yes' &&
+      needs.gate.result == 'success' &&
       (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
@@ -1123,8 +1132,9 @@ jobs:
     needs: gate
     # 只在 push 到 main 与手动触发时出现：45 分钟且要求客机镜像可用。
     # PR 不跑（成本太高）；镜像未配置时作业内部会 skip 而不是 fail。
+    # 刻意不看 gate.outputs.skip：同上，日判重不约束自毁作业。
     if: |
-      needs.gate.outputs.skip != 'yes' &&
+      needs.gate.result == 'success' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
