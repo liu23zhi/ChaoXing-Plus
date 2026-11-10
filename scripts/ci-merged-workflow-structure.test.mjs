@@ -37,10 +37,15 @@ const EXPECTED_JOBS = [
   'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
+  // 2026-11-11 新增：Linux guest 关机自毁。KVM 路线实测可达（提权后 KVM_ACCESSIBLE=yes），
+  // 用 Ubuntu cloud image + 覆盖层 + guest 内真实重启验证「关机销毁 / 开机续删」语义。
+  // 放在 qemu-shutdown-destruct 之后、summary 之前：它与前者同属 QEMU 自毁族，
+  // 但前者依赖 Windows qcow2（可能 skip），本作业不 skip、拿不到 KVM 就硬失败。
+  'qemu-destruct-linux-guest',
   'summary',
 ];
 
-// summary 汇总了哪些作业（14 项，不含它自己）。
+// summary 汇总了哪些作业（15 项，不含它自己）。
 const EXPECTED_SUMMARY_NEEDS = [
   'source',
   'windows-build',
@@ -56,6 +61,7 @@ const EXPECTED_SUMMARY_NEEDS = [
   'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
+  'qemu-destruct-linux-guest',
 ];
 
 // 去掉纯注释行后再断言，避免注释里的字样造成假通过/假失败。
@@ -214,9 +220,9 @@ test('ci.yml 里不再有任何本地 workflow 复用调用', async () => {
   assert.doesNotMatch(text, /uses:\s*\.\/\.github\/workflows\/ci-vm\.yml/u);
 });
 
-// ─────────────────────── 2. 15 个作业全在且顺序合理 ───────────────────────
+// ─────────────────────── 2. 16 个作业全在且顺序合理 ───────────────────────
 
-test('jobs 块恰好是合并后的 15 个作业，顺序精确', async () => {
+test('jobs 块恰好是合并后的 16 个作业，顺序精确', async () => {
   const names = await jobNames();
   assert.deepEqual(
     names,
@@ -364,7 +370,7 @@ test('qemu-shutdown-destruct 在 push 与手动触发时都运行，不是只手
 
 // ───────────────────── 4. summary 汇总完整 ─────────────────────
 
-test('summary.needs 精确包含 14 个上游作业', async () => {
+test('summary.needs 精确包含 15 个上游作业', async () => {
   const section = await jobSection('summary');
   const raw = inlineValue(section, 'needs');
   assert.match(raw, /^\[.*\]$/u, `needs 必须是单行列表写法，实际：${raw}`);
