@@ -62,8 +62,86 @@ test('ci-vm.yml 的 runner 标签与必要检查名保持不变', async () => {
   const workflow = await read('.github/workflows/ci-vm.yml');
   assert.match(workflow, /runs-on: \[self-hosted, windows, cx-vm\]/u, 'self-hosted cx-vm 策略不变');
   assert.match(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '既有 job 名不得改动');
-  assert.match(workflow, /name: 接线就绪度探针（不关机，托管 runner）/u, '既有作业名不得改动');
   assert.match(workflow, /vars\.CX_VM_ENABLED == 'true'/u, '三重保护不变');
+  // 托管 runner 上的语义验证作业必须保留，否则「RunOnce 命令串是否可执行」
+  // 会退回到「从未验证」。
+  assert.match(workflow, /^ {2}wiring-probe:$/mu, 'wiring-probe 作业必须保留');
+  assert.match(workflow, /name: 自毁续删语义验证（不关机，托管 runner）/u, '作业名需说明它验证的是语义而非接线');
+});
+
+test('wiring-probe 必须真跑两阶段语义验证，不能只验证接线', async () => {
+  const workflow = withoutComments(await read('.github/workflows/ci-vm.yml'));
+
+  // 1) 必须是 workflow_dispatch 独占：不参与 PR、不参与夜间巡检。
+  //    2026-11-10 合并后改为多行 if（多了 gate 日判重），语义不变、约束更强，
+  //    因此这里断言『if 块里出现 workflow_dispatch 且没有 pull_request/schedule』。
+  assert.match(workflow, /^\s+if: \|/mu, 'wiring-probe 必须显式声明 if 块');
+  assert.match(workflow, /github\.event_name == 'workflow_dispatch'/u, '只由手动触发');
+  assert.doesNotMatch(workflow, /^\s{2}pull_request:/mu, '不得挂 pull_request');
+  assert.doesNotMatch(workflow, /^\s{2}schedule:/mu, '不得挂 schedule');
+
+  // 2) 不得再挂 continue-on-error —— 挂了就永远绿，等于没有门禁。
+  //    缺陷 c/d 已由 PR #29 修掉，保留它会让真实的续删回归被吞掉。
+  assert.doesNotMatch(workflow, /continue-on-error/u, '不得保留 continue-on-error（会让门禁永远是绿的）');
+
+  // 3) 两阶段都必须真跑，且顺序固定：先登记再重放。
+  const shutdownIndex = workflow.indexOf('-Stage shutdown -NoShutdown');
+  const replayIndex = workflow.indexOf('-Stage resume -ReplayRunOnce');
+  assert.ok(shutdownIndex > 0, '必须跑 shutdown -NoShutdown 阶段');
+  assert.ok(replayIndex > 0, '必须跑 resume -ReplayRunOnce 阶段（这是盖住「续删真的执行」的那一半）');
+  assert.ok(shutdownIndex < replayIndex, '必须先登记再重放：resume 断言的正是重放之后的状态');
+
+  // 4) 覆盖边界必须写在注释里，不许留悬空断言。
+  const raw = await read('.github/workflows/ci-vm.yml');
+  assert.match(raw, /不覆盖|盖不住/u, '必须写明这个作业覆盖不到什么');
+  assert.match(raw, /WM_QUERYENDSESSION/u, '必须点名未覆盖的真实关机时序');
+  assert.match(raw, /MOVEFILE_DELAY_UNTIL_REBOOT/u, '必须点名未覆盖的重启后删除');
+
+  // 5) workflow 传了 -ReplayRunOnce，脚本就必须真的实现它。
+  //    否则参数被静默忽略，两阶段退化成两次 -NoShutdown：作业仍是绿的，
+  //    但「注册表里那条命令串能不能执行」这一半又回到从未验证。
+  const vmScript = await read('scripts/vm/run-shutdown-destruct.ps1');
+  assert.match(vmScript, /\[switch\]\$ReplayRunOnce/u, '脚本必须声明 -ReplayRunOnce 开关');
+  assert.match(vmScript, /if \(\$ReplayRunOnce\)/u, '开关必须真的分支，不能只声明');
+  // 重放必须按注册表原文执行（cmd /c <stored command>），不能自己拼一条新命令。
+  assert.match(vmScript, /& \$shell \/c \$command/u, '必须把注册表里存的命令串原样交给 shell');
+  assert.match(vmScript, /Get-ItemProperty -LiteralPath \$runOnceKey -Name \$name/u, '命令串必须从 RunOnce 读回');
+  // 重放后登记必须清空，否则 -ReplayRunOnce 就成了「跑了但没断言」。
+  assert.match(vmScript, /重放 RunOnce 后登记仍在/u, '重放后残留登记必须记为问题');
+
+  // 6) 残留检查必须查脚本真正用的那个临时根目录。
+  //    run-shutdown-destruct.ps1 用「有 RUNNER_TEMP 就用它，否则 %TEMP%」，
+  //    只查 %TEMP% 会在 runner 上漏报（%TEMP% 与 RUNNER_TEMP 不是同一个目录）。
+  const leftoverStep = raw.slice(raw.indexOf('断言运行后无残留'));
+  assert.match(leftoverStep, /\$env:RUNNER_TEMP/u, '残留检查必须覆盖 RUNNER_TEMP');
+  assert.match(leftoverStep, /IsNullOrWhiteSpace\(\$_\)|IsNullOrWhiteSpace\(\$env:TEMP\)/u,
+    '临时根目录要过滤空值后取唯一值');
+
+  // 7) 不得设对本作业无效的环境变量：上一轮的 CX_NATIVE_BUILD_ALLOW_UNSIGNED
+  //    就是这样来的（全仓只此一处，没人读它）。本作业不跑任何宿主，
+  //    CXPLUS_NO_LOG_FILE 只被 windows/node-source/main.mjs 读取。
+  //    注意要跑在去注释文本上：注释里正好在解释「为什么不设它」。
+  assert.doesNotMatch(workflow, /CXPLUS_NO_LOG_FILE/u,
+    'CXPLUS_NO_LOG_FILE 只被 Node 宿主读取，本作业不跑宿主，设了就是死变量');
+});
+
+test('每个跑测试的作业都要把 TAP 传成 artifact', async () => {
+  // 历史缺陷：TAP 只写进 runner 临时目录，作业结束即销毁，
+  // 失败时最需要 TAP 却拿不到。逐个作业核对「写了哪个 tap」==「传了哪个 tap」。
+  const workflow = withoutComments(await read('.github/workflows/ci.yml'));
+
+  const writePaths = [...workflow.matchAll(/Join-Path \$env:RUNNER_TEMP '([^']+\.tap)'/gu)].map((m) => m[1]);
+  const uploadPaths = [...workflow.matchAll(/path: \$\{\{ runner\.temp \}\}\/([^\s]+\.tap)/gu)].map((m) => m[1]);
+  const artifactNames = [...workflow.matchAll(/^\s+name: ([\w-]+-tap)\s*$/gmu)].map((m) => m[1]);
+
+  assert.ok(writePaths.length > 0, '必须能找到 TAP 写入路径');
+  // 每个写出的 TAP 都必须被上传，否则该作业的日志等于丢弃。
+  for (const tap of new Set(writePaths)) {
+    assert.ok(uploadPaths.includes(tap), `TAP ${tap} 被写出但没有上传`);
+  }
+  // artifact 名不得重复：同名 artifact 会引起覆盖/上传冲突。
+  assert.equal(new Set(artifactNames).size, artifactNames.length,
+    `artifact 名重复: ${artifactNames.join(', ')}`);
 });
 
 // 2026-11-10：原先独立的 probe-kvm-daily.yml 已并入 ci-vm.yml（用户要求合并成单一

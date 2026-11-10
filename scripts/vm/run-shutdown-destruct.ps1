@@ -25,8 +25,19 @@ param(
     [ValidateSet('shutdown', 'resume')]
     [string]$Stage,
 
-    # 跳过真实关机，只做登记与断言。用于在没有 VM 的环境里做语法与逻辑自检。
-    [switch]$NoShutdown
+    # 跳过真实关机，只做登记与断言。用于在没有 VM 的环境里做语法自检。
+    [switch]$NoShutdown,
+
+    # 在 resume 阶段之前，把 shutdown 阶段登记的真实 RunOnce command 串
+    # **按注册表里存的原文**执行一次，模拟「登录时 Windows 执行 RunOnce」。
+    #
+    # 为什么需要一个单独的开关：$NoShutdown 只是「不关机」，
+    # 它证明的是「登记正确」；而开机续删真正要证的是
+    # 「RunOnce 里那条命令串被 Windows 执行后，脚本删掉了目标、并撤销了登记」。
+    # 在本机/托管 Windows runner 上跑不了真重启，但可以执行**存储的那条命令串**
+    # ——这正是 Windows 登录时做的事（`reg query` 拿到什么就执行什么）。
+    # 覆盖不到的只有「登录会话真去读 RunOnce 这个动作」，不是命令串本身。
+    [switch]$ReplayRunOnce
 )
 
 $ErrorActionPreference = 'Stop'
@@ -146,6 +157,48 @@ switch ($Stage) {
 
     'resume' {
         $problems = [System.Collections.Generic.List[string]]::new()
+
+        # -ReplayRunOnce：先按注册表里存的原文执行那条 RunOnce 命令串，
+        # 再交给 purge-tests 的 resume 阶段做原生断言。
+        #
+        # 顺序不能反：resume 断言的正是「RunOnce 执行之后」的状态。
+        # 执行前后各记录一次登记名，用来区分三种情况：
+        #   执行前就没有 → 用户没跑 shutdown 阶段，属调用顺序错误
+        #   执行后有残留 → 续删逻辑没删净（真缺陷）
+        #   执行后清空   → 期望行为
+        if ($ReplayRunOnce) {
+            $beforeReplay = @(Get-PurgeRunOnceValues)
+            if ($beforeReplay.Count -eq 0) {
+                throw 'RunOnce 里没有 cxplus-purge-* 登记，无法重放（先跑 -Stage shutdown）'
+            }
+            Write-Output "重放前登记项: $($beforeReplay -join ', ')"
+            foreach ($name in $beforeReplay) {
+                $command = (Get-ItemProperty -LiteralPath $runOnceKey -Name $name -ErrorAction Stop).$name
+                if ([string]::IsNullOrWhiteSpace($command)) { throw "RunOnce 项 $name 的值为空" }
+                Write-Output "重放 RunOnce 命令串 [$name]: $command"
+                # 与 Windows 登录时一致：把存下来的命令行原样交给 shell 执行。
+                # 不能用 Start-Process 拆参数 —— 那条串本身就是一个完整命令行，
+                # 里面已经有成对引号，拆开就变味了。
+                $shell = $env:ComSpec
+                if ([string]::IsNullOrWhiteSpace($shell)) { $shell = 'cmd.exe' }
+                & $shell /c $command | Out-Null
+                $launchCode = $LASTEXITCODE
+                Write-Output "重放退出码: $launchCode"
+                # 续删脚本是独立进程，命令串返回时它可能还在收尾。
+                # 最多等 60 s（与 purge-tests 内部的 wait_gone_file 同量级）。
+                $waited = 0
+                while ($waited -lt 60000 -and (@(Get-PurgeRunOnceValues).Count -gt 0)) {
+                    Start-Sleep -Milliseconds 200
+                    $waited += 200
+                }
+                Write-Output "重放后等待: ${waited}ms"
+            }
+            $afterReplay = @(Get-PurgeRunOnceValues)
+            Write-Output "重放后登记项: $(if ($afterReplay.Count -eq 0) { '(无)' } else { $afterReplay -join ', ' })"
+            if ($afterReplay.Count -gt 0) {
+                $problems.Add("重放 RunOnce 后登记仍在: $($afterReplay -join ', ')")
+            }
+        }
 
         # purge-tests 的 resume 阶段做原生断言：目标已删 + 真实 RunOnce 登记已撤销。
         # 目标路径必须与 shutdown 阶段一致，缺了它 C 侧会拒绝执行。

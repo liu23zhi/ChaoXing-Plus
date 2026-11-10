@@ -240,7 +240,18 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          "## Windows 单元与原生测试`n`n测试在独立 runner 串行分组执行；完整 TAP 日志位于 runner 临时目录。" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "## Windows 单元与原生测试`n`n测试在独立 runner 串行分组执行；完整 TAP 日志见下方 artifact。" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+      # 历史缺陷：TAP 只写进 runner 临时目录，作业结束即销毁。
+      # 单元作业是失败率最高的一环（实测 run 42674827829 在 windows-node-launch 挂掉），
+      # 失败时最需要 TAP，却恰恰拿不到。改为 always 上传。
+      - name: 上传单元测试 TAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unit-tap
+          path: ${{ runner.temp }}/ci-unit-tests.tap
+          if-no-files-found: warn
+          retention-days: 7
 
   windows-pause:
     name: Windows 标签页暂停隔离回归
@@ -275,6 +286,14 @@ jobs:
           $tapPath = Join-Path $env:RUNNER_TEMP 'ci-tab-answer-pause.tap'
           node --test --test-reporter=tap --test-concurrency=1 --test-timeout=300000 $testFile 2>&1 | Tee-Object -FilePath $tapPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 上传暂停隔离 TAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pause-tap
+          path: ${{ runner.temp }}/ci-tab-answer-pause.tap
+          if-no-files-found: warn
+          retention-days: 7
 
   windows-window:
     name: Windows 可见窗口与 Edge/Chrome 会话回归
@@ -377,12 +396,18 @@ jobs:
           node --test --test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files 2>&1 | Tee-Object -FilePath $tapPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 上传可见窗口测试 TAP
+      # 这里的 TAP 文件名必须与上面 --reporter 写出的文件名一致。
+      # 历史缺陷：本作业写的是 ci-browser-tests.tap，却上传 ci-window-tests.tap，
+      # 且 artifact 名与 windows-window 作业相同 —— 结果是双错：
+      #   1) 上传步骤始终 "No files were found"（实测 run 42674827829 的浏览器作业日志）
+      #   2) 即使文件名对了，同名 artifact 会在 windows-window 之后覆盖失败
+      # 浏览器回归是最慢的一环（实测 5m43s），丢了它的 TAP 排障时无从下手。
+      - name: 上传浏览器回归 TAP
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-window-tap
-          path: ${{ runner.temp }}/ci-window-tests.tap
+          name: windows-browser-tap
+          path: ${{ runner.temp }}/ci-browser-tests.tap
           if-no-files-found: warn
           retention-days: 7
 

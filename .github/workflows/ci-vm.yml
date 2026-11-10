@@ -372,24 +372,44 @@ jobs:
         env:
           VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
 
-  # ---------------------------------------------------------------------------
-  # 接线就绪度探针：不依赖 cx-vm runner，在托管 windows-latest 上只跑「不关机」的那半条链路。
+  # 自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完整两阶段。
   #
-  # 为什么必须标 continue-on-error：缺陷 c（purge-tests.c 不读 CX_PURGE_TEST_STAGE/
-  # CX_PURGE_TEST_TARGET）与缺陷 d（注册表断言位置不匹配）目前都由
-  # fix/purge-wiring-261109 处理。在该分支合并前，重放步骤必然失败，
-  # 这个作业只是「构建段已接通」的证据，不是功能验收。
-  # 合并后请去掉 continue-on-error，让它变成真正的门禁。
-  # ---------------------------------------------------------------------------
+  # 它能证明什么（这才是重点）：
+  #
+  #   1. shutdown 阶段真的把待删文件登记进了**真实 HKCU RunOnce**（不是测试子键）
+  #   2. 注册表里存下的那条 command 串，**按原文执行**之后
+  #      → 目标文件被删、RunOnce 登记被撤销、续删脚本自删
+  #
+  #   第 2 条正是 `-NoShutdown` 盖不住的那一半：-NoShutdown 只证明「登记正确」，
+  #   而这里执行的是 Windows 登录时会执行的**同一条命令串**
+  #   （注册表里存什么就执行什么，`cmd /c <stored command>`）。
+  #
+  # 它盖不住什么（如实标注，不许当成已覆盖）：
+  #
+  #   · 登录会话真的去读 RunOnce 这个**触发动作**本身 —— 需要真重启。
+  #   · `WM_QUERYENDSESSION` / `WM_ENDSESSION` 在真实关机流程中的时序。
+  #   · `shutdown.exe /s` 真的走自毁路径（这条由 cx-vm 的关机作业覆盖）。
+  #   · `MOVEFILE_DELAY_UNTIL_REBOOT` 项重启后消失 —— 需要真重启。
+  #
+  # 结论：这个作业把「RunOnce 命令串是否可执行、执行后是否删净并自撤销」
+  # 从「从未验证」变成「每次手动触发都验证」。真正的重启语义仍留给 cx-vm，
+  # 所以本作业**不能替代** cx-vm 的关机作业，只能补上它常年跑不起来时的缺口。
+  #
+  # 为什么现在去掉 continue-on-error：它原先存在的理由是缺陷 c/d
+  # （purge-tests.c 不读 CX_PURGE_TEST_STAGE/TARGET）——这两条已由 PR #29 修掉，
+  # 本地实跑 `-Stage shutdown -NoShutdown` 与 `-Stage resume -ReplayRunOnce` 均 exit 0。
+  # 保留 continue-on-error 会让它永远绿，等于没有门禁。
   wiring-probe:
-    name: 接线就绪度探针（不关机，托管 runner）
+    name: 自毁续删语义验证（不关机，托管 runner）
     needs: gate
     if: |
       needs.gate.outputs.skip != 'yes' &&
       github.event_name == 'workflow_dispatch'
-    continue-on-error: true
     runs-on: windows-latest
     timeout-minutes: 40
+    # 刻意不设 CXPLUS_NO_LOG_FILE：它只被 windows/node-source/main.mjs 读取，
+    # 本作业既不跑 Node 宿主也不跑原生宿主（只跑 purge-tests.exe + PowerShell），
+    # 设了就是第二个 CX_NATIVE_BUILD_ALLOW_UNSIGNED 式死变量（见 06 号文档缺陷 b）。
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -421,15 +441,73 @@ jobs:
           $item = Get-Item -LiteralPath $exe
           Write-Output "purge-tests.exe = $($item.Length) 字节"
 
-      # 这一步就是缺陷 c/d 的验收点：在 fix/purge-wiring-261109 合并前会红。
-      - name: 重放关机阶段（跳过真实关机）
+      - name: 记录运行前的 RunOnce 基线
         shell: pwsh
-        continue-on-error: true
         run: |
-          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown -NoShutdown
+          # 只记录，不清场：托管 runner 是干净的，记录基线便于失败时区分
+          # 「本作业留下的」和「镜像里本来就有的」。
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+          $baseline = @()
+          if (Test-Path -LiteralPath $key) {
+            $item = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+              $baseline = @($item.PSObject.Properties | Where-Object { $_.Name -like 'cxplus-purge-*' } | ForEach-Object { $_.Name })
+            }
+          }
+          Write-Output "运行前 cxplus-purge 登记: $(if ($baseline.Count -eq 0) { '(无)' } else { $baseline -join ', ' })"
+          if ($baseline.Count -gt 0) {
+            Write-Warning 'runner 镜像里已有 cxplus-purge-* 登记，续删断言可能受干扰。'
+          }
+
+      - name: 阶段一：登记待删目标（不关机）
+        shell: pwsh
+        # -NoShutdown：只做「登记 + 断言」，不真的关机 —— 托管 runner 一关机就没了。
+        run: ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown -NoShutdown
         env:
           CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
           CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 阶段二：按 RunOnce 原文重放并断言续删
+        shell: pwsh
+        # -ReplayRunOnce：把注册表里存下的命令串原样执行一次，
+        # 模拟「登录时 Windows 执行 RunOnce」，然后由 purge-tests 的 resume
+        # 阶段断言「目标已删 + RunOnce 登记已撤销」。
+        run: ./scripts/vm/run-shutdown-destruct.ps1 -Stage resume -ReplayRunOnce
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 断言运行后无残留
+        if: always()
+        shell: pwsh
+        run: |
+          # 失败时也要能看出留下了什么：这条不 throw，只把现状写进日志与 Summary，
+          # 避免它把原始失败覆盖成「清理失败」。
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+          $leftover = @()
+          if (Test-Path -LiteralPath $key) {
+            $item = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+              $leftover = @($item.PSObject.Properties | Where-Object { $_.Name -like 'cxplus-purge-*' } | ForEach-Object { $_.Name })
+            }
+          }
+          # 续删脚本落在 $tempRoot：有 RUNNER_TEMP 时是它，否则回退 %TEMP%（见脚本第 51 行）。
+          # 两个都要查，否则 runner 上二者不一致时会报出假的「无残留」。
+          $tempRoots = @($env:RUNNER_TEMP, $env:TEMP) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+          $tempDirs = @($tempRoots | ForEach-Object {
+            Get-ChildItem -LiteralPath $_ -Directory -Filter 'cx-purge-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          })
+          Write-Output "运行后 cxplus-purge 登记: $(if ($leftover.Count -eq 0) { '(无)' } else { $leftover -join ', ' })"
+          Write-Output "运行后 cx-purge-* 目录: $(if ($tempDirs.Count -eq 0) { '(无)' } else { $tempDirs -join ', ' })"
+          @(
+            '## 自毁续删语义验证'
+            ''
+            "- 运行后 RunOnce 残留：$(if ($leftover.Count -eq 0) { '无' } else { $leftover -join ', ' })"
+            "- 运行后临时目录残留：$(if ($tempDirs.Count -eq 0) { '无' } else { $tempDirs -join ', ' })"
+            ''
+            '> 覆盖范围见 `ci-vm.yml` 中 `wiring-probe` 的注释：验证「RunOnce 命令串可执行且执行后删净并自撤销」，'
+            '> **不覆盖**真实重启语义（`WM_QUERYENDSESSION` 时序、`MOVEFILE_DELAY_UNTIL_REBOOT` 重启后消失）。'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: 上传探针证据
         if: always()
