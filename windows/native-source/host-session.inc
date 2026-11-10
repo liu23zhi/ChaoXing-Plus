@@ -445,9 +445,20 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
     h_report.stopReason = h_duration && GetTickCount() - h_started >= h_duration ? "duration" : "client-exit";
     if (!ok) h_error(error, errorCap, L"native session ended without any completed business injection");
     /* 判据 2：dll-proxy 模式必须有代理日志证明 cef_initialize 被接管。
-       日志缺失记为 unknown（不误判失败），日志里明确失败则整轮判失败。 */
+       日志缺失是否等于失败，取决于「客户端到底会不会加载载体 DLL」——
+       h_proxy_hook_state 用 h_proxy_carrier_expected（静态导入表）区分出 ABSENT 态，这里只负责定级：
+         CONFIRMED  证据齐全
+         FAILED     日志自己承认没钩上        → 判失败（既有行为）
+         ABSENT     客户端注明会加载载体却零日志 → DLL 根本没跑（可证明的失败）
+         UNKNOWN    无从判断（代理未安装/日志被撑坏/日志里没有结论） → 只记 warn，绝不误判 */
+    /* ⚠️ 整轮可达性（2026-11-11 实测）：本判据块在 ready 门之后（见上方 `if (!ready) goto done`），
+       而「载体 DLL 未加载」的客户端通常也拿不到 CDP endpoint ⇒ ABSENT 在整轮运行里目前不可达，
+       实际会先命中 client-exit-before-endpoint / endpoint-unavailable。
+       三态的当前价值在函数级（h_proxy_hook_state 可被单独验证），以及将来
+       「endpoint 通了但 DLL 零日志」这类场景。要让它整轮可达需把本块移到 ready 门之前，
+       属结构性改动，需单独评估。 */
     if (h_report.injectEvidence.proxyHookRequired && h_client_pid) {
-        H_PROXY_HOOK_STATE hook = h_proxy_hook_state(h_client_pid);
+        H_PROXY_HOOK_STATE hook = h_proxy_hook_state(h_client_pid, h_proxy_carrier_expected);
         if (hook == H_PROXY_HOOK_CONFIRMED) {
             h_report.injectEvidence.proxyHook = TRUE;
             h_audit_event("info", "inject", "Proxy log confirms the cef_initialize hook");
@@ -460,6 +471,19 @@ static BOOL h_watch_targets(USHORT port, const CX_OPTIONS *options, const char *
                 ok = FALSE;
             }
             h_audit_event("error", "inject", "Proxy log shows the cef_initialize hook never applied");
+        } else if (hook == H_PROXY_HOOK_ABSENT) {
+            /* 客户端静态导入表里确实有载体 DLL，DLL 文件也在（proxyUsable），却一条日志都没有：
+               说明 DLL 根本没被执行（被安全软件拦下、被改名、加载失败）。
+               这与 UNKNOWN 的区别是"可证明"——不是"看不到"，是"确定没发生"。 */
+            h_report.injectEvidence.proxyHook = FALSE;
+            h_report.injectEvidence.reason = "proxy-carrier-absent";
+            h_audit_event("warn", "inject", "Proxy carrier DLL was never loaded: the client imports it but no proxy log exists");
+            if (ok) {
+                h_report.stopReason = "inject-proxy-carrier-absent";
+                h_error(error, errorCap, L"the client imports the proxy carrier DLL but the proxy never ran: no proxy log was written");
+                ok = FALSE;
+            }
+            h_audit_event("error", "inject", "Proxy carrier DLL absent: the client never loaded it");
         } else {
             h_audit_event("warn", "inject", "Proxy log unavailable; cef_initialize hook unverified");
         }
