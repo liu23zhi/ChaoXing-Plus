@@ -1,7 +1,18 @@
-name: KVM 能力巡检（托管 runner）
+name: KVM 能力巡检（托管 runner，仅手动）
 
 # 目的：把「GitHub 托管 Ubuntu runner 有没有把 /dev/kvm 开放给作业用户」
-# 这个外部事实变成每天一条可追溯的记录，而不是一次性的探测残留。
+# 这个外部事实变成可追溯的记录。
+#
+# 触发方式（2026-11-10 起）：
+#   · **workflow_dispatch** —— 手动触发。**一定运行**，不受「今天跑过没有」限制。
+#   · **workflow_call** —— 由 ci.yml 调用。先查今天是否已有有效巡检记录，
+#     有则跳过本次，避免每次 push 都产出一条重复记录。
+#   · 已**移除** schedule（原先每天 03:17 UTC）。原因：runner 镜像的 KVM 组权限
+#     极少变化，每天一条记录的信息量远低于记录数量。
+#
+# 「同一个日历日只跑一次」的语义（用户 2026-11-10 定）：
+#   手动 → 一定要跑（哪怕今天已经跑过 10 次）
+#   CI 调用 → 今天已跑过就跳过
 #
 # 已知基线（2026-11-09 实测，run 42588732951 / 42590175761）：
 #   /dev/kvm       存在，crw-rw---- 1 root kvm 10, 232
@@ -15,23 +26,28 @@ name: KVM 能力巡检（托管 runner）
 #
 # 成本上限（硬约束）：
 #   · timeout-minutes: 5，实测单次 < 40 秒
-#   · 不 apt 安装、不下载镜像、不启动任何虚拟机 —— 那是 ci/probe-qemu-261109
-#     上的一次性探测做的事（冷启动到 Windows Setup 约 9.7 分钟，绝不适合每天都跑）
+#   · 不 apt 安装、不下载镜像、不启动任何虚拟机
 #
 # 这不是门禁：不挂 pull_request / pull_request_target，作业红叉不会影响任何
 # PR 的必需检查。它只产出日志与 Step Summary。
-#
-# 论证与数据出处：task_doc/06-CI升级与虚拟机测试.md §4.2 / §5.5，
-# 索引：task_doc/00-总览与任务索引.md §8「PLUS KVM 探测结论」、§9 第 12 条。
 
 on:
-  schedule:
-    # 每天 03:17 UTC（避开整点排队高峰）。
-    - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: '强制运行（手动触发恒为 true）'
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      force:
+        description: '强制运行（即使今天已经巡检过）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read          # 需要读本仓库 workflow run 列表判断「今天跑过没有」
 
 concurrency:
   group: probe-kvm-daily
@@ -42,8 +58,64 @@ jobs:
     name: 巡检 /dev/kvm 权限（只读）
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      skipped: ${{ steps.gate.outputs.SKIP }}
+      reason: ${{ steps.gate.outputs.REASON }}
     steps:
+      - name: 是否今天已巡检过（手动恒运行，CI 调用才判重）
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -eu
+          today_utc=$(date -u +%Y-%m-%d)
+
+          # 手动触发 → 一定运行（用户要求：手动拉起则一定要跑）
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=手动触发（workflow_dispatch），一定运行" >> "$GITHUB_OUTPUT"
+            echo "今天(UTC)=$today_utc → 手动触发，运行"
+            exit 0
+          fi
+
+          # 调用方显式要求强制 → 运行
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=调用方要求强制执行" >> "$GITHUB_OUTPUT"
+            echo "今天(UTC)=$today_utc → 调用方 force=true，运行"
+            exit 0
+          fi
+
+          # CI 调用 → 查今天是否已有有效记录（排除 cancelled / skipped）
+          count=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/probe-kvm-daily.yml/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled" and .conclusion != "skipped" and .status != "queued")] | length')
+          echo "今天(UTC)=$today_utc，已有 $count 条有效巡检记录"
+          if [ "$count" -gt 0 ]; then
+            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)已有 $count 条巡检记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
+          else
+            echo "SKIP=no" >> "$GITHUB_OUTPUT"
+            echo "REASON=今天(UTC $today_utc)还没有巡检记录，执行" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 跳过说明
+        if: steps.gate.outputs.SKIP == 'yes'
+        run: |
+          set -eu
+          echo "::notice title=KVM 巡检已跳过::${{ steps.gate.outputs.REASON }}"
+          {
+            echo '## KVM 能力巡检（已跳过）'
+            echo ''
+            echo "- 原因：${{ steps.gate.outputs.REASON }}"
+            echo ''
+            echo '> 要强制运行：在 Actions 页面选本 workflow 点 `Run workflow`（手动触发一定运行）。'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 设备节点与作业用户
+        if: steps.gate.outputs.SKIP != 'yes'
         run: |
           set -u
           echo '=== 设备节点 ==='
@@ -68,6 +140,7 @@ jobs:
           fi
 
       - name: 虚拟化标志与内核模块
+        if: steps.gate.outputs.SKIP != 'yes'
         run: |
           set -u
           echo '=== CPU 虚拟化标志 ==='
@@ -83,6 +156,7 @@ jobs:
           ls -d /sys/module/kvm* 2>/dev/null || echo '（无 kvm 模块目录）'
 
       - name: sudo 可用性（不改设备权限）
+        if: steps.gate.outputs.SKIP != 'yes'
         run: |
           set -u
           # 只探测是否免密，不改 /dev/kvm 的 mode —— 巡检作业不做任何变更，
@@ -94,6 +168,7 @@ jobs:
           fi
 
       - name: 汇总并记录结论
+        if: steps.gate.outputs.SKIP != 'yes'
         run: |
           set -u
           if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
@@ -121,6 +196,7 @@ jobs:
             echo "- 核数：$(nproc)"
             echo "- 内存：$(free -g | awk '/^Mem:/{print $2}') GiB"
             echo "- kvm 模块：$(lsmod | grep -ci '^kvm') 条"
+            echo "- 触发方式：${{ github.event_name }}"
             echo ''
             echo '> 本作业只巡检，不安装、不下载镜像、不启动虚拟机；红叉不影响任何 PR 的必需检查。'
           } >> "$GITHUB_STEP_SUMMARY"

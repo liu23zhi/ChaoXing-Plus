@@ -563,10 +563,17 @@ jobs:
           retention-days: 7
 
 
+  kvm-probe:
+    name: KVM probe (called by CI)
+    uses: ./.github/workflows/probe-kvm-daily.yml
+    with:
+      force: false
+    secrets: inherit
+
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, kvm-probe]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -581,6 +588,9 @@ jobs:
           WINDOWS_RELEASE_RESULT: ${{ needs.windows-release.result }}
           WINDOWS_REAL_CLIENT_DISCOVERY_RESULT: ${{ needs.windows-real-client-discovery.result }}
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
+          KVM_PROBE_RESULT: ${{ needs.kvm-probe.result }}
+          KVM_PROBE_SKIPPED: ${{ needs.kvm-probe.outputs.skipped }}
+          KVM_PROBE_REASON: ${{ needs.kvm-probe.outputs.reason }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -608,6 +618,11 @@ jobs:
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
+            if [[ "$KVM_PROBE_SKIPPED" == "yes" ]]; then
+              printf '| KVM 能力巡检 | 跳过（%s） |\n' "$KVM_PROBE_REASON"
+            else
+              printf '| KVM 能力巡检 | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
+            fi
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"
