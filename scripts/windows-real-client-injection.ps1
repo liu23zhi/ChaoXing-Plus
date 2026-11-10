@@ -407,7 +407,8 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   #   reason = proxy-carrier-absent                    -> red   (the carrier DLL never ran at all)
   #   endpointReady + bundleInPage = false             -> red   (the chain ran and the bundle still
   #                                                              never landed: this is the case that
-  #                                                              "只有功能真生效才可能为 true" guards)
+  #                                                              "only a working feature can be true"
+  #                                                              guards)
   #   verified = false on its own                      -> yellow warning + injectVerifiedSummary
   # The red tier for "chain ran, bundle did not land" is what makes this matrix meaningful: without it
   # a report with pageSessions>=1 / bootstraps>=1 / bundles>=1 and bundleInPage=false passes, which is
@@ -424,8 +425,9 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
     }
   }
   # The chain "really ran" only when the CDP endpoint answered AND the bootstrap reached the page.
-  # pageSessions 不算在内：一个页面会话只能证明 WebSocket 连上了，bootstrap 从未送达时它依然 >= 1，
-  # 那种情况属于"链路没起来"，不该算成 bundle 的失败。
+  # pageSessions is deliberately NOT part of this: a page session only proves the WebSocket
+  # connected; when the bootstrap never arrives it is still >= 1, and that case means the chain
+  # never came up rather than that the bundle failed to land.
   $chainRan = [bool]$evidence.endpointReady -and [int]$report.totals.bootstraps -ge 1
   $bundleLanded = [bool]$evidence.bundleInPage
   $verifiedTrue = if ([bool]$evidence.verified) { 1 } else { 0 }
