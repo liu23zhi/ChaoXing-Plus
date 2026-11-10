@@ -1,5 +1,8 @@
 # 超星学习助手
 
+[![持续集成](https://github.com/liu23zhi/chaoxing_plus/actions/workflows/ci.yml/badge.svg)](https://github.com/liu23zhi/chaoxing_plus/actions/workflows/ci.yml)
+[![虚拟机自毁环境验证](https://github.com/liu23zhi/chaoxing_plus/actions/workflows/ci-vm.yml/badge.svg)](https://github.com/liu23zhi/chaoxing_plus/actions/workflows/ci-vm.yml)
+
 超星学习通辅助工具。浏览器扩展与 Windows 桌面程序共用同一份业务代码。
 
 ## 安装
