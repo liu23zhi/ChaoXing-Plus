@@ -11,15 +11,32 @@ let resolverBundle;
 let adapterBundle;
 
 before(async () => {
+  // 把源码里的指定顶层声明原样搬进浏览器执行上下文。
+  // 除了函数声明，还要搬**顶层 const**：判断题对错表 JUDGEMENT_PAIRS 是模块级常量，
+  // 只搬函数的话 inferQuestionTypeFromOptionElements 会以 ReferenceError 挂掉。
   const declarations = async (path, names) => {
     const source = await readFile(path, 'utf8');
     const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
-    return ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text))
-      .map((node) => node.getText(ast).replace(/^export /u, '')).join('\n');
+    return ast.statements.flatMap((node) => {
+      if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) {
+        return [node.getText(ast).replace(/^export /u, '')];
+      }
+      if (ts.isVariableStatement(node)) {
+        // 按声明名匹配，避免把 `const a = ...` 等号右侧的同名标识符也算进来。
+        const matched = node.declarationList.declarations
+          .filter((decl) => ts.isIdentifier(decl.name) && names.includes(decl.name.text));
+        if (matched.length > 0) return [node.getText(ast).replace(/^export /u, '')];
+      }
+      return [];
+    }).join('\n');
   };
   runtime = ts.transpileModule([
     await declarations('src/projects/cx.ts', ['queryWorkOrExamQuestionRoots', 'getWorkOrExamQuestionSelector']),
-    await declarations('src/utils/work.ts', ['optimizationElementWithImage', 'extractQuestionImageEvidence', 'extractExplicitCorrectAnswerEvidence', 'inferQuestionTypeFromOptionElements', 'extractQuestionOptionTexts', 'simplifyWorkResult'])
+    await declarations('src/utils/work.ts', [
+      'JUDGEMENT_PAIRS', 'isLegacyLetterLabel', 'normalizeOptionLabel', 'stripOptionLabelPrefix',
+      'optimizationElementWithImage', 'extractQuestionImageEvidence', 'extractExplicitCorrectAnswerEvidence',
+      'inferQuestionTypeFromOptionElements', 'extractQuestionOptionTexts', 'simplifyWorkResult'
+    ])
   ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
   const built = await build({ configFile: false, logLevel: 'silent', build: {
     write: false, target: 'es2020', minify: false,

@@ -73,6 +73,27 @@ export function answerExactMatch(answers: string[], options: string[]): string[]
   return result;
 }
 
+/**
+ * 选项标签前缀：`A.` / `A、` / `A：` / `A．` / `A)` / `(A)` / `（A）` / `Ａ.`（全角字母）。
+ *
+ * 三条边界是刻意的，改动前请先看 answer-text-matching.test.mjs：
+ *   - **只认单个字母**：`AB. 保留` 是多字母标签，不是标签，必须原样保留；
+ *   - **只认大写**（ASCII `A-Z` + 全角 `Ａ-Ｚ`）：`a. 保留` 按既有行为不算标签；
+ *   - **字母后必须有分隔符或括号**：否则裸 `A` 会被剥成空串，
+ *     让 answerSimilar 把所有空选项都判成命中。
+ *
+ * 三种合法形态（任一）：
+ *   `(A)` 带左括号   |   `A)` 只带右括号   |   `A、/A./A：` 带分隔符
+ * 之后再允许补一个分隔符（`(A). 北京`），学习通这种写法也出现过。
+ */
+const OPTION_LABEL_PREFIX =
+  /^(?:[(（][A-Z\uFF21-\uFF3A][)）]|[A-Z\uFF21-\uFF3A][)）]|[A-Z\uFF21-\uFF3A][.．、:：])[.．、:：]?\s*/u;
+
 export function removeRedundant(str: string) {
-  return str?.trim().replace(/^[A-Z][.．、:：]\s*/u, '') || '';
+  const trimmed = String(str ?? '').trim();
+  const label = trimmed.match(OPTION_LABEL_PREFIX);
+  if (!label) return trimmed;
+  const rest = trimmed.slice(label[0].length).trim();
+  // 只有标签没有正文（`(A)`）时，那不是标签而是选项内容本身，别剥成空串。
+  return rest || trimmed;
 }

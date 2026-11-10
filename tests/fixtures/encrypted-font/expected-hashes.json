@@ -1,0 +1,24 @@
+{
+  "note": "由 make-fixture.py 生成。glyphHash 是按 Typr._simpleGlyph 的轮廓顺序独立复刻算出的 md5(pathStr).slice(24)，不调用 JS 实现。",
+  "sliceOffset": 24,
+  "codepoints": {
+    "19968": {
+      "glyphName": "u4E00",
+      "pathSignature": "{\"cmds\":[\"M\",\"L\",\"L\",\"L\",\"L\",\"Z\"],\"crds\":[50,400,300,50,550,400,300,750,50,400]}",
+      "md5": "efcb06354c0415f49b3cbaabf945a9be",
+      "glyphHash": "f945a9be"
+    },
+    "19969": {
+      "glyphName": "u4E01",
+      "pathSignature": "{\"cmds\":[\"M\",\"L\",\"L\",\"L\",\"Z\"],\"crds\":[250,700,0,0,500,0,250,700]}",
+      "md5": "b90909bed2d5031eae308937502ed78f",
+      "glyphHash": "502ed78f"
+    },
+    "19970": {
+      "glyphName": "u4E02",
+      "pathSignature": "{\"cmds\":[\"M\",\"L\",\"L\",\"L\",\"L\",\"Z\"],\"crds\":[100,400,100,100,400,100,400,400,100,400]}",
+      "md5": "7f6b5184e0020515272b15d11693ac6b",
+      "glyphHash": "1693ac6b"
+    }
+  }
+}

@@ -361,28 +361,41 @@ export function createDefaultQuestionResolver<E>(
       return { finish: false };
     },
     async judgement(infos, options, handler) {
-      for (const answers of infos.map((info) => info.results.map((res) => res.answer))) {
-        const correctWords = ['是', '对', '正确', '确定', '√', '对的', '是的', '正确的', 'true', 'True', 'T', 'yes', '1'];
-        const incorrectWords = [
-          '非',
-          '否',
-          '错',
-          '错误',
-          '×',
-          'X',
-          '错的',
-          '不对',
-          '不正确的',
-          '不正确',
-          '不是',
-          '不是的',
-          'false',
-          'False',
-          'F',
-          'no',
-          '0'
-        ];
+      // 极性词表必须覆盖学习通实际出现的所有写法，否则「答案是 √、选项写 T」这类
+      // 组合会一个都配不上，最终判成未解析。与 src/utils/work.ts 的 JUDGEMENT_PAIRS
+      // 保持同一集合，两处任一新增都要同步（cx-secret-font 之外没有别的地方读它）。
+      // 注意 matches 用 clearString 比对，会剔除 ASCII 标点，所以 `T.`/`(T)` 等价于 `T`。
+      const correctWords = [
+        '是', '对', '正确', '确定', '√', '✓', '对的', '是的', '正确的',
+        'true', 'True', 'T', 't', 'yes', 'Yes', 'Y', 'y', '1'
+      ];
+      const incorrectWords = [
+        '非',
+        '否',
+        '错',
+        '错误',
+        '×',
+        '✗',
+        'X',
+        'x',
+        '错的',
+        '不对',
+        '不正确的',
+        '不正确',
+        '不是',
+        '不是的',
+        'false',
+        'False',
+        'F',
+        'f',
+        'no',
+        'No',
+        'N',
+        'n',
+        '0'
+      ];
 
+      for (const answers of infos.map((info) => info.results.map((res) => res.answer))) {
         const answerShowCorrect = answers.find((answer) => matches(answer, correctWords));
         const answerShowIncorrect = answers.find((answer) => matches(answer, incorrectWords));
 
@@ -408,9 +421,13 @@ export function createDefaultQuestionResolver<E>(
         }
 
         function matches(target: string, options: string[]) {
+          // clearString 只保留 CJK 与字母数字，会把 √ × ✓ ✗ 这类符号一并剔除；
+          // 必须把它们放进 exclude，否则「答案是 √」会因为被剔成空串而永不匹配。
+          // 四个符号都要列：只列 √ × 时，✓/✗ 写法的页面依然配不上。
           return options.some(
             (option) =>
-              clearString(removeRedundant(option), '√', '×') === clearString(removeRedundant(target), '√', '×')
+              clearString(removeRedundant(option), '√', '×', '✓', '✗') ===
+              clearString(removeRedundant(target), '√', '×', '✓', '✗')
           );
         }
       }

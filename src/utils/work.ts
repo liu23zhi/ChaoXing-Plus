@@ -40,6 +40,66 @@ export function optimizationElementWithImage(root: HTMLElement, cloneNode = fals
   return clone;
 }
 
+/**
+ * 判断题的对错词表。
+ *
+ * 学习通不同题库/不同学院的判断题选项写法差异极大，只认 4 组（正确/错误、对/错、
+ * 是/否、true/false）会把 T/F、√/×、1/0 这类同样常见的写法判成「非判断题」，
+ * 于是走了单选题分支、按字母标签去配答案，最终填错。
+ *
+ * 注意：这里比对的是**已经小写化**的文本（见 inferQuestionTypeFromOptionElements
+ * 里的 toLowerCase），所以 true/false、T/F、Y/N 都写成小写形式。
+ */
+const JUDGEMENT_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['正确', '错误'],
+  ['对', '错'],
+  ['是', '否'],
+  ['true', 'false'],
+  ['t', 'f'],
+  ['y', 'n'],
+  ['√', '×'],
+  ['✓', '✗'],
+  ['1', '0']
+];
+
+/**
+ * 选项标签归一：把 `A` / `A.` / `A、` / `(A)` / `Ａ`（全角）统一认成字母 A。
+ *
+ * 返回 undefined 表示「这不是一个字母标签」—— 多字母（`AB.`）、中文、空串都属此类，
+ * 必须原样保留，否则选项内容会被当成标签吃掉。
+ *
+ * 大小写**保持原样**（`a` 归一成 `a`，`Ａ` 归一成 `A`）：extractQuestionOptionTexts
+ * 用它重建选项前缀，改动大小写会连带改掉已上线产物的选项文本。
+ */
+export function normalizeOptionLabel(raw: string): string | undefined {
+  const compact = String(raw ?? '').normalize('NFKC').replace(/\s+/gu, '');
+  if (!compact) return undefined;
+  // 允许两侧括号只出现一边（学习通既有 .num_option 里就有 `A)` 这种写法）。
+  const match = compact.match(/^\(?([A-Za-z])[).、:：.]?$/u);
+  return match ? match[1] : undefined;
+}
+
+/** 该标签是否已经是「单个半角字母 + 可选分隔符」的既有写法（用于保留原前缀样式）。 */
+function isLegacyLetterLabel(raw: string): boolean {
+  return /^[A-Za-z](?:[.、:：)）．])?$/u.test(raw);
+}
+
+/**
+ * 去掉选项文本开头的字母标签（`A. ` / `(A) ` / `A、` / `Ａ．`），返回剩下的正文。
+ *
+ * 与 removeRedundant 的区别：本函数**要求字母后面必须有分隔符或右括号**，
+ * 所以 `true` 不会被剥成 `rue`、`是` 不会被当成标签。这是判断题对表比对的前提
+ * （拿 `正确/错误` 去比，而不是 `a. 正确`）。
+ *
+ * 全角字母要一并处理：inferQuestionTypeFromOptionElements 会先把文本 toLowerCase，
+ * `Ａ` 于是变成全角小写 `ａ`（U+FF41），只列 `Ａ-Ｚ` 会漏掉。
+ */
+export function stripOptionLabelPrefix(text: string): string {
+  return String(text ?? '')
+    .replace(/^\s*[(（]?[A-Za-z\uFF21-\uFF3A\uFF41-\uFF5A][)）.．、:：]\s*/u, '')
+    .trim();
+}
+
 export function inferQuestionTypeFromOptionElements(options: HTMLElement[]) {
   const text = options.map((option) => String(option.innerText ?? option.textContent ?? '').replace(/\s+/gu, ' ').trim().toLowerCase());
   const controlScopes = options.map((option) => option.closest('.answerBg, li') ?? option);
@@ -50,9 +110,10 @@ export function inferQuestionTypeFromOptionElements(options: HTMLElement[]) {
   const radioCount = controls.filter((control) => control.type === 'radio').length;
   if (radioCount > 2) return 'single' as const;
   if (radioCount === 2 && text.length === 2) {
-    const labels = new Set(text.map((item) => item.replace(/^[A-Da-d][.、:：)）]\s*/u, '').trim()));
-    const judgementPairs = [['正确', '错误'], ['对', '错'], ['是', '否'], ['true', 'false']];
-    if (judgementPairs.some((pair) => pair.every((label) => labels.has(label)))) return 'judgement' as const;
+    // 标签可能是 `A. 正确` / `(A) 正确` / `Ａ．正确`：stripOptionLabelPrefix 都剥得掉，
+    // 只靠 `^[A-Da-d][.、:：)）]` 会把 (A)/(Ａ) 这两种漏下来，导致判断题被误判。
+    const labels = new Set(text.map((item) => stripOptionLabelPrefix(item)));
+    if (JUDGEMENT_PAIRS.some((pair) => pair.every((label) => labels.has(label)))) return 'judgement' as const;
   }
   return undefined;
 }
@@ -63,11 +124,12 @@ export function extractQuestionOptionTexts(options: HTMLElement[]) {
     const visibleLabel = labelScope.querySelector<HTMLElement>('.num_option, .option-label, .optionLabel, .answer_num')?.innerText?.trim() ?? '';
     const contentRoot = option.querySelector<HTMLElement>('.answer_p, .after') ?? option;
     const content = optimizationElementWithImage(contentRoot, true).innerText.trim();
-    const letterLabel = visibleLabel.match(/^([A-Za-z])(?:[.、:：)）．])?$/u);
-    if (letterLabel) {
-      const letter = letterLabel[1];
+    const letter = normalizeOptionLabel(visibleLabel);
+    if (letter) {
       if (new RegExp(`^${letter}[.、:：)）．]`, 'u').test(content)) return content;
-      const prefix = visibleLabel.length === 1 ? `${letter}.` : visibleLabel;
+      // 既有写法（`A` / `A.` / `A、`）保持原样式，避免改变已上线产物的选项文本；
+      // 新支持的 `(A)` / `Ａ` 统一折成 `A.`，这样 removeRedundant 能剥掉标签。
+      const prefix = isLegacyLetterLabel(visibleLabel) && visibleLabel.length > 1 ? visibleLabel : `${letter}.`;
       return [prefix, content].filter(Boolean).join(' ').trim();
     }
     const text = visibleLabel && content.startsWith(visibleLabel) ? content : [visibleLabel, content].filter(Boolean).join(' ');
