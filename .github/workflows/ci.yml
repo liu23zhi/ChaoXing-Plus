@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read          # 被调用的 ci-vm.yml（KVM 巡检 gate）需要读 workflow run 列表判重
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
