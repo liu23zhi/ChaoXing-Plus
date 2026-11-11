@@ -108,15 +108,57 @@ jobs:
           echo 'KVM_ACCESSIBLE=yes'
 
       - name: 安装依赖
+        # ⚠️ 2026-11-11：加步骤级超时。实测托管 runner 偶发 DNS 故障
+        #    （`Temporary failure resolving azure.archive.ubuntu.com`），
+        #    apt-get 会反复重试、这个步骤能挂 9 分钟以上且不退出，
+        #    而 job 级 timeout 是 120 分钟 —— 等于白烧 100 分钟。
+        timeout-minutes: 8
         run: |
-          set -eu
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            qemu-utils qemu-system-x86 openssh-client genisoimage
+          set -u
+          # apt 的 DNS 抖动是环境问题，不是代码问题。策略：
+          #   ① 给 apt 设较短的重试与超时，别让它无限等；
+          #   ② 失败允许**有限次重试**；
+          #   ③ 最终失败必须 exit 1（不静默跳过，否则后面会以
+          #      「qemu-system-x86_64: command not found」的形式炸在最后一步，
+          #      诊断信息严重错位）。
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          ok=no
+          for attempt in 1 2 3; do
+            echo "=== apt 第 $attempt 次尝试 ==="
+            if sudo apt-get update -qq $APT_OPTS 2>&1 | tail -20; then
+              echo "apt-get update 成功"
+              ok=yes; break
+            fi
+            echo "apt-get update 失败（第 $attempt 次），10 秒后重试"
+            sleep 10
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error title=apt 源不可达::连续 3 次 apt-get update 失败。这是 runner 的 DNS/网络故障，不是仓库代码问题，重跑一次通常就好"
+            # 打印 DNS 诊断，便于判断是全局断网还是单个镜像站
+            echo "--- DNS 诊断 ---"
+            cat /etc/resolv.conf 2>/dev/null || true
+            getent hosts archive.ubuntu.com || echo "(archive.ubuntu.com 解析失败)"
+            getent hosts azure.archive.ubuntu.com || echo "(azure.archive.ubuntu.com 解析失败)"
+            curl -sS --max-time 10 -o /dev/null -w "github.com http=%{http_code}\n" https://github.com || echo "(github.com 不可达)"
+            exit 1
+          fi
+          # install 同样给重试；成功判据是「二进制真的能跑」，不是 apt 返回 0
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $APT_OPTS \
+               qemu-utils qemu-system-x86 openssh-client genisoimage 2>&1 | tail -20; then
+            echo "::error title=apt install 失败::qemu/system 依赖装不上"
+            exit 1
+          fi
           # ⚠️ qemu-utils 只提供 qemu-img（转换/压缩）；
           #    「验证 SSH 可连」那步要启动客机，需要 qemu-system-x86_64，
           #    它在 qemu-system-x86 包里。漏了这个包会报：
           #      qemu-system-x86_64: command not found  (exit 127)
+          # ⇒ 装完立刻断言二进制存在且可执行，把错误提前到这一步暴露。
+          for bin in qemu-img qemu-system-x86_64 genisoimage ssh; do
+            if ! command -v "$bin" >/dev/null 2>&1; then
+              echo "::error title=缺少 $bin::apt 装完但二进制不存在"
+              exit 1
+            fi
+          done
           qemu-system-x86_64 --version | head -1
           qemu-system-x86_64 -accel help 2>/dev/null | head -5 || true
           qemu-img --version | head -1
