@@ -112,7 +112,13 @@ jobs:
           set -eu
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            qemu-utils openssh-client genisoimage
+            qemu-utils qemu-system-x86 openssh-client genisoimage
+          # ⚠️ qemu-utils 只提供 qemu-img（转换/压缩）；
+          #    「验证 SSH 可连」那步要启动客机，需要 qemu-system-x86_64，
+          #    它在 qemu-system-x86 包里。漏了这个包会报：
+          #      qemu-system-x86_64: command not found  (exit 127)
+          qemu-system-x86_64 --version | head -1
+          qemu-system-x86_64 -accel help 2>/dev/null | head -5 || true
           qemu-img --version | head -1
           # 磁盘预算：ISO 6 GB + 安装中镜像 + 最终 qcow2，32G 稀疏盘在 86G 可用空间下安全。
           df -h /
