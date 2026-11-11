@@ -16,6 +16,21 @@
 #     6. 待删目标真的被删了
 #     7. 续删单元真的自撤销了（unit 文件不存在、不再 enabled）
 #
+#   2026-11-11（t98）补的 5 个覆盖缺口 —— 这些是上面 1–7 覆盖不到的：
+#     缺口 1  强制断电后仍能续删 —— `kill -KILL` QEMU 等价拔电源，再用**同一覆盖层**冷启动。
+#             为什么必要：`systemctl reboot` 走有序关闭，可能顺手把目标清了，
+#             于是「重启后文件没了」无法区分「续删执行了」与「关机流程替它干了」。
+#             powercut 阶段额外断言「断电前目标仍在」，把这第二条解释彻底排除。
+#     缺口 2  多次重启只执行一次（幂等）—— reboot2 + replay2：第二次开机后
+#             resume-proof **逐字节未变** 即证明续删没重跑。不幂等会误删用户后来新建的同名文件。
+#     缺口 3  多目标同时登记 —— 3 个登记目标全部按列表处理；另设 1 个**未登记对照**，
+#             它必须存活，否则说明实现是「清空目录」而不是「删登记的条目」。
+#     缺口 4  登记值本身正确 —— 字节级断言 targets.txt 的三行内容、unit 的 ExecStart、
+#             续删脚本的可执行位。只断言「后来删对了」会被「登记写错但恰好删对」骗过。
+#     缺口 5  异常路径 —— 登记列表中间插一个**目录**（rm -f 对目录必失败，
+#             与权限无关，root 也失败），断言：它被记为 rc 非 0、且排在它后面的目标
+#             仍被删除（列表处理不因单项失败而中断）。
+#
 #   它不验证什么（必须如实标注，别把这里当成 Windows RunOnce 已覆盖）：
 #     · HKCU\...\RunOnce 的登记与撤销 —— 那是 Windows 专属，由 ci.yml 里
 #       qemu-shutdown-destruct 的 Windows 客机链路覆盖，需 repo variable
@@ -26,10 +41,17 @@
 # 用法（由 .github/workflows/ci.yml 的 qemu-destruct-linux-guest 作业分步调用）：
 #   qemu-guest-destruct-linux.sh --phase prepare    # 下镜像 / 转格式 / 覆盖层 / SSH key / seed.iso
 #   qemu-guest-destruct-linux.sh --phase boot       # 起 QEMU（-daemonize）并等 SSH 回连
-#   qemu-guest-destruct-linux.sh --phase register   # guest 内登记待删目标 + 续删单元
-#   qemu-guest-destruct-linux.sh --phase reboot     # guest 内重启并等回连
-#   qemu-guest-destruct-linux.sh --phase replay     # 断言「重启过 + 已续删 + 已撤销」
+#   qemu-guest-destruct-linux.sh --phase register   # guest 内登记多目标 + 续删单元 + 登记值校验
+#   qemu-guest-destruct-linux.sh --phase powercut   # t98 缺口 1：强制断电 + 同一覆盖层冷启动
+#   qemu-guest-destruct-linux.sh --phase replay     # 断言 缺口1/3/4/5 + 重启过 + 已撤销
+#   qemu-guest-destruct-linux.sh --phase reboot2    # t98 缺口 2：第二次重启
+#   qemu-guest-destruct-linux.sh --phase replay2    # t98 缺口 2：断言续删没有重跑（幂等）
 #   qemu-guest-destruct-linux.sh --phase teardown   # 杀 QEMU、清临时私钥（不判红）
+#
+#   ⚠️ powercut 与 reboot 是**两条互斥的独立跑法**：
+#     · 走 powercut → replay  验证「断电也能续删」（缺口 1）
+#     · 走 reboot   → replay  验证「有序重启也能续删」（旧行为，保留作对照）
+#   两者都需要在 register 之后。矩阵见 ci.yml 的 job 注释。
 #
 # ⚠️ 跨 step 的关键设计：QEMU 必须用 `-daemonize` 而不是 `&`。
 #   每个 workflow step 是独立 shell，用 `&` 起的子进程在 step 结束时可能被回收，
@@ -56,6 +78,12 @@ if [ -z "$PHASE" ]; then echo '缺少 --phase' >&2; exit 2; fi
 # 不能被「RUNNER_TEMP 未设置」这种环境错误抢先成 exit 1，否则排障时会被误导。
 case "$PHASE" in
   prepare|boot|register|reboot|replay|teardown) ;;
+  # t98 新增：强制断电（拔电源），替代 reboot 的阶段。
+  powercut) ;;
+  # t98 新增：第二次重启，用来断言续删**幂等**（只执行一次）。
+  reboot2) ;;
+  # t98 新增：断言第二次开机后续删没有再执行（boot_id 与 proof 交叉核对）。
+  replay2) ;;
   *) echo "未知 phase: $PHASE" >&2; exit 2 ;;
 esac
 
@@ -75,10 +103,22 @@ PIDFILE="$WORK/qemu.pid"
 
 # guest 内的固定路径（register 写、replay 读，必须是同一组常量）
 G_DIR=/var/lib/cx-destruct
-G_TARGET="$G_DIR/target.txt"
+G_TARGETS="$G_DIR/targets.txt"
 G_BOOT_BEFORE="$G_DIR/boot-before.txt"
 G_PROOF="$G_DIR/resume-proof.txt"
+G_LOG="$G_DIR/resume-log.txt"
 G_UNIT=/etc/systemd/system/cx-destruct-resume.service
+
+# t98：多目标 + 异常路径 + 对照目标。
+#   T1 / T2  —— 正常可删，用来证明「多目标全部处理」；
+#   T3       —— 一个**目录**：`rm -f` 对目录必然失败（root 也一样，这不是权限问题）。
+#               它排在 T2 之后进入 targets.txt……不，排在 T2 **之前**，
+#               这样 T2 被删就证明「单个目标失败不会中断列表处理」（缺口 5）。
+#   CTL      —— 未登记，必须存活。用来证明「只删登记的，不是删整目录」（缺口 3 的反向断言）。
+G_T1="$G_DIR/target-1.txt"
+G_T2="$G_DIR/target-2.txt"
+G_T3="$G_DIR/target-dir"
+G_CTL="$G_DIR/control.txt"
 
 say() { echo "[cx-linux-guest] $*"; }
 
@@ -239,15 +279,40 @@ register)
   BOOT_BEFORE=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
   say "register 阶段 boot_id=$BOOT_BEFORE"
 
+  # t98：续删脚本要覆盖 captain 指定的 5 个缺口，逐条对应：
+  #   缺口 3 多目标   —— 遍历 targets.txt 的每一行，逐条 rm（不是只删第一条）
+  #   缺口 5 异常路径 —— 单个目标失败（目录 / 不存在 / 占用）必须**记录后继续**，
+  #                     不能让一次失败中断整个列表，也不能整体报错退出
+  #   缺口 4 可观测   —— 每个目标的处理结果写进 resume-log.txt，供 replay 逐条断言
+  #                      （登记值与实际处理的对应关系能被验证，而不是「恰好删对了」）
+  # 仍然保留原有的自撤销（缺口 2 幂等的前提：撤销后下一次开机就不会再跑）。
   cat > "$WORK/resume.sh" <<'RESUME'
 #!/bin/bash
-# 开机续删：由 systemd 在启动时执行，删掉待删目标后自撤销。
+# 开机续删：由 systemd 在启动时执行，按 targets.txt 逐条删除后自撤销。
 set -u
-mkdir -p /var/lib/cx-destruct
+G_DIR=/var/lib/cx-destruct
+G_TARGETS="$G_DIR/targets.txt"
 BOOT_NOW=$(cat /proc/sys/kernel/random/boot_id)
-rm -f /var/lib/cx-destruct/target.txt
+mkdir -p "$G_DIR"
+
+# 逐条处理，**单条失败不中断**：这是「列表处理正确」与「删一个就退出」的分水岭。
+# 每条都写一行 rc=<退出码> source=<原行>，replay 据此断言：
+#   · 正常文件 → rc=0
+#   · 目录（rm -f 必失败）→ rc 非 0，但后面的条目仍然被处理
+: > "$G_DIR/resume-log.txt"
+if [ -f "$G_TARGETS" ]; then
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    rm -f -- "$src" 2>/dev/null
+    rc=$?
+    printf 'rc=%s source=%s\n' "$rc" "$src" >> "$G_DIR/resume-log.txt"
+  done < "$G_TARGETS"
+else
+  printf 'rc=missing source=\n' >> "$G_DIR/resume-log.txt"
+fi
+
 printf 'resumed_at=%s\nboot_id=%s\n' "$(date -u +%FT%TZ)" "$BOOT_NOW" \
-  > /var/lib/cx-destruct/resume-proof.txt
+  > "$G_DIR/resume-proof.txt"
 systemctl disable cx-destruct-resume.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/cx-destruct-resume.service
 systemctl daemon-reload
@@ -274,17 +339,63 @@ UNIT
   ssh_guest 'sudo install -m 0755 /tmp/cx-destruct-resume.sh /usr/local/bin/cx-destruct-resume.sh'
   ssh_guest "sudo install -m 0644 /tmp/cx-destruct-resume.service $G_UNIT"
 
-  # 待删目标 + 重启前 boot_id 落盘，供 replay 交叉核对。
-  ssh_guest "printf 'shutdown-destruct-target\n' | sudo tee $G_TARGET >/dev/null"
-  ssh_guest "printf '%s\n' '$BOOT_BEFORE' | sudo tee $G_BOOT_BEFORE >/dev/null"
+  # ── 造现场：3 个登记目标（含 1 个必然失败的目录）+ 1 个未登记对照 ──────────
+  # 清理上一次运行可能留下的东西，保证每次从同一初始态开始。
+  ssh_guest "sudo rm -rf '$G_T1' '$G_T2' '$G_T3' '$G_CTL' '$G_DIR/resume-log.txt'"
+  ssh_guest "printf 'cx-destruct-target-1\n' | sudo tee '$G_T1' >/dev/null"
+  ssh_guest "printf 'cx-destruct-target-2\n' | sudo tee '$G_T2' >/dev/null"
+  # 目录：rm -f 对目录返回非 0（POSIX 语义），与权限无关，因此 root 也会失败。
+  ssh_guest "sudo mkdir -p '$G_T3'"
+  # 未登记对照：它必须活到最后，证明「只删登记的条目」而不是「清空整个目录」。
+  ssh_guest "printf 'must-survive\n' | sudo tee '$G_CTL' >/dev/null"
+
+  # 登记顺序刻意把**会失败的目录放在中间**：若实现是「删一个就退出」，
+  # 排在它后面的 target-2 就不会被删 —— 缺口 3 与缺口 5 由此一次断言覆盖。
+  ssh_guest "printf '%s\n%s\n%s\n' '$G_T1' '$G_T3' '$G_T2' | sudo tee '$G_TARGETS' >/dev/null"
+
+  ssh_guest "printf '%s\n' '$BOOT_BEFORE' | sudo tee '$G_BOOT_BEFORE' >/dev/null"
   ssh_guest 'sudo systemctl enable cx-destruct-resume.service'
 
-  # 登记完的现场必须成立，否则后面的断言没有意义。
-  TARGET_EXISTS=$(ssh_guest "test -f $G_TARGET && echo yes || echo no")
+  # ── 登记完的现场必须成立，否则后面的断言没有意义 ─────────────────────────
+  TARGET_EXISTS=$(ssh_guest "test -f $G_T1 && echo yes || echo no")
   UNIT_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo unknown')
-  say "登记后: target_exists=$TARGET_EXISTS unit_enabled=$UNIT_ENABLED"
+  say "登记后: target1_exists=$TARGET_EXISTS unit_enabled=$UNIT_ENABLED"
   [ "$TARGET_EXISTS" = yes ] || { say '登记失败：待删目标不存在'; exit 1; }
   [ "$UNIT_ENABLED" = enabled ] || { say "登记失败：续删单元未 enabled（$UNIT_ENABLED）"; exit 1; }
+
+  # ── 缺口 4：登记值本身必须字节级正确，不能只断言「后来删对了」 ────────────
+  # 理由：登记写错但恰好删对（比如写了个通配或错路径却碰到同名文件）时，
+  # 只看结果仍然是绿的。这里把「登记了什么」本身钉住。
+  say '=== 登记值校验（缺口 4：登记内容必须字节级正确）==='
+  REG_TARGETS=$(ssh_guest "cat '$G_TARGETS'")
+  EXPECTED_TARGETS=$(printf '%s\n%s\n%s' "$G_T1" "$G_T3" "$G_T2")
+  if [ "$REG_TARGETS" = "$EXPECTED_TARGETS" ]; then
+    say 'REGISTER_CONTENT=ok'
+  else
+    say "REGISTER_CONTENT=mismatch（登记值不是预期的三条）"
+    say "  实际: $(printf '%s' "$REG_TARGETS" | tr '\n' ' ')"
+    say "  预期: $(printf '%s' "$EXPECTED_TARGETS" | tr '\n' ' ')"
+    exit 1
+  fi
+
+  # unit 的 ExecStart 必须真的指向刚装好的续删脚本：
+  # 指向错文件时「没删成」和「脚本没跑」会混在一起，无法区分。
+  UNIT_EXEC=$(ssh_guest "sed -n 's/^ExecStart=//p' $G_UNIT")
+  say "unit_exec_start=$UNIT_EXEC"
+  if [ "$UNIT_EXEC" = /usr/local/bin/cx-destruct-resume.sh ]; then
+    say 'UNIT_EXECSTART=ok'
+  else
+    say '断言失败：unit 的 ExecStart 未指向续删脚本'; exit 1
+  fi
+
+  # 续删脚本必须是可执行的，否则 systemd 会以 203/EXEC 失败，
+  # 现象是「单元跑了但没删」—— 那会被误判成续删逻辑坏了。
+  RESUME_MODE=$(ssh_guest 'stat -c %A /usr/local/bin/cx-destruct-resume.sh')
+  say "resume_script_mode=$RESUME_MODE"
+  case "$RESUME_MODE" in
+    -rwx*) say 'RESUME_SCRIPT_EXEC=ok' ;;
+    *) say '断言失败：续删脚本没有可执行位'; exit 1 ;;
+  esac
   ;;
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +416,135 @@ reboot)
   ;;
 
 # ─────────────────────────────────────────────────────────────────────────────
+powercut)
+  # t98 缺口 1：**强制断电**，不是有序关机。
+  #
+  # 为什么这条最有价值：`systemctl reboot` 会走 systemd 有序关闭流程，可能顺手 sync/
+  # 清了待删目标 —— 于是「重启后文件没了」有两种解释：
+  #   (a) 登记已落盘，开机续删真的执行了        ← 我们想要的
+  #   (b) 关机流程自己把它清掉了（或根本没落盘）  ← 也表现为「文件没了」
+  # 只有**拔电源**能排除 (b)：`kill -KILL` QEMU 等价于断电，guest 没有任何机会收尾。
+  # 然后用**同一个覆盖层**冷启动 —— 重新 cloud-init 会重置盘，那等于把断言作废。
+  #
+  # 断电前先把 boot_id 留在宿主侧：断电后 guest 无法再写任何东西。
+  BEFORE_CUT_BOOT=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
+  say "断电前 boot_id=$BEFORE_CUT_BOOT"
+  printf '%s\n' "$BEFORE_CUT_BOOT" > "$WORK/boot-before-powercut.txt"
+
+  # 断电前确认覆盖层上还没被删：若这时目标就没了，说明系统已提前删掉，
+  # 后面的「重启后没了」不能归功于续删 —— 那样缺口 1 的断言就是假的。
+  PRE_EXISTS=$(ssh_guest "test -f $G_T1 && echo yes || echo no")
+  say "断电前 target1_exists=$PRE_EXISTS"
+  if [ "$PRE_EXISTS" != yes ]; then
+    say '断言失败：断电前目标已被删除，无法区分「续删」与「关机流程顺手删」'
+    exit 1
+  fi
+
+  PID=$(cat "$PIDFILE" 2>/dev/null || true)
+  if [ -z "${PID:-}" ] || ! kill -0 "$PID" 2>/dev/null; then
+    say "断言失败：找不到存活的 QEMU 进程（pid=${PID:-none}），无法断电"
+    exit 1
+  fi
+  say "强制断电：SIGKILL QEMU pid=$PID（等价拔电源，guest 无收尾机会）"
+  kill -KILL "$PID" 2>/dev/null || true
+
+  # 等进程真的消失，否则端口可能还被占着，冷启动会失败。
+  for _ in $(seq 1 30); do
+    if ! qemu_alive; then break; fi
+    sleep 1
+  done
+  if qemu_alive; then
+    say '断言失败：QEMU 进程未在 30s 内消失'; exit 1
+  fi
+  say 'QEMU 已终止（断电完成）'
+
+  # 冷启动：复用同一个覆盖层与 seed.iso。不重跑 cloud-init、不新建覆盖层。
+  [ -f "$OVERLAY" ] || { say '缺少覆盖层，无法冷启动'; exit 1; }
+  qemu-system-x86_64 \
+    -enable-kvm -cpu host -smp 2 -m 2048 \
+    -drive file="$OVERLAY",if=virtio,cache=writeback \
+    -drive file="$SEED",if=virtio,media=cdrom,readonly=on \
+    -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
+    -display none -vga none \
+    -pidfile "$PIDFILE" -daemonize
+  say "冷启动后 pid=$(cat "$PIDFILE" 2>/dev/null || echo unknown)"
+
+  START=$(date +%s)
+  if ! wait_ssh 'powercut'; then exit 1; fi
+  say "POWERCUT_BOOT_ELAPSED_SEC=$(( $(date +%s) - START ))"
+  ;;
+
+# ─────────────────────────────────────────────────────────────────────────────
+reboot2)
+  # t98 缺口 2：第二次重启。续删单元在第一次开机时已自撤销，
+  # 所以这次开机**不应**再执行续删（幂等）。断言放在 replay2。
+  BOOT_AFTER_FIRST=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
+  say "第二次重启前 boot_id=$BOOT_AFTER_FIRST"
+  printf '%s\n' "$BOOT_AFTER_FIRST" > "$WORK/boot-before-reboot2.txt"
+
+  # 第一次续删后 proof 的 boot_id 也留一份：replay2 要证明它**没被覆盖**。
+  FIRST_PROOF=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo missing")
+  printf '%s\n' "$FIRST_PROOF" > "$WORK/proof-after-first.txt"
+  say "第一次续删 proof=$FIRST_PROOF"
+
+  say '在 guest 内发起第二次重启'
+  ssh_guest 'sudo systemctl reboot' || say '（SSH 被重启切断，属预期）'
+
+  for _ in $(seq 1 60); do
+    if ! port_open; then break; fi
+    sleep 2
+  done
+  START=$(date +%s)
+  if ! wait_ssh 'reboot2'; then exit 1; fi
+  say "REBOOT2_ELAPSED_SEC=$(( $(date +%s) - START ))"
+  ;;
+
+# ─────────────────────────────────────────────────────────────────────────────
+replay2)
+  # t98 缺口 2：**多次重启只执行一次（幂等）**。
+  #
+  # 为什么重要：若续删不撤销，每次开机都会重新跑一遍，
+  # 会误删用户后来新建的同名文件 —— 那是真正的数据丢失。
+  #
+  # 判据不是「目标还在不在」（早就删了，看不出差别），而是：
+  #   · boot_id 必须变了（证明真的重启了，否则后面两条没有意义）
+  #   · resume-proof 的 boot_id 必须仍是**第一次**重启后的那个
+  #     ⇒ 续删没有在本次开机重跑（重跑会把它覆盖成本次 boot_id）
+  FAIL2=0
+  BOOT_BEFORE2=$(cat "$WORK/boot-before-reboot2.txt" 2>/dev/null || echo missing)
+  BOOT_NOW=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
+  PROOF_NOW=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo missing")
+  PROOF_FIRST=$(cat "$WORK/proof-after-first.txt" 2>/dev/null || echo missing)
+  say "boot_before_2=$BOOT_BEFORE2"
+  say "boot_now      =$BOOT_NOW"
+  say "proof_first   =$(printf '%s' "$PROOF_FIRST" | tr '\n' ' ')"
+  say "proof_now     =$(printf '%s' "$PROOF_NOW" | tr '\n' ' ')"
+
+  # ① 真的又重启了一次。
+  if [ "$BOOT_BEFORE2" = missing ] || [ "$BOOT_BEFORE2" = "$BOOT_NOW" ]; then
+    say '断言失败：第二次重启后 boot_id 未变化'; FAIL2=1
+  fi
+
+  # ② 续删 proof 必须**逐字节未变** —— 这才证明它没有再执行。
+  if [ "$PROOF_NOW" != "$PROOF_FIRST" ]; then
+    say '断言失败：续删在第二次开机时又执行了（proof 被覆盖）—— 不幂等，会误删同名新文件'
+    FAIL2=1
+  fi
+
+  # ③ 续删单元仍必须处于「不存在」状态（被第二次开机重新装回去也是回归）。
+  UNIT_PRESENT2=$(ssh_guest "test -f $G_UNIT && echo yes || echo no")
+  say "unit_present_after_2nd_boot=$UNIT_PRESENT2"
+  [ "$UNIT_PRESENT2" = no ] || { say '断言失败：续删单元在第二次开机后重新出现了'; FAIL2=1; }
+
+  if [ "$FAIL2" -ne 0 ]; then
+    say 'REPLAY2_VERDICT=failed'
+    exit 1
+  fi
+  say 'IDEMPOTENT=yes'
+  say 'REPLAY2_VERDICT=passed'
+  ;;
+
+# ─────────────────────────────────────────────────────────────────────────────
 replay)
   FAIL=0
   BOOT_AFTER=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
@@ -317,14 +557,55 @@ replay)
     say '断言失败：boot_id 未变化（客机没有真的重启）'; FAIL=1
   fi
 
-  # ② 待删目标已删。
-  TARGET_EXISTS=$(ssh_guest "test -f $G_TARGET && echo yes || echo no")
-  say "target_exists_after=$TARGET_EXISTS"
-  [ "$TARGET_EXISTS" = no ] || { say '断言失败：待删目标仍存在'; FAIL=1; }
+  # ② 缺口 3：**所有**登记的文件目标都已删（不只第一个）。
+  T1=$(ssh_guest "test -f $G_T1 && echo yes || echo no")
+  T2=$(ssh_guest "test -f $G_T2 && echo yes || echo no")
+  say "target1_exists=$T1 target2_exists=$T2"
+  [ "$T1" = no ] || { say '断言失败：第 1 个目标仍存在'; FAIL=1; }
+  # target-2 排在「必然失败的目录」之后：它被删掉 = 列表没在第一次失败处中断。
+  [ "$T2" = no ] || { say '断言失败：第 2 个目标仍存在（列表在失败项处中断了）'; FAIL=1; }
+
+  # ②b 缺口 5：异常路径——目录目标保留（删不掉是预期），且**不影响后续条目**。
+  T3=$(ssh_guest "test -d $G_T3 && echo yes || echo no")
+  say "target_dir_exists=$T3（预期 yes：rm -f 对目录必失败）"
+  [ "$T3" = yes ] || { say '断言失败：目录目标消失了（rm -f 不应能删目录）'; FAIL=1; }
+
+  # ②c 缺口 3 的反向断言：**未登记的对照文件必须存活**。
+  CTL=$(ssh_guest "test -f $G_CTL && echo yes || echo no")
+  say "control_exists=$CTL（预期 yes：未登记就不该删）"
+  [ "$CTL" = yes ] || { say '断言失败：未登记的对照文件被删了（删多了）'; FAIL=1; }
+
+  # ②d 缺口 4 + 5：逐条核对「登记条目 → 处理结果」的对应关系。
+  # 只断言「最终删没删」无法区分「按列表处理」与「碰巧删到」，
+  # 也无法证明失败项被记录下来而不是被静默吞掉。
+  LOG=$(ssh_guest "cat $G_LOG 2>/dev/null || echo missing")
+  say "resume_log=$(printf '%s' "$LOG" | tr '\n' ' | ')"
+  if [ "$LOG" = missing ]; then
+    say '断言失败：没有 resume-log（无法证明逐条处理）'; FAIL=1
+  else
+    # 正常条目：rc=0
+    for t in "$G_T1" "$G_T2"; do
+      if printf '%s\n' "$LOG" | grep -qxF "rc=0 source=$t"; then
+        say "log_ok: rc=0 source=$t"
+      else
+        say "断言失败：日志里没有 rc=0 的条目 $t"; FAIL=1
+      fi
+    done
+    # 目录条目：rc 非 0，但必须**被记录**（证明异常被观测到而非吞掉）
+    if printf '%s\n' "$LOG" | grep -qE "^rc=[1-9][0-9]* source=$G_T3$"; then
+      say "log_ok: 目录条目以非 0 记录 source=$G_T3"
+    else
+      say '断言失败：目录条目没有被记为失败（异常被静默吞掉）'; FAIL=1
+    fi
+    # 条目总数必须正好 3 条：多一条说明处理了未登记的东西，少一条说明漏处理。
+    LOG_COUNT=$(printf '%s\n' "$LOG" | grep -c '^rc=' || true)
+    say "resume_log_entries=$LOG_COUNT（预期 3）"
+    [ "$LOG_COUNT" = 3 ] || { say '断言失败：处理条目数与登记数不一致'; FAIL=1; }
+  fi
 
   # ③ 续删单元真的执行过，且是**本次启动**执行的（proof 里的 boot_id == 当前 boot_id）。
   PROOF=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo missing")
-  say "resume_proof=$PROOF"
+  say "resume_proof=$(printf '%s' "$PROOF" | tr '\n' ' ')"
   if [ "$PROOF" = missing ]; then
     say '断言失败：续删单元未执行（无 resume-proof）'; FAIL=1
   else

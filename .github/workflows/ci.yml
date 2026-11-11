@@ -1810,11 +1810,17 @@ jobs:
       - name: 阶段一：客机内登记待删目标与开机续删单元
         run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase register
 
-      - name: 阶段二前半：客机内真实重启并等待回连
-        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase reboot
+      - name: 阶段二之一：强制断电（等价拔电源）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase powercut
 
-      - name: 阶段二后半：断言重启过、已续删、已自撤销
+      - name: 阶段二之二：断言断电后仍续删（缺口 1）+ 多目标/登记值/异常路径（缺口 3/4/5）
         run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase replay
+
+      - name: 阶段三之一：第二次重启（幂等验证）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase reboot2
+
+      - name: 阶段三之二：断言续删未重跑（缺口 2，proof 逐字节未变）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase replay2
 
       - name: 上传客机证据
         if: always()
@@ -1827,6 +1833,9 @@ jobs:
             ${{ runner.temp }}/cx-linux-guest/meta-data
             ${{ runner.temp }}/cx-linux-guest/resume.sh
             ${{ runner.temp }}/cx-linux-guest/unit.service
+            ${{ runner.temp }}/cx-linux-guest/boot-before-powercut.txt
+            ${{ runner.temp }}/cx-linux-guest/proof-after-first.txt
+            ${{ runner.temp }}/cx-linux-guest/boot-before-reboot2.txt
           if-no-files-found: warn
           retention-days: 14
 
