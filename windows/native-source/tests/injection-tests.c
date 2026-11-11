@@ -16,6 +16,9 @@ static DWORD calls, failures, failedChecks, ids[32];
 static char methods[33];
 static char response[256];
 static DWORD scriptReplyMode;
+/* t95：最后一次 net_ws_send_text 的原文，用来断言 eval 里是否带了 "contextId":N。 */
+static char lastCommand[4096];
+static DWORD lastCommandLength;
 static BOOL emitRequest;
 static BOOL targetFixture, ownerAllowed, mockClientAlive;
 static DWORD ownerChecks, httpCalls, openCalls, closeCalls, fakeTick;
@@ -61,6 +64,14 @@ BOOL net_ws_send_text(NET_WS *ws, const char *text, DWORD length, WCHAR *error, 
     const char *tail;
     (void)ws; (void)error; (void)cap;
     if (emitRequest) { h_print_utf8(text); h_print_utf8("\n"); }
+    /* t95：捕获最近一次发出的 CDP 命令原文，供断言 eval 是否带 "contextId"。
+       只做 memcpy 截断保存，不影响原有逻辑。 */
+    {
+        DWORD copy = length < (DWORD)(sizeof(lastCommand) - 1) ? length : (DWORD)(sizeof(lastCommand) - 1);
+        CopyMemory(lastCommand, text, copy);
+        lastCommand[copy] = 0;
+        lastCommandLength = copy;
+    }
     if (calls >= 32 || jparse(text, (int)length, tokens, 32) <= 0) return FALSE;
     id = (DWORD)jint(text, tokens, jkey(text, tokens, 0, "id"), -1);
     params = jkey(text, tokens, 0, "params");
@@ -752,6 +763,196 @@ static void test_bundle_sentinel(void) {
 #undef T89_ADVANCE_MS
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   t93：探针是否真的被 h_page_pump 排期执行（而不是只被直接调用）
+
+   为什么必须有这条：
+     上面 test_bundle_sentinel 的**全部**用例都是直接 `h_probe_bundle_sentinel(&page)`，
+     绕过了 h_page_pump。于是「探针函数本身写对了」能过，但「探针有没有被排期执行」
+     完全没被覆盖 —— 这正是 2026-11-11 那个缺陷能长期隐藏的原因：
+     探针原本在 h_page_pump 的任务处理循环（loop 2）内部，而 loop 2 的进入条件是
+     `cx_session_next(...)`；bundle ACK 之后没有新任务 ⇒ loop 2 体一次也不进
+     ⇒ 探针永不执行。6 份 report 全是 bundleInPage=False + sentinelRejected=False
+     且 host.stdout.log 里一条 sentinel 日志都没有。
+
+   本用例的构造（故意不直接调探针）：
+     1) 建一个真实 CX_SESSION，喂 executionContextCreated 建立 top context；
+     2) 喂 __CX_WIN_MSG__ kind=ready ⇒ bundleQueued=TRUE（session.c:238）；
+     3) 让 h_page_pump 处理完这个 bundle 任务（ACK 成功 ⇒ h_schedule_bundle_probe 排期）；
+     4) ★ 关键：ACK 之后 session 里**没有新任务**，cx_session_next 返回 FALSE；
+     5) 推进 fakeTick 越过 H_BUNDLE_PROBE_DELAY_MS，再调一次 h_page_pump；
+     6) 断言 bundleInPage 变 TRUE（= 探针真的被执行了）。
+
+   若探针仍在 loop 2 内，第 5 步的 pump 会因「无任务」直接跳过整个 loop 2，
+   探针永不执行，第 6 步必红。 */
+static void test_probe_runs_without_pending_tasks(void) {
+    const char created[] = "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"id\":1,\"origin\":\"https://a.chaoxing.com\",\"auxData\":{\"isDefault\":true,\"frameId\":\"top\"}}}}";
+    /* __CX_WIN_MSG__ kind=ready：session.c:238 会把 top context 的 bundleQueued 置真。 */
+    const char ready[] = "{\"method\":\"Runtime.consoleAPICalled\",\"params\":{\"type\":\"log\",\"executionContextId\":1,\"args\":[{\"type\":\"string\",\"value\":\"__CX_WIN_MSG__{\\\"kind\\\":\\\"ready\\\"}\"}]}}";
+    H_NATIVE_PAGE *pages;
+    WCHAR error[HOST_ERROR_CAP];
+    BOOL pumped;
+    DWORD callsAfterBundle;
+
+    cx_options_init(&h_base_options);
+    h_base_options.quiet = TRUE;
+    h_base_options.extensionEnabled = TRUE;
+    targetFixture = TRUE; ownerAllowed = TRUE; mockClientAlive = TRUE;
+    ownerChecks = httpCalls = openCalls = closeCalls = calls = failures = 0;
+    h_zero(&h_report, sizeof(h_report));
+    h_client_pid = 123; h_started = 1000; h_duration = 60000; fakeTick = 1000;
+    h_current_page = NULL; h_task_pending = FALSE; h_current_context = 0;
+    cancelReadMode = 0; multipleTargets = FALSE; transportErrorMode = FALSE;
+    scriptReplyMode = 0;   /* 页面一律回 boolean true */
+
+    pages = (H_NATIVE_PAGE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(H_NATIVE_PAGE) * HOST_MAX_PAGES);
+    if (!pages) { check("t93 probe fixture allocation", FALSE); return; }
+    pages[0].state = cx_session_create("https://a.chaoxing.com/exam-ans/", TRUE, TRUE);
+    if (!pages[0].state) {
+        HeapFree(GetProcessHeap(), 0, pages);
+        check("t93 probe session allocation", FALSE);
+        return;
+    }
+    pages[0].ws = (NET_WS *)1;
+    pages[0].nextId = 1;
+    cx_session_feed(pages[0].state, created, sizeof(created) - 1);
+    cx_session_feed(pages[0].state, ready, sizeof(ready) - 1);
+
+    /* 第 3 步：一次 pump 处理完 bundle 任务（此时 fakeTick 还没到探针时间点）。 */
+    pumped = h_page_pump(&pages[0], &h_base_options, "true;", 5, "true;", 5, "body{}", 6, error, HOST_ERROR_CAP);
+    check("t93 setup: bundle task is acknowledged and the probe gets scheduled",
+          pumped && cx_session_stats(pages[0].state)->bundles == 1 && pages[0].bundleProbeAt != 0);
+    /* t95：ACK 时**必须**把 bundle 所在的 contextId 记到页面上。
+       这一条是「记录路径」的钉子 —— 上面 t95 的三条用例是直接给 page.bundleContextId 赋值，
+       绕过了 ACK 路径，因此测不到「代码里到底有没有记」。变异验证抓到的正是这个漏洞：
+       删掉 `page->bundleContextId = task.contextId;` 后那三条照样全绿。
+       fixture 的 top context 是 id=1（见本函数开头的 executionContextCreated）。 */
+    check("t95 ACK records the bundle contextId on the page",
+          pages[0].bundleContextId == 1);
+
+    /* 第 4 步：ACK 后没有新任务。这是本缺陷的关键前提 —— 先证明它确实成立，
+       否则后面的断言可能因为「恰好还有任务」而误绿。 */
+    {
+        CX_SESSION_TASK leftover;
+        check("t93 setup: no pending task remains after the bundle acknowledgement",
+              !cx_session_next(pages[0].state, &leftover));
+    }
+
+    /* 第 5 步：推进到探针到期，再 pump 一次（此时 loop 2 一定进不去）。 */
+    callsAfterBundle = calls;
+    fakeTick += H_BUNDLE_PROBE_DELAY_MS + 1;
+    pumped = h_page_pump(&pages[0], &h_base_options, "true;", 5, "true;", 5, "body{}", 6, error, HOST_ERROR_CAP);
+
+    /* 第 6 步：探针必须被执行。
+       ★ 断言的是「探针执行过」这件事本身（bundleProbeCount 增加 + 真的发出了 eval），
+       而**不是** bundleInPage。原因：mock 的 net_ws_read_timeout 永远返回同一份全局
+       response buffer，h_wait_reply 在 id 不匹配时会重新读、读到的还是旧的 id，
+       于是 probe 的 eval 可能一直等不到自己的应答而走超时分支。
+       那是**测试夹具的局限**，不是被测实现的问题 —— 用它当断言会测出假红。
+       「探针有没有被执行」的正确证据是：探针计数器前进 + 发出了新的 eval 请求。 */
+    check("t93 probe counter advanced (probe body really ran)", pages[0].bundleProbeCount >= 1);
+    check("t93 probe actually sent an evaluation to the page", calls > callsAfterBundle);
+    check("t93 probe did not misreport the page as rejecting", !h_report.injectEvidence.bundleSentinelRejected);
+    check("t93 probe runs even when there is no pending task",
+          pumped && pages[0].bundleProbeCount >= 1 && calls > callsAfterBundle);
+
+    h_page_close(&pages[0]);
+    HeapFree(GetProcessHeap(), 0, pages);
+    h_client_pid = 0; h_duration = 0; h_current_page = NULL;
+    h_task_pending = FALSE; h_current_context = 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   t95：探针必须定向到 bundle 所在的 frame
+
+   背景（用户实证）：v4.3.0.4-2 的截图里面板已经显示 ⇒ bundle 确实执行了，
+   但 report 里 `bundleInPage=false`。原因不是探针没跑（t93 已修），而是**探错了 frame**：
+   `h_send_eval_result` 只在 `h_current_context > 0` 时才拼 `"contextId":N`，
+   否则落到「默认执行上下文」= 主 frame。而 bundle 常注入在 about:blank /
+   passport2 等子 frame 里，主 frame 的 `__CX_WIN_BUNDLE_LOADED__` 恒为 undefined。
+
+   两条用例：
+     1) bundleContextId = 5 → 发出的 eval JSON 必须含 `"contextId":5`
+     2) bundleContextId = 0 → eval **不得**含 contextId（退化到旧行为）
+   并额外断言探针调用前后 `h_current_context` 不变（保存/恢复生效）。 */
+static void test_probe_targets_bundle_context(void) {
+    H_NATIVE_PAGE page;
+    WCHAR error[HOST_ERROR_CAP];
+    int savedGlobal;
+
+    /* ── 用例 1：bundleContextId = 5 → eval 带 "contextId":5 ───────────────── */
+    ZeroMemory(&page, sizeof(page));
+    ZeroMemory(&h_report, sizeof(h_report));
+    page.ws = (NET_WS *)1;
+    page.nextId = 1;
+    page.bundleContextId = 5;
+    /* ⚠️ h_send_eval_result 的拼串条件是
+       `h_current_page && h_current_page->ws == ws && h_current_context > 0`。
+       夹具必须把全局 h_current_page 指向本页，否则 contextId 永远不会被拼进命令 ——
+       那是被测条件的正确行为，不是缺陷。（t93 用例没设也能过，是因为它只断「发了 eval」。） */
+    h_current_page = &page;
+    /* 预先排好期（等价于 bundle ACK 已调用 h_schedule_bundle_probe）。 */
+    h_schedule_bundle_probe(&page);
+    fakeTick += H_BUNDLE_PROBE_DELAY_MS + 1;
+    /* 故意把全局设成一个**不同的**值，用来同时验证保存/恢复。 */
+    h_current_context = 7;
+    savedGlobal = h_current_context;
+    lastCommand[0] = 0; lastCommandLength = 0;
+    scriptReplyMode = 0; transportErrorMode = FALSE; calls = 0; failures = 0;
+
+    h_probe_bundle_sentinel(&page);
+
+    check("t95 #1 probe evaluation is addressed to the bundle frame",
+          lastCommandLength > 0 && h_wcontains_a(lastCommand, "\"contextId\":5"));
+    check("t95 #1 probe restores h_current_context after the call",
+          h_current_context == savedGlobal);
+
+    /* ── 用例 2：bundleContextId = 0（未知）→ eval 不带 contextId ─────────── */
+    ZeroMemory(&page, sizeof(page));
+    ZeroMemory(&h_report, sizeof(h_report));
+    page.ws = (NET_WS *)1;
+    page.nextId = 1;
+    page.bundleContextId = 0;
+    h_current_page = &page;
+    h_schedule_bundle_probe(&page);
+    fakeTick += H_BUNDLE_PROBE_DELAY_MS + 1;
+    h_current_context = 0;
+    savedGlobal = h_current_context;
+    lastCommand[0] = 0; lastCommandLength = 0;
+    scriptReplyMode = 0; transportErrorMode = FALSE; calls = 0; failures = 0;
+
+    h_probe_bundle_sentinel(&page);
+
+    check("t95 #2 unknown bundle context keeps the default-context behaviour",
+          lastCommandLength > 0 && !h_wcontains_a(lastCommand, "contextId"));
+    check("t95 #2 probe leaves h_current_context at zero", h_current_context == savedGlobal);
+
+    /* ── 用例 3（补充）：bundleContextId = 5 但全局是 0，仍须定向到 5 ────────
+       这是真实路径的形态：t93 外移后 loop 2 一整轮不进，h_current_context 停在 0，
+       而探针仍要能定向到 bundle 的 frame。 */
+    ZeroMemory(&page, sizeof(page));
+    ZeroMemory(&h_report, sizeof(h_report));
+    page.ws = (NET_WS *)1;
+    page.nextId = 1;
+    page.bundleContextId = 5;
+    h_current_page = &page;
+    h_schedule_bundle_probe(&page);
+    fakeTick += H_BUNDLE_PROBE_DELAY_MS + 1;
+    h_current_context = 0;   /* 模拟「loop 2 没进过」 */
+    lastCommand[0] = 0; lastCommandLength = 0;
+    scriptReplyMode = 0; transportErrorMode = FALSE; calls = 0; failures = 0;
+
+    h_probe_bundle_sentinel(&page);
+
+    check("t95 #3 probe targets the bundle frame even when the global context is zero",
+          lastCommandLength > 0 && h_wcontains_a(lastCommand, "\"contextId\":5"));
+    check("t95 #3 and the global stays zero afterwards", h_current_context == 0);
+
+    h_current_context = 0;
+    h_current_page = NULL;
+    ZeroMemory(&h_report, sizeof(h_report));
+}
+
 void __stdcall InjectionTestMain(void) {
     DWORD id = 2;
     int argc;
@@ -783,6 +984,8 @@ void __stdcall InjectionTestMain(void) {
         if (!gate[0] || lstrcmpW(gate, L"sentinel") == 0) test_bundle_sentinel();
     }
     test_http_deadline_budget();
+    test_probe_runs_without_pending_tasks();
+    test_probe_targets_bundle_context();
     test_endpoint_probe();
     test_upgrade_deadline_budget();
     test_normal_stop_cancellation();

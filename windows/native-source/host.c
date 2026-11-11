@@ -60,6 +60,14 @@ typedef struct H_NATIVE_PAGE {
        而超时是 120000ms）。所以改成「延迟首探 + 有限次重探」。 */
     DWORD bundleProbeAt;   /* 下次允许探测的时刻；0 = 还没排期 */
     DWORD bundleProbeCount; /* 已经探测过几次 */
+    /* t95：bundle ACK 时的 contextId —— 探针必须**定向到当初注入 bundle 的那个 frame**。
+       0 = 未知（退化到默认执行上下文，与 t95 之前的旧行为一致）。
+       为什么必须记：主 frame 不一定是被注入 bundle 的 frame。实测（v4.3.0.4-2）bundle
+       同时注入了 about:blank 与 passport2.chaoxing.com/login 等多个 frame，而
+       `__CX_WIN_BUNDLE_LOADED__` 只在被注入的那个 frame 里为 true。
+       在默认上下文里读它必然是 undefined ⇒ bundleInPage 误报 false
+       （用户截图证明面板其实已经显示，即 bundle 确实执行了）。 */
+    int bundleContextId;
     CX_SESSION_STATS reported;
 } H_NATIVE_PAGE;
 

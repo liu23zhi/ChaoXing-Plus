@@ -222,8 +222,26 @@ static BOOL h_probe_bundle_sentinel(H_NATIVE_PAGE *page) {
 
     error[0] = 0;
     ++page->bundleProbeCount;
-    ok = h_send_eval_checked(page->ws, page->nextId++, h_bundle_sentinel,
-                             (DWORD)(sizeof(h_bundle_sentinel) - 1), TRUE, error, 256);
+    /* t95：探针必须**定向到当初注入 bundle 的那个 frame**，而不是当前（可能为 0 的）上下文。
+     *
+     * 为什么：h_send_eval_result（host.c）只在 `h_current_context > 0` 时才往 CDP 命令里
+     * 拼 "contextId"，否则落到「默认执行上下文」= 主 frame。而 bundle 不一定注入在主 frame：
+     * 实测 v4.3.0.4-2 的 client-debug.log 显示 bundle 同时进入 about:blank 与
+     * passport2.chaoxing.com/login 等多个 frame，`__CX_WIN_BUNDLE_LOADED__` 只在被注入的
+     * 那个 frame 里为 true。于是主 frame 读它必然是 undefined ⇒ bundleInPage 误报 false
+     * （而用户截图显示面板已出现，说明 bundle 确实执行了）。
+     *
+     * 为什么要保存/恢复：h_current_context 是全局，被 loop 2 与 h_ui_send 共用。
+     * 探针是「插进来的一次额外 eval」，改完必须还原，否则会污染调用方后续的 eval 定向。
+     *
+     * bundleContextId == 0（未知）：保持原值不动，eval 落到默认上下文 —— 与 t95 之前一致。 */
+    {
+        int savedContext = h_current_context;
+        if (page->bundleContextId > 0) h_current_context = page->bundleContextId;
+        ok = h_send_eval_checked(page->ws, page->nextId++, h_bundle_sentinel,
+                                 (DWORD)(sizeof(h_bundle_sentinel) - 1), TRUE, error, 256);
+        h_current_context = savedContext;
+    }
     if (ok) {
         h_report.injectEvidence.bundleInPage = TRUE;
         h_audit_event("info", "inject", "Bundle sentinel confirmed in the page main world");
@@ -287,6 +305,12 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
                 if (task.top) {
                     /* t89：ACK 只代表源码送达，不代表执行完。这里只排期，
                        真正的探测在 h_page_pump 末尾按 bundleProbeAt 到点重试。 */
+                    /* t95：记录 bundle 实际被注入的 contextId —— 探针必须定向到同一个 frame。
+                       此刻 h_current_context 已被 L268 设为 task.contextId，而
+                       h_inject_asset → h_send_eval → h_send_eval_result 正是读
+                       h_current_context 来拼 "contextId" 的（host.c h_send_eval_result），
+                       所以 task.contextId 就是「注入时用的那个 frame」，两者天然一致。 */
+                    page->bundleContextId = task.contextId;
                     h_schedule_bundle_probe(page);
                     h_collect_page_diagnostics(page);
                 }
@@ -295,11 +319,35 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
                 task.type == CX_SESSION_TASK_CONFIG ? (success ? "Configuration acknowledged" : "Configuration delivery failed") : (success ? "Injection acknowledged" : "Injection failed"));
         }
         /* t89：到点就重探 bundle 哨兵，未确认则排下一次（最多 H_BUNDLE_PROBE_MAX 次）。 */
-        h_probe_bundle_sentinel(page);
         h_sample_page(page);
         h_task_pending = FALSE;
         if (!h_operation_active()) break;
     }
+    /* ⚠️ 2026-11-11（t93）修正：探针**必须**放在 loop 2 外面。
+     *
+     * 原位置在 loop 2 内部末尾（与 h_sample_page 并列）。而 loop 2 的进入条件是
+     * `cx_session_next(page->state, &task)` —— 只有「还有待办任务」时才进。
+     * bundle ACK 之后页面不会再有新任务，于是 cx_session_next 恒返回 FALSE
+     * ⇒ **loop 2 体一次也不进** ⇒ 探针永不执行。
+     * 后果（6 份 report 实测，run 42958179520）：
+     *   bundleInPage=False、sentinelRejected=False、reason=bundle-unverified，
+     *   且 host.stdout.log 里**一条 sentinel 日志都没有**（confirmed/rejected 都没打印）
+     *   —— 正好是「探针根本没跑到审计事件」的形态。
+     * 时间窗反证（25512-1）：22.971 bundle ACK → 23.371 应在首探 → 25.155 第二次 ACK
+     *   落在 24.871~25.871 的 6 次窗口内却仍未被探到。
+     *
+     * 移到外面为什么安全：
+     *   · h_page_pump 被 h_run_session 的 `do { ... Sleep(20); } while (h_operation_active())`
+     *     每 20ms 调用一次（host-session.inc:472-491），所以外移后探针的检查频率是 20ms，
+     *     远高于探针自身 500ms 的间隔，延迟语义不变。
+     *   · 探针只读 page->bundleProbeAt / page->bundleProbeCount 与全局 h_report，
+     *     不依赖 loop 2 里的 h_current_task / h_current_context（已逐行核对）。
+     *   · 外移后仍在 `h_current_context = 0` 之前、h_ui_send 之前，顺序与原来一致。
+     *
+     * 刻意**不**改成「loop 2 条件加 || h_bundle_probe_due(page)」：那会让探针到期时
+     * 进入 loop 2 体、从而执行一次 body（里面会重新赋值 h_current_task 等），
+     * 副作用面比外移大得多，且 task 未初始化就进 body 更危险。 */
+    h_probe_bundle_sentinel(page);
     h_current_context = 0;
     if (h_operation_active()) h_ui_send(page, options);
     return TRUE;
