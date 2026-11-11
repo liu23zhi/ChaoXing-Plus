@@ -90,8 +90,10 @@ test('ci.yml 的 runner 标签与必要检查名保持不变', async () => {
   // 这三条锚的是**跨作业的固定字符串**（标签、job 名、变量名），不是某一段的行为，
   // 所以继续整文件断言；它们各自唯一，不会与别的 job 混淆。
   const workflow = await read(WORKFLOW);
-  assert.match(workflow, /runs-on: \[self-hosted, windows, cx-vm\]/u, 'self-hosted cx-vm 策略不变');
-  assert.match(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '既有 job 名不得改动');
+  // 2026-11-11 用户要求「不用 self-hosted」：该作业已整条删除。
+  assert.doesNotMatch(workflow, /runs-on: \[self-hosted/u, '不得再出现 self-hosted runner 标签');
+  // 该作业已删除，其 job 名不应再出现（否则读者会以为它还在）。
+  assert.doesNotMatch(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '已删除的作业名不得残留');
   // 2026-11-11 用户三次要求「不要跳过任务」：CX_VM_ENABLED 变量门已取消，
   // 否则该作业在从未配置该变量时永远 skip（且历史上还因此假绿）。
   assert.doesNotMatch(workflow, /vars\.CX_VM_ENABLED/u, '变量门已取消（用户要求不跳过）');

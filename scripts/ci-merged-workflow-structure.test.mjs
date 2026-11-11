@@ -273,32 +273,6 @@ test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async 
   );
 });
 
-test('vm-shutdown-destruct 已取消所有限制（含变量门）', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  const condition = blockValue(section, 'if');
-
-  // 2026-11-11 用户三次要求「不要跳过任务」：变量门与 event 限制全部取消。
-  //
-  // ⚠️ 代价已知：本仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]），
-  // 去掉变量门后本作业是 **queued** 而非 skipped。这是「不跳过」的真实代价，
-  // 注册 runner 后即正常执行。该代价记录在 ci.yml 的 job 注释里。
-  assert.ok(
-    !condition.includes('vars.CX_VM_ENABLED'),
-    'vm-shutdown-destruct 不得再受 CX_VM_ENABLED 变量门限制，实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('github.event_name'),
-    'vm-shutdown-destruct 不得再按 event_name 限制，实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'vm-shutdown-destruct 必须仍然受 gate.result 约束，实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('needs.gate.outputs.skip'),
-    'vm-shutdown-destruct 不得被任何判重跳过，实际：' + condition,
-  );
-});
 
 test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
   const section = await jobSection('gate');
@@ -341,14 +315,6 @@ test('wiring-probe 跑在托管 runner 上（不依赖 self-hosted 才有自毁�
   );
 });
 
-test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  assert.equal(
-    inlineValue(section, 'runs-on'),
-    '[self-hosted, windows, cx-vm]',
-    '真关机必须落在自建 cx-vm 上：改成托管 runner 会让作业永久排队或杀掉 runner 自己',
-  );
-});
 
 test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
