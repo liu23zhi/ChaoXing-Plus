@@ -7,6 +7,15 @@ import { createTestDirectory, resolveTestPath } from './test-helpers/temp-direct
 // Windows PowerShell 5.1 按 ANSI 解码，dot-source 的路径变乱码后直接失败。
 import { writePowerShellScript, runPowerShellScript } from './test-helpers/windows-script.mjs';
 
+// 2026-11-11: artifact 文件名已中文化（用户要求）。这里用与 ps1 相同的码点映射取名，
+// 避免「测试硬编码英文名、脚本产出中文名」的静默漂移。
+const ARTIFACT_ZH = {
+  sha256: String.fromCharCode(0x6821, 0x9A8C, 0x548C),
+  clientDebug: String.fromCharCode(0x5BA2, 0x6237, 0x7AEF, 0x8C03, 0x8BD5, 0x65E5, 0x5FD7),
+  clientInput: String.fromCharCode(0x5BA2, 0x6237, 0x7AEF, 0x8F93, 0x5165, 0x8BB0, 0x5F55),
+};
+const MANIFEST_FILE = `cx-real-client-cleanup-${ARTIFACT_ZH.sha256}.txt`;
+
 const windowsOnly = process.platform === 'win32' ? undefined : 'Windows PowerShell cleanup regression';
 const source = resolveTestPath('scripts', 'windows-real-client-injection.ps1');
 
@@ -115,7 +124,7 @@ function assertFinished(result, expectedError) {
   assert.ok(existsSync(path.join(result.runner, 'input-restored.marker')), 'input restore must still run');
   assert.equal(existsSync(path.join(result.runner, 'cdp-capture.marker')), false,
     'no CDP endpoint was ever found, so no page capture may be attempted');
-  const manifest = path.join(result.runner, 'cx-real-client-cleanup-sha256.txt');
+  const manifest = path.join(result.runner, MANIFEST_FILE);
   assert.ok(existsSync(manifest), `artifact manifest must be written after cleanup diagnostics:\n${result.output}`);
   assert.match(readFileSync(manifest, 'utf8'), /^[a-f0-9]{64}  cx-real-client-cleanup-/mu);
   assert.deepEqual(readdirSync(result.runner, { withFileTypes: true }).filter((entry) => entry.isDirectory()), [],
@@ -142,8 +151,8 @@ test('database failure without debug or input files still writes the manifest an
 test('debug and input evidence are both copied and included in the final hash manifest', { skip: windowsOnly }, () => {
   const result = runCleanupCase({ logs: true });
   assertFinished(result, /^ORIGINAL_INSTALL_FAILURE$/u);
-  const manifest = readFileSync(path.join(result.runner, 'cx-real-client-cleanup-sha256.txt'), 'utf8');
-  for (const [suffix, content] of [['client-debug.log', 'debug evidence'], ['client-input.txt', 'input evidence']]) {
+  const manifest = readFileSync(path.join(result.runner, MANIFEST_FILE), 'utf8');
+  for (const [suffix, content] of [[`${ARTIFACT_ZH.clientDebug}.log`, 'debug evidence'], [`${ARTIFACT_ZH.clientInput}.txt`, 'input evidence']]) {
     assert.equal(readFileSync(path.join(result.runner, `cx-real-client-cleanup-${suffix}`), 'utf8'), content);
     assert.ok(manifest.includes(`cx-real-client-cleanup-${suffix}`));
   }
