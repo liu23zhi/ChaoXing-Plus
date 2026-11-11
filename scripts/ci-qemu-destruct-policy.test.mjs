@@ -158,12 +158,11 @@ test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不�
     '必须支持手动触发时覆盖（用 github.event.inputs.guest_image，push 下 inputs.* 为 null）');
   assert.doesNotMatch(workflow, /[^.]inputs\.guest_image/u,
     '不得残留裸 inputs.* 写法（push 事件下为 null）');
-  // 2026-11-11（用户最终要求）：**不跳过** —— job 级 if 只判 gate.result，
-  // 不按 CX_QEMU_GUEST_IMAGE 是否为空跳过。所以「未配置」会正常走到 image 步骤，
-  // 由那里的 fail() 判红（exit 1），而不是 skip(){} + exit 0（假绿）。
-  // 判据：空值分支必须存在且给出**可操作**的配置指引，而不是含糊的「内部错误」。
-  assert.match(workflow, /fail '未配置客机镜像/u,
-    'image 步骤必须保留空值分支并判红，且给出可操作的配置指引');
+  // 2026-11-11（t96）：镜像「未配置」的判定从 job 内部挪到了 **job 级 if**，
+  // 所以 GitHub 显示 skipped（诚实：未执行不会被读成通过），而不是内部的 skip(){exit 0}（假绿）。
+  // job 内走到 image 步骤时，变量必然非空 —— 若仍为空那是工作流自身 bug，必须判红。
+  assert.match(workflow, /fail '内部错误：job 级 if 应已拦截空镜像/u,
+    'image 步骤必须保留空值兜底并判红（若走到这里仍为空，说明 if 与 env 取值不一致）');
   // skip(){ ... exit 0 } 是假绿指纹（run 42963390787 实测：客机一步没跑却报 success），不得再出现。
   assert.doesNotMatch(workflow, /skip\(\)\s*\{[^}]*exit\s+0/u,
     'qemu 段不得出现 skip(){ exit 0 } —— 那是 t96 修掉的假绿');
@@ -288,10 +287,14 @@ test('ci.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM、
   assert.match(workflow, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
   assert.match(workflow, /KVM 可用（提权后复核）/u, '摘要必须写明 KVM 是否可用');
   assert.match(workflow, /客机镜像已配置/u, '摘要必须写明客机镜像是否配置');
-  // 2026-11-11: 文案演进为「这不是通过 / 未执行（环境不可用，不是通过）」——
-  // 语义等价于「跳过不等于验证通过」，断言按实际文案匹配，避免文案改写就误红。
-  assert.match(workflow, /(跳过不等于验证通过|这不是通过|未执行（环境不可用，不是通过）)/u,
-    '摘要必须明确「跳过/未执行 ≠ 通过」');
+  // 2026-11-11（t96）：summary 不再用「跳过 ≠ 通过」这一句就收场 —— 那只是文字，
+  // job 结论仍是 success（用户实测抓到的假绿）。现在要求两类失败有**各自不同**的标题：
+  //   · 环境不可用（KVM/QEMU）→ 明写「不是通过」
+  //   · 镜像配置坏了        → 明写「失败：…已配置但不可用」
+  assert.match(workflow, /未执行（环境不可用，不是通过）/u,
+    '环境不可用时摘要必须明写「不是通过」（不再用旧的「跳过不等于验证通过」单句了事）');
+  assert.match(workflow, /失败：客机镜像已配置但不可用/u,
+    '镜像配置坏了必须以「失败」单独成段，不能和「跳过」混在一起');
   assert.match(workflow, /实际执行到了哪一步/u, '摘要必须写明实际执行到了哪一步');
   // 跳过要有明确停在哪一段，而不是一句笼统的 skipped。
   assert.match(workflow, /停在：/u, '摘要必须写明停在哪一段');
