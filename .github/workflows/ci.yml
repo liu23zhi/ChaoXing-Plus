@@ -1168,9 +1168,31 @@ jobs:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
     needs: gate
-    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
-    # 镜像未配置时作业内部会 skip 而不是 fail。
-    # 刻意不看 gate.outputs.skip：日判重不约束自毁作业。
+    # ── 触发条件（2026-11-11 合并两方意图）────────────────────────────────
+    #
+    # 【意图 1：用户要求「不要跳过任务」（captain 侧，优先级高）】
+    #   不按 event_name / 变量门跳过 —— PR 上也跑，每次都跑。
+    #
+    # 【意图 2：t96 修的假绿（必须保留）】
+    #   旧行为：job 总会启动，内部发现「客机镜像未配置」就 exit 0（成功），
+    #   只在 Step Summary 里写「跳过不等于验证通过」—— job 结论仍是 success。
+    #   用户实测抓到：run 42963390787 明明什么都没跑却显示绿色。
+    #   ⇒ 已修：内部 skip 不再 exit 0，改为 `::error` + exit 1（见「解析客机镜像」步骤）。
+    #   所以「未配置镜像」现在会**如实失败**，而不是伪装成成功。
+    #
+    # 【两者的交点】
+    #   意图 1 要求「不跳过」，意图 2 要求「不撒谎」。
+    #   合起来的正确语义 = **跑，跑不了就红**（不是 skipped、不是 success）。
+    #   这正是用户「跳过不等于验证通过」的原话要求。
+    #
+    # ⚠️ 代价（已知并接受）：本仓库从未配置过 CX_QEMU_GUEST_IMAGE
+    #   （gh api /actions/variables 只有 EXAMINATION_CLIENT_DATABASE_1/2），
+    #   所以这条作业会持续红，直到配置镜像。这是「不跳过」的真实代价，
+    #   用户明确选择不跳过，故按此实现。
+    #
+    # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
+    #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
+    #   绝对路径或 https URL；外加 secret `CX_QEMU_GUEST_SSH_KEY`。
     if: needs.gate.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
@@ -1413,6 +1435,7 @@ jobs:
           if [ -z "$IMG" ]; then
             fail '未配置客机镜像：请设置仓库变量 CX_QEMU_GUEST_IMAGE（预装好的 Windows qcow2 绝对路径或 https URL），或用手动触发时的 guest_image 输入'
           fi
+
 
           # 出口检查：不装 Windows。体积（5.6 GiB 级）、许可与冷启动时间都不合适，
           # 所以 ISO 只做显式拒绝，不作为任何退路。

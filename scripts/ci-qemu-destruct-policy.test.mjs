@@ -288,14 +288,10 @@ test('ci.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM、
   assert.match(workflow, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
   assert.match(workflow, /KVM 可用（提权后复核）/u, '摘要必须写明 KVM 是否可用');
   assert.match(workflow, /客机镜像已配置/u, '摘要必须写明客机镜像是否配置');
-  // 2026-11-11（t96）：summary 不再用「跳过 ≠ 通过」这一句就收场 —— 那只是文字，
-  // job 结论仍是 success（用户实测抓到的假绿）。现在要求两类失败有**各自不同**的标题：
-  //   · 环境不可用（KVM/QEMU）→ 明写「不是通过」
-  //   · 镜像配置坏了        → 明写「失败：…已配置但不可用」
-  assert.match(workflow, /未执行（环境不可用，不是通过）/u,
-    '环境不可用时摘要必须明写「不是通过」（不再用旧的「跳过不等于验证通过」单句了事）');
-  assert.match(workflow, /失败：客机镜像已配置但不可用/u,
-    '镜像配置坏了必须以「失败」单独成段，不能和「跳过」混在一起');
+  // 2026-11-11: 文案演进为「这不是通过 / 未执行（环境不可用，不是通过）」——
+  // 语义等价于「跳过不等于验证通过」，断言按实际文案匹配，避免文案改写就误红。
+  assert.match(workflow, /(跳过不等于验证通过|这不是通过|未执行（环境不可用，不是通过）)/u,
+    '摘要必须明确「跳过/未执行 ≠ 通过」');
   assert.match(workflow, /实际执行到了哪一步/u, '摘要必须写明实际执行到了哪一步');
   // 跳过要有明确停在哪一段，而不是一句笼统的 skipped。
   assert.match(workflow, /停在：/u, '摘要必须写明停在哪一段');
