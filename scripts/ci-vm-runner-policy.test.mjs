@@ -68,26 +68,32 @@ test('ci.yml 提到旧断言时必须同处标注它已被推翻', async () => {
   }
 });
 
-test('ci.yml 必须写清留在 self-hosted 的真实理由', async () => {
+test('ci.yml 必须写清「不再用 self-hosted」的演进与残余缺口', async () => {
   const workflow = await read(WORKFLOW);
-  // 真实理由一：作业内不能真重启宿主（托管 runner 一次作业一台一次性 VM）。
-  assert.match(workflow, /一次作业一[台次]/u, '必须写明托管 runner 的生命周期限制');
-  // 真实理由二：KVM 设备存在但作业用户不在 kvm 组。
-  assert.match(workflow, /\/dev\/kvm/u, '必须提到 /dev/kvm 实测事实');
-  assert.match(workflow, /KVM_ACCESSIBLE=no|不在 kvm 组/u, '必须写明权限而不是「没有设备」');
-  // 必须指向 QEMU 备选与它的成本，避免读者以为没试过。
-  assert.match(workflow, /QEMU/u, '必须提到 QEMU + Windows guest 这条备选路径');
-  // 论证必须留在仓库内可达的位置：文件头部已把两条实测结论就地写全，
-  // 不再外链 task_doc 的编号文档（那是跨轮次记忆目录，不在本仓库、对外不可达）。
-  assert.match(workflow, /嵌套虚拟化|KVM_ACCESSIBLE=no/u, '必须就地写明实测结论，不得只给外部出处');
+  // 2026-11-11 用户要求「重写整个关机自毁检查，使用虚拟机，绕过该问题，不使用 self-hosted」：
+  // 原来那条跑在 [self-hosted, windows, cx-vm] 的作业已整条删除（本仓库 runners
+  // total_count = 0，它永远排队到超时被取消，既没验证任何东西又让 CI 长期不可用）。
+  //
+  // 本测试锁的是「删除之后，说明与补偿都还在」：
+  //   ① 头部必须写清演进（为什么删、删了什么、缺口是什么）
+  //   ② 必须保留 Linux 客机真实重启这条替代
+  //   ③ 必须保留 wiring-probe 的两阶段语义验证
+  assert.match(workflow, /关机自毁验证的演进/u, '头部必须有演进说明');
+  assert.match(workflow, /total_count\s*=\s*0/u, '必须写明该作业删除的原因（0 runner）');
+  assert.match(workflow, /缺口/u, '必须如实记录残余缺口');
+  assert.match(workflow, /PendingFileRenameOperations/u, '必须点名只有 Windows 客机能验证的那一项');
+  assert.match(workflow, /qemu-destruct-linux-guest/u, '必须有 Linux 客机真实重启这条替代');
+  assert.match(workflow, /^ {2}wiring-probe:$/mu, '必须保留 wiring-probe 两阶段语义验证');
 });
 
 test('ci.yml 的 runner 标签与必要检查名保持不变', async () => {
   // 这三条锚的是**跨作业的固定字符串**（标签、job 名、变量名），不是某一段的行为，
   // 所以继续整文件断言；它们各自唯一，不会与别的 job 混淆。
   const workflow = await read(WORKFLOW);
-  assert.match(workflow, /runs-on: \[self-hosted, windows, cx-vm\]/u, 'self-hosted cx-vm 策略不变');
-  assert.match(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '既有 job 名不得改动');
+  // 2026-11-11 用户要求「不用 self-hosted」：该作业已整条删除。
+  assert.doesNotMatch(workflow, /runs-on: \[self-hosted/u, '不得再出现 self-hosted runner 标签');
+  // 该作业已删除，其 job 名不应再出现（否则读者会以为它还在）。
+  assert.doesNotMatch(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '已删除的作业名不得残留');
   // 2026-11-11 用户三次要求「不要跳过任务」：CX_VM_ENABLED 变量门已取消，
   // 否则该作业在从未配置该变量时永远 skip（且历史上还因此假绿）。
   assert.doesNotMatch(workflow, /vars\.CX_VM_ENABLED/u, '变量门已取消（用户要求不跳过）');

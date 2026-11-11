@@ -34,7 +34,6 @@ const EXPECTED_JOBS = [
   'windows-real-client',
   'gate',
   'kvm-probe',
-  'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
   // 2026-11-11 新增：Linux guest 关机自毁。KVM 路线实测可达（提权后 KVM_ACCESSIBLE=yes），
@@ -58,7 +57,6 @@ const EXPECTED_SUMMARY_NEEDS = [
   'windows-real-client',
   'gate',
   'kvm-probe',
-  'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
   'qemu-destruct-linux-guest',
@@ -275,32 +273,6 @@ test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async 
   );
 });
 
-test('vm-shutdown-destruct 已取消所有限制（含变量门）', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  const condition = blockValue(section, 'if');
-
-  // 2026-11-11 用户三次要求「不要跳过任务」：变量门与 event 限制全部取消。
-  //
-  // ⚠️ 代价已知：本仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]），
-  // 去掉变量门后本作业是 **queued** 而非 skipped。这是「不跳过」的真实代价，
-  // 注册 runner 后即正常执行。该代价记录在 ci.yml 的 job 注释里。
-  assert.ok(
-    !condition.includes('vars.CX_VM_ENABLED'),
-    'vm-shutdown-destruct 不得再受 CX_VM_ENABLED 变量门限制，实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('github.event_name'),
-    'vm-shutdown-destruct 不得再按 event_name 限制，实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'vm-shutdown-destruct 必须仍然受 gate.result 约束，实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('needs.gate.outputs.skip'),
-    'vm-shutdown-destruct 不得被任何判重跳过，实际：' + condition,
-  );
-});
 
 test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
   const section = await jobSection('gate');
@@ -343,14 +315,6 @@ test('wiring-probe 跑在托管 runner 上（不依赖 self-hosted 才有自毁�
   );
 });
 
-test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  assert.equal(
-    inlineValue(section, 'runs-on'),
-    '[self-hosted, windows, cx-vm]',
-    '真关机必须落在自建 cx-vm 上：改成托管 runner 会让作业永久排队或杀掉 runner 自己',
-  );
-});
 
 test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
@@ -391,8 +355,8 @@ test('summary.needs 精确包含 15 个上游作业', async () => {
     EXPECTED_SUMMARY_NEEDS,
     `summary.needs 与合并后的作业表不一致：实际 ${JSON.stringify(actual)}`,
   );
-  // 三条自毁作业必须在汇总里，否则「跑了但汇总不显示」= 等于没跑。
-  for (const required of ['vm-shutdown-destruct', 'wiring-probe', 'qemu-shutdown-destruct']) {
+  // 两条自毁作业必须在汇总里，否则「跑了但汇总不显示」= 等于没跑。
+  for (const required of ['wiring-probe', 'qemu-shutdown-destruct']) {
     assert.ok(actual.includes(required), `summary.needs 必须包含 ${required}`);
   }
 });
@@ -411,10 +375,6 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
     {
       label: '自毁续删语义验证（托管 runner，两阶段）',
       variable: 'WIRING_PROBE_RESULT',
-    },
-    {
-      label: '关机自毁（self-hosted cx-vm）',
-      variable: 'VM_DESTRUCT_RESULT',
     },
     {
       label: '关机自毁（托管 Ubuntu + QEMU + KVM）',
@@ -438,7 +398,6 @@ test('summary 的 env 四个关键变量都取自正确的作业输出', async (
   const section = await jobSection('summary');
   const expected = {
     WIRING_PROBE_RESULT: '${{ needs.wiring-probe.result }}',
-    VM_DESTRUCT_RESULT: '${{ needs.vm-shutdown-destruct.result }}',
     QEMU_DESTRUCT_RESULT: '${{ needs.qemu-shutdown-destruct.result }}',
     GATE_REASON: '${{ needs.gate.outputs.reason }}',
   };
@@ -512,7 +471,6 @@ test('顶层触发恰好是 push / pull_request / workflow_dispatch，没有 sch
 
 // [作业名, 该作业 concurrency.group 里必须出现的独立标识]
 const DESTRUCT_JOBS = [
-  ['vm-shutdown-destruct', 'cx-vm-destruct'],
   ['wiring-probe', 'cx-wiring-probe'],
   ['qemu-shutdown-destruct', 'cx-qemu-destruct'],
 ];

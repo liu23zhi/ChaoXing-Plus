@@ -6,7 +6,6 @@ name: 持续集成
 #
 #   · 日常构建与测试    source / windows-*（不变）
 #   · 虚拟机能力巡检    gate → kvm-probe（托管 ubuntu，只读，5 分钟）
-#   · 关机自毁（VM）    vm-shutdown-destruct（self-hosted cx-vm，真关机）
 #   · 关机自毁（语义）  wiring-probe（托管 windows-latest，-NoShutdown → -ReplayRunOnce）
 #   · 关机自毁（QEMU）  qemu-shutdown-destruct（托管 ubuntu + KVM + Windows 客机）
 #
@@ -27,23 +26,32 @@ name: 持续集成
 #   所以比较一律写成字符串比较（'true' / 'false'），不能写成 `== true`。
 #
 # ============================================================================
-# ## 为什么关机自毁仍然必须有 self-hosted + cx-vm 这一条（2026-11-09 实测修订）
+# ## 关机自毁验证的演进（2026-11-11 用户要求：不用 self-hosted）
 #
-#   早先这里写的是「托管 runner 不支持嵌套虚拟化」。这条**已被实测推翻**，
-#   不是 self-hosted 留在工作流里的理由。实测事实（run 42588732951 / 42590175761）：
-#     · 托管 ubuntu-24.04 runner **确实有** /dev/kvm（crw-rw---- root kvm 10,232）
-#     · kvm_amd / kvm / irqbypass 模块**已加载**，宿主开了嵌套虚拟化
-#     · 但作业用户 uid=1001(runner) **不在 kvm 组**，-r / -w 都失败 → KVM_ACCESSIBLE=no
-#   所以真正卡住的是下面两条，而不是「没有嵌套虚拟化」：
-#     (1) 直接形态下作业要跑的正是宿主自身的 shutdown /s：托管 runner 是
-#         「一次作业一台一次性 VM」，关机一执行 runner agent 连同宿主一起消失，
-#         作业立刻被判失败，后续 resume 步骤永远不会执行。作业内无法在不杀死
-#         自己的前提下真重启宿主，也没有外部快照 API 可还原。
-#     (2) 想绕开 (1) 就得用 ubuntu + QEMU 跑 Windows guest（重启发生在 guest 内层），
-#         那条路实测「能成」但成本不可接受：Windows Server 2025 ISO 5.60 GiB、
-#         下载 520 s，冷启动到 Setup 画面已耗时 9.7 分钟 —— 不适合每次 PR。
-#   结论：self-hosted + 可快照 VM 依然是「验证最完整」的那条路；托管 runner 上
-#   能跑的等价验证是 wiring-probe（-NoShutdown + -ReplayRunOnce），见该 job 的注释。
+# 历史：曾有一条 vm-shutdown-destruct 跑在 [self-hosted, windows, cx-vm] 上，
+# 用真 Windows 虚拟机做「关机登记 → 重启 → 开机续删」。但本仓库 runners
+# total_count = 0，该作业永远排队到超时，最终被取消 —— 既没验证任何东西，
+# 又让 CI 长期不可用。
+#
+# ⚠️ 一条被推翻的旧断言（2026-11-10 曾写进本文件，现已不成立）：
+#   「托管 runner 不支持嵌套虚拟化」—— 该结论是**错的**。实测 run 42588732951 /
+#   42590175761：托管 ubuntu-24.04 有 /dev/kvm，sudo 提权后可正常引导 guest。
+#   所以现在用托管 Ubuntu + QEMU + cloud image 就能做真实重启，不需要 self-hosted。
+#
+# 现状（全部托管 runner，零 self-hosted、零人工配置）：
+#   · wiring-probe（windows-latest）—— 两阶段语义：阶段一登记待删目标，
+#     阶段二按 RunOnce 原文重放并断言续删。不真关机（托管 runner 关机就没了），
+#     所以「重启后」这一步是用重放模拟的。
+#   · qemu-destruct-linux-guest（ubuntu-24.04）—— QEMU + Linux cloud image，
+#     自动下载镜像，做**真实重启**，断言 boot_id 变化 + 目标已删 + 续删在本次
+#     启动执行 + 单元自撤销。
+#   · qemu-shutdown-destruct（ubuntu-24.04）—— QEMU + Windows 客机，覆盖
+#     Windows 特有的 HKCU RunOnce 与 PendingFileRenameOperations。需要自备
+#     Windows qcow2（无官方 cloud image，从 ISO 装需 20-40 分钟，不适合 CI），
+#     未配置时**如实判红**而不是伪装成成功。
+#
+# 缺口（如实记录）：PendingFileRenameOperations 在真实 Windows 重启后的清除
+# 行为，目前只有 qemu-shutdown-destruct 能验证，而它需要人工准备镜像。
 #
 # → KVM 巡检（kvm-probe job）跑在托管 ubuntu，负责把「托管 runner 的 KVM 权限」
 #   这个外部事实变成可追溯记录；它的基线结论是「有设备、无权限」，一旦
@@ -62,7 +70,7 @@ on:
         type: boolean
         default: true
       include_vm_destruct:
-        description: '同时运行关机自毁验证（虚拟机需 self-hosted cx-vm 且 CX_VM_ENABLED=true；QEMU 需客机镜像）'
+        description: '同时运行关机自毁验证（QEMU Linux 客机自动下载镜像；Windows 客机需自备镜像）'
         type: boolean
         default: true
       guest_image:
@@ -680,7 +688,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-
   gate:
     name: 前置门（已取消一切判重，每次 run 都放行）
     runs-on: ubuntu-24.04
@@ -698,7 +705,6 @@ jobs:
           echo "SKIP=no"
           echo "SHA_VERIFIED=no"
           echo "REASON=已取消判重：每次 run 都执行"
-
 
   kvm-probe:
     name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
@@ -844,146 +850,13 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 关机自毁端到端：需要 self-hosted cx-vm + 仓库变量 CX_VM_ENABLED=true。
-  # 只在**手动触发**时出现（CI 调用不拉这条，因为它要 60 分钟且依赖特定 runner）。
+  # 自毁续删语义验证：托管 windows-latest，不真关机。
+  #
+  # 2026-11-11 用户要求「不用 self-hosted」后，原来那条真关机的
+  # vm-shutdown-destruct 已删除（本仓库 runners total_count = 0，它永远排队）。
+  # 本作业保留它的**语义**：阶段一登记待删目标，阶段二按 RunOnce 原文重放，
+  # 断言「续删命令确实执行且目标被删」。不真关机 —— 托管 runner 关机就没了。
   # ---------------------------------------------------------------------------
-
-  vm-shutdown-destruct:
-    name: 关机自毁与开机续删（虚拟机）
-    needs: gate
-    # 2026-11-11: 完全取消限制（用户三次要求「不要跳过任务」）。
-    # ⚠️ 当前仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]）。
-    # 去掉变量门后本作业会 **queued** 而非 skipped —— 这是「不跳过」的真实代价，
-    # 注册 cx-vm runner 后即正常执行。
-    # ⚠️ 刻意不看 gate.outputs.skip：自毁作业是「完整 CI 里必须有」的部分。
-    if: needs.gate.result == 'success'
-    runs-on: [self-hosted, windows, cx-vm]
-    # ⚠️ 独立 concurrency + 不取消：本作业会真关机。若被新 push 中途取消，
-    # -Stage shutdown 已登记的 RunOnce 永不执行 -Stage resume，
-    # 虚拟机将停在「已登记、未续删」状态。宁可排队也不能取消。
-    concurrency:
-      group: cx-vm-destruct-${{ github.ref }}
-      cancel-in-progress: false
-    timeout-minutes: 60
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 配置 Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-
-      - name: 安装依赖
-        run: npm ci
-
-      # build-windows.ps1 依赖 dist-windows 下的页面资源与 windows/native-build/hook
-      # 的代理产物；缺任何一项都会直接 throw「Missing injection asset」。
-      # 与主 CI 一致：先扩展包，再 Windows 注入资源（发布口径用 --release）。
-      - name: 构建扩展包与 Windows 注入资源
-        run: |
-          npm run build
-          npm run build:windows -- --release
-
-      - name: 记录基线快照标记
-        shell: pwsh
-        run: |
-          # 快照本身由 runner 镜像层负责；这里只记录起点，便于失败时对照。
-          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-          "CX_VM_SNAPSHOT_BASELINE=$stamp" | Out-File -FilePath "$env:RUNNER_TEMP\cx-vm-baseline.txt" -Encoding utf8
-          Write-Output "基线标记 $stamp"
-
-      - name: 断言起点干净（无残留登记与临时目录）
-        shell: pwsh
-        run: |
-          ./scripts/vm/assert-clean.ps1 -Stage baseline
-
-      - name: 构建原生测试产物
-        shell: pwsh
-        run: |
-          # 复用仓库既有构建脚本，不新增一套编译流程。
-          # -BuildTests 是 switch（不带值）；与 package.json 的 build:native 同口径调用。
-          # 测试产物（injection-tests.exe / purge-tests.exe 等）不签名，脚本内没有 signtool 环节，
-          # 因此这里不需要任何「允许未签名」开关。
-          ./windows/native-source/build-windows.ps1 -BuildTests
-
-      - name: 关机自毁端到端
-        shell: pwsh
-        run: |
-          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown
-        env:
-          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
-          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
-
-      - name: 开机续删与强制关机保障
-        shell: pwsh
-        run: |
-          ./scripts/vm/run-shutdown-destruct.ps1 -Stage resume
-        env:
-          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
-          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
-
-      - name: 断言终点干净（自毁后无残留）
-        if: always()
-        shell: pwsh
-        run: |
-          ./scripts/vm/assert-clean.ps1 -Stage teardown
-
-      - name: 上传证据
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cx-vm-destruct-evidence
-          compression-level: 0
-          path: |
-            ${{ runner.temp }}/cx-vm-*.txt
-            ${{ runner.temp }}/cx-purge-*.log
-            ${{ runner.temp }}/cx-purge-*.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: 还原虚拟机快照
-        if: always()
-        shell: pwsh
-        run: |
-          # 快照还原交给 runner 自身的 VM 管理层（Hyper-V / VMware / Proxmox），
-          # 由 VM_RESTORE_COMMAND 注入；未配置时只告警，不掩盖前面的失败。
-          if ([string]::IsNullOrWhiteSpace($env:VM_RESTORE_COMMAND)) {
-            Write-Warning '未配置 VM_RESTORE_COMMAND；本次运行后虚拟机不会自动还原，请人工核对。'
-            exit 0
-          }
-          Invoke-Expression $env:VM_RESTORE_COMMAND
-        env:
-          VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
-
-  # 自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完整两阶段。
-  #
-  # 它能证明什么（这才是重点）：
-  #
-  #   1. shutdown 阶段真的把待删文件登记进了**真实 HKCU RunOnce**（不是测试子键）
-  #   2. 注册表里存下的那条 command 串，**按原文执行**之后
-  #      → 目标文件被删、RunOnce 登记被撤销、续删脚本自删
-  #
-  #   第 2 条正是 `-NoShutdown` 盖不住的那一半：-NoShutdown 只证明「登记正确」，
-  #   而这里执行的是 Windows 登录时会执行的**同一条命令串**
-  #   （注册表里存什么就执行什么，`cmd /c <stored command>`）。
-  #
-  # 它盖不住什么（如实标注，不许当成已覆盖）：
-  #
-  #   · 登录会话真的去读 RunOnce 这个**触发动作**本身 —— 需要真重启。
-  #   · `WM_QUERYENDSESSION` / `WM_ENDSESSION` 在真实关机流程中的时序。
-  #   · `shutdown.exe /s` 真的走自毁路径（这条由 cx-vm 的关机作业覆盖）。
-  #   · `MOVEFILE_DELAY_UNTIL_REBOOT` 项重启后消失 —— 需要真重启。
-  #
-  # 结论：这个作业把「RunOnce 命令串是否可执行、执行后是否删净并自撤销」
-  # 从「从未验证」变成「每次手动触发都验证」。真正的重启语义仍留给 cx-vm，
-  # 所以本作业**不能替代** cx-vm 的关机作业，只能补上它常年跑不起来时的缺口。
-  #
-  # 为什么现在去掉 continue-on-error：它原先存在的理由是缺陷 c/d
-  # （purge-tests.c 不读 CX_PURGE_TEST_STAGE/TARGET）——这两条已由 PR #29 修掉，
-  # 本地实跑 `-Stage shutdown -NoShutdown` 与 `-Stage resume -ReplayRunOnce` 均 exit 0。
-  # 保留 continue-on-error 会让它永远绿，等于没有门禁。
 
   wiring-probe:
     name: 自毁续删语义验证（不关机，托管 runner）
@@ -1115,7 +988,6 @@ jobs:
             ${{ runner.temp }}/cx-purge-*.txt
           if-no-files-found: warn
           retention-days: 7
-
 
   qemu-shutdown-destruct:
     name: 关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）
@@ -1392,7 +1264,6 @@ jobs:
           if [ -z "$IMG" ]; then
             fail '未配置客机镜像：请设置仓库变量 CX_QEMU_GUEST_IMAGE（预装好的 Windows qcow2 绝对路径或 https URL），或用手动触发时的 guest_image 输入'
           fi
-
 
           # 出口检查：不装 Windows。体积（5.6 GiB 级）、许可与冷启动时间都不合适，
           # 所以 ISO 只做显式拒绝，不作为任何退路。
@@ -1785,13 +1656,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # 关机自毁 / 开机续删：Linux cloud image 客机，走真实重启。
   #
-  # 为什么要有这条（它补的是上面两条都补不上的那一格）：
-  #   · vm-shutdown-destruct 要 self-hosted cx-vm，本仓库**一个 runner 都没有**
-  #     （gh api /actions/runners 返回 total_count=0），所以它永远 skipped。
+  # 为什么要有这条（它补的是另一个作业补不上的那一格）：
   #   · wiring-probe 用 -ReplayRunOnce 在托管 windows-latest 上执行 RunOnce 命令串，
-  #     这条真的在跑，但它**没有重启**，「开机才续删」这一半无从验证。
-  #   · qemu-shutdown-destruct 有真实重启，但需要 Windows qcow2（repo variable
-  #     CX_QEMU_GUEST_IMAGE），未配置就 skip。
+  #     这条真的在跑，但它**没有重启**，「开机才续删」这一半是重放模拟的。
+  #   · qemu-shutdown-destruct 有真实重启，但需要 Windows qcow2（仓库变量
+  #     CX_QEMU_GUEST_IMAGE），而 Windows 无官方 cloud image，从 ISO 装需 20-40
+  #     分钟，不适合 CI ⇒ 未配置时**如实判红**（不伪装成成功、也不静默跳过）。
+  #   · 本作业用自动下载的 Ubuntu cloud image 把「真实重启」这一格补上，
+  #     零人工配置，是三条里唯一「既真重启又开箱即用」的。
   #
   # 本作业用 ~260 MB 的 Ubuntu cloud image 把「真实重启」这一格补上：
   #   KVM 提权 → 起 QEMU 客机 → guest 内登记待删目标 + 开机续删单元
@@ -1965,7 +1837,7 @@ jobs:
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -1983,7 +1855,6 @@ jobs:
           KVM_PROBE_RESULT: ${{ needs.kvm-probe.result }}
           WIRING_PROBE_RESULT: ${{ needs.wiring-probe.result }}
           WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.outcome }}
-          VM_DESTRUCT_RESULT: ${{ needs.vm-shutdown-destruct.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
           QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
           GATE_REASON: ${{ needs.gate.outputs.reason }}
@@ -2022,7 +1893,6 @@ jobs:
               printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             fi
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
-            printf '| 关机自毁（self-hosted cx-vm） | %s |\n' "$(result_label "$VM_DESTRUCT_RESULT")"
             printf '| 关机自毁（托管 Ubuntu + QEMU + KVM） | %s |\n' "$(result_label "$QEMU_DESTRUCT_RESULT")"
             printf '| 关机销毁/开机续删（QEMU + Linux 客机，真实重启） | %s |\n' "$(result_label "$QEMU_LINUX_DESTRUCT_RESULT")"
             if [[ -n "$GATE_REASON" ]]; then

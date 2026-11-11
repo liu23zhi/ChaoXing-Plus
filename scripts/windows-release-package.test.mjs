@@ -472,13 +472,14 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   // 顺带守住「summary 必须无条件运行（if: always()）」：它是唯一汇总出口。
   // 2026-11-11：新增 qemu-destruct-linux-guest（Linux guest 关机自毁）。
   // 它同样必须进 needs，否则 Step Summary 里那一行取不到 needs.*.result。
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与四条关机自毁作业）并报告结果');
+  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与三条关机自毁作业）并报告结果');
   // 三条关机自毁作业的结果必须真的进 Step Summary，否则「完整 CI 有关机自毁测试」
   // 只体现在 JSON 里，看摘要的人看不到。
   assert.match(workflow, /WIRING_PROBE_RESULT: \$\{\{ needs\.wiring-probe\.result \}\}/u,
     '汇总必须引用 wiring-probe 的结果');
-  assert.match(workflow, /VM_DESTRUCT_RESULT: \$\{\{ needs\.vm-shutdown-destruct\.result \}\}/u,
-    '汇总必须引用 vm-shutdown-destruct 的结果');
+  // 2026-11-11 用户要求「不用 self-hosted」：vm-shutdown-destruct 已整条删除，
+  // 其 result 变量必须一起清掉（留着会引用不存在的 needs，渲染成空值）。
+  assert.doesNotMatch(workflow, /VM_DESTRUCT_RESULT/u, '已删除作业的 result 变量不得残留');
   assert.match(workflow, /QEMU_DESTRUCT_RESULT: \$\{\{ needs\.qemu-shutdown-destruct\.result \}\}/u,
     '汇总必须引用 qemu-shutdown-destruct 的结果');
   assert.doesNotMatch(workflow, /windows-fake-ime|Install-FakeInputMethod|cx-fake-ime-modules|Language\.Basic~~~zh-CN/u,
