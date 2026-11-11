@@ -478,7 +478,33 @@ jobs:
   windows-release:
     name: Windows 发布包验证
     needs: [windows-build, windows-unit, windows-pause, windows-window, windows-browser]
-    if: ${{ always() && needs.windows-build.result == 'success' && needs.windows-unit.result == 'success' && needs.windows-pause.result == 'success' && needs.windows-window.result == 'success' && needs.windows-browser.result == 'success' }}
+    # needs 保留全部五个，但 if 只把 windows-build 当硬门 —— 理由见下。
+    #
+    # 为什么 needs 仍写五个：needs 同时还决定调度顺序（并行会抢占 runner）。
+    # 保留它让发布包验证仍排在这些作业之后跑，避免与浏览器回归抢 runner 配额。
+    #
+    # 为什么 if 只要求 windows-build：
+    #   本作业的**唯一输入**是 windows-build 上传的 artifact
+    #   `windows-ci-build-${{ github.sha }}`（下面的 download 步骤）。单元测试 /
+    #   暂停回归 / 可见窗口 / 浏览器回归**都不产出本作业消费的任何东西**，
+    #   把它们写进 if 是「假依赖」—— 它们一红，发布包验证就被连带 skip，
+    #   于是「发布包能不能打出来」这个**与单测无关**的验证完全没跑。
+    #
+    #   实测过的问题（2026-11-11）：windows-unit 因 mjs 清单不同步失败，
+    #   windows-release 被连带跳过，那一轮就没人知道发布包坏没坏。
+    #
+    # 保留 windows-build 硬门是必要的，不是保守：
+    #   · windows-build 上传时 `if-no-files-found: error`，它失败就没有 artifact；
+    #   · 下面的 download 步骤没有 continue-on-error，缺 artifact 会直接失败；
+    #   · 发布包本身由 `npm run release:windows` 基于该 artifact 打包。
+    #   ⇒ build 不成功时跑这个作业只会得到一堆「文件不存在」，不如不跑。
+    #
+    # 不会造成「单测红但发布绿」的假绿灯：本作业只回答「发布包完整性能不能通过」，
+    # 不回答「代码是否正确」。单测红在 summary 表里仍然是红，两者互不掩盖；
+    # 反过来说，本作业**通过**也从不会被解读为「代码没问题」。
+    #
+    # 不使用裸 always()：那会让本作业在 PR 上、在被取消时也跑，属红线。
+    if: ${{ always() && needs.windows-build.result == 'success' && !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 60
     outputs:
