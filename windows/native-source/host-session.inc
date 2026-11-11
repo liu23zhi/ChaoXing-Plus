@@ -182,23 +182,67 @@ static char *h_bundle_source(const char *bundle, DWORD length, DWORD *wrappedLen
    只有 __CX_WIN_HOST__ 桥存在且 bundle 包装器写下的 __CX_WIN_BUNDLE_LOADED__ 为真，
    才认定"bundle 真的注入到页面主世界"。
    三态：确认 / 明确否定 / 无法判定。只有"明确否定"才升级为失败——
-   传输错误不能当成注入失败，否则会把一次抖动变成误报。 */
-static void h_probe_bundle_sentinel(H_NATIVE_PAGE *page) {
+   传输错误不能当成注入失败，否则会把一次抖动变成误报。
+
+   t89 两条修正（2026-11-11 CI 6/6 全红后实测确认）：
+
+   1) 晚一点再探，并且反复探。bundle 的 ACK 只代表源码已送达页面，不代表它执行完。
+      旧实现只在 ACK 那一刻探一次，探不到就永远定论；实测探针在 13ms–1.77s 内就返回失败，
+      而 h_command_timeout 是 120000ms —— 说明失败与超时无关，是"探早了"。
+      改为：首次延迟 H_BUNDLE_PROBE_DELAY_MS，之后每 H_BUNDLE_PROBE_INTERVAL_MS 重探，
+      最多 H_BUNDLE_PROBE_MAX 次。
+
+   2) 只有 H_EVAL_REJECTED 才记"页面说没跑"。旧代码用一个 BOOL 把
+      "页面明确回了 false" 与 "我根本没问到（超时/断连/非 boolean 应答）" 压成同一态，
+      等于把"证据不足"写成"证据显示没跑" —— 这是 bundleSentinelRejected 长期恒为 false
+      却仍判红的真正来源。 */
+#define H_BUNDLE_PROBE_DELAY_MS 400UL    /* 首次探测前等待，给页面执行 bundle 的时间 */
+#define H_BUNDLE_PROBE_INTERVAL_MS 500UL /* 之后每次重探的间隔 */
+#define H_BUNDLE_PROBE_MAX 6UL           /* 最多探测次数（含首探），约覆盖 2.9s */
+
+/* 排期首次探测。bundle ACK 时调用；已排期则不重排（保持首次的延迟语义）。 */
+static void h_schedule_bundle_probe(H_NATIVE_PAGE *page) {
+    if (!page || page->bundleProbeAt) return;
+    page->bundleProbeAt = GetTickCount() + H_BUNDLE_PROBE_DELAY_MS;
+    if (!page->bundleProbeAt) page->bundleProbeAt = 1; /* 0 是"未排期"的哨兵值 */
+}
+
+/* 到点就探一次；未确认则排下一次。
+   返回 TRUE = 这个页面不再需要探测（已确认 / 已明确否定 / 次数用尽）；
+   返回 FALSE = 还要再探。 */
+static BOOL h_probe_bundle_sentinel(H_NATIVE_PAGE *page) {
     WCHAR error[256];
     BOOL ok;
-    if (!page || !page->ws || h_report.injectEvidence.bundleInPage) return;
+    if (!page || !page->ws) return TRUE;
+    if (h_report.injectEvidence.bundleInPage) return TRUE;           /* 已确认 */
+    if (h_report.injectEvidence.bundleSentinelRejected) return TRUE; /* 已明确否定 */
+    if (!page->bundleProbeAt) h_schedule_bundle_probe(page);
+    if ((LONG)(GetTickCount() - page->bundleProbeAt) < 0) return FALSE; /* 还没到点 */
+    if (page->bundleProbeCount >= H_BUNDLE_PROBE_MAX) return TRUE;      /* 次数用尽 */
+
     error[0] = 0;
+    ++page->bundleProbeCount;
     ok = h_send_eval_checked(page->ws, page->nextId++, h_bundle_sentinel,
                              (DWORD)(sizeof(h_bundle_sentinel) - 1), TRUE, error, 256);
     if (ok) {
         h_report.injectEvidence.bundleInPage = TRUE;
         h_audit_event("info", "inject", "Bundle sentinel confirmed in the page main world");
-        return;
+        return TRUE;
     }
-    /* 只有页面回了明确否定（error/exception，或 boolean 不是 true）才记录；
-       超时、断连、预算到期都只是"无法判定"。 */
-    if (h_last_eval_rejected) h_report.injectEvidence.bundleSentinelRejected = TRUE;
-    h_audit_event("warn", "inject", "Bundle sentinel unconfirmed; the page did not prove the bundle ran");
+    /* 只有页面明确回了 false / 抛异常才升级为失败。其余（超时、断连、非 boolean 应答）
+       都是"没问到"，继续重试，并且绝不写成"页面说没跑"。 */
+    if (h_last_eval_state == H_EVAL_REJECTED) {
+        h_report.injectEvidence.bundleSentinelRejected = TRUE;
+        h_audit_event("warn", "inject", "Bundle sentinel rejected by the page (explicit false or exception)");
+        return TRUE;
+    }
+    if (page->bundleProbeCount >= H_BUNDLE_PROBE_MAX) {
+        h_audit_event("warn", "inject", "Bundle sentinel unconfirmed after all probes; the page did not prove the bundle ran");
+        return TRUE;
+    }
+    page->bundleProbeAt = GetTickCount() + H_BUNDLE_PROBE_INTERVAL_MS;
+    if (!page->bundleProbeAt) page->bundleProbeAt = 1;
+    return FALSE;
 }
 
 static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength,
@@ -241,13 +285,17 @@ static BOOL h_page_pump(H_NATIVE_PAGE *page, const CX_OPTIONS *options, const ch
             if (success && task.type == CX_SESSION_TASK_BUNDLE) {
                 ++h_bundles_completed;
                 if (task.top) {
-                    h_probe_bundle_sentinel(page);
+                    /* t89：ACK 只代表源码送达，不代表执行完。这里只排期，
+                       真正的探测在 h_page_pump 末尾按 bundleProbeAt 到点重试。 */
+                    h_schedule_bundle_probe(page);
                     h_collect_page_diagnostics(page);
                 }
             }
             h_audit_event(success ? "info" : "warn", task.type == CX_SESSION_TASK_CONFIG ? "config" : (task.type == CX_SESSION_TASK_BUNDLE ? "bundle" : "bootstrap"),
                 task.type == CX_SESSION_TASK_CONFIG ? (success ? "Configuration acknowledged" : "Configuration delivery failed") : (success ? "Injection acknowledged" : "Injection failed"));
         }
+        /* t89：到点就重探 bundle 哨兵，未确认则排下一次（最多 H_BUNDLE_PROBE_MAX 次）。 */
+        h_probe_bundle_sentinel(page);
         h_sample_page(page);
         h_task_pending = FALSE;
         if (!h_operation_active()) break;
