@@ -69,24 +69,22 @@ async function qemuJobSection() {
   return jobSection(raw, 'qemu-shutdown-destruct');
 }
 
-test('QEMU 自毁作业只由 push 到 main 与手动触发，绝不进 PR 检查', async () => {
+test('QEMU 自毁作业已取消 event 限制（PR 上也跑）', async () => {
   const workflow = withoutComments(await read(WORKFLOW));
   const job = await qemuJobSection();
 
-  // 触发已统一在 ci.yml 的 workflow 级（它同时服务日常构建，必须挂 pull_request），
-  // 所以「不挂 pull_request」这条约束的对象只能是**作业自身的 if**。
-  // 原意是「45 分钟的 QEMU 链路不得压到每个 PR 上」，这里按事件白名单断言。
-  assert.match(job, /github\.event_name == 'push'/u, 'QEMU 作业必须在 push 到 main 时尝试');
-  assert.match(job, /github\.event_name == 'workflow_dispatch'/u, 'QEMU 作业必须支持手动触发');
-  assert.doesNotMatch(job, /github\.event_name == 'pull_request'/u, 'QEMU 作业不得在 pull_request 上运行');
+  // 2026-11-11 用户明确要求「不要跳过任务」：作业 if 不再按 event_name 分支。
+  // 历史：原写法限定 push/workflow_dispatch，PR 上整条 45 分钟链路被 skip；
+  // 后来发现「跳过却 success」是假绿（t96），最终改成 job 级只判 gate.result。
+  assert.doesNotMatch(job, /github\.event_name/u,
+    'QEMU 作业不得再按 event_name 限制（PR 上也要跑）');
+  assert.match(job, /needs\.gate\.result/u, 'QEMU 作业必须仍受 gate.result 约束');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
   // ci.yml 现在是唯一入口，不再是 callee，不得再声明 workflow_call。
   assert.doesNotMatch(workflow, /^ {2}workflow_call:\s*$/mu, 'ci.yml 已是唯一入口，不得再声明 workflow_call');
   assert.doesNotMatch(workflow, /^ {2}schedule:\s*$/mu, '不得再有 schedule（已改 push + 手动）');
   assert.doesNotMatch(workflow, /cron:/u, '不得残留任何 cron 表达式');
-
-  assert.match(job, /needs: gate/u, 'QEMU 作业必须经过日判重闸');
 });
 
 test('ci.yml#qemu-shutdown-destruct 必须跑在托管 ubuntu-24.04 上，不得退回 self-hosted', async () => {
@@ -160,7 +158,15 @@ test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不�
     '必须支持手动触发时覆盖（用 github.event.inputs.guest_image，push 下 inputs.* 为 null）');
   assert.doesNotMatch(workflow, /[^.]inputs\.guest_image/u,
     '不得残留裸 inputs.* 写法（push 事件下为 null）');
-  assert.match(workflow, /未配置客机镜像/u, '镜像未配置时必须 skip 并说明');
+  // 2026-11-11（用户最终要求）：**不跳过** —— job 级 if 只判 gate.result，
+  // 不按 CX_QEMU_GUEST_IMAGE 是否为空跳过。所以「未配置」会正常走到 image 步骤，
+  // 由那里的 fail() 判红（exit 1），而不是 skip(){} + exit 0（假绿）。
+  // 判据：空值分支必须存在且给出**可操作**的配置指引，而不是含糊的「内部错误」。
+  assert.match(workflow, /fail '未配置客机镜像/u,
+    'image 步骤必须保留空值分支并判红，且给出可操作的配置指引');
+  // skip(){ ... exit 0 } 是假绿指纹（run 42963390787 实测：客机一步没跑却报 success），不得再出现。
+  assert.doesNotMatch(workflow, /skip\(\)\s*\{[^}]*exit\s+0/u,
+    'qemu 段不得出现 skip(){ exit 0 } —— 那是 t96 修掉的假绿');
   assert.match(workflow, /if:\s*steps\.image\.outputs\.image_ok\s*==\s*'yes'/u, '客机步骤必须以 image_ok 为门');
 
   // 拒绝 ISO 装机路径：任何提到 .iso 的行都必须同时是「拒绝」，且不存在下载它的命令。
@@ -282,7 +288,14 @@ test('ci.yml#qemu-shutdown-destruct 的 Step Summary 必须写清四项：KVM、
   assert.match(workflow, /GITHUB_STEP_SUMMARY/u, '必须写入 Step Summary');
   assert.match(workflow, /KVM 可用（提权后复核）/u, '摘要必须写明 KVM 是否可用');
   assert.match(workflow, /客机镜像已配置/u, '摘要必须写明客机镜像是否配置');
-  assert.match(workflow, /跳过不等于验证通过/u, '摘要必须明确「跳过 ≠ 通过」');
+  // 2026-11-11（t96）：summary 不再用「跳过 ≠ 通过」这一句就收场 —— 那只是文字，
+  // job 结论仍是 success（用户实测抓到的假绿）。现在要求两类失败有**各自不同**的标题：
+  //   · 环境不可用（KVM/QEMU）→ 明写「不是通过」
+  //   · 镜像配置坏了        → 明写「失败：…已配置但不可用」
+  assert.match(workflow, /未执行（环境不可用，不是通过）/u,
+    '环境不可用时摘要必须明写「不是通过」（不再用旧的「跳过不等于验证通过」单句了事）');
+  assert.match(workflow, /失败：客机镜像已配置但不可用/u,
+    '镜像配置坏了必须以「失败」单独成段，不能和「跳过」混在一起');
   assert.match(workflow, /实际执行到了哪一步/u, '摘要必须写明实际执行到了哪一步');
   // 跳过要有明确停在哪一段，而不是一句笼统的 skipped。
   assert.match(workflow, /停在：/u, '摘要必须写明停在哪一段');
@@ -340,4 +353,50 @@ test('ci.yml#qemu-shutdown-destruct 的 purge 产物路径必须穿过 SSH 边�
   assert.match(guest, /\$env:CX_NATIVE_PURGE_EXE\s*=\s*\$PurgeExe/u, '客机脚本必须把参数提升成 CX_NATIVE_PURGE_EXE');
   // 两阶段的 RUNNER_TEMP 必须钉死成同一个根，否则 workRoot 会漂移。
   assert.match(guest, /\$env:RUNNER_TEMP\s*=\s*\$tempRoot/u, '客机脚本必须钉死 RUNNER_TEMP');
+});
+
+// ────────── 2026-11-11（t98）：Linux 客机接入 5 个覆盖缺口 ──────────
+//
+// 这批断言的职责很具体：钉住「新 phase 真的接进了 ci.yml」。
+// 没有它们，脚本里写了 powercut/reboot2/replay2 但 ci.yml 不调用，
+// 测试全绿而 CI 里一步没跑 —— 那正是最典型的「看起来在测、实际没测」。
+test('ci.yml#qemu-destruct-linux-guest 必须按链路接入 5 个覆盖缺口', async () => {
+  // jobSection 需要 (去注释文本, job 名)：注释里出现的 --phase 字样是解释，不是调用。
+  const workflow = jobSection(withoutComments(await read(WORKFLOW)), 'qemu-destruct-linux-guest');
+  const phases = [...workflow.matchAll(/--phase\s+([a-z0-9]+)/gu)].map((m) => m[1]);
+
+  // 链路顺序有语义：register 之后必须先断电（更严），再断言，再第二次重启验幂等。
+  const expected = ['prepare', 'boot', 'register', 'powercut', 'replay', 'reboot2', 'replay2'];
+  for (const phase of expected) {
+    assert.ok(phases.includes(phase), `ci.yml 必须调用 --phase ${phase}，实际：${phases.join(' ')}`);
+  }
+
+  // 顺序断言：索引必须严格递增。写成 deepEqual 会让「顺序错但都在」也通过。
+  const positions = expected.map((phase) => phases.indexOf(phase));
+  for (let i = 1; i < positions.length; i += 1) {
+    assert.ok(
+      positions[i] > positions[i - 1],
+      `phase 顺序不对：${expected[i]} 必须排在 ${expected[i - 1]} 之后，实际 ${phases.join(' ')}`,
+    );
+  }
+
+  // powercut 是**替代** reboot，不是额外一轮：
+  // 断电比有序重启更严（断电过了有序必然过），两条都跑是浪费 runner 时间。
+  assert.ok(
+    !phases.includes('reboot'),
+    `powercut 替代 reboot，不应再调用 --phase reboot（实际：${phases.join(' ')}）`,
+  );
+
+  // timeout 必须够跑三轮冷启动。30 分钟不够（冷启动 ×3 + 两阶段），已实测基线 12-18 分钟。
+  const timeout = workflow.match(/timeout-minutes:\s*(\d+)/u);
+  assert.ok(timeout, 'qemu-destruct-linux-guest 必须有 timeout-minutes');
+  assert.ok(
+    Number(timeout[1]) >= 45,
+    `timeout 必须 ≥45 分钟（三轮冷启动 + 两阶段），实际 ${timeout[1]}`,
+  );
+
+  // 证据要包含断电前的 boot_id 与第一次 proof，否则排障时无法区分「没断电」与「续删没跑」。
+  assert.match(workflow, /boot-before-powercut\.txt/u, '证据必须包含断电前的 boot_id');
+  assert.match(workflow, /proof-after-first\.txt/u, '证据必须包含第一次续删的 proof');
+  assert.match(workflow, /boot-before-reboot2\.txt/u, '证据必须包含第二次重启前的 boot_id');
 });

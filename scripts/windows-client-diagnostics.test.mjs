@@ -64,12 +64,15 @@ test('注入脚本在关键节点落盘环境与截图', async () => {
   const script = await readFile(injectionScript, 'utf8');
   assert.match(script, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-diagnostics\.ps1'\)/u,
     '注入脚本必须 dot-source 桌面诊断助手');
-  assert.match(script, /cx-real-client-\$CaseName-environment\.json/u, '启动时必须写出桌面环境快照');
-  assert.match(script, /cx-real-client-\$CaseName-start\.png/u, '启动时必须截一张起始画面');
+  // 2026-11-11: artifact 文件名已中文化，断言改为脚本实际的 zh 映射用法。
+  assert.match(script, /zh\['environment'\]/u, '启动时必须写出桌面环境快照');
+  assert.match(script, /zh\['imageStart'\]/u, '启动时必须截一张起始画面');
   assert.match(script, /Wait-ClientExamEntry -ClientPath \$client\.FullName -TimeoutSeconds 90 -ScreenshotPrefix \$entryPrefix/u,
     '每次点击尝试都要留下截图');
-  assert.match(script, /Save-DesktopScreenshot -Path \(Join-Path \$target "cx-real-client-\$CaseName-desktop\.png"\)/u,
-    '失败时必须保存最终桌面截图');
+  // 只断言「同一处既调用 Save-DesktopScreenshot 又用了 imageDesktop 键」，
+  // 不锁死括号与空格细节 —— 那类断言会因为格式化改动而误红。
+  const desktopShot = script.split('\n').find((l) => l.includes('Save-DesktopScreenshot') && l.includes('imageDesktop'));
+  assert.ok(desktopShot, '失败时必须保存最终桌面截图');
 
   const bytes = readFileSync(diagnosticsScript);
   for (const byte of bytes) assert.equal(byte <= 0x7f, true, 'windows-client-diagnostics.ps1 必须保持纯 ASCII');

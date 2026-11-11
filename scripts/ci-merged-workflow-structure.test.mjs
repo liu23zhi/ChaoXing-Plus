@@ -34,7 +34,6 @@ const EXPECTED_JOBS = [
   'windows-real-client',
   'gate',
   'kvm-probe',
-  'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
   // 2026-11-11 新增：Linux guest 关机自毁。KVM 路线实测可达（提权后 KVM_ACCESSIBLE=yes），
@@ -58,7 +57,6 @@ const EXPECTED_SUMMARY_NEEDS = [
   'windows-real-client',
   'gate',
   'kvm-probe',
-  'vm-shutdown-destruct',
   'wiring-probe',
   'qemu-shutdown-destruct',
   'qemu-destruct-linux-guest',
@@ -256,43 +254,48 @@ test('每个作业段都能抽出且各有 name / runs-on', async () => {
 
 // ───────── 3. 「完整 CI 也跑关机自毁测试」这件事真的成立（核心） ─────────
 
-test('wiring-probe 的 if 覆盖 push / pull_request / workflow_dispatch 三种触发', async () => {
+test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async () => {
   const section = await jobSection('wiring-probe');
   const condition = blockValue(section, 'if');
 
+  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
   assert.ok(
-    condition.includes("github.event_name == 'push'"),
-    `wiring-probe 必须在 push 时运行（自毁续删语义是完整 CI 的一部分），实际：\n${condition}`,
+    !condition.includes('github.event_name'),
+    'wiring-probe 不得再按 event_name 限制，实际：' + condition,
   );
   assert.ok(
-    condition.includes("github.event_name == 'pull_request'"),
-    `wiring-probe 必须在 pull_request 时运行，实际：\n${condition}`,
+    condition.includes('needs.gate.result'),
+    'wiring-probe 必须仍然受 gate.result 约束（gate 挂了才不跑），实际：' + condition,
   );
   assert.ok(
-    condition.includes("github.event_name == 'workflow_dispatch'"),
-    `wiring-probe 必须保留手动触发，实际：\n${condition}`,
-  );
-  // 三条用 || 串起来才叫「三种触发都跑」；用 && 或单独写死某一种都要红。
-  assert.match(
-    condition.replace(/\s+/gu, ' '),
-    /github\.event_name == 'push' \|\| github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch'/u,
-    `三种触发必须并列（||），不能只留其中一种，实际：\n${condition}`,
-  );
-  // 日判重闸不能被顺手删掉：删了 kvm-probe 就会和自毁作业重复跑。
-  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，**不约束三条自毁作业**。
-  // 因为用户要求「完整 CI 里必须有完整关机自毁测试」，若自毁作业也被日判重跳过，
-  // 就退回了「关机自毁从未在 CI 里跑过」的老状态。
-  // 所以这里断言的是「只受 gate.result 约束，不看 gate.outputs.skip」。
-  assert.ok(
-    condition.includes("needs.gate.result == 'success'"),
-    `wiring-probe 必须受 gate.result 约束（gate 跑挂了才不跑），实际：\n${condition}`,
-  );
-  assert.ok(
-    !condition.includes("needs.gate.outputs.skip"),
-    `wiring-probe 不得被日判重跳过 —— 那会让「完整 CI 有自毁测试」失效，实际：\n${condition}`,
+    !condition.includes('needs.gate.outputs.skip'),
+    'wiring-probe 不得被任何判重跳过，实际：' + condition,
   );
 });
 
+
+test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
+  const section = await jobSection('gate');
+
+  // 2026-11-11 最终口径：判重逻辑整体删除。
+  assert.ok(
+    !section.includes('GITHUB_RUN_ID'),
+    'gate 不得再引用 GITHUB_RUN_ID（已取消判重，不查历史 run）',
+  );
+  assert.ok(
+    !section.includes('GITHUB_WORKFLOW_REF'),
+    'gate 不得再推导 workflow 文件名（已取消判重，不查 runs 列表）',
+  );
+  assert.ok(
+    !section.includes('head_sha='),
+    'gate 不得再按 commit sha 查历史 run（已取消判重）',
+  );
+
+  // 三个输出保留为常量，仅为不破坏下游引用。
+  for (const key of ['SKIP=', 'REASON=', 'SHA_VERIFIED=']) {
+    assert.ok(section.includes(key), `gate 必须仍然产出 ${key}（下游有引用）`);
+  }
+});
 test('wiring-probe 的 continue-on-error 只在 PR 上放行', async () => {
   const section = await jobSection('wiring-probe');
   assert.equal(
@@ -312,63 +315,28 @@ test('wiring-probe 跑在托管 runner 上（不依赖 self-hosted 才有自毁�
   );
 });
 
-test('vm-shutdown-destruct 由仓库变量开启，不再要求手动触发', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  const condition = blockValue(section, 'if');
 
-  assert.ok(
-    condition.includes("vars.CX_VM_ENABLED == 'true'"),
-    `vm-shutdown-destruct 必须保留 CX_VM_ENABLED 变量门（托管 runner 没有 cx-vm 标签，硬跑会永久排队），实际：\n${condition}`,
-  );
-  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，不约束自毁作业。
-  // 真关机是「完整 CI 里必须有」的那部分，被日判重跳过等于退回「从未跑过」。
-  assert.ok(
-    condition.includes("needs.gate.result == 'success'"),
-    `vm-shutdown-destruct 必须受 gate.result 约束，实际：\n${condition}`,
-  );
-  assert.ok(
-    !condition.includes("needs.gate.outputs.skip"),
-    `vm-shutdown-destruct 不得被日判重跳过，实际：\n${condition}`,
-  );
-});
-
-test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  assert.equal(
-    inlineValue(section, 'runs-on'),
-    '[self-hosted, windows, cx-vm]',
-    '真关机必须落在自建 cx-vm 上：改成托管 runner 会让作业永久排队或杀掉 runner 自己',
-  );
-});
-
-test('qemu-shutdown-destruct 在 push 与手动触发时都运行，不是只手动', async () => {
+test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
   const condition = blockValue(section, 'if');
   const squashed = condition.replace(/\s+/gu, ' ');
 
+  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
   assert.ok(
-    condition.includes("github.event_name == 'push'"),
-    `qemu-shutdown-destruct 必须在 push 时运行，实际：\n${condition}`,
+    !condition.includes('github.event_name'),
+    'qemu-shutdown-destruct 不得再按 event_name 限制（PR 上也要跑），实际：' + condition,
   );
-  assert.match(
-    squashed,
-    /github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'/u,
-    `必须是 push ∪ workflow_dispatch 两个触发，实际：\n${condition}`,
+  assert.ok(
+    condition.includes('needs.gate.result'),
+    'qemu-shutdown-destruct 必须仍然要求 gate 成功，实际：' + condition,
   );
-  // 旧写法（只手动触发）会退化成「CI 里从来没有 QEMU 自毁记录」。
+  // 旧写法会把「推送后从未跑过」变成永久缺口。
   assert.doesNotMatch(
     squashed,
-    /^\s*needs\.gate\.outputs\.skip != 'yes' &&\s*\(?github\.event_name == 'workflow_dispatch'\)?\s*$/u,
-    `不能是「只 workflow_dispatch」的旧写法，实际：\n${condition}`,
-  );
-  // PR 上不跑是刻意的（45 分钟 + 客机镜像），这一条防止有人好心把它加进 pull_request。
-  assert.ok(
-    !condition.includes("github.event_name == 'pull_request'"),
-    `qemu-shutdown-destruct 不该跑 pull_request（成本太高），实际：\n${condition}`,
+    /github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'/u,
+    '不得回退成只认 push/workflow_dispatch，实际：' + condition,
   );
 });
-
-// ───────────────────── 4. summary 汇总完整 ─────────────────────
 
 test('summary.needs 精确包含 15 个上游作业', async () => {
   const section = await jobSection('summary');
@@ -387,8 +355,8 @@ test('summary.needs 精确包含 15 个上游作业', async () => {
     EXPECTED_SUMMARY_NEEDS,
     `summary.needs 与合并后的作业表不一致：实际 ${JSON.stringify(actual)}`,
   );
-  // 三条自毁作业必须在汇总里，否则「跑了但汇总不显示」= 等于没跑。
-  for (const required of ['vm-shutdown-destruct', 'wiring-probe', 'qemu-shutdown-destruct']) {
+  // 两条自毁作业必须在汇总里，否则「跑了但汇总不显示」= 等于没跑。
+  for (const required of ['wiring-probe', 'qemu-shutdown-destruct']) {
     assert.ok(actual.includes(required), `summary.needs 必须包含 ${required}`);
   }
 });
@@ -407,10 +375,6 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
     {
       label: '自毁续删语义验证（托管 runner，两阶段）',
       variable: 'WIRING_PROBE_RESULT',
-    },
-    {
-      label: '关机自毁（self-hosted cx-vm）',
-      variable: 'VM_DESTRUCT_RESULT',
     },
     {
       label: '关机自毁（托管 Ubuntu + QEMU + KVM）',
@@ -434,7 +398,6 @@ test('summary 的 env 四个关键变量都取自正确的作业输出', async (
   const section = await jobSection('summary');
   const expected = {
     WIRING_PROBE_RESULT: '${{ needs.wiring-probe.result }}',
-    VM_DESTRUCT_RESULT: '${{ needs.vm-shutdown-destruct.result }}',
     QEMU_DESTRUCT_RESULT: '${{ needs.qemu-shutdown-destruct.result }}',
     GATE_REASON: '${{ needs.gate.outputs.reason }}',
   };
@@ -456,43 +419,6 @@ test('gate 段里不再出现 ci-vm.yml', async () => {
   assert.match(section, /SKIP=/u, 'gate 必须仍然产出 SKIP 输出');
   assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
 });
-
-test('gate 用 GITHUB_RUN_ID 排除当前 run 自己', async () => {
-  const section = await jobSection('gate');
-
-  assert.match(
-    section,
-    /\[\s*"\$rid"\s*=\s*"\$\{GITHUB_RUN_ID\}"\s*\]\s*&&\s*continue/u,
-    'gate 必须逐条跳过当前 run：否则正在跑的自己会被数成「今天已跑过」',
-  );
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  //
-  // ⚠️ 推导顺序不能反（2026-11-10 独立终验抓到）：GITHUB_WORKFLOW_REF 形如
-  //   .github/workflows/ci.yml@refs/heads/main
-  // 必须先 %% @* 再去 basename，顺序颠倒会得到 main / merge / foo，
-  // gh api 查 /workflows/main/runs 404 → 被 || true 吞 → count 恒 0 → 判重静默失效。
-  const wfSection = section;
-  const stripAt = wfSection.indexOf('${GITHUB_WORKFLOW_REF%%@*}');
-  const stripSlash = wfSection.indexOf('${workflow_file##*/}');
-  assert.notEqual(stripAt, -1,
-    'gate 必须先用 %% @* 去掉 @<ref> 再取 basename：顺序反了会得到 main/merge/foo，判重恒失效');
-  assert.notEqual(stripSlash, -1,
-    'gate 必须第二步用 ##*/ 取 basename');
-  assert.ok(stripAt < stripSlash,
-    '推导顺序必须先是 %% @* 再是 ##*/，实际相反 —— 这会让 gh api 404、判重恒不生效');
-  assert.doesNotMatch(
-    section,
-    /GITHUB_WORKFLOW_REF##\*\/\}/u,
-    '不得再出现「先 ##*/ 后 %%@*」的错误顺序');
-  assert.doesNotMatch(
-    section,
-    /actions\/workflows\/ci-vm\.yml/u,
-    'gate 的 API 路径不能指向已删除的 ci-vm.yml',
-  );
-});
-
-// ───────────────────────── 6. 权限与触发 ─────────────────────────
 
 test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）', async () => {
   const children = topLevelChildren('permissions');
@@ -545,7 +471,6 @@ test('顶层触发恰好是 push / pull_request / workflow_dispatch，没有 sch
 
 // [作业名, 该作业 concurrency.group 里必须出现的独立标识]
 const DESTRUCT_JOBS = [
-  ['vm-shutdown-destruct', 'cx-vm-destruct'],
   ['wiring-probe', 'cx-wiring-probe'],
   ['qemu-shutdown-destruct', 'cx-qemu-destruct'],
 ];
@@ -807,5 +732,130 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   assert.ok(
     buildSection.includes('if-no-files-found: error'),
     'windows-build 的 artifact 上传必须保持 if-no-files-found: error（否则失败也算成功，build 门失效）',
+  );
+});
+// ────────── 4. 跳过不得伪装成成功（假绿） ──────────
+//
+// 2026-11-11 用户实测抓到：run 42963390787 的
+// 「关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）」客机镜像未配置、内部一步没跑，
+// 却报 **success**。原因是 job 内部 `skip(){ exit 0; }` + 结论文本只写进
+// Step Summary、从不 exit 非零 ⇒ GitHub 看到的是成功。
+//
+// 修法把两种「没跑」分开：
+//   ① 没配置 CX_QEMU_GUEST_IMAGE → **job 级 if 判掉** ⇒ GitHub 显示 skipped（不是 success）
+//   ② 配置了但坏（下载失败/格式非 qcow2/文件不存在/缺 secret）→ 步骤 `::error` + exit 1 ⇒ failure
+//
+// 这组断言要能抓住的回归形态：
+//   · 把 job 级 if 里的镜像判空去掉 → ① 变回 success（假绿）
+//   · 把 `fail()` 改回 `exit 0` → ② 变回 success（假绿）
+//   · 把结论步骤里的 `exit 1` 兜底去掉 → ② 只剩红色文字但 job 绿
+
+test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也必须启动并如实失败', async () => {
+  const section = await jobSection('qemu-shutdown-destruct');
+  // `if:` 是 `|` 多行块时必须用 blockValue（inlineValue 只会读到那个竖线）。
+  const condition = blockValue(section, 'if');
+
+  // 正向对照：证明读到的是本作业的 if。
+  assert.ok(condition.includes("needs.gate.result == 'success'"), `if 必须仍受 gate 约束，实际：${condition}`);
+
+  // 2026-11-11 用户三次要求「不要跳过任务」，所以 job 级**不得**再按镜像变量跳过。
+  //
+  // 历史（两轮修正）：
+  //   ① 原状：job 总启动，内部 `skip(){ exit 0; }` ⇒ 「未配置」变成 success = 假绿。
+  //   ② t96 一度改成 job 级判变量 ⇒ 显示 skipped（不撒谎，但仍是「跳过」）。
+  //   ③ **现在（用户最终要求）**：不跳过 —— job 必启动，未配置时由内部
+  //      「解析客机镜像」步骤 `::error` + exit 1 收场 ⇒ **failure**。
+  //      「跑不了就红」比「假装没要求」更符合「跳过不等于验证通过」。
+  assert.ok(
+    !condition.includes('CX_QEMU_GUEST_IMAGE') && !condition.includes('guest_image'),
+    'job 级 if 不得再按镜像变量跳过（用户要求不跳过；未配置应由内部步骤判红）。' +
+      `实际：${condition}`,
+  );
+  assert.ok(
+    !condition.includes('github.event_name'),
+    'job 级 if 不得再按 event 限制（PR 上也跑）。' + `实际：${condition}`,
+  );
+
+  // env 里必须仍有镜像来源，否则内部步骤判不了「配置了但坏」。
+  assert.match(
+    section,
+    /CX_QEMU_GUEST_IMAGE:\s*\$\{\{\s*github\.event\.inputs\.guest_image\s*\|\|\s*vars\.CX_QEMU_GUEST_IMAGE\s*\}\}/u,
+    'env 必须以 `inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE` 取值',
+  );
+});
+
+
+test('qemu-shutdown-destruct 配置了但坏时必须失败，不得 exit 0', async () => {
+  const section = await jobSection('qemu-shutdown-destruct');
+
+  // 找出「解析客机镜像」步骤的 run 正文。
+  const stepLines = section.split('\n');
+  const start = stepLines.findIndex((line) => line.includes('解析客机镜像'));
+  assert.notEqual(start, -1, 'qemu-shutdown-destruct 必须有「解析客机镜像」步骤');
+  // 取到下一个 `- name:` 之前的全部内容。
+  let end = stepLines.length;
+  for (let i = start + 1; i < stepLines.length; i += 1) {
+    if (/^\s+- name:/u.test(stepLines[i])) { end = i; break; }
+  }
+  const body = stepLines.slice(start, end).join('\n');
+
+  // ① 必须有 fail() 且它 exit 1。
+  assert.match(body, /fail\(\)\s*\{/u, '解析客机镜像步骤必须有 fail() 辅助函数');
+  const failBlock = body.split(/fail\(\)\s*\{/u)[1]?.split(/\}/u)[0] ?? '';
+  assert.ok(failBlock.length > 0, 'fail() 必须有函数体');
+  assert.ok(
+    /exit\s+1/u.test(failBlock),
+    `fail() 必须以 exit 1 结束，否则「配置了但坏」会变成成功（假绿）。实际函数体：${failBlock.trim()}`,
+  );
+
+  // ② 不得再有「skip() 里 exit 0」这种形态残留在本步骤里。
+  assert.ok(
+    !/skip\(\)\s*\{[^}]*exit\s+0/u.test(body),
+    '解析客机镜像步骤不得再出现 `skip(){ ... exit 0 }` —— 那正是假绿的成因',
+  );
+
+  // ③ 关键分支都要走 fail()：空值兜底 / ISO 拒绝 / 下载失败 / 本地文件不存在 / 格式不对 / 缺 secret。
+  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'CX_QEMU_GUEST_SSH_KEY']) {
+    assert.ok(
+      body.includes(marker),
+      `解析客机镜像步骤必须保留「${marker}」这条失败分支（且走 fail() 判红）`,
+    );
+  }
+});
+
+test('qemu-shutdown-destruct 的跳过按「环境不可用 / 配置坏了」分流', async () => {
+  const section = await jobSection('qemu-shutdown-destruct');
+
+  // 「环境不可用（KVM/QEMU）」与「配置坏了（镜像）」必须用两个不同变量表达，
+  // 否则无法只对后者判红。
+  assert.ok(section.includes('ENVIRONMENT_SKIPPED'), 'summary 必须区分 ENVIRONMENT_SKIPPED（KVM/QEMU 环境问题）');
+  assert.ok(section.includes('CONFIG_BROKEN'), 'summary 必须区分 CONFIG_BROKEN（镜像/secret 配置问题）');
+
+  // 两类跳过在 summary 里必须有不同标题，不能都写成「跳过」。
+  assert.ok(
+    section.includes('未执行（环境不可用，不是通过）'),
+    'environment 跳过必须明确写「不是通过」',
+  );
+  assert.ok(
+    section.includes('失败：客机镜像已配置但不可用'),
+    'config 坏了必须以「失败」呈现，不能写成「跳过」',
+  );
+});
+
+test('qemu-destruct-linux-guest 不得引入同款假绿（它不需要镜像变量）', async () => {
+  const section = await jobSection('qemu-destruct-linux-guest');
+
+  // 这条作业不依赖 CX_QEMU_GUEST_IMAGE，所以它的 if 里**不应**出现该变量
+  // （出现说明有人照抄了上面那条的 job 级判空，会让它永远 skipped）。
+  const condition = inlineValue(section, 'if');
+  assert.ok(
+    !condition.includes('CX_QEMU_GUEST_IMAGE'),
+    `qemu-destruct-linux-guest 不依赖 Windows 镜像变量，if 里不应出现它。实际：${condition}`,
+  );
+
+  // 它也不应出现 skip()+exit 0 的假绿形态：拿不到 KVM 就硬失败是刻意设计。
+  assert.ok(
+    !/skip\(\)\s*\{[^}]*exit\s+0/u.test(section),
+    'qemu-destruct-linux-guest 不得有 `skip(){ exit 0 }` 形态：它拿不到 KVM 就该硬失败',
   );
 });

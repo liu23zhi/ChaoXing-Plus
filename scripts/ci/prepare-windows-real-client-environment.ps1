@@ -155,6 +155,204 @@ function Set-DesktopResolution {
   }
 }
 
+# Pre-seed the OBS profile so the first launch does not open the Auto-Configuration Wizard.
+#
+# Verified against a real install (OBS 32.0.1, %APPDATA%\obs-studio):
+#   * an empty ".sentinel" file marks the config directory as initialised. OBS deletes it on the
+#     first run; while it is absent OBS treats the next launch as a first run and shows the wizard
+#     even when user.ini already exists. So the sentinel is the flag that actually matters.
+#   * user.ini holds [General] FirstRun=true. Note OBS 28+ moved the general section here out of
+#     global.ini, so seeding global.ini alone does not suppress the wizard on current builds.
+#   * basic.ini needs "ConfirmOnExit=false" so a stray shutdown never blocks on a modal dialog.
+# Everything here is best effort: if OBS is not installed yet, or the layout changes again, the
+# post-launch wizard check below still catches the problem.
+function Initialize-ObsProfile {
+  param([Parameter(Mandatory = $true)] [string] $ObsExecutable)
+  try {
+    $appData = [Environment]::GetEnvironmentVariable('APPDATA')
+    if (-not $appData) { Write-Step 'camera: APPDATA unavailable; cannot pre-seed the OBS profile'; return }
+    $root = Join-Path $appData 'obs-studio'
+    $basic = Join-Path $root 'basic'
+    $profiles = Join-Path $basic 'profiles\CI'
+    $scenes = Join-Path $basic 'scenes'
+    foreach ($path in @($root, $basic, $profiles, $scenes)) {
+      if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+    }
+
+    # The sentinel is only honoured while empty; write it before anything else reads the directory.
+    $sentinel = Join-Path $root '.sentinel'
+    if (-not (Test-Path -LiteralPath $sentinel)) {
+      Set-Content -LiteralPath $sentinel -Value '' -NoNewline -Encoding ascii
+    }
+
+    $userIni = Join-Path $root 'user.ini'
+    $userText = @"
+[General]
+Pre19Defaults=false
+Pre21Defaults=false
+Pre23Defaults=false
+Pre24.1Defaults=false
+ConfirmOnExit=false
+HotkeyFocusType=NeverDisableHotkeys
+FirstRun=false
+
+[Basic]
+Profile=CI
+ProfileDir=CI
+SceneCollection=CI
+SceneCollectionFile=CI.json
+ConfigOnNewProfile=false
+"@
+    Set-Content -LiteralPath $userIni -Value $userText -Encoding ascii
+
+    # An empty-but-valid profile: no scene, no source. The virtual camera output does not need one
+    # for the device to register, and an empty scene keeps the OBS window itself unobtrusive.
+    $profileIni = Join-Path $profiles 'basic.ini'
+    $profileText = @"
+[General]
+Name=CI
+ConfirmOnExit=false
+
+[Output]
+Mode=Simple
+"@
+    Set-Content -LiteralPath $profileIni -Value $profileText -Encoding ascii
+
+    $sceneJson = Join-Path $scenes 'CI.json'
+    Set-Content -LiteralPath $sceneJson -Value '{"current_scene":null,"current_program_scene":null,"scene_order":[],"name":"CI","sources":[]}' -Encoding ascii
+
+    $globalIni = Join-Path $root 'global.ini'
+    if (-not (Test-Path -LiteralPath $globalIni)) {
+      Set-Content -LiteralPath $globalIni -Value "[General]`nMaxLogs=10`nEnableAutoUpdates=false`n`n[Video]`nRenderer=Direct3D 11" -Encoding ascii
+    }
+    Write-Step "camera: pre-seeded OBS profile at $root (sentinel + user.ini FirstRun=false + CI profile)"
+  } catch {
+    Write-Step "camera: pre-seeding the OBS profile failed - $($_.Exception.Message)"
+  }
+}
+
+# Close the Auto-Configuration Wizard if it shows up, then confirm it is really gone.
+#
+# -WindowStyle Hidden does not apply to the wizard: it is a separate top-level window. Closing it is
+# the only reliable suppression. Stop-Process would also kill obs64, which the virtual camera needs
+# for the rest of the job, so the wizard window is closed with WM_CLOSE first, and only the wizard's
+# own handle is targeted.
+function Wait-ObsWizardGone {
+  param([int] $TimeoutSeconds = 20, [int] $PollMilliseconds = 500)
+  $matched = ''
+  $suppressed = $false
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CXWizardSuppressor {
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr handle, StringBuilder text, int cap);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr handle, StringBuilder text, int cap);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr handle);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+
+    delegate bool EnumProc(IntPtr handle, IntPtr parameter);
+
+    // The wizard is an obs64 top-level window titled "Auto-Configuration Wizard". Matching on the
+    // title only (never on "any obs window") keeps the main OBS window, which the virtual camera
+    // needs, untouched.
+    public static List<IntPtr> Find(uint[] processIds) {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows((handle, parameter) => {
+            if (!IsWindowVisible(handle)) return true;
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            bool wanted = false;
+            foreach (uint id in processIds) { if (id == owner) { wanted = true; break; } }
+            if (!wanted) return true;
+            StringBuilder title = new StringBuilder(256);
+            GetWindowTextW(handle, title, 256);
+            string value = title.ToString();
+            if (value.IndexOf("Auto-Configuration", StringComparison.OrdinalIgnoreCase) < 0) return true;
+            found.Add(handle);
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    public static string Describe(uint[] processIds) {
+        StringBuilder text = new StringBuilder();
+        EnumWindows((handle, parameter) => {
+            if (!IsWindowVisible(handle)) return true;
+            uint owner;
+            GetWindowThreadProcessId(handle, out owner);
+            bool wanted = false;
+            foreach (uint id in processIds) { if (id == owner) { wanted = true; break; } }
+            if (!wanted) return true;
+            StringBuilder title = new StringBuilder(256);
+            GetWindowTextW(handle, title, 256);
+            StringBuilder cls = new StringBuilder(128);
+            GetClassNameW(handle, cls, 128);
+            if (text.Length > 0) text.Append(" | ");
+            text.Append(cls.ToString()).Append(':').Append(title.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return text.ToString();
+    }
+
+    public const uint WM_CLOSE = 0x0010;
+    public static void Close(IntPtr handle) { SendMessageW(handle, WM_CLOSE, IntPtr.Zero, IntPtr.Zero); }
+}
+'@ -ErrorAction Stop
+  } catch {
+    # Type already loaded on a second call, or compilation is blocked; fall back to process matching.
+  }
+
+  while ((Get-Date) -lt $deadline) {
+    $pids = @(Get-Process -Name 'obs64' -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+    if ($pids.Count -eq 0) {
+      $matched = ''
+      break
+    }
+    try {
+      $handles = @([CXWizardSuppressor]::Find($pids))
+      $matched = [CXWizardSuppressor]::Describe($pids)
+    } catch {
+      # Without the helper, title matching through MainWindowTitle is the only signal available.
+      $matched = @(Get-Process -Name 'obs64' -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -match 'Auto-Configuration' } |
+        ForEach-Object { "$($_.ProcessName):$($_.MainWindowTitle)" }) -join ' | '
+      $handles = @()
+    }
+    if ($handles.Count -gt 0) {
+      foreach ($handle in $handles) { try { [CXWizardSuppressor]::Close($handle) } catch { } }
+      $suppressed = $true
+      Start-Sleep -Milliseconds 800
+      continue
+    }
+    if ($suppressed) { break }
+    if ($matched -and $matched -notmatch 'Auto-Configuration') { break }
+    Start-Sleep -Milliseconds $PollMilliseconds
+  }
+
+  $remaining = $false
+  try {
+    $pids = @(Get-Process -Name 'obs64' -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+    if ($pids.Count -gt 0) {
+      $left = @([CXWizardSuppressor]::Find($pids))
+      $remaining = $left.Count -gt 0
+      $matched = [CXWizardSuppressor]::Describe($pids)
+    }
+  } catch { }
+  return [pscustomobject]@{
+    Suppressed = $suppressed
+    Remaining = $remaining
+    Detail = $matched
+    SecondsWaited = $TimeoutSeconds
+  }
+}
+
 function Get-CameraDevices {
   try {
     return @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue |
@@ -185,8 +383,37 @@ function Add-VirtualCamera {
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $obs) { Write-Step 'camera: OBS executable not found; virtual camera unavailable'; return }
 
+    # 2026-11-11: the first launch shows the "Auto-Configuration Wizard", a top-level window that
+    # ignores -WindowStyle Hidden and covers the desktop. The exam client's entry button is located by
+    # scanning SCREEN pixels (Get-WindowScanBuffer uses Graphics.CopyFromScreen, not the window DC), so
+    # an overlapping window makes the button undetectable => entry-button-never-visible => no CEF page
+    # => pageSessions=0.
+    #
+    # Measured on run 42963609890 (same batch, same client build v4.1.4.25389):
+    #   case -1: wizard present, attempt=1 target=button-scan ..., success
+    #   case -2: wizard present, attempts=0 reason=entry-button-never-visible, pageSessions=0
+    # The wizard can be present while entry still succeeds (the client window may be raised above it),
+    # so this is a RACE, not a deterministic blocker. Two things are therefore needed:
+    #   (a) pre-seed the profile so the wizard never appears (below);
+    #   (b) poll after launch, close any wizard that does appear, and verify it is gone (below).
+    # Doing only (a) leaves the race in place.
+    Initialize-ObsProfile -ObsExecutable $obs
+
     Write-Step "camera: starting virtual camera via $obs"
     Start-Process -FilePath $obs -ArgumentList '--startvirtualcam', '--minimize-to-tray' -WorkingDirectory (Split-Path $obs -Parent) -WindowStyle Hidden
+
+    # (b) Suppress the wizard if it still appeared, then prove it is gone before returning.
+    $wizard = Wait-ObsWizardGone -TimeoutSeconds 20
+    if ($wizard.Suppressed) {
+      Write-Step "camera: OBS wizard was visible and has been closed ($($wizard.Detail))"
+    } elseif ($wizard.Remaining) {
+      # Not fatal by itself (case -1 succeeded with the wizard on screen), but it is the single most
+      # likely cause of a flaky entry failure, so it must be loud in the log instead of silent.
+      Write-Step "camera: WARNING OBS wizard is still visible after $($wizard.SecondsWaited)s ($($wizard.Detail)); the exam client entry button may be covered and the run may fail with pageSessions=0"
+    } else {
+      Write-Step "camera: no OBS wizard window present ($($wizard.Detail))"
+    }
+
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
       $devices = Get-CameraDevices
@@ -197,8 +424,22 @@ function Add-VirtualCamera {
       Start-Sleep -Seconds 3
     }
     Write-Step 'camera: no device appeared after starting the virtual camera'
+    # Record what is actually on the desktop at this point: if a device never appears, the next thing
+    # anyone needs is which windows were in the way.
+    Write-Step "camera: windows when no device appeared = $(Get-VisibleWindowSummary)"
   } catch {
     Write-Step "camera: failed - $($_.Exception.Message)"
+  }
+}
+
+# List window owner and title, so the next failure can be diagnosed from the log instead of a screenshot.
+function Get-VisibleWindowSummary {
+  try {
+    return @(Get-Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowTitle } |
+      ForEach-Object { "$($_.ProcessName):$($_.MainWindowTitle)" }) -join ' | '
+  } catch {
+    return ''
   }
 }
 

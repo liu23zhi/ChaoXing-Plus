@@ -27,6 +27,11 @@ import path from 'node:path';
 import { createTestDirectory, resolveTestPath } from './test-helpers/temp-directory.mjs';
 import { writePowerShellScript, runPowerShellScript } from './test-helpers/windows-script.mjs';
 
+// 2026-11-11: artifact filename localized to Chinese (user request). Built from the same
+// code points as scripts/windows-real-client-injection.ps1 so the two sides cannot drift.
+const ARTIFACT_REPORT_SUFFIX = String.fromCharCode(0x6CE8, 0x5165, 0x62A5, 0x544A) + '.json';
+
+
 const windowsOnly = process.platform === 'win32' ? undefined : 'injection verdict fixture layer';
 const verdictScript = resolveTestPath('scripts', 'windows-real-client-injection.ps1');
 const fixtureDir = resolveTestPath('tests', 'fixtures', 'inject-report');
@@ -191,7 +196,7 @@ try {
   const line = result.stdout.split(/\r?\n/u).findLast((value) => value.startsWith('{'));
   assert.ok(line, `harness 必须报出脚本结果:\n${result.stdout}\n${result.stderr}`);
   const error = JSON.parse(line).Error;
-  const artifactPath = path.join(runner, `cx-real-client-${CASE_NAME}-report.json`);
+  const artifactPath = path.join(runner, `cx-real-client-${CASE_NAME}-${ARTIFACT_REPORT_SUFFIX}`);
   const output = result.stdout;
   const passed = /REAL_CLIENT_INJECTION_PASS/u.test(output) && !error;
   const warned = /INJECT_BUNDLE_UNVERIFIED/u.test(output);

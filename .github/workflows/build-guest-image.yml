@@ -1,0 +1,542 @@
+# 打包 Windows 客机镜像（供 ci.yml 的 qemu-shutdown-destruct 使用）
+#
+# 用 docker.io/dockurr/windows 自动装 Windows Server 2022 评估版，装完直接拿到 qcow2，
+# 存进 GitHub Actions Cache，不占 Release（用户明确不想用 Release）。
+#
+# 为什么用 dockurr/windows 而不是自己写 unattend.xml：
+#   · Windows 没有官方 cloud image，从 ISO 手写 unattend 装机有 20+ 个可失败点
+#     （分区、驱动注入、OOBE 跳过、首次登录脚本时序…），失败时只有黑屏、诊断为零。
+#   · dockurr/windows 已经把这条路走通并开源（Docker Hub 352 万次拉取），
+#     它还**在自己的 GitHub Actions 上跑完整安装测试**（.github/workflows/install.yml，
+#     runs-on: ubuntu-24.04）—— 这是本方案可行性的最强证据，比任何文档都硬。
+#   · 它的 `DISK_FMT=qcow2` 直接落盘 qcow2，省掉一次 10 分钟的格式转换。
+#   · 它的 `/oem/install.bat` 会在安装最后一步自动执行 —— 不用自己找注入时机。
+#
+# 存储选 Actions Cache 而不是 Release：
+#   实测本仓库 cache 已用 67.6 MB / 上限 10 GB（gh api .../actions/cache/usage）。
+#   Windows Server 2022 装完压缩后约 3-5 GB，放得下；单 asset 2 GiB 的 Release 限制也不用绕。
+#   风险：cache 7 天未被访问会被清理。ci.yml 每次 push 都 restore 它 ⇒ 常态下会续期；
+#   真被清了，那边应当**明确报错要求重建**，不能静默当成「没有镜像就跳过」。
+#
+# 安全取舍：
+#   支持 `ssh_public_key` 输入。给了就用（推荐，私钥你自己保管并设成 secret）；
+#   没给就自签并把私钥写进 job summary —— 一次跑完零手工，但私钥会留在 Actions 记录里，
+#   所以 summary 里会显式警告并要求跑完轮换。
+#
+# Keep this file pure ASCII except the Chinese comments.
+
+name: 打包 Windows 客机镜像
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_public_key:
+        description: '（推荐）注入镜像的 SSH 公钥（ssh-ed25519/ssh-rsa 单行）。留空则自签并把私钥写进 summary。'
+        required: false
+        default: ''
+      guest_password:
+        description: '客机 runner 账号密码'
+        required: false
+        default: 'Cx-Guest-2026!'
+      version:
+        description: 'Windows 版本（2022 = Server 2022，ISO ~6 GB）'
+        required: false
+        default: '2022'
+      disk_size:
+        description: '磁盘大小（稀疏）'
+        required: false
+        default: '32G'
+      install_timeout_sec:
+        description: '安装超时（秒）'
+        required: false
+        default: '3600'
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  CACHE_KEY: cx-win2022-guest-qcow2-v1
+  GUEST_USER: runner
+
+jobs:
+  build:
+    name: 用 dockurr/windows 构建客机镜像
+    runs-on: ubuntu-24.04
+    # 硬上限 120 分钟：
+    #   ISO 下载 ~3 min（6 GB / 微软 CDN）+ 无人值守安装 ~15-25 min
+    #   + install.bat 配置（装 SSH / 注公钥 / 拷 exe）~5 min
+    #   + 压缩 ~8 min + cache 上传 ~5 min。留足余量，因为共享 runner 上 QEMU 安装波动很大。
+    timeout-minutes: 120
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境基线
+        run: |
+          set -u
+          uname -a
+          echo "NPROC=$(nproc)"
+          free -h
+          df -h /
+          echo
+          echo '=== KVM 设备 ==='
+          ls -l /dev/kvm || echo '（无 /dev/kvm）'
+          echo
+          echo '=== /dev/net/tun（dockur 用于 macvlan，bridge 模式下非必需）==='
+          ls -l /dev/net/tun || echo '（无 /dev/net/tun）'
+          echo
+          echo '=== docker ==='
+          docker --version || echo '（无 docker）'
+          docker info --format '{{.ServerVersion}} {{.Driver}}' 2>/dev/null || true
+          echo "RUNNER_GROUPS=$(id -Gn | tr ' ' ',')"
+
+      - name: KVM 提权并断言
+        id: kvm
+        run: |
+          set -eu
+          accessible() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+          if [ ! -e /dev/kvm ]; then
+            echo '::error title=无 /dev/kvm::托管 runner 未提供 KVM，Windows 安装会超时'
+            exit 1
+          fi
+          if ! accessible; then
+            sudo chmod 666 /dev/kvm
+            sleep 1
+          fi
+          accessible || { echo '::error title=KVM 不可读写::提权失败'; exit 1; }
+          echo 'KVM_ACCESSIBLE=yes'
+
+      - name: 安装依赖
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-utils openssh-client genisoimage
+          qemu-img --version | head -1
+          # 磁盘预算：ISO 6 GB + 安装中镜像 + 最终 qcow2，32G 稀疏盘在 86G 可用空间下安全。
+          df -h /
+
+      - name: 准备 SSH 密钥
+        id: keys
+        env:
+          INPUT_PUBKEY: ${{ github.event.inputs.ssh_public_key }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          mkdir -p "$WORK/oem" "$WORK/storage"
+          if [ -n "${INPUT_PUBKEY:-}" ]; then
+            printf '%s\n' "$INPUT_PUBKEY" > "$WORK/id.pub"
+            KEY_SOURCE=input
+          else
+            ssh-keygen -t ed25519 -N '' -C 'cx-ci-guest-image' -f "$WORK/id" >/dev/null
+            cp "$WORK/id.pub" "$WORK/pub.tmp" && mv "$WORK/pub.tmp" "$WORK/id.pub"
+            KEY_SOURCE=generated
+          fi
+          # sshd 对公钥格式极严格：类型 + 一个空格 + base64，多一个空格就静默拒绝。
+          grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+' "$WORK/id.pub" \
+            || { echo '::error title=公钥格式不合法::必须是 ssh-ed25519 / ssh-rsa / ecdsa 开头的单行'; exit 1; }
+          echo "PUBKEY_PREFIX=$(cut -c1-40 "$WORK/id.pub")..."
+          echo "KEY_SOURCE=$KEY_SOURCE" >> "$GITHUB_OUTPUT"
+
+          {
+            echo '## SSH 密钥'
+            echo ''
+            echo "- 来源：**$KEY_SOURCE**"
+            if [ "$KEY_SOURCE" = generated ]; then
+              echo ''
+              echo '> ⚠️ 私钥在下面，**只显示这一次**。请立刻保存为仓库 secret `CX_QEMU_GUEST_SSH_KEY` 并轮换。'
+              echo ''
+              echo '```'
+              cat "$WORK/id"
+              echo '```'
+            else
+              echo ''
+              echo '请确认对应私钥已设为 secret `CX_QEMU_GUEST_SSH_KEY`。'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 构建 purge-tests.exe
+        shell: pwsh
+        run: |
+          ./windows/native-source/build-windows.ps1 -BuildTests
+          $exe = 'windows\native-build\bin\purge-tests.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "缺少 $exe" }
+          $item = Get-Item -LiteralPath $exe
+          Write-Output "purge-tests.exe = $($item.Length) 字节"
+          Copy-Item -LiteralPath $exe -Destination "$env:RUNNER_TEMP/guest/oem/purge-tests.exe" -Force
+
+      # ── OEM：dockur 会把 /oem 下所有文件放进 ISO 的 $OEM$，并把 install.bat
+      #    在**安装最后一步**自动执行；同目录其余文件被拷到 C:\OEM。
+      #    这是本方案「配置镜像」的唯一注入点，不需要自己找时机。
+      - name: 生成 OEM install.bat
+        env:
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password }}
+          GUEST_USER: ${{ env.GUEST_USER }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          PUBKEY=$(cat "$WORK/id.pub")
+
+          # 密码里若有 % 会让 bat 的 %VAR% 展开出问题；这里限制字符集并校验。
+          case "$GUEST_PASSWORD" in
+            *%*|*\'*|*\"*) echo '::error title=密码含特殊字符::bat 里会导致展开异常，请改用字母数字与 -_.!'; exit 1 ;;
+          esac
+
+          # 注意：bat 里 % 是变量前缀，PowerShell 的 $ 在 bat 中无特殊含义，可直接用。
+          # 所有 PowerShell 都用 -EncodedCommand 会更好，但可读性差、排障困难；
+          # 这里用 -Command 并把脚本写成单独 .ps1 文件由 bat 调用，兼顾可读与安全。
+          cat > "$WORK/oem/setup.ps1" <<PSSETUP
+          \$ErrorActionPreference = 'Continue'
+          \$log = 'C:\OEM\setup.log'
+          function Say(\$m) { "\$([datetime]::UtcNow.ToString('o')) \$m" | Tee-Object -FilePath \$log -Append }
+
+          try {
+            Say 'setup start'
+
+            # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
+            \$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+            if (\$cap -and \$cap.State -ne 'Installed') {
+              Say "installing OpenSSH.Server (was \$(\$cap.State))"
+              Add-WindowsCapability -Online -Name \$cap.Name | Out-Null
+            } else {
+              Say "OpenSSH.Server state=\$(\$cap.State)"
+            }
+            Set-Service -Name sshd -StartupType Automatic
+            Start-Service sshd
+            Say "sshd status=\$((Get-Service sshd).Status) startup=\$((Get-Service sshd).StartType)"
+
+            # 2) 防火墙放行 22。漏这条的现象是「端口拒绝」，极易误判成 sshd 没起。
+            if (-not (Get-NetFirewallRule -Name 'CX-SSHD-22' -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule -Name 'CX-SSHD-22' -DisplayName 'CX SSHD 22' \`
+                -Protocol TCP -LocalPort 22 -Action Allow -Direction Inbound | Out-Null
+              Say 'firewall rule added'
+            } else { Say 'firewall rule exists' }
+
+            # 3) 公钥 + **ACL**。
+            #    Windows sshd 对 administrators_authorized_keys 的权限极挑剔：
+            #    Users / Authenticated Users 只要有读权限，sshd 就直接拒绝认证，
+            #    日志里只写 Permission denied，完全看不出是 ACL 问题。
+            #    正确做法：关继承，只留 Administrators + SYSTEM。
+            \$sshDir = 'C:\ProgramData\ssh'
+            New-Item -ItemType Directory -Force -Path \$sshDir | Out-Null
+            \$ak = Join-Path \$sshDir 'administrators_authorized_keys'
+            Set-Content -LiteralPath \$ak -Value (Get-Content 'C:\OEM\id.pub' -Raw).Trim() -Encoding ascii
+            icacls \$ak /inheritance:r | Out-Null
+            icacls \$ak /grant 'Administrators:F' | Out-Null
+            icacls \$ak /grant 'SYSTEM:F' | Out-Null
+            Say "acl=\$((icacls \$ak) -join ' | ')"
+
+            # 4) 钉住 PubkeyAuthentication，然后重启 sshd 让配置生效。
+            \$cfg = Join-Path \$sshDir 'sshd_config'
+            if (Test-Path \$cfg) {
+              \$c = Get-Content \$cfg -Raw
+              if (\$c -notmatch '(?m)^\s*PubkeyAuthentication\s+yes') {
+                Add-Content \$cfg "\`nPubkeyAuthentication yes"
+                Say 'sshd_config: appended PubkeyAuthentication yes'
+              }
+              Restart-Service sshd
+              Say "sshd restarted, status=\$((Get-Service sshd).Status)"
+            }
+
+            # 5) purge-tests.exe 到约定路径
+            New-Item -ItemType Directory -Force -Path 'C:\cx\native' | Out-Null
+            if (Test-Path 'C:\OEM\purge-tests.exe') {
+              Copy-Item 'C:\OEM\purge-tests.exe' 'C:\cx\native\purge-tests.exe' -Force
+              Say 'purge-tests.exe deployed'
+            } else { Say 'ERROR purge-tests.exe missing from OEM' }
+
+            # 6) 自检：把关键结论写进日志，之后可以从镜像外核对
+            Say "verify whoami=\$(whoami)"
+            Say "verify exe=\$(Test-Path 'C:\cx\native\purge-tests.exe')"
+            Say "verify keys=\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            Say 'setup done'
+          } catch {
+            Say "FATAL \$(\$_.Exception.Message)"
+          }
+          PSSETUP
+
+          printf '%s\n' "$PUBKEY" > "$WORK/oem/id.pub"
+
+          # install.bat：dockur 在安装最后一步执行它。
+          # 关键：跑完写 C:\OEM\install.done —— 这是 workflow 判断「配置完成」的标记
+          # （dockur 自己的 CI 也用同一个标记名，行为已在他们仓库验证过）。
+          cat > "$WORK/oem/install.bat" <<'BATEOF'
+          @echo off
+          setlocal
+          echo === CX OEM install begin ===
+          del /Q C:\OEM\install.done 2>nul
+
+          REM 执行 setup.ps1（放单独文件而不是内联，避免 bat 的转义地狱）
+          powershell -NoProfile -ExecutionPolicy Bypass -File C:\OEM\setup.ps1
+          echo setup.ps1 exit=%ERRORLEVEL%
+
+          REM 把 setup.log 一并留在 OEM 目录（dockur 会把 C:\OEM 暴露给宿主）
+          if exist C:\OEM\setup.log type C:\OEM\setup.log
+
+          echo === CX OEM install end ===
+          type nul > C:\OEM\install.done
+          BATEOF
+
+          # 去掉 heredoc 的公共前导空格（bat 对行首空格敏感）
+          sed -i 's/^          //' "$WORK/oem/install.bat"
+          sed -i 's/^          //' "$WORK/oem/setup.ps1"
+
+          echo '=== install.bat 前 12 行 ==='
+          head -12 "$WORK/oem/install.bat"
+          echo "INSTALL_BAT_BYTES=$(stat -c %s "$WORK/oem/install.bat")"
+          echo "SETUP_PS1_BYTES=$(stat -c %s "$WORK/oem/setup.ps1")"
+          ls -l "$WORK/oem"
+
+      - name: 启动 dockurr/windows 安装
+        id: install
+        env:
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password }}
+          GUEST_USER: ${{ env.GUEST_USER }}
+          VERSION: ${{ github.event.inputs.version }}
+          DISK_SIZE: ${{ github.event.inputs.disk_size }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          START=$(date +%s)
+          echo "INSTALL_START_EPOCH=$START" >> "$GITHUB_OUTPUT"
+
+          # 端口：容器的 Web Viewer(8006) 与 RDP 不暴露 —— 我们只用 SSH 验证，
+          # 而 SSH 由 install.bat 在客机内装好，之后靠 QEMU 的 hostfwd 访问。
+          # dockur 默认把 guest 放在容器内的桥接网络里，我们拿到 qcow2 后再自己起 QEMU 验证，
+          # 所以这里不需要对外暴露任何 guest 端口。
+          docker run -d --name cxwin \
+            --device=/dev/kvm \
+            -e VERSION="$VERSION" \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE="$DISK_SIZE" \
+            -e USERNAME="$GUEST_USER" \
+            -e PASSWORD="$GUEST_PASSWORD" \
+            -e LANGUAGE=English \
+            -e REGION=en-US \
+            -e KEYBOARD=en-US \
+            -e LOG=Y \
+            -v "$WORK/storage:/storage" \
+            -v "$WORK/oem:/oem" \
+            docker.io/dockurr/windows:latest
+          echo "CONTAINER_ID=$(docker ps -q --filter name=cxwin)"
+          echo '=== 镜像版本 ==='
+          docker inspect --format '{{.Config.Image}} {{.Image}}' cxwin || true
+
+      - name: 等待安装完成
+        id: wait
+        env:
+          INSTALL_TIMEOUT: ${{ github.event.inputs.install_timeout_sec }}
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          START=$(date +%s)
+          DEADLINE=$(( START + INSTALL_TIMEOUT ))
+          RESULT=timeout
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            # 完成判据用 install.done（dockur 自己的 CI 也用这个标记）
+            if [ -f "$WORK/oem/install.done" ]; then RESULT=done; break; fi
+            # 容器退出 = 安装失败（除非已 done）
+            if ! docker ps -q --filter name=cxwin | grep -q .; then
+              RESULT=container-exited; break
+            fi
+            # 进度可见性：每 5 分钟打一次磁盘占用，便于判断是不是卡死
+            NOW=$(date +%s)
+            if [ $(( (NOW - START) % 300 )) -lt 20 ]; then
+              echo "[$(date -u +%T)] storage=$(du -sh "$WORK/storage" 2>/dev/null | cut -f1) done=$([ -f "$WORK/oem/install.done" ] && echo yes || echo no)"
+            fi
+            sleep 20
+          done
+          ELAPSED=$(( $(date +%s) - START ))
+          echo "INSTALL_RESULT=$RESULT"
+          echo "INSTALL_ELAPSED_SEC=$ELAPSED"
+          echo "INSTALL_RESULT=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "INSTALL_ELAPSED_SEC=$ELAPSED" >> "$GITHUB_OUTPUT"
+
+          echo '=== install.log（若存在，dockur 会把 install.bat 输出写这里）==='
+          cat "$WORK/storage/install.log" 2>/dev/null | tail -50 || echo '(no install.log in storage)'
+          echo '=== docker logs 尾部 ==='
+          docker logs cxwin 2>&1 | tail -60 || true
+
+          if [ "$RESULT" != done ]; then
+            echo "::error title=安装未完成::RESULT=$RESULT 耗时 ${ELAPSED}s；见上方 docker logs"
+            exit 1
+          fi
+
+      - name: 取出 qcow2 并核对 setup 结果
+        id: extract
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          echo '=== storage 目录 ==='
+          ls -lh "$WORK/storage" || true
+          echo '=== OEM 目录（含 install.done / setup.log）==='
+          ls -lh "$WORK/oem" || true
+          echo '=== setup.log 全文 ==='
+          cat "$WORK/oem/setup.log" 2>/dev/null || echo '(没有 setup.log —— install.bat 可能没执行)'
+
+          # dockur 在 DISK_FMT=qcow2 时落盘 storage/data.qcow2（旧版本是 windows.qcow2）
+          SRC=""
+          for c in "$WORK/storage/data.qcow2" "$WORK/storage/windows.qcow2"; do
+            if [ -f "$c" ]; then SRC="$c"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            echo '::error title=找不到 qcow2::DISK_FMT=qcow2 可能未生效；storage 里只有：'
+            ls -la "$WORK/storage" || true
+            exit 1
+          fi
+          echo "QCOW2_SRC=$SRC"
+          echo "QCOW2_RAW_BYTES=$(stat -c %s "$SRC")"
+          qemu-img info "$SRC" | head -12
+          echo "QCOW2_SRC=$SRC" >> "$GITHUB_OUTPUT"
+
+          # 停容器：它还在占用这个 qcow2
+          docker stop cxwin --time 30 2>/dev/null || true
+          docker rm -f cxwin 2>/dev/null || true
+
+      - name: 压缩
+        id: compress
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          SRC="${{ steps.extract.outputs.QCOW2_SRC }}"
+          START=$(date +%s)
+          qemu-img convert -p -O qcow2 -c "$SRC" "$WORK/guest.qcow2"
+          ELAPSED=$(( $(date +%s) - START ))
+          SIZE=$(stat -c %s "$WORK/guest.qcow2")
+          echo "FINAL_BYTES=$SIZE"
+          echo "FINAL_GIB=$(awk -v b="$SIZE" 'BEGIN{printf "%.2f", b/1073741824}')"
+          echo "COMPRESS_ELAPSED_SEC=$ELAPSED"
+          echo "FINAL_GIB=$(awk -v b="$SIZE" 'BEGIN{printf "%.2f", b/1073741824}')" >> "$GITHUB_OUTPUT"
+          echo "FINAL_BYTES=$SIZE" >> "$GITHUB_OUTPUT"
+          sha256sum "$WORK/guest.qcow2" | tee "$WORK/guest.qcow2.sha256"
+          df -h /
+
+      # ── 硬验收：SSH 真的能连上 ─────────────────────────────────────────────
+      # 不验证就交付 = 给下游一个黑盒。ci.yml 那边会因为「连不上」浪费 45 分钟。
+      - name: 验证 SSH 可连
+        id: verify
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          qemu-system-x86_64 \
+            -enable-kvm -cpu host -smp 2 -m 4096 \
+            -drive file="$WORK/guest.qcow2",if=virtio,cache=writeback \
+            -nic "user,model=e1000,hostfwd=tcp:127.0.0.1:2222-:22" \
+            -display none -vga none \
+            -pidfile "$WORK/vqemu.pid" -daemonize
+          echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)"
+
+          SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+               -o BatchMode=yes -o LogLevel=ERROR"
+          READY=no
+          DEADLINE=$(( $(date +%s) + 900 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then
+              exec 3>&- 2>/dev/null || true
+              if $SSH "$GUEST_USER@127.0.0.1" 'whoami' >/tmp/whoami.txt 2>/tmp/ssherr.txt; then
+                READY=yes; break
+              fi
+            fi
+            sleep 10
+          done
+          echo "SSH_READY=$READY"
+          if [ "$READY" = yes ]; then
+            echo '=== SSH 实测 ==='
+            cat /tmp/whoami.txt
+            $SSH "$GUEST_USER@127.0.0.1" \
+              'powershell -NoProfile -Command "(Get-Service sshd).Status; Test-Path C:/cx/native/purge-tests.exe"' || true
+            {
+              echo '## SSH 验证：通过'
+              echo ''
+              echo '```'
+              cat /tmp/whoami.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::error title=SSH 连不上::镜像不可用，不要拿去给 ci.yml 用'
+            echo '--- ssh stderr ---'
+            cat /tmp/ssherr.txt 2>/dev/null || true
+            {
+              echo '## SSH 验证：失败'
+              echo ''
+              echo '```'
+              cat /tmp/ssherr.txt 2>/dev/null || echo '(no stderr)'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          kill -TERM "$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+          sleep 3
+          kill -KILL "$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
+          echo "SSH_READY=$READY" >> "$GITHUB_OUTPUT"
+          [ "$READY" = yes ] || exit 1
+
+      - name: 存入 Actions Cache
+        if: steps.verify.outputs.SSH_READY == 'yes'
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          # 缓存目录只放 qcow2 + sha256，避免把 storage 里的 ISO 也塞进去。
+          mkdir -p "$WORK/cache"
+          cp "$WORK/guest.qcow2" "$WORK/cache/"
+          cp "$WORK/guest.qcow2.sha256" "$WORK/cache/"
+          ls -lh "$WORK/cache"
+          echo "CACHE_DIR=$WORK/cache" >> "$GITHUB_ENV"
+
+      - name: 保存到 cache
+        if: steps.verify.outputs.SSH_READY == 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CACHE_DIR }}
+          key: ${{ env.CACHE_KEY }}
+
+      - name: 结论写入 Step Summary
+        if: always()
+        env:
+          INSTALL_ELAPSED: ${{ steps.wait.outputs.INSTALL_ELAPSED_SEC }}
+          INSTALL_RESULT: ${{ steps.wait.outputs.INSTALL_RESULT }}
+          FINAL_GIB: ${{ steps.compress.outputs.FINAL_GIB }}
+          SSH_READY: ${{ steps.verify.outputs.SSH_READY }}
+        run: |
+          set -u
+          {
+            echo '## Windows 客机镜像打包结果'
+            echo ''
+            echo '| 项 | 值 |'
+            echo '| --- | --- |'
+            echo "| 安装结果 | ${INSTALL_RESULT:-未执行} |"
+            echo "| 安装耗时 | ${INSTALL_ELAPSED:-?} s |"
+            echo "| 压缩后体积 | ${FINAL_GIB:-?} GiB |"
+            echo "| SSH 验证 | ${SSH_READY:-未执行} |"
+            echo "| cache key | \`$CACHE_KEY\` |"
+            echo ''
+            if [ "${SSH_READY:-}" = yes ]; then
+              echo '### ✅ 镜像可用，已存入 cache'
+              echo ''
+              echo '接下来在仓库设置：'
+              echo ''
+              echo '- secret `CX_QEMU_GUEST_SSH_KEY` = 匹配本次公钥的私钥'
+              echo '- ci.yml 侧用 `actions/cache/restore@v4` 取回，'
+              echo "  key = \`$CACHE_KEY\`"
+              echo ''
+              echo '> cache 7 天未访问会被清理；ci.yml 每次 push 都 restore 就会续期。'
+            else
+              echo '### ❌ 未产出可用镜像'
+              echo ''
+              echo '不要把它配给 ci.yml —— 那边会因 SSH 连不上而红。'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失败时也导出诊断
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-image-diagnostics
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/guest/oem/setup.log
+            ${{ runner.temp }}/guest/oem/install.bat
+            ${{ runner.temp }}/guest/storage/install.log
+          if-no-files-found: warn
+          retention-days: 7

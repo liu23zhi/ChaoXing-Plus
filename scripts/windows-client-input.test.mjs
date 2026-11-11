@@ -49,7 +49,8 @@ test('注入脚本在运行前后快照并恢复输入法', async () => {
   const script = await readFile(injectionScript, 'utf8');
   assert.match(script, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-input\.ps1'\)/u, '注入脚本必须 dot-source 输入法助手');
   assert.match(script, /\$inputState = Get-InputState/u, '启动客户端前必须快照输入法状态');
-  assert.match(script, /cx-real-client-\$CaseName-input-before\.json/u, '必须落盘输入法快照');
+  // 2026-11-11: artifact 文件名已中文化（input-before.json -> 输入前状态.json）。
+  assert.match(script, /zh\['inputBefore'\]/u, '必须落盘输入法快照');
   assert.match(script, /Restore-InputState -State \$inputState/u, '结束后必须恢复输入法');
   assert.match(script, /input changed=\$\(\$inputChanges -join ','\) restored=\$\(\$restoredInput -join ','\)/u,
     '必须记录输入法是否被改动以及恢复结果');

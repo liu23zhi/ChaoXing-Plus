@@ -24,6 +24,42 @@ $script:snapshotSizes = @{}
 . (Join-Path $PSScriptRoot 'windows-client-shell.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-diagnostics.ps1')
 . (Join-Path $PSScriptRoot 'windows-client-input.ps1')
+
+# -- Artifact filename map (user requirement 2026-11-11: artifact filenames in Chinese) --
+#
+# Why [char]0xNNNN instead of literal Chinese:
+#   scripts/windows-build-script.test.mjs hard-asserts that every .ps1 in this directory
+#   stays PURE ASCII (Chinese is decoded as ANSI by Windows PowerShell 5.1 and garbles).
+#   Building names from code points satisfies the ASCII rule and still yields Chinese
+#   filenames. Verified on both pwsh 7 and Windows PowerShell 5.1.
+#
+# Only the ARTIFACT filenames change; the real paths the script and host read/write
+# (report.json / native-host.stdout.log / debug.log / input.txt ...) stay as-is,
+# because renaming those would break the host contract. What gets localized is the
+# Copy-Item destination name.
+#
+# The `cx-real-client-<CaseName>-` prefix stays ASCII on purpose: CaseName is
+# version+index, so keeping it makes cross-run comparison and sorting trivial.
+$script:zh = @{
+  'imageCdp'     = -join ([char]0x622A, [char]0x56FE, [char]0x9875)                                                  # jietuye
+  'imageDesktop' = -join ([char]0x684C, [char]0x9762, [char]0x622A, [char]0x56FE)                                    # zhuomian jietu
+  'imageStart'   = -join ([char]0x542F, [char]0x52A8, [char]0x622A, [char]0x56FE)                                    # qidong jietu
+  'imageBefore'  = -join ([char]0x70B9, [char]0x51FB, [char]0x524D, [char]0x622A, [char]0x56FE)                      # dianjiqian jietu
+  'imageAfter'   = -join ([char]0x70B9, [char]0x51FB, [char]0x540E, [char]0x622A, [char]0x56FE)                      # dianjihou jietu
+  'imageConfirm' = -join ([char]0x786E, [char]0x8BA4, [char]0x5F39, [char]0x7A97, [char]0x622A, [char]0x56FE)        # queren tanchuang jietu
+  'imageFinal'   = -join ([char]0x6CE8, [char]0x5165, [char]0x540E, [char]0x622A, [char]0x56FE)                # zhuru hou jietu
+  'report'       = -join ([char]0x6CE8, [char]0x5165, [char]0x62A5, [char]0x544A)                                    # zhuru baogao
+  'entry'        = -join ([char]0x5165, [char]0x53E3, [char]0x8BB0, [char]0x5F55)                                    # rukou jilu
+  'environment'  = -join ([char]0x73AF, [char]0x5883, [char]0x4FE1, [char]0x606F)                                    # huanjing xinxi
+  'hostOut'      = -join ([char]0x5BBF, [char]0x4E3B, [char]0x6807, [char]0x51C6, [char]0x8F93, [char]0x51FA)        # suzhu biaozhun shuchu
+  'hostErr'      = -join ([char]0x5BBF, [char]0x4E3B, [char]0x6807, [char]0x51C6, [char]0x9519, [char]0x8BEF)        # suzhu biaozhun cuowu
+  'clientDebug'  = -join ([char]0x5BA2, [char]0x6237, [char]0x7AEF, [char]0x8C03, [char]0x8BD5, [char]0x65E5, [char]0x5FD7)   # kehuduan tiaoshi rizhi
+  'clientInput'  = -join ([char]0x5BA2, [char]0x6237, [char]0x7AEF, [char]0x8F93, [char]0x5165, [char]0x8BB0, [char]0x5F55)   # kehuduan shuru jilu
+  'inputBefore'  = -join ([char]0x8F93, [char]0x5165, [char]0x524D, [char]0x72B6, [char]0x6001)                      # shuruqian zhuangtai
+  'inputAfter'   = -join ([char]0x8F93, [char]0x5165, [char]0x540E, [char]0x72B6, [char]0x6001)                      # shuruhou zhuangtai
+  'sha256'       = -join ([char]0x6821, [char]0x9A8C, [char]0x548C)                                                  # jiaoyanhe
+  'prepSummary'  = -join ([char]0x51C6, [char]0x5907, [char]0x6458, [char]0x8981)                                    # zhunbei zhaiyao
+}
 $tempRoot = Join-Path $env:RUNNER_TEMP ("cx-real-client-" + [guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $tempRoot 'package'
 $reportPath = Join-Path $tempRoot 'report.json'
@@ -109,12 +145,12 @@ function Save-RunArtifacts {
     param([string] $CaseName)
     $target = $env:RUNNER_TEMP
     if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { return }
-    foreach ($entry in @(@{ Source = $reportPath; Name = 'report.json' }, @{ Source = $stdoutPath; Name = 'host.stdout.log' }, @{ Source = $stderrPath; Name = 'host.stderr.log' })) {
+    foreach ($entry in @(@{ Source = $reportPath; Name = ($script:zh['report'] + '.json') }, @{ Source = $stdoutPath; Name = ($script:zh['hostOut'] + '.log') }, @{ Source = $stderrPath; Name = ($script:zh['hostErr'] + '.log') })) {
         if (-not (Test-Path -LiteralPath $entry.Source -PathType Leaf)) { continue }
         try { Copy-Item -LiteralPath $entry.Source -Destination (Join-Path $target "cx-real-client-$CaseName-$($entry.Name)") -Force } catch { }
     }
     if ($clientDirectory) {
-        foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+        foreach ($item in @(@{ Source = 'debug.log'; Suffix = ($script:zh['clientDebug'] + '.log') }, @{ Source = 'input.txt'; Suffix = ($script:zh['clientInput'] + '.txt') })) {
             $saved = Join-Path $target "cx-real-client-$CaseName-$($item.Suffix)"
             $live = Join-Path $clientDirectory $item.Source
             $liveSize = 0
@@ -127,7 +163,7 @@ function Save-RunArtifacts {
             }
         }
     }
-    [void](Save-DesktopScreenshot -Path (Join-Path $target "cx-real-client-$CaseName-desktop.png") -ScalePercent 100)
+    [void](Save-DesktopScreenshot -Path (Join-Path $target ("cx-real-client-$CaseName-" + $script:zh['imageDesktop'] + ".png")) -ScalePercent 100)
 }
 
 # The host truncates the client's debug.log during its own shutdown, so the only way to keep it is to
@@ -138,7 +174,7 @@ function Update-ClientDebugSnapshot {
     param([string] $CaseName)
     $target = $env:RUNNER_TEMP
     if (-not $target -or -not $clientDirectory) { return }
-    foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+    foreach ($item in @(@{ Source = 'debug.log'; Suffix = ($script:zh['clientDebug'] + '.log') }, @{ Source = 'input.txt'; Suffix = ($script:zh['clientInput'] + '.txt') })) {
         try {
             $source = Join-Path $clientDirectory $item.Source
             if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
@@ -160,11 +196,11 @@ function Save-ArtifactManifest {
     if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { return }
     try {
         $lines = foreach ($file in @(Get-ChildItem -LiteralPath $target -File -Filter "cx-real-client-$CaseName-*" | Sort-Object Name)) {
-            if ($file.Name -like '*-sha256.txt') { continue }
+            if ($file.Name -like ("*-" + $script:zh['sha256'] + ".txt")) { continue }
             $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
         }
-        if ($lines) { [IO.File]::WriteAllLines((Join-Path $target "cx-real-client-$CaseName-sha256.txt"), @($lines)) }
+        if ($lines) { [IO.File]::WriteAllLines((Join-Path $target ("cx-real-client-$CaseName-" + $script:zh['sha256'] + ".txt")), @($lines)) }
     } catch {
         Write-Host "[real-client] artifact manifest failed: $($_.Exception.Message)"
     }
@@ -190,13 +226,13 @@ function Write-HostDiagnostics {
 try {
   Write-Host "[real-client] case=$CaseName mode=$InjectMode stage=validate-inputs"
   if ($env:RUNNER_TEMP -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
-    $environmentPath = Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-environment.json"
+    $environmentPath = Join-Path $env:RUNNER_TEMP ("cx-real-client-$CaseName-" + $script:zh['environment'] + ".json")
     try { (Get-DesktopEnvironment) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $environmentPath -Encoding utf8 } catch { }
-    [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-start.png") -ScalePercent 100)
+    [void](Save-DesktopScreenshot -Path (Join-Path $env:RUNNER_TEMP ("cx-real-client-$CaseName-" + $script:zh['imageStart'] + ".png")) -ScalePercent 100)
   }
   $inputState = Get-InputState
   if ($env:RUNNER_TEMP) {
-    try { $inputState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-input-before.json") -Encoding utf8 } catch { }
+    try { $inputState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP ("cx-real-client-$CaseName-" + $script:zh['inputBefore'] + ".json")) -Encoding utf8 } catch { }
   }
   Write-Host "[real-client] input before: layouts=$((@($inputState.LayoutHandles)) -join ',') active=$($inputState.ActiveLayout) preload=$((($inputState.Preload.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '))"
   if (-not (Test-Path -LiteralPath $ClientInstaller -PathType Leaf)) { throw "Client fixture is missing: $ClientInstaller" }
@@ -229,7 +265,6 @@ try {
     '--report', $reportPath,
     '--duration', '180000',
     '--no-log',
-    '--no-diagnose',
     '--stop-client-on-exit'
   )
   # Mount the panel on non-exam pages too: the host evaluates window.__CX_WIN_PANEL_ALL_PAGES__ = true
@@ -266,7 +301,19 @@ try {
   # this is the page-internal copy of the same moment, taken through the client's own DevTools endpoint.
   $script:cdpPort = if ($entry.PSObject.Properties['ProcessId']) { Get-ClientCdpPort -ProcessId ([int]$entry.ProcessId) } else { 0 }
   if ($script:cdpPort -gt 0 -and $entryPrefix) {
-    $entryShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path "$entryPrefix-cdp-page.png" -TimeoutSeconds 15
+    # Wait for the page to actually finish loading before capturing. Without this the
+    # screenshot lands mid-navigation: the frame is a skeleton login page with no form
+    # rendered (user report 2026-11-11, run 42958179520). Wait-CdpPageReady already
+    # requires readyState=complete + enough text + quiet DOM/resources across repeated
+    # samples, so reuse it instead of inventing a second readiness rule.
+    $ready = $null
+    if (Get-Command Wait-CdpPageReady -ErrorAction SilentlyContinue) {
+      $ready = Wait-CdpPageReady -Port $script:cdpPort -TimeoutSeconds 30
+      Write-Host ("[real-client] cdp page ready={0} stable={1} text={2} quietMs={3} url={4}" -f $ready.Ready, $ready.StableSamples, $ready.TextLength, $ready.QuietMilliseconds, $ready.Url)
+    }
+    # Even when the probe times out we still capture: a mid-load frame with ready=false
+    # recorded is more useful for diagnosis than no frame at all.
+    $entryShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path ("$entryPrefix-" + $script:zh['imageCdp'] + ".png") -TimeoutSeconds 15
     if ($entryShot) {
       Write-Host "[real-client] cdp page screenshot bytes=$($entryShot.Bytes) size=$($entryShot.Width)x$($entryShot.Height) url=$($entryShot.Url)"
     } else {
@@ -331,7 +378,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
         windowAffinity = $affinitySnapshot
         keyboardHookLog = $hookLog
         capturedAt = (Get-Date).ToString('o')
-      } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-entry.json") -Encoding UTF8
+      } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP ("cx-real-client-$CaseName-" + $script:zh['entry'] + ".json")) -Encoding UTF8
     } catch { }
   }
   if ($entry.PageTargets -lt 1) {
@@ -500,7 +547,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   # WDA_MONITOR protected desktop frame can never show. Best effort - a missing client just skips it.
   try {
     if ($script:cdpPort -gt 0 -and $script:cdpPrefix) {
-      $finalShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path "$($script:cdpPrefix)-cdp-final.png" -TimeoutSeconds 10
+      $finalShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path ("$($script:cdpPrefix)-" + $script:zh['imageFinal'] + ".png") -TimeoutSeconds 10
       if ($finalShot) {
         Write-Host "[real-client] cdp final screenshot bytes=$($finalShot.Bytes) size=$($finalShot.Width)x$($finalShot.Height) url=$($finalShot.Url)"
       }
@@ -530,7 +577,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
     $inputChanges = Compare-InputState -Before $inputState -After $inputAfter
     $restoredInput = Restore-InputState -State $inputState
     if ($env:RUNNER_TEMP) {
-      try { $inputAfter | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-input-after.json") -Encoding utf8 } catch { }
+      try { $inputAfter | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP ("cx-real-client-$CaseName-" + $script:zh['inputAfter'] + ".json")) -Encoding utf8 } catch { }
     }
     Write-Host "[real-client] input changed=$($inputChanges -join ',') restored=$($restoredInput -join ',') active=$($inputAfter.ActiveLayout)"
   } catch {
@@ -538,7 +585,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   }
   # Use the same fixed artifact paths as the live snapshot collector. An early failure may never have
   # created either file, and reporting missing evidence must not interrupt the remaining cleanup.
-  foreach ($item in @(@{ Source = 'debug.log'; Suffix = 'client-debug.log' }, @{ Source = 'input.txt'; Suffix = 'client-input.txt' })) {
+  foreach ($item in @(@{ Source = 'debug.log'; Suffix = ($script:zh['clientDebug'] + '.log') }, @{ Source = 'input.txt'; Suffix = ($script:zh['clientInput'] + '.txt') })) {
     try {
       $snapshot = if ($env:RUNNER_TEMP) { Join-Path $env:RUNNER_TEMP "cx-real-client-$CaseName-$($item.Suffix)" } else { '' }
       if ($snapshot -and (Test-Path -LiteralPath $snapshot -PathType Leaf)) {

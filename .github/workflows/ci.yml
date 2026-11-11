@@ -6,7 +6,6 @@ name: 持续集成
 #
 #   · 日常构建与测试    source / windows-*（不变）
 #   · 虚拟机能力巡检    gate → kvm-probe（托管 ubuntu，只读，5 分钟）
-#   · 关机自毁（VM）    vm-shutdown-destruct（self-hosted cx-vm，真关机）
 #   · 关机自毁（语义）  wiring-probe（托管 windows-latest，-NoShutdown → -ReplayRunOnce）
 #   · 关机自毁（QEMU）  qemu-shutdown-destruct（托管 ubuntu + KVM + Windows 客机）
 #
@@ -27,23 +26,32 @@ name: 持续集成
 #   所以比较一律写成字符串比较（'true' / 'false'），不能写成 `== true`。
 #
 # ============================================================================
-# ## 为什么关机自毁仍然必须有 self-hosted + cx-vm 这一条（2026-11-09 实测修订）
+# ## 关机自毁验证的演进（2026-11-11 用户要求：不用 self-hosted）
 #
-#   早先这里写的是「托管 runner 不支持嵌套虚拟化」。这条**已被实测推翻**，
-#   不是 self-hosted 留在工作流里的理由。实测事实（run 42588732951 / 42590175761）：
-#     · 托管 ubuntu-24.04 runner **确实有** /dev/kvm（crw-rw---- root kvm 10,232）
-#     · kvm_amd / kvm / irqbypass 模块**已加载**，宿主开了嵌套虚拟化
-#     · 但作业用户 uid=1001(runner) **不在 kvm 组**，-r / -w 都失败 → KVM_ACCESSIBLE=no
-#   所以真正卡住的是下面两条，而不是「没有嵌套虚拟化」：
-#     (1) 直接形态下作业要跑的正是宿主自身的 shutdown /s：托管 runner 是
-#         「一次作业一台一次性 VM」，关机一执行 runner agent 连同宿主一起消失，
-#         作业立刻被判失败，后续 resume 步骤永远不会执行。作业内无法在不杀死
-#         自己的前提下真重启宿主，也没有外部快照 API 可还原。
-#     (2) 想绕开 (1) 就得用 ubuntu + QEMU 跑 Windows guest（重启发生在 guest 内层），
-#         那条路实测「能成」但成本不可接受：Windows Server 2025 ISO 5.60 GiB、
-#         下载 520 s，冷启动到 Setup 画面已耗时 9.7 分钟 —— 不适合每次 PR。
-#   结论：self-hosted + 可快照 VM 依然是「验证最完整」的那条路；托管 runner 上
-#   能跑的等价验证是 wiring-probe（-NoShutdown + -ReplayRunOnce），见该 job 的注释。
+# 历史：曾有一条 vm-shutdown-destruct 跑在 [self-hosted, windows, cx-vm] 上，
+# 用真 Windows 虚拟机做「关机登记 → 重启 → 开机续删」。但本仓库 runners
+# total_count = 0，该作业永远排队到超时，最终被取消 —— 既没验证任何东西，
+# 又让 CI 长期不可用。
+#
+# ⚠️ 一条被推翻的旧断言（2026-11-10 曾写进本文件，现已不成立）：
+#   「托管 runner 不支持嵌套虚拟化」—— 该结论是**错的**。实测 run 42588732951 /
+#   42590175761：托管 ubuntu-24.04 有 /dev/kvm，sudo 提权后可正常引导 guest。
+#   所以现在用托管 Ubuntu + QEMU + cloud image 就能做真实重启，不需要 self-hosted。
+#
+# 现状（全部托管 runner，零 self-hosted、零人工配置）：
+#   · wiring-probe（windows-latest）—— 两阶段语义：阶段一登记待删目标，
+#     阶段二按 RunOnce 原文重放并断言续删。不真关机（托管 runner 关机就没了），
+#     所以「重启后」这一步是用重放模拟的。
+#   · qemu-destruct-linux-guest（ubuntu-24.04）—— QEMU + Linux cloud image，
+#     自动下载镜像，做**真实重启**，断言 boot_id 变化 + 目标已删 + 续删在本次
+#     启动执行 + 单元自撤销。
+#   · qemu-shutdown-destruct（ubuntu-24.04）—— QEMU + Windows 客机，覆盖
+#     Windows 特有的 HKCU RunOnce 与 PendingFileRenameOperations。需要自备
+#     Windows qcow2（无官方 cloud image，从 ISO 装需 20-40 分钟，不适合 CI），
+#     未配置时**如实判红**而不是伪装成成功。
+#
+# 缺口（如实记录）：PendingFileRenameOperations 在真实 Windows 重启后的清除
+# 行为，目前只有 qemu-shutdown-destruct 能验证，而它需要人工准备镜像。
 #
 # → KVM 巡检（kvm-probe job）跑在托管 ubuntu，负责把「托管 runner 的 KVM 权限」
 #   这个外部事实变成可追溯记录；它的基线结论是「有设备、无权限」，一旦
@@ -51,6 +59,39 @@ name: 持续集成
 #
 # ============================================================================
 
+# ============================================================================
+# ## 覆盖矩阵（2026-11-11 用户第三次要求「重写，覆盖全面，不使用 self-host」）
+#
+# | # | 维度 | 覆盖者 | 状态 |
+# |---|---|---|---|
+# | 1 | 关机时登记待删目标 | wiring-probe（RunOnce）/ linux-guest（targets.txt） | ✅ |
+# | 2 | 真实关机（不是模拟） | linux-guest `powercut`（kill -KILL QEMU = 拔电源） | ✅ |
+# | 3 | 真实开机，续删真的执行 | linux-guest `replay`（resume-proof 的 boot_id == 本次） | ✅ |
+# | 4 | 断言目标已删 | linux-guest `replay`（3 个目标全部） | ✅ |
+# | 5 | 断言登记项自行撤销 | linux-guest `replay`（unit 文件 + is-enabled） | ✅ |
+# | 6 | 强制关机后仍能续删 | linux-guest `powercut`（**替代** reboot，断电更严） | ✅ |
+# | 7 | 多次重启不重复执行（幂等） | linux-guest `reboot2` + `replay2`（proof 逐字节未变） | ✅ |
+# | 8 | Linux 侧对应机制 | linux-guest 全程 | ✅ |
+# | 9 | Windows 侧对应机制 | qemu-shutdown-destruct（需人工镜像） | ⚠️ 缺镜像 |
+# | 10 | KVM 能力基线留痕 | kvm-probe（只读巡检，职责单一） | ✅ |
+#
+# 附加覆盖（用户在「覆盖全面」下明确要求的扩展）：
+#   · 多目标 —— 3 个登记目标 + **1 个未登记对照必须存活**（证明不是「清空目录」）
+#   · 登记值本身正确 —— targets.txt 字节级内容、unit 的 ExecStart、脚本可执行位
+#   · 异常路径 —— 列表中间插一个目录（rm -f 对目录必失败），
+#     断言它记 rc≠0 **且排在它后面的目标仍被删**（列表处理不因单项失败中断）
+#
+# 为什么 #9 仍是 ⚠️（不是「再努力一下就能解决」）：
+#   PendingFileRenameOperations 与 RunOnce 都是 Windows **运行时**写进注册表的。
+#   qemu-nbd 离线挂载只能看到 NTFS 文件，**看不到注册表项**；要让 Windows 写它们，
+#   必须先在客机里执行代码 ⇒ 回到注入通道问题。
+#   而 Windows 评估版默认既不开 OpenSSH Server 也不开 WinRM；
+#   走 unattend 完整装机 20-40 min，叠加 9.51 GiB 下载 + 转换 + 两轮重启
+#   = 35-50 min，撞 45 min 上限。
+#   ⇒ 要真正补上，只能人工准备「预装 SSH + purge-tests.exe」的 qcow2
+#     并配 repo variable（或托管到 release 后由 CI 分卷下载）。
+#      这是**一次性人工**，不是每次 CI 的人工步骤，但仍需有人做。
+#
 on:
   push:
     branches: [main]
@@ -62,7 +103,7 @@ on:
         type: boolean
         default: true
       include_vm_destruct:
-        description: '同时运行关机自毁验证（虚拟机需 self-hosted cx-vm 且 CX_VM_ENABLED=true；QEMU 需客机镜像）'
+        description: '同时运行关机自毁验证（QEMU Linux 客机自动下载镜像；Windows 客机需自备镜像）'
         type: boolean
         default: true
       guest_image:
@@ -172,7 +213,8 @@ jobs:
     permissions:
       contents: read
     needs: windows-build
-    if: ${{ needs.windows-build.result == 'success' && github.event_name != 'pull_request' }}
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。只要求构建成功。
+    if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
@@ -574,7 +616,8 @@ jobs:
     permissions:
       contents: read
     needs: [windows-build, windows-real-client-discovery]
-    if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
+    if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
     # Point this at a machine that can satisfy the client's environment check (camera + zh-CN input
     # method) by setting the repository variable REAL_CLIENT_RUNNER, e.g.
     #   ["self-hosted","windows","cx-exam"]
@@ -678,109 +721,32 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-
   gate:
-    name: 是否今天已验证过（手动恒运行，CI 调用才判重）
+    name: 前置门（已取消一切判重，每次 run 都放行）
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     outputs:
-      skip: ${{ steps.gate.outputs.SKIP }}
-      reason: ${{ steps.gate.outputs.REASON }}
+      # 三个输出保留为常量，仅为不破坏下游引用（kvm-probe / summary）。
+      # 它们**不再表达任何判重结论** —— 判重逻辑已整体删除。
+      skip: "no"
+      reason: "已取消判重：每次 run 都执行（用户 2026-11-11 明确要求）"
+      sha_verified: "no"
     steps:
-      - name: 日判重
-        id: gate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          FORCE: ${{ github.event.inputs.force }}
+      - name: 放行
         run: |
-          set -eu
-          today_utc=$(date -u +%Y-%m-%d)
-
-          # 手动触发 → 一定运行（用户要求：手动拉起则一定要跑）
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=手动触发（workflow_dispatch），一定运行" >> "$GITHUB_OUTPUT"
-            echo "今天(UTC)=$today_utc → 手动触发，运行"
-            exit 0
-          fi
-
-          # 手动触发时显式勾选 force → 运行（合并进 ci.yml 后已无 workflow_call 调用方，
-          # 此分支只服务 workflow_dispatch 的 force 输入；push/PR 下 github.event.inputs.force
-          # 为空字符串，走 ${FORCE:-false} 兜底为 false，不会误入。）
-          if [ "${FORCE:-false}" = "true" ]; then
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=手动触发时勾选了 force" >> "$GITHUB_OUTPUT"
-            echo "今天(UTC)=$today_utc → force=true，运行"
-            exit 0
-          fi
-          # 2026-11-10：ci-vm.yml 已并入本文件，原「workflow_call 的调用不在 callee
-          # 自己的 runs 列表里产生记录」这个坑随之消失 —— 现在可以直接查**本 workflow**
-          # 今天的 runs。同时必须排除当前这次 run 自己（$GITHUB_RUN_ID）：
-          # 否则将来若放宽「只看 completed」的条件，正在跑的自己会被数成「已跑过」。
-          count=0
-          # ⚠️ 顺序不能反：GITHUB_WORKFLOW_REF 形如
-          #   .github/workflows/ci.yml@refs/heads/main
-          #   .github/workflows/ci.yml@refs/pull/42/merge
-          # 必须先去掉 @<ref> 再取 basename。反过来做会得到 main / merge / foo，
-          # gh api 拿它查 /workflows/main/runs 会 404，被 `|| true` 吞掉 → count 恒 0，
-          # 判重静默失效（kvm-probe 每天都跑，等于没有日判重）。
-          #   先 %% @* 后 ##*/：三种 ref 都得 ci.yml
-          workflow_file="${GITHUB_WORKFLOW_REF%%@*}"
-          workflow_file="${workflow_file##*/}"
-          run_ids=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=30" \
-            --jq '.workflow_runs[].id' 2>/dev/null || true)
-          for rid in $run_ids; do
-            # 排除当前 run 自己
-            [ "$rid" = "${GITHUB_RUN_ID}" ] && continue
-            # 只看已完成的 run（in_progress 的还没产出结果，不能算「已跑过」）
-            rstatus=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}" --jq '.status' 2>/dev/null || echo unknown)
-            [ "$rstatus" = "completed" ] || continue
-            # job name 匹配 "KVM 能力巡检"：合并后实际 name 是
-            # "KVM 能力巡检（托管 runner，只读）"，子串匹配仍命中。
-            hit=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name | test("KVM 能力巡检")) | select(.conclusion == "success")] | length' 2>/dev/null || echo 0)
-            count=$((count + hit))
-          done
-          echo "今天(UTC)=$today_utc，本 workflow 中已成功的 KVM 巡检 job 数 = $count（已排除当前 run ${GITHUB_RUN_ID}）"
-          if [ "$count" -gt 0 ]; then
-            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)已有 $count 条成功的 KVM 巡检记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
-          else
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)还没有成功的巡检记录，执行" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: 跳过说明
-        if: steps.gate.outputs.SKIP == 'yes'
-        run: |
-          set -eu
-          echo "::notice title=KVM 能力巡检已跳过::${{ steps.gate.outputs.REASON }}"
-          {
-            echo '## KVM 能力巡检（已跳过）'
-            echo ''
-            echo "- 原因：${{ steps.gate.outputs.REASON }}"
-            echo ''
-            echo '> 要强制运行：在 Actions 页面选本 workflow 点 `Run workflow`（手动触发一定运行）。'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ---------------------------------------------------------------------------
-  # KVM 能力巡检：托管 ubuntu-24.04，只读，不安装/不下载/不启动虚拟机。
-  #
-  # 已知基线（2026-11-09 实测，run 42588732951 / 42590175761）：
-  #   /dev/kvm       存在，crw-rw---- 1 root kvm 10, 232
-  #   作业用户       uid=1001(runner)，**不在 kvm 组**
-  #   -r / -w        均失败 → KVM_ACCESSIBLE=no
-  #   kvm 模块       kvm_amd / kvm / irqbypass 已加载（宿主已开嵌套虚拟化）
-  #   sudo           免密可用；chmod 666 /dev/kvm 实测 8 ms 生效
-  # ⇒ 结论是「有设备、无权限」，不是「没有嵌套虚拟化」。
-  # ---------------------------------------------------------------------------
+          echo "已取消一切判重，本次 run 直接放行。"
+          echo "SKIP=no"
+          echo "SHA_VERIFIED=no"
+          echo "REASON=已取消判重：每次 run 都执行"
 
   kvm-probe:
     name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
     needs: gate
-    if: needs.gate.outputs.skip != 'yes'
+    # 2026-11-11 最终口径（用户两次要求）：**取消一切判重，每次 run 都跑**。
+    # 旧写法按日历判重，实测 run 42935345965：main 当天第 1 次 push 巡检成功后，
+    # 后续不同 commit 的 push 全部 skipped ⇒ main 的最新代码从未被巡检验证过。
+    # 代价依据：timeout 是 5 分钟、实测单次 < 40 秒，不是重活。
+    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -917,148 +883,13 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 关机自毁端到端：需要 self-hosted cx-vm + 仓库变量 CX_VM_ENABLED=true。
-  # 只在**手动触发**时出现（CI 调用不拉这条，因为它要 60 分钟且依赖特定 runner）。
+  # 自毁续删语义验证：托管 windows-latest，不真关机。
+  #
+  # 2026-11-11 用户要求「不用 self-hosted」后，原来那条真关机的
+  # vm-shutdown-destruct 已删除（本仓库 runners total_count = 0，它永远排队）。
+  # 本作业保留它的**语义**：阶段一登记待删目标，阶段二按 RunOnce 原文重放，
+  # 断言「续删命令确实执行且目标被删」。不真关机 —— 托管 runner 关机就没了。
   # ---------------------------------------------------------------------------
-
-  vm-shutdown-destruct:
-    name: 关机自毁与开机续删（虚拟机）
-    needs: gate
-    # 三重保护：变量开启、非 PR、（不再要求手动触发）。
-    # 托管 runner 没有 cx-vm 标签，硬跑会永久排队，所以变量门必须留。
-    # ⚠️ 刻意**不看** gate.outputs.skip：日判重只省 kvm-probe 的成本，
-    # 自毁作业是「完整 CI 里必须有」的那部分，跳过等于退回「从未在 CI 里跑过」。
-    if: |
-      needs.gate.result == 'success' &&
-      vars.CX_VM_ENABLED == 'true' &&
-      (github.event_name != 'pull_request' || github.event.inputs.include_vm_destruct != 'false')
-    runs-on: [self-hosted, windows, cx-vm]
-    # ⚠️ 独立 concurrency + 不取消：本作业会真关机。若被新 push 中途取消，
-    # -Stage shutdown 已登记的 RunOnce 永不执行 -Stage resume，
-    # 虚拟机将停在「已登记、未续删」状态。宁可排队也不能取消。
-    concurrency:
-      group: cx-vm-destruct-${{ github.ref }}
-      cancel-in-progress: false
-    timeout-minutes: 60
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 配置 Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-
-      - name: 安装依赖
-        run: npm ci
-
-      # build-windows.ps1 依赖 dist-windows 下的页面资源与 windows/native-build/hook
-      # 的代理产物；缺任何一项都会直接 throw「Missing injection asset」。
-      # 与主 CI 一致：先扩展包，再 Windows 注入资源（发布口径用 --release）。
-      - name: 构建扩展包与 Windows 注入资源
-        run: |
-          npm run build
-          npm run build:windows -- --release
-
-      - name: 记录基线快照标记
-        shell: pwsh
-        run: |
-          # 快照本身由 runner 镜像层负责；这里只记录起点，便于失败时对照。
-          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-          "CX_VM_SNAPSHOT_BASELINE=$stamp" | Out-File -FilePath "$env:RUNNER_TEMP\cx-vm-baseline.txt" -Encoding utf8
-          Write-Output "基线标记 $stamp"
-
-      - name: 断言起点干净（无残留登记与临时目录）
-        shell: pwsh
-        run: |
-          ./scripts/vm/assert-clean.ps1 -Stage baseline
-
-      - name: 构建原生测试产物
-        shell: pwsh
-        run: |
-          # 复用仓库既有构建脚本，不新增一套编译流程。
-          # -BuildTests 是 switch（不带值）；与 package.json 的 build:native 同口径调用。
-          # 测试产物（injection-tests.exe / purge-tests.exe 等）不签名，脚本内没有 signtool 环节，
-          # 因此这里不需要任何「允许未签名」开关。
-          ./windows/native-source/build-windows.ps1 -BuildTests
-
-      - name: 关机自毁端到端
-        shell: pwsh
-        run: |
-          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown
-        env:
-          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
-          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
-
-      - name: 开机续删与强制关机保障
-        shell: pwsh
-        run: |
-          ./scripts/vm/run-shutdown-destruct.ps1 -Stage resume
-        env:
-          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
-          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
-
-      - name: 断言终点干净（自毁后无残留）
-        if: always()
-        shell: pwsh
-        run: |
-          ./scripts/vm/assert-clean.ps1 -Stage teardown
-
-      - name: 上传证据
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cx-vm-destruct-evidence
-          compression-level: 0
-          path: |
-            ${{ runner.temp }}/cx-vm-*.txt
-            ${{ runner.temp }}/cx-purge-*.log
-            ${{ runner.temp }}/cx-purge-*.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: 还原虚拟机快照
-        if: always()
-        shell: pwsh
-        run: |
-          # 快照还原交给 runner 自身的 VM 管理层（Hyper-V / VMware / Proxmox），
-          # 由 VM_RESTORE_COMMAND 注入；未配置时只告警，不掩盖前面的失败。
-          if ([string]::IsNullOrWhiteSpace($env:VM_RESTORE_COMMAND)) {
-            Write-Warning '未配置 VM_RESTORE_COMMAND；本次运行后虚拟机不会自动还原，请人工核对。'
-            exit 0
-          }
-          Invoke-Expression $env:VM_RESTORE_COMMAND
-        env:
-          VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
-
-  # 自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完整两阶段。
-  #
-  # 它能证明什么（这才是重点）：
-  #
-  #   1. shutdown 阶段真的把待删文件登记进了**真实 HKCU RunOnce**（不是测试子键）
-  #   2. 注册表里存下的那条 command 串，**按原文执行**之后
-  #      → 目标文件被删、RunOnce 登记被撤销、续删脚本自删
-  #
-  #   第 2 条正是 `-NoShutdown` 盖不住的那一半：-NoShutdown 只证明「登记正确」，
-  #   而这里执行的是 Windows 登录时会执行的**同一条命令串**
-  #   （注册表里存什么就执行什么，`cmd /c <stored command>`）。
-  #
-  # 它盖不住什么（如实标注，不许当成已覆盖）：
-  #
-  #   · 登录会话真的去读 RunOnce 这个**触发动作**本身 —— 需要真重启。
-  #   · `WM_QUERYENDSESSION` / `WM_ENDSESSION` 在真实关机流程中的时序。
-  #   · `shutdown.exe /s` 真的走自毁路径（这条由 cx-vm 的关机作业覆盖）。
-  #   · `MOVEFILE_DELAY_UNTIL_REBOOT` 项重启后消失 —— 需要真重启。
-  #
-  # 结论：这个作业把「RunOnce 命令串是否可执行、执行后是否删净并自撤销」
-  # 从「从未验证」变成「每次手动触发都验证」。真正的重启语义仍留给 cx-vm，
-  # 所以本作业**不能替代** cx-vm 的关机作业，只能补上它常年跑不起来时的缺口。
-  #
-  # 为什么现在去掉 continue-on-error：它原先存在的理由是缺陷 c/d
-  # （purge-tests.c 不读 CX_PURGE_TEST_STAGE/TARGET）——这两条已由 PR #29 修掉，
-  # 本地实跑 `-Stage shutdown -NoShutdown` 与 `-Stage resume -ReplayRunOnce` 均 exit 0。
-  # 保留 continue-on-error 会让它永远绿，等于没有门禁。
 
   wiring-probe:
     name: 自毁续删语义验证（不关机，托管 runner）
@@ -1068,9 +899,7 @@ jobs:
     # PR 上挂 continue-on-error：它约 40 分钟且受宿主环境影响，不该阻塞代码评审；
     # push 到 main 与手动触发时严格（失败即红），这样真正的回归会被抓住。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁语义验证。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    if: needs.gate.result == 'success'
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
     # 同上：两阶段必须跑完（shutdown 登记 → resume 重放断言）。
@@ -1193,7 +1022,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-
   qemu-shutdown-destruct:
     name: 关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）
     runs-on: ubuntu-24.04
@@ -1202,16 +1030,37 @@ jobs:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
     needs: gate
-    # 只在 push 到 main 与手动触发时出现：45 分钟且要求客机镜像可用。
-    # PR 不跑（成本太高）；镜像未配置时作业内部会 skip 而不是 fail。
-    # 刻意不看 gate.outputs.skip：同上，日判重不约束自毁作业。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # ── 触发条件（2026-11-11 合并两方意图）────────────────────────────────
+    #
+    # 【意图 1：用户要求「不要跳过任务」（captain 侧，优先级高）】
+    #   不按 event_name / 变量门跳过 —— PR 上也跑，每次都跑。
+    #
+    # 【意图 2：t96 修的假绿（必须保留）】
+    #   旧行为：job 总会启动，内部发现「客机镜像未配置」就 exit 0（成功），
+    #   只在 Step Summary 里写「跳过不等于验证通过」—— job 结论仍是 success。
+    #   用户实测抓到：run 42963390787 明明什么都没跑却显示绿色。
+    #   ⇒ 已修：内部 skip 不再 exit 0，改为 `::error` + exit 1（见「解析客机镜像」步骤）。
+    #   所以「未配置镜像」现在会**如实失败**，而不是伪装成成功。
+    #
+    # 【两者的交点】
+    #   意图 1 要求「不跳过」，意图 2 要求「不撒谎」。
+    #   合起来的正确语义 = **跑，跑不了就红**（不是 skipped、不是 success）。
+    #   这正是用户「跳过不等于验证通过」的原话要求。
+    #
+    # ⚠️ 代价（已知并接受）：本仓库从未配置过 CX_QEMU_GUEST_IMAGE
+    #   （gh api /actions/variables 只有 EXAMINATION_CLIENT_DATABASE_1/2），
+    #   所以这条作业会持续红，直到配置镜像。这是「不跳过」的真实代价，
+    #   用户明确选择不跳过，故按此实现。
+    #
+    # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
+    #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
+    #   绝对路径或 https URL；外加 secret `CX_QEMU_GUEST_SSH_KEY`。
+    if: needs.gate.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
     timeout-minutes: 45
-    # 客机镜像来源：手动输入优先，其次仓库变量。两者都空 → 整条客机链路 skip。
+    # 客机镜像来源：手动输入优先，其次仓库变量。走到这里说明两者至少有一个非空
+    # （否则 job 级 `if` 已把它判成 skipped）。
     env:
       CX_QEMU_GUEST_IMAGE: ${{ github.event.inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE }}
       CX_QEMU_GUEST_SSH_USER: ${{ vars.CX_QEMU_GUEST_SSH_USER || 'runner' }}
@@ -1417,7 +1266,11 @@ jobs:
           fi
 
       # ── 客机镜像解析 ─────────────────────────────────────────────────────
-      - name: 解析客机镜像（未配置则跳过）
+      # 走到这一步说明 job 级 `if` 已确认「镜像已配置」（否则整个 job 是 skipped）。
+      # 所以这里**任何**失败都属于「配置了但坏了」，必须判红 —— 不允许 exit 0。
+      # t96 之前这里统一 `exit 0`，于是「下载失败 / 格式不对 / 文件不存在」
+      # 全部被悄悄算成成功，与「未配置」混在一起。
+      - name: 解析客机镜像
         id: image
         if: steps.qemu.outputs.qemu_ok == 'yes'
         env:
@@ -1425,33 +1278,42 @@ jobs:
         run: |
           set -u
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
-          skip() {
+          # 配置了但坏 → 必须红。给出精确原因 + 可操作的修法。
+          fail() {
             out image_ok no
             out image_reason "$1"
-            echo "::notice title=客机镜像不可用，本次跳过客机验证::$1"
-            exit 0
+            echo "::error title=客机镜像不可用（已配置但不可用）::$1"
+            exit 1
           }
 
           IMG="${CX_QEMU_GUEST_IMAGE:-}"
+          # 2026-11-11 用户要求「不要跳过任务」：job 级 if 不再按镜像变量跳过，
+          # 所以「未配置」会走到这里。它必须**如实判红**，而不是 skip/exit 0。
+          #
+          # 历史：旧代码这里是 `skip(){ ... exit 0; }` ⇒ job 报 success = 假绿
+          # （run 42963390787 实测：客机一步没跑却显示绿色）。
+          # t96 一度改成 job 级 if 判变量 ⇒ 显示 skipped（不撒谎，但仍是「跳过」）。
+          # 现在：跑不了就红 —— 这是「跳过不等于验证通过」的字面执行。
           if [ -z "$IMG" ]; then
-            skip '未配置客机镜像：请设置仓库变量 CX_QEMU_GUEST_IMAGE（预装好的 Windows qcow2 路径或 https URL），或用手动触发时的 guest_image 输入'
+            fail '未配置客机镜像：请设置仓库变量 CX_QEMU_GUEST_IMAGE（预装好的 Windows qcow2 绝对路径或 https URL），或用手动触发时的 guest_image 输入'
           fi
 
           # 出口检查：不装 Windows。体积（5.6 GiB 级）、许可与冷启动时间都不合适，
           # 所以 ISO 只做显式拒绝，不作为任何退路。
           case "$IMG" in
-            *.iso|*.ISO) skip '拒绝 ISO 装机路径：体积/许可/时间都不合适，请改用预装好的 qcow2' ;;
+            *.iso|*.ISO) fail '拒绝 ISO 装机路径：体积/许可/时间都不合适，请改用预装好的 qcow2' ;;
           esac
 
           BASE="$RUNNER_TEMP/guest-base.qcow2"
           case "$IMG" in
             http://*|https://*)
               echo "下载预置 qcow2：$IMG"
-              curl -fL --retry 3 --retry-delay 3 -o "$BASE" "$IMG"
+              curl -fL --retry 3 --retry-delay 3 -o "$BASE" "$IMG" \
+                || fail "下载客机镜像失败：$IMG（检查 URL 可达性、是否需要鉴权、是否超时）"
               ;;
             *)
               if [ ! -f "$IMG" ]; then
-                skip "CX_QEMU_GUEST_IMAGE 指向的本地文件不存在：$IMG"
+                fail "CX_QEMU_GUEST_IMAGE 指向的本地文件不存在：$IMG"
               fi
               cp --sparse=always "$IMG" "$BASE"
               ;;
@@ -1461,7 +1323,7 @@ jobs:
           FORMAT=$(qemu-img info --output=json "$BASE" | tr -d ' \n' | sed -n 's/.*"format":"\([^"]*\)".*/\1/p')
           echo "GUEST_IMAGE_FORMAT=$FORMAT"
           if [ "$FORMAT" != qcow2 ]; then
-            skip "客机镜像格式为 ${FORMAT:-unknown}，需要 qcow2（母镜像只读 + 覆盖层写入）"
+            fail "客机镜像格式为 ${FORMAT:-unknown}，需要 qcow2（母镜像只读 + 覆盖层写入）"
           fi
 
           # 覆盖层：母镜像全程不动，客机内的一切写入都落在覆盖层里。
@@ -1471,7 +1333,7 @@ jobs:
           echo
 
           if [ -z "${SSH_KEY:-}" ]; then
-            skip '缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道（这里用 SSH）'
+            fail '缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道（这是配置缺失，不是镜像问题）'
           fi
           printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/guest-ssh-key"
           chmod 600 "$RUNNER_TEMP/guest-ssh-key"
@@ -1710,21 +1572,35 @@ jobs:
           set -u
           yes_no() { case "$1" in yes) echo '是' ;; no) echo '否' ;; '') echo '未执行' ;; *) echo "$1" ;; esac; }
 
+          # t96：job 级 `if` 已保证 CX_QEMU_GUEST_IMAGE 非空，能跑到这里就一定是「已配置」。
+          # 保留这个变量只为 summary 里那一行可读，不再用它做跳过判断。
           IMAGE_CONFIGURED=no
           if [ -n "${CX_QEMU_GUEST_IMAGE:-}" ]; then IMAGE_CONFIGURED=yes; fi
 
           # 跳过的判定优先级：KVM → QEMU → 客机镜像。
+          #
+          # t96 修正：区分「环境不可用」与「配置了但坏」。
+          #   · KVM / QEMU 不可用 = 托管 runner 能力问题，非仓库配置问题 → **不判红**，
+          #     但 summary 必须写明「不是通过」，且这一步仍以 exit 0 结束。
+          #   · 客机镜像不可用 = 用户在 job 级已确认配置过镜像，走到这里说明
+          #     「配置了但坏」→ **必须判红**（镜像步骤本身已经 exit 1，
+          #     这里再兜一次，防止将来有人把 image 步骤改成不判红）。
+          ENVIRONMENT_SKIPPED=no
+          CONFIG_BROKEN=no
           if [ "${KVM_OK:-}" != yes ]; then
-            SKIPPED=yes; SKIP_STAGE='KVM 不可用'
+            ENVIRONMENT_SKIPPED=yes; SKIP_STAGE='KVM 不可用'
             SKIP_REASON="${KVM_REASON:-KVM 探测步骤未执行}"
           elif [ "${QEMU_OK:-}" != yes ]; then
-            SKIPPED=yes; SKIP_STAGE='QEMU 不可用'
+            ENVIRONMENT_SKIPPED=yes; SKIP_STAGE='QEMU 不可用'
             SKIP_REASON="${QEMU_REASON:-QEMU 步骤未执行}"
           elif [ "${IMAGE_OK:-}" != yes ]; then
-            SKIPPED=yes; SKIP_STAGE='客机镜像不可用'
+            CONFIG_BROKEN=yes; SKIP_STAGE='客机镜像不可用'
             SKIP_REASON="${IMAGE_REASON:-客机镜像步骤未执行}"
           else
             SKIPPED=no; SKIP_STAGE=''; SKIP_REASON=''
+          fi
+          if [ "$ENVIRONMENT_SKIPPED" = yes ] || [ "$CONFIG_BROKEN" = yes ]; then
+            SKIPPED=yes
           fi
 
           {
@@ -1759,13 +1635,25 @@ jobs:
             echo ''
             echo "作业最终状态：\`${JOB_STATUS:-unknown}\`"
             echo ''
-            if [ "$SKIPPED" = yes ]; then
-              echo "### 跳过"
+            if [ "$CONFIG_BROKEN" = yes ]; then
+              # 客机镜像「配置了但坏」：这是仓库侧可修的问题，必须红。
+              echo '### 失败：客机镜像已配置但不可用'
               echo ''
               echo "- 停在：\`$SKIP_STAGE\`"
               echo "- 原因：$SKIP_REASON"
               echo ''
-              echo '> 跳过不等于验证通过。客机内的两阶段一个字节都没跑，本轮不产出任何自毁行为结论。'
+              echo '> 与「未配置」不同：本作业因为 `CX_QEMU_GUEST_IMAGE` 非空才会启动，'
+              echo '> 所以走到这一步代表**镜像或 secret 本身有问题**，按失败处理。'
+              echo '> 修复方式见本节末尾「需要准备什么」。'
+            elif [ "$ENVIRONMENT_SKIPPED" = yes ]; then
+              echo '### 未执行（环境不可用，不是通过）'
+              echo ''
+              echo "- 停在：\`$SKIP_STAGE\`"
+              echo "- 原因：$SKIP_REASON"
+              echo ''
+              echo '> **这不是通过**。客机内的两阶段一个字节都没跑，本轮不产出任何自毁行为结论。'
+              echo '> 停因是托管 runner 的环境能力（KVM/QEMU），不是本仓库的配置错误，'
+              echo '> 所以不判红；但它同样**不能**被读作「自毁验证已通过」。'
             elif [ "${REPLAY_STEP:-}" = success ] && [ "${REGISTER_STEP:-}" = success ]; then
               echo '### 结论'
               echo ''
@@ -1780,6 +1668,20 @@ jobs:
             fi
             echo ''
             echo '---'
+            echo '### 需要准备什么（让本作业真正跑起来）'
+            echo ''
+            echo '| 项 | 要求 |'
+            echo '| --- | --- |'
+            echo '| repo variable `CX_QEMU_GUEST_IMAGE` | 预装好的 **Windows qcow2** 的绝对路径或 https URL。**当前未配置** |'
+            echo '| secret `CX_QEMU_GUEST_SSH_KEY` | 客机内运行两阶段所需的 SSH 私钥 |'
+            echo '| 镜像内容 | 已安装 OpenSSH Server，并预置 `purge-tests.exe`（`build-windows.sh -BuildTests` 产物） |'
+            echo '| 体积预算 | 5.6 GiB 量级，下载 + 冷启动约 10 分钟，故本作业只手动/定时触发 |'
+            echo '| 为什么不支持 ISO | 体积、许可与冷启动时间都不合适；ISO 路径会在「解析客机镜像」里被显式拒绝 |'
+            echo ''
+            echo '> 未配置时本作业在 job 级就被判为 `skipped`（GitHub 显示「已跳过」），'
+            echo '> **不会**再伪装成 success。这与「配置了但坏 → failure」是两条不同的路径。'
+            echo ''
+            echo '---'
             echo '本作业只由 workflow_dispatch 与每周 schedule 触发，**不挂 pull_request**，'
             echo '红叉不影响任何 PR 的必需检查。'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1787,13 +1689,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # 关机自毁 / 开机续删：Linux cloud image 客机，走真实重启。
   #
-  # 为什么要有这条（它补的是上面两条都补不上的那一格）：
-  #   · vm-shutdown-destruct 要 self-hosted cx-vm，本仓库**一个 runner 都没有**
-  #     （gh api /actions/runners 返回 total_count=0），所以它永远 skipped。
+  # 为什么要有这条（它补的是另一个作业补不上的那一格）：
   #   · wiring-probe 用 -ReplayRunOnce 在托管 windows-latest 上执行 RunOnce 命令串，
-  #     这条真的在跑，但它**没有重启**，「开机才续删」这一半无从验证。
-  #   · qemu-shutdown-destruct 有真实重启，但需要 Windows qcow2（repo variable
-  #     CX_QEMU_GUEST_IMAGE），未配置就 skip。
+  #     这条真的在跑，但它**没有重启**，「开机才续删」这一半是重放模拟的。
+  #   · qemu-shutdown-destruct 有真实重启，但需要 Windows qcow2（仓库变量
+  #     CX_QEMU_GUEST_IMAGE），而 Windows 无官方 cloud image，从 ISO 装需 20-40
+  #     分钟，不适合 CI ⇒ 未配置时**如实判红**（不伪装成成功、也不静默跳过）。
+  #   · 本作业用自动下载的 Ubuntu cloud image 把「真实重启」这一格补上，
+  #     零人工配置，是三条里唯一「既真重启又开箱即用」的。
   #
   # 本作业用 ~260 MB 的 Ubuntu cloud image 把「真实重启」这一格补上：
   #   KVM 提权 → 起 QEMU 客机 → guest 内登记待删目标 + 开机续删单元
@@ -1807,25 +1710,55 @@ jobs:
   # 所以「有设备、无权限」这个卡点已经在提权后消失了，剩下只缺客机镜像。
   #
   # 它能证明什么 / 不能证明什么（不许把 Linux 客机说成 Windows RunOnce 已覆盖）：
-  #   能：QEMU 在托管 runner 上真跑得起来、guest 真能重启、重启后的自动化真会执行、
-  #       执行完真会删目标并自撤销。
-  #   不能：HKCU\...\RunOnce 的登记/撤销；WM_QUERYENDSESSION 时序；
-  #         MOVEFILE_DELAY_UNTIL_REBOOT 重启后消失。那三条仍只有 qemu-shutdown-destruct
-  #         的 Windows 客机链路能覆盖。
+  #   能（2026-11-11 t98 补全后共 12 项）：
+  #     · QEMU 在托管 runner 上真跑得起来、guest 真能重启；
+  #     · 续删单元真的执行、目标真的被删、单元真的自撤销；
+  #     · **强制断电后仍能续删**（kill -KILL QEMU 等价拔电源，再用同一覆盖层冷启动）
+  #       —— 这条排除了「有序 shutdown 顺手把活干了」这个混淆项；
+  #     · **多次重启只执行一次**（第二次开机后 resume-proof 逐字节未变）；
+  #     · **多目标按列表处理**（3 个登记目标 + 1 个未登记对照必须存活）；
+  #     · **登记值本身正确**（targets.txt 字节级、unit 的 ExecStart、脚本可执行位）；
+  #     · **异常路径不中断列表**（列表中间插一个目录，rm -f 必失败，后续条目仍被删）。
+  #   不能（Windows 专属，Linux 客机无从覆盖）：
+  #     · HKCU\...\RunOnce 的登记与撤销 —— 由 wiring-probe 覆盖（重放命令串）；
+  #     · WM_QUERYENDSESSION / WM_ENDSESSION 时序；
+  #     · MOVEFILE_DELAY_UNTIL_REBOOT / PendingFileRenameOperations 重启后消失。
+  #
+  #   ⚠️ 缺口（如实记录，不许当成已覆盖）：
+  #     PendingFileRenameOperations 在真实 Windows 重启后的清除行为，目前**无验证**。
+  #
+  #     为什么「在线下载镜像」也解决不了（已实测，不是推测）：
+  #       · 镜像能拿到 —— 微软确实提供 Windows Server 2022 评估版真 VHD
+  #         （LinkID=2195166，10208214528 B = 9.51 GiB，Range GET 返回 HTTP 206
+  #          且前 8 字节 = conectix 魔数，已实测可读）。
+  #         注意 LinkID=2195280 是 **ISO**（5044094976 B），不是 VHD，别混。
+  #       · 但 PendingFileRenameOperations 与 RunOnce 都是 **Windows 运行时**写进注册表的。
+  #         qemu-nbd 离线挂载只能看 NTFS 文件系统，看不到注册表项；
+  #         要让 Windows 写它们，必须先在客机里执行代码 ⇒ 又回到注入通道问题。
+  #       · Windows 评估版默认既不开 OpenSSH Server 也不开 WinRM。
+  #         走 unattend 完整装机 20-40 min，叠加 9.51 GiB 下载（1-3 min）+ 转换（1-2 min）
+  #         + 两轮重启 = 35-50 min，会撞 qemu-shutdown-destruct 的 45 min 上限。
+  #     ⇒ 结论：要么人工准备「预装 SSH + purge-tests.exe」的 Windows qcow2 并配置
+  #       repo variable CX_QEMU_GUEST_IMAGE，要么接受这条覆盖缺失。当前选后者。
   # ---------------------------------------------------------------------------
 
   qemu-destruct-linux-guest:
     name: 关机销毁与开机续删（托管 Ubuntu + QEMU + Linux 客机，真实重启）
     needs: gate
-    # 与 qemu-shutdown-destruct 同口径：push 到 main 与手动触发时跑，PR 不跑。
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
-    # 硬上限：30 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
-    # + 客机冷启动（≤7 min）+ 登记/重启/断言（~5 min），再留余量。
-    timeout-minutes: 30
+    # 硬上限：50 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
+    # + 客机冷启动（≤7 min）× 3 轮（首次 / 断电后冷启动 / 第二次重启）
+    # + 登记/断言（~5 min）+ 证据收集（~2 min），再留余量。
+    #
+    # 2026-11-11（t98）：30 → 50。原来只有一轮重启，现在是一轮断电 + 一轮重启，
+    # 冷启动次数从 1 变 3（boot / powercut 后冷启动 / reboot2）。
+    # 实测基线约 12-18 分钟，加两轮后估 18-26 分钟；刻意留到 50 而不卡 42，
+    # 因为客机冷启动时间在共享 runner 上波动明显（实测 3-7 分钟）。
+    # 若实测稳定超 35 分钟再回来调。
+    timeout-minutes: 50
     # 独立 concurrency + 不取消：中途被新 push 取消会留下「已登记、未续删」的客机，
     # 与 vm-shutdown-destruct 的理由一致。宁可排队也不取消。
     concurrency:
@@ -1942,11 +1875,17 @@ jobs:
       - name: 阶段一：客机内登记待删目标与开机续删单元
         run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase register
 
-      - name: 阶段二前半：客机内真实重启并等待回连
-        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase reboot
+      - name: 阶段二之一：强制断电（等价拔电源）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase powercut
 
-      - name: 阶段二后半：断言重启过、已续删、已自撤销
+      - name: 阶段二之二：断言断电后仍续删（缺口 1）+ 多目标/登记值/异常路径（缺口 3/4/5）
         run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase replay
+
+      - name: 阶段三之一：第二次重启（幂等验证）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase reboot2
+
+      - name: 阶段三之二：断言续删未重跑（缺口 2，proof 逐字节未变）
+        run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase replay2
 
       - name: 上传客机证据
         if: always()
@@ -1959,6 +1898,12 @@ jobs:
             ${{ runner.temp }}/cx-linux-guest/meta-data
             ${{ runner.temp }}/cx-linux-guest/resume.sh
             ${{ runner.temp }}/cx-linux-guest/unit.service
+            ${{ runner.temp }}/cx-linux-guest/boot-before-powercut.txt
+            ${{ runner.temp }}/cx-linux-guest/proof-after-first.txt
+            ${{ runner.temp }}/cx-linux-guest/boot-before-reboot2.txt
+            # 2026-11-11：replay2 判红时 GitHub 会回收 job 日志（gh run view 只剩 82 字节），
+            # 这份文件是唯一能看出「哪条断言红、各变量是什么」的证据。
+            ${{ runner.temp }}/cx-linux-guest/replay2-diagnosis.txt
           if-no-files-found: warn
           retention-days: 14
 
@@ -1969,7 +1914,7 @@ jobs:
   summary:
     name: 持续集成汇总
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, vm-shutdown-destruct, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
+    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -1987,7 +1932,6 @@ jobs:
           KVM_PROBE_RESULT: ${{ needs.kvm-probe.result }}
           WIRING_PROBE_RESULT: ${{ needs.wiring-probe.result }}
           WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.outcome }}
-          VM_DESTRUCT_RESULT: ${{ needs.vm-shutdown-destruct.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
           QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
           GATE_REASON: ${{ needs.gate.outputs.reason }}
@@ -2026,7 +1970,6 @@ jobs:
               printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             fi
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
-            printf '| 关机自毁（self-hosted cx-vm） | %s |\n' "$(result_label "$VM_DESTRUCT_RESULT")"
             printf '| 关机自毁（托管 Ubuntu + QEMU + KVM） | %s |\n' "$(result_label "$QEMU_DESTRUCT_RESULT")"
             printf '| 关机销毁/开机续删（QEMU + Linux 客机，真实重启） | %s |\n' "$(result_label "$QEMU_LINUX_DESTRUCT_RESULT")"
             if [[ -n "$GATE_REASON" ]]; then
