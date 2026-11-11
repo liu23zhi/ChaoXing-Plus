@@ -300,6 +300,18 @@ try {
   # this is the page-internal copy of the same moment, taken through the client's own DevTools endpoint.
   $script:cdpPort = if ($entry.PSObject.Properties['ProcessId']) { Get-ClientCdpPort -ProcessId ([int]$entry.ProcessId) } else { 0 }
   if ($script:cdpPort -gt 0 -and $entryPrefix) {
+    # Wait for the page to actually finish loading before capturing. Without this the
+    # screenshot lands mid-navigation: the frame is a skeleton login page with no form
+    # rendered (user report 2026-11-11, run 42958179520). Wait-CdpPageReady already
+    # requires readyState=complete + enough text + quiet DOM/resources across repeated
+    # samples, so reuse it instead of inventing a second readiness rule.
+    $ready = $null
+    if (Get-Command Wait-CdpPageReady -ErrorAction SilentlyContinue) {
+      $ready = Wait-CdpPageReady -Port $script:cdpPort -TimeoutSeconds 30
+      Write-Host ("[real-client] cdp page ready={0} stable={1} text={2} quietMs={3} url={4}" -f $ready.Ready, $ready.StableSamples, $ready.TextLength, $ready.QuietMilliseconds, $ready.Url)
+    }
+    # Even when the probe times out we still capture: a mid-load frame with ready=false
+    # recorded is more useful for diagnosis than no frame at all.
     $entryShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path ("$entryPrefix-" + $script:zh['imageCdp'] + ".png") -TimeoutSeconds 15
     if ($entryShot) {
       Write-Host "[real-client] cdp page screenshot bytes=$($entryShot.Bytes) size=$($entryShot.Width)x$($entryShot.Height) url=$($entryShot.Url)"
