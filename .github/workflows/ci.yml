@@ -59,6 +59,39 @@ name: 持续集成
 #
 # ============================================================================
 
+# ============================================================================
+# ## 覆盖矩阵（2026-11-11 用户第三次要求「重写，覆盖全面，不使用 self-host」）
+#
+# | # | 维度 | 覆盖者 | 状态 |
+# |---|---|---|---|
+# | 1 | 关机时登记待删目标 | wiring-probe（RunOnce）/ linux-guest（targets.txt） | ✅ |
+# | 2 | 真实关机（不是模拟） | linux-guest `powercut`（kill -KILL QEMU = 拔电源） | ✅ |
+# | 3 | 真实开机，续删真的执行 | linux-guest `replay`（resume-proof 的 boot_id == 本次） | ✅ |
+# | 4 | 断言目标已删 | linux-guest `replay`（3 个目标全部） | ✅ |
+# | 5 | 断言登记项自行撤销 | linux-guest `replay`（unit 文件 + is-enabled） | ✅ |
+# | 6 | 强制关机后仍能续删 | linux-guest `powercut`（**替代** reboot，断电更严） | ✅ |
+# | 7 | 多次重启不重复执行（幂等） | linux-guest `reboot2` + `replay2`（proof 逐字节未变） | ✅ |
+# | 8 | Linux 侧对应机制 | linux-guest 全程 | ✅ |
+# | 9 | Windows 侧对应机制 | qemu-shutdown-destruct（需人工镜像） | ⚠️ 缺镜像 |
+# | 10 | KVM 能力基线留痕 | kvm-probe（只读巡检，职责单一） | ✅ |
+#
+# 附加覆盖（用户在「覆盖全面」下明确要求的扩展）：
+#   · 多目标 —— 3 个登记目标 + **1 个未登记对照必须存活**（证明不是「清空目录」）
+#   · 登记值本身正确 —— targets.txt 字节级内容、unit 的 ExecStart、脚本可执行位
+#   · 异常路径 —— 列表中间插一个目录（rm -f 对目录必失败），
+#     断言它记 rc≠0 **且排在它后面的目标仍被删**（列表处理不因单项失败中断）
+#
+# 为什么 #9 仍是 ⚠️（不是「再努力一下就能解决」）：
+#   PendingFileRenameOperations 与 RunOnce 都是 Windows **运行时**写进注册表的。
+#   qemu-nbd 离线挂载只能看到 NTFS 文件，**看不到注册表项**；要让 Windows 写它们，
+#   必须先在客机里执行代码 ⇒ 回到注入通道问题。
+#   而 Windows 评估版默认既不开 OpenSSH Server 也不开 WinRM；
+#   走 unattend 完整装机 20-40 min，叠加 9.51 GiB 下载 + 转换 + 两轮重启
+#   = 35-50 min，撞 45 min 上限。
+#   ⇒ 要真正补上，只能人工准备「预装 SSH + purge-tests.exe」的 qcow2
+#     并配 repo variable（或托管到 release 后由 CI 分卷下载）。
+#      这是**一次性人工**，不是每次 CI 的人工步骤，但仍需有人做。
+#
 on:
   push:
     branches: [main]
