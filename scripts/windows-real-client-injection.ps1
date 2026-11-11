@@ -47,6 +47,7 @@ $script:zh = @{
   'imageBefore'  = -join ([char]0x70B9, [char]0x51FB, [char]0x524D, [char]0x622A, [char]0x56FE)                      # dianjiqian jietu
   'imageAfter'   = -join ([char]0x70B9, [char]0x51FB, [char]0x540E, [char]0x622A, [char]0x56FE)                      # dianjihou jietu
   'imageConfirm' = -join ([char]0x786E, [char]0x8BA4, [char]0x5F39, [char]0x7A97, [char]0x622A, [char]0x56FE)        # queren tanchuang jietu
+  'imageFinal'   = -join ([char]0x6CE8, [char]0x5165, [char]0x540E, [char]0x622A, [char]0x56FE)                # zhuru hou jietu
   'report'       = -join ([char]0x6CE8, [char]0x5165, [char]0x62A5, [char]0x544A)                                    # zhuru baogao
   'entry'        = -join ([char]0x5165, [char]0x53E3, [char]0x8BB0, [char]0x5F55)                                    # rukou jilu
   'environment'  = -join ([char]0x73AF, [char]0x5883, [char]0x4FE1, [char]0x606F)                                    # huanjing xinxi
@@ -546,7 +547,7 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   # WDA_MONITOR protected desktop frame can never show. Best effort - a missing client just skips it.
   try {
     if ($script:cdpPort -gt 0 -and $script:cdpPrefix) {
-      $finalShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path "$($script:cdpPrefix)-cdp-final.png" -TimeoutSeconds 10
+      $finalShot = Save-CdpPageScreenshot -Port $script:cdpPort -Path ("$($script:cdpPrefix)-" + $script:zh['imageFinal'] + ".png") -TimeoutSeconds 10
       if ($finalShot) {
         Write-Host "[real-client] cdp final screenshot bytes=$($finalShot.Bytes) size=$($finalShot.Width)x$($finalShot.Height) url=$($finalShot.Url)"
       }

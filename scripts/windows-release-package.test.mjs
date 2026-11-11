@@ -529,10 +529,19 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /真实客户端自动发现注入矩阵/u, 'CI 摘要必须记录自动发现的真实客户端矩阵');
   assert.match(workflow, /matrix:/u, '真实客户端注入必须使用矩阵');
   assert.match(workflow, /windows-real-client-discovery:/u, 'CI 必须先发现真实客户端注入矩阵');
-  assert.match(workflow, /if: \$\{\{ needs\.windows-build\.result == 'success' && github\.event_name != 'pull_request' \}\}/u,
-    '私有客户端 discovery 必须只在非 PR 事件运行，且不得再依赖额外的启用变量（否则整组静默跳过）');
-  assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-build\.result == 'success' && needs\.windows-real-client-discovery\.result == 'success' && github\.event_name != 'pull_request'/u,
-    '真实客户端注入必须跟随 discovery 结果在非 PR 事件运行');
+  // 2026-11-11 用户要求「不要跳过任务」：discovery 的 PR 限制已取消。
+  assert.match(workflow, /if: \$\{\{ needs\.windows-build\.result == 'success' \}\}/u,
+    '私有客户端 discovery 只要求构建成功（不再按 PR 事件跳过，也不依赖启用变量）'
+  );
+  // 2026-11-11 用户要求「不要跳过任务」：PR 限制已取消，注入矩阵在 PR 上也跑。
+  assert.match(workflow, /windows-real-client:[\s\S]*?needs\.windows-build\.result == 'success' && needs\.windows-real-client-discovery\.result == 'success'/u,
+    '真实客户端注入必须跟随 discovery 结果'
+  );
+  assert.doesNotMatch(
+    workflow.split('windows-real-client:')[1].split(/\n {2}[a-z0-9-]+:/u)[0],
+    /github\.event_name != 'pull_request'/u,
+    '真实客户端注入不得再按 PR 事件跳过（用户要求不跳过任务）',
+  );
   assert.match(workflow, /\$attempts = 2/u, '真实客户端注入必须自动重试');
   assert.match(workflow, /注入尝试 \$attempt\/\$attempts 失败（退出码 \$code），15 秒后自动重试/u, '重试前必须给出可读告警');
   assert.match(workflow, /\$base-attempt\$attempt/u, '重试前必须保留上一次的现场文件');
@@ -599,9 +608,12 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   const cdpScript = await fs.readFile(path.join(root, 'scripts', 'windows-client-cdp.ps1'), 'utf8');
   assert.match(injectionScript, /\.\s*\(Join-Path \$PSScriptRoot 'windows-client-cdp\.ps1'\)/u,
     '注入脚本必须 dot-source CDP 页内截图助手');
-  assert.match(injectionScript, /Save-CdpPageScreenshot -Port \$script:cdpPort -Path "\$entryPrefix-cdp-page\.png"/u,
-    '进入考试后必须补一张页面内部截图（桌面截图此时已被 WDA_MONITOR 变黑）');
-  assert.match(injectionScript, /-cdp-final\.png/u,
+  // 只断言「同一处既调用 Save-CdpPageScreenshot 又用了 imageCdp 键」，不锁括号细节。
+  const entryPageShot = injectionScript
+    .split('\n')
+    .find((l) => l.includes('Save-CdpPageScreenshot') && l.includes('imageCdp'));
+  assert.ok(entryPageShot, '进入考试后必须补一张页面内部截图（桌面截图此时已被 WDA_MONITOR 变黑）');
+  assert.match(injectionScript, /zh\['imageFinal'\]/u,
     '关掉客户端前必须再抓一帧页内截图，它才包含注入后的面板');
   assert.match(cdpScript, /Page\.captureScreenshot/u, '页内截图必须走 CDP Page.captureScreenshot');
   assert.match(cdpScript, /WDA_MONITOR/u, '页内截图的注释必须记录考试窗口的 WDA_MONITOR 保护背景');
