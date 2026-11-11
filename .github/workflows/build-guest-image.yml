@@ -156,15 +156,69 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 构建 purge-tests.exe
-        shell: pwsh
+      # ⚠️ 不能在 ubuntu runner 上构建 purge-tests.exe：
+      #   `windows/native-source/build-windows.ps1` 硬依赖 MSVC 编译器、
+      #   Windows SDK 与注册表 `HKLM:\SOFTWARE\Microsoft\Windows Kits`，
+      #   在 Linux 上会报 `A parameter cannot be found that matches parameter name 'File'`
+      #   （Get-ChildItem 的 -Path 枚举行为不同 + 后续 MSVC 探测必失败）。
+      #   ⇒ 改为从 `ci.yml` 的 windows-build job 已上传的 artifact 里取现成产物。
+      #   artifact 名：windows-ci-build-<sha>，内含 windows/native-build/（含 bin/purge-tests.exe）。
+      - name: 下载 purge-tests.exe（来自 windows-build artifact）
+        id: getexe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./windows/native-source/build-windows.ps1 -BuildTests
-          $exe = 'windows\native-build\bin\purge-tests.exe'
-          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "缺少 $exe" }
-          $item = Get-Item -LiteralPath $exe
-          Write-Output "purge-tests.exe = $($item.Length) 字节"
-          Copy-Item -LiteralPath $exe -Destination "$env:RUNNER_TEMP/guest/oem/purge-tests.exe" -Force
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          mkdir -p "$WORK/oem"
+
+          # 优先用本仓库最近一次成功 ci.yml run 的 artifact（同一次 push 不一定跑了 windows-build，
+          # 因为这个 workflow 是独立的 workflow_dispatch）。
+          SHA="$GITHUB_SHA"
+          ART="windows-ci-build-$SHA"
+
+          echo "尝试下载 artifact: $ART"
+          set +e
+          gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art" 2>&1 | sed 's/^/  /'
+          RC=$?
+          set -e
+
+          if [ $RC -ne 0 ]; then
+            echo "同 sha 没有 artifact，回退到最近一次成功的 ci.yml run"
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+                       --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            if [ -z "${RUN_ID:-}" ]; then
+              echo '::error title=找不到 windows-build 产物::需要先有一次成功的 ci.yml run（它会产生 purge-tests.exe）'
+              exit 1
+            fi
+            echo "使用 run $RUN_ID"
+            ART=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+                    --jq '.artifacts[] | select(.name | startswith("windows-ci-build-")) | .name' | head -n1)
+            if [ -z "${ART:-}" ]; then
+              echo '::error title=该 run 没有 windows-ci-build artifact'
+              exit 1
+            fi
+            echo "下载 artifact: $ART"
+            gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art"
+          fi
+
+          # artifact 解包后路径为 <art>/windows/native-build/bin/purge-tests.exe
+          EXE=$(find "$WORK/art" -type f -name 'purge-tests.exe' | head -n1)
+          if [ -z "${EXE:-}" ]; then
+            echo '::error title=artifact 里没有 purge-tests.exe::列出内容'
+            find "$WORK/art" -type f | head -50
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$EXE")
+          echo "purge-tests.exe = $SIZE 字节（来自 $EXE）"
+          if [ "$SIZE" -lt 1000 ]; then
+            echo '::error title=purge-tests.exe 体积异常::小于 1000 字节，可能是占位文件'
+            exit 1
+          fi
+          cp "$EXE" "$WORK/oem/purge-tests.exe"
+          echo "已拷贝到 $WORK/oem/purge-tests.exe"
+          echo "exe_size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "exe_source=$ART" >> "$GITHUB_OUTPUT"
 
       # ── OEM：dockur 会把 /oem 下所有文件放进 ISO 的 $OEM$，并把 install.bat
       #    在**安装最后一步**自动执行；同目录其余文件被拷到 C:\OEM。
