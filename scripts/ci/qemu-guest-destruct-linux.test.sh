@@ -315,5 +315,34 @@ OUT=$(run_phase replay2 "$F" 2>&1)
 check_msg 'wants 链接残留' "$OUT" 'enable 符号链接仍在'
 
 echo
+echo '=== 22) 结构断言：断电前必须 flush guest 脏页 ==='
+# 为什么用源码断言而不是行为断言：
+#   fixture 垫片只**回放** ssh 的返回值，不会真的执行 guest 内的 sync ——
+#   所以「删掉 sync」在行为层永远测不出来（那只有真跑 QEMU 才能覆盖）。
+# 但这条正是 CI 首次真跑（run 42982388969）丢数据的直接修复，
+# 被人「顺手删掉」的风险很高，必须有一条能立刻变红的钉子。
+POWERCUT_BODY=$(awk '/^powercut\)/{f=1} f{print} /^  ;;$/{if(f)exit}' "$TARGET")
+if printf '%s' "$POWERCUT_BODY" | grep -q 'sync; sync; sync'; then
+  echo "  ✔ powercut 内含 sync; sync; sync"; PASS=$((PASS+1))
+else
+  echo "  ✖ powercut 内缺少 sync（断电会丢未落盘的登记）"; FAIL=$((FAIL+1))
+fi
+SYNC_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'sync; sync; sync' | head -1 | cut -d: -f1)
+# 只匹配**非注释**的 kill：powercut 段里注释也提到 `kill -KILL`（解释用），
+# 拿它当行号会得出「sync 排在 kill 之后」的错误结论。
+KILL_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'kill -KILL' | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1)
+if [ -n "$SYNC_LINE" ] && [ -n "$KILL_LINE" ] && [ "$SYNC_LINE" -lt "$KILL_LINE" ]; then
+  echo "  ✔ sync 在 kill -KILL 之前"; PASS=$((PASS+1))
+else
+  echo "  ✖ sync 必须排在 kill -KILL 之前（sync=$SYNC_LINE kill=$KILL_LINE）"; FAIL=$((FAIL+1))
+fi
+# 用 kill -KILL 而不是 systemctl poweroff：后者走有序关闭，就不是「拔电源」了。
+if printf '%s' "$POWERCUT_BODY" | grep -qE 'systemctl (poweroff|halt|shutdown)'; then
+  echo "  ✖ powercut 不得用 systemctl poweroff/halt（那就不是拔电源）"; FAIL=$((FAIL+1))
+else
+  echo "  ✔ powercut 用的是 kill -KILL，不是有序关机"; PASS=$((PASS+1))
+fi
+
+echo
 echo "结果：$PASS 通过 / $FAIL 失败"
 [ "$FAIL" -eq 0 ] || exit 1

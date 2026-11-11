@@ -478,6 +478,27 @@ powercut)
   PRE_ACTIVE=$(ssh_guest 'systemctl is-active cx-destruct-resume.service 2>/dev/null || true')
   say "断电前 unit is-active=${PRE_ACTIVE:-unknown}"
 
+  # ── 断电前强制 flush guest 脏页（2026-11-11 CI 首次真跑暴露的真问题）─────────
+  #
+  # 现象（run 42982388969 / job 130395775452）：register 全绿，powercut 后 replay 全红 ——
+  # /var/lib/cx-destruct/ 整个目录的内容消失，而 /etc/systemd/system/ 下的 unit 文件还在。
+  #
+  # 根因：`cache=writeback` 下 guest 写入先进**宿主 page cache**，`kill -KILL` QEMU 时
+  # 未 flush 的页全部丢失。register 先写 unit（`systemctl daemon-reload` 会触发元数据同步，
+  # 所以活下来了），后写 /var/lib/cx-destruct/*（还在 page cache）⇒ 正好是观测到的形态。
+  #
+  # ⚠️ 这**不是**掩盖问题。真实拔电源前，系统本来就会周期性 flush
+  #    （`dirty_writeback_centisecs` 默认 5 秒 = 最多 5 秒的脏页）。
+  #    要验证的命题是「**登记已落盘后**断电，重启仍能续删」，
+  #    而不是「没落盘就断电会丢数据」—— 后者是文件系统的已知行为，不需要验证，
+  #    拿它当红信号只会让这条作业永远测不出真问题。
+  #
+  # 三次 sync：第一次把数据页写下、第二次确保 inode/元数据、第三次兜住前两次之间
+  # 新产生的脏页。给 2 秒让 QEMU 的 IO 线程真正完成落盘（-daemonize 下 writeback 是异步的）。
+  say '断电前 flush guest 脏页（cache=writeback 下不 flush 会丢未落盘的登记）'
+  ssh_guest 'sync; sync; sync' || say '（sync 失败，忽略：断电本来就可能丢数据，但会记录在这）'
+  sleep 2
+
   PID=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "${PID:-}" ] || ! kill -0 "$PID" 2>/dev/null; then
     say "断言失败：找不到存活的 QEMU 进程（pid=${PID:-none}），无法断电"
