@@ -569,31 +569,58 @@ replay2)
   #   · boot_id 必须变了（证明真的重启了，否则后面两条没有意义）
   #   · resume-proof 的 boot_id 必须仍是**第一次**重启后的那个
   #     ⇒ 续删没有在本次开机重跑（重跑会把它覆盖成本次 boot_id）
+  #
+  # ⚠️ 2026-11-11（run 42988303310）暴露：这个 phase 判红时**不打印是哪条**，
+  #    而 GitHub 的 job 日志会被回收（`gh run view --log` 只剩 82 字节），
+  #    导致完全无法定位。所以这里改成：
+  #      · 每条断言失败时 mark 一个带编号的标签进 FAILED_CHECKS
+  #      · 末尾一次性打印 REPLAY2_FAILED_CHECKS=...
+  #      · 把全部关键变量写进 $WORK/replay2-diagnosis.txt（随 artifact 上传）
+  #    这样即使日志丢了，也能从 artifact 直接读出哪条红、值是多少。
   FAIL2=0
-  BOOT_BEFORE2=$(cat "$WORK/boot-before-reboot2.txt" 2>/dev/null || echo missing)
+  FAILED_CHECKS=()
+  mark() { FAILED_CHECKS+=("$1"); FAIL2=1; }
+
+  BOOT_BEFORE2=$(cat "$WORK/boot-before-reboot2.txt" 2>/dev/null || echo __ABSENT__)
   BOOT_NOW=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
-  PROOF_NOW=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo missing")
-  PROOF_FIRST=$(cat "$WORK/proof-after-first.txt" 2>/dev/null || echo missing)
+  PROOF_NOW=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo __ABSENT__")
+  PROOF_FIRST=$(cat "$WORK/proof-after-first.txt" 2>/dev/null || echo __ABSENT__)
+  # 归一化：命令替换会剥掉尾随换行，而 proof 是用 printf 写的（带尾换行）。
+  # 两侧都经 $() 处理时应该一致，但为了诊断能看懂，这里保留原值不做裁切。
   say "boot_before_2=$BOOT_BEFORE2"
   say "boot_now      =$BOOT_NOW"
   say "proof_first   =$(printf '%s' "$PROOF_FIRST" | tr '\n' ' ')"
   say "proof_now     =$(printf '%s' "$PROOF_NOW" | tr '\n' ' ')"
 
   # ① 真的又重启了一次。
-  if [ "$BOOT_BEFORE2" = missing ] || [ "$BOOT_BEFORE2" = "$BOOT_NOW" ]; then
-    say '断言失败：第二次重启后 boot_id 未变化'; FAIL2=1
+  if [ "$BOOT_BEFORE2" = __ABSENT__ ] || [ "$BOOT_BEFORE2" = missing ]; then
+    say '断言失败：boot-before-reboot2.txt 不存在（reboot2 阶段没落盘）'
+    mark '①a boot-before-reboot2 缺失'
+  elif [ "$BOOT_BEFORE2" = "$BOOT_NOW" ]; then
+    say '断言失败：第二次重启后 boot_id 未变化（第二次重启没真的发生）'
+    mark '①b boot_id 未变化'
   fi
 
   # ② 续删 proof 必须**逐字节未变** —— 这才证明它没有再执行。
-  if [ "$PROOF_NOW" != "$PROOF_FIRST" ]; then
+  # 2026-11-11：区分「丢失」与「被覆盖」。两者含义完全不同：
+  #   · 被覆盖 = 续删在第二次开机又跑了一遍（真的不幂等，是要害）
+  #   · 丢失   = 文件不见了（文件系统问题，或 /var/lib/cx-destruct 被清）
+  # 混成一条会让「修哪个」都判断不了。
+  if [ "$PROOF_NOW" = __ABSENT__ ] || [ "$PROOF_NOW" = missing ]; then
+    say '断言失败：续删 proof 丢失（不是被覆盖，是文件不见了）'
+    mark '②a proof 丢失'
+  elif [ "$PROOF_NOW" != "$PROOF_FIRST" ]; then
     say '断言失败：续删在第二次开机时又执行了（proof 被覆盖）—— 不幂等，会误删同名新文件'
-    FAIL2=1
+    mark '②b proof 被覆盖'
   fi
 
   # ③ 续删单元仍必须处于「不存在」状态（被第二次开机重新装回去也是回归）。
   UNIT_PRESENT2=$(ssh_guest "test -f $G_UNIT && echo yes || echo no")
   say "unit_present_after_2nd_boot=$UNIT_PRESENT2"
-  [ "$UNIT_PRESENT2" = no ] || { say '断言失败：续删单元在第二次开机后重新出现了'; FAIL2=1; }
+  if [ "$UNIT_PRESENT2" != no ]; then
+    say '断言失败：续删单元在第二次开机后重新出现了'
+    mark '③ unit 文件重现'
+  fi
 
   # ④ 2026-11-11（用户要求「最后再删除开机自启」）：**自撤销彻底性**断言。
   #
@@ -606,15 +633,60 @@ replay2)
   WANTS_LINK="/etc/systemd/system/multi-user.target.wants/cx-destruct-resume.service"
   RESIDUE_FILE=$(ssh_guest "test -f $G_UNIT && echo exists || echo absent")
   RESIDUE_LINK=$(ssh_guest "test -e '$WANTS_LINK' && echo exists || echo absent")
-  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo not-found')
-  say "自撤销彻底性: unit_file=$RESIDUE_FILE wants_link=$RESIDUE_LINK is_enabled=$RESIDUE_ENABLED"
-  [ "$RESIDUE_FILE" = absent ] || { say '断言失败：自撤销未删干净 —— unit 文件仍在'; FAIL2=1; }
-  [ "$RESIDUE_LINK" = absent ] || {
-    say '断言失败：enable 符号链接仍在 → 下次开机会重复执行，幂等已被破坏'; FAIL2=1; }
-  [ "$RESIDUE_ENABLED" = not-found ] || {
-    say "断言失败：is-enabled 仍返回 $RESIDUE_ENABLED（预期 not-found）"; FAIL2=1; }
+  # is-enabled 的返回值在不同 systemd 版本上不统一，所以同时抓 raw 值与 exit code 供诊断。
+  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo __CMD_FAILED__')
+  RESIDUE_ENABLED_RC=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service >/dev/null 2>&1; echo $?')
+  say "自撤销彻底性: unit_file=$RESIDUE_FILE wants_link=$RESIDUE_LINK is_enabled=[$RESIDUE_ENABLED] rc=$RESIDUE_ENABLED_RC"
+  if [ "$RESIDUE_FILE" != absent ]; then
+    say '断言失败：自撤销未删干净 —— unit 文件仍在'
+    mark '④a unit 文件残留'
+  fi
+  if [ "$RESIDUE_LINK" != absent ]; then
+    say '断言失败：enable 符号链接仍在 → 下次开机会重复执行，幂等已被破坏'
+    mark '④b wants 符号链接残留'
+  fi
+  # ⚠️ 这一条是 2026-11-11 的**真根因**（见文件顶部 t106 说明）：
+  #  `systemctl is-enabled <不存在的 unit>` 在不同 systemd 上的返回不统一：
+  #    · systemd 249（本机 WSL 实测）：`... 2>/dev/null || echo not-found` **不触发兜底**，
+  #      结果拿到**空字符串**（因为该版本对不存在的 unit 未必返回非零），
+  #      于是 `[ "" = not-found ]` 为假 → 误判成「未清干净」。
+  #    · 部分版本：输出 `not-found`；另有版本在有残留缓存时给 `masked` / `disabled`。
+  #  判断标准应该是「**是否会被执行**」，而不是「字面量是否恰好等于 not-found」：
+  #    not-found / 空 / masked / disabled / __CMD_FAILED__（命令失败=查不到）都表示不会执行；
+  #    只有 enabled / enabled-runtime / static / indirect 等**能被执行**的态才判红。
+  case "$RESIDUE_ENABLED" in
+    not-found|''|masked|masked-runtime|disabled|__CMD_FAILED__)
+      say "is-enabled 状态=[$RESIDUE_ENABLED] → 视为不会被执行（通过）"
+      ;;
+    enabled|enabled-runtime|static|indirect|generated|transient)
+      say "断言失败：is-enabled 返回 [$RESIDUE_ENABLED]，该状态仍可能被执行"
+      mark "④c is-enabled 未清（$RESIDUE_ENABLED）"
+      ;;
+    *)
+      say "断言失败：is-enabled 返回未知状态 [$RESIDUE_ENABLED]，需要人工确认"
+      mark "④d is-enabled 未知状态（$RESIDUE_ENABLED）"
+      ;;
+  esac
+
+  # 诊断落盘：job 日志会被 GitHub 回收，这份文件随 artifact 一起上传，
+  # 是下次失败时唯一的可追溯证据。
+  {
+    printf 'BOOT_BEFORE2=%s\n' "$BOOT_BEFORE2"
+    printf 'BOOT_NOW=%s\n' "$BOOT_NOW"
+    printf 'PROOF_FIRST_BEGIN\n%s\nPROOF_FIRST_END\n' "$PROOF_FIRST"
+    printf 'PROOF_NOW_BEGIN\n%s\nPROOF_NOW_END\n' "$PROOF_NOW"
+    printf 'UNIT_PRESENT2=%s\n' "$UNIT_PRESENT2"
+    printf 'RESIDUE_FILE=%s\n' "$RESIDUE_FILE"
+    printf 'RESIDUE_LINK=%s\n' "$RESIDUE_LINK"
+    printf 'RESIDUE_ENABLED=[%s]\n' "$RESIDUE_ENABLED"
+    printf 'RESIDUE_ENABLED_RC=%s\n' "$RESIDUE_ENABLED_RC"
+    printf 'FAIL2=%s\n' "$FAIL2"
+    printf 'FAILED_CHECKS=%s\n' "${FAILED_CHECKS[*]:-(none)}"
+  } > "$WORK/replay2-diagnosis.txt"
+  say "诊断已写入 $WORK/replay2-diagnosis.txt"
 
   if [ "$FAIL2" -ne 0 ]; then
+    say "REPLAY2_FAILED_CHECKS=${FAILED_CHECKS[*]}"
     say 'REPLAY2_VERDICT=failed'
     exit 1
   fi
