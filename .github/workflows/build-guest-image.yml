@@ -121,20 +121,37 @@ jobs:
           #   ③ 最终失败必须 exit 1（不静默跳过，否则后面会以
           #      「qemu-system-x86_64: command not found」的形式炸在最后一步，
           #      诊断信息严重错位）。
+          # ⚠️ 2026-11-11 真因（拿到执行输出后确认）：
+          #   `apt-get update -qq` 在**所有索引都下载失败时仍返回 0**。
+          #   实测日志：四条 `Temporary failure resolving azure.archive.ubuntu.com`
+          #   之后紧跟一行 `apt-get update 成功` —— 我的重试循环第 1 次就判定成功，
+          #   然后 `apt-get install` 拿残缺索引解析依赖、反复超时，撞 8 分钟步骤超时。
+          #   ⇒ 不能相信 update 的退出码。改三层判据：
+          #      ① 先探测镜像站 DNS+TCP 可达性（这才是根因所在）
+          #      ② update 加 --error-on-any-failure（让部分失败变非零）
+          #      ③ 装完断言二进制真的存在（成功判据是「能跑」不是「apt 返回 0」）
           APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
-          ok=no
-          for attempt in 1 2 3; do
-            echo "=== apt 第 $attempt 次尝试 ==="
-            if sudo apt-get update -qq $APT_OPTS 2>&1 | tail -20; then
-              echo "apt-get update 成功"
-              ok=yes; break
+
+          # ① 镜像站可达性探测：能解析 + TCP 80 能连
+          probe_mirror() {
+            local host="$1"
+            getent hosts "$host" >/dev/null 2>&1 || return 1
+            timeout 8 bash -c "exec 3<>/dev/tcp/$host/80" 2>/dev/null || return 1
+            return 0
+          }
+
+          echo "--- 镜像站可达性探测 ---"
+          MIRROR_OK=no
+          for h in azure.archive.ubuntu.com archive.ubuntu.com ports.ubuntu.com; do
+            if probe_mirror "$h"; then
+              echo "  $h 可达"
+              MIRROR_OK=yes
+            else
+              echo "  $h 不可达"
             fi
-            echo "apt-get update 失败（第 $attempt 次），10 秒后重试"
-            sleep 10
           done
-          if [ "$ok" != yes ]; then
-            echo "::error title=apt 源不可达::连续 3 次 apt-get update 失败。这是 runner 的 DNS/网络故障，不是仓库代码问题，重跑一次通常就好"
-            # 打印 DNS 诊断，便于判断是全局断网还是单个镜像站
+          if [ "$MIRROR_OK" != yes ]; then
+            echo "::error title=所有 apt 镜像站都不可达::这是 runner 的 DNS/网络故障，不是仓库代码问题"
             echo "--- DNS 诊断 ---"
             cat /etc/resolv.conf 2>/dev/null || true
             getent hosts archive.ubuntu.com || echo "(archive.ubuntu.com 解析失败)"
@@ -142,10 +159,29 @@ jobs:
             curl -sS --max-time 10 -o /dev/null -w "github.com http=%{http_code}\n" https://github.com || echo "(github.com 不可达)"
             exit 1
           fi
-          # install 同样给重试；成功判据是「二进制真的能跑」，不是 apt 返回 0
-          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $APT_OPTS \
+
+          # ② update 加 --error-on-any-failure，让「部分索引拿不到」变成非零
+          ok=no
+          for attempt in 1 2 3; do
+            echo "=== apt-get update 第 $attempt 次 ==="
+            if sudo apt-get update -qq --error-on-any-failure $APT_OPTS 2>&1 | tail -20; then
+              echo "apt-get update 真成功"
+              ok=yes; break
+            fi
+            echo "apt-get update 失败（第 $attempt 次），10 秒后重试"
+            sleep 10
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error title=apt-get update 连续 3 次失败::镜像站可达但索引拉不下来"
+            ls -la /var/lib/apt/lists/ 2>/dev/null | head -20 || true
+            exit 1
+          fi
+
+          # ③ install 单独限时 180 秒，防止用残缺索引无限重试
+          if ! timeout 180 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+               --error-on-any-failure $APT_OPTS \
                qemu-utils qemu-system-x86 openssh-client genisoimage 2>&1 | tail -20; then
-            echo "::error title=apt install 失败::qemu/system 依赖装不上"
+            echo "::error title=apt install 失败或超时::qemu/system 依赖装不上"
             exit 1
           fi
           # ⚠️ qemu-utils 只提供 qemu-img（转换/压缩）；
