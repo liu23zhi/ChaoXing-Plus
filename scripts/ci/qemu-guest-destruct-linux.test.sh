@@ -178,9 +178,28 @@ F=$(mkfix sameboot boot-SAME boot-SAME boot-SAME no no not-found)
 run_replay "$F" >/dev/null 2>&1; check 'boot_id 未变化' 1 $?
 
 echo
-echo '=== 3) boot-before 缺失（登记阶段没落盘）→ 必须判红 ==='
+echo '=== 3) boot-before 两处都缺失（登记没落盘）→ 必须判红 ==='
+# 2026-11-11 修正判据：replay 现在优先用**宿主侧**副本（$WORK/boot-before-powercut.txt，
+# 断电不会丢），guest 内副本只做交叉核对。所以「缺失」必须是**两处都缺**才判红 ——
+# 只缺 guest 侧而宿主侧还在，是完全正常的情况（断电丢了 guest 副本，这正是那个副本的用途）。
+rm -f "$RUNDIR/cx-linux-guest/boot-before-powercut.txt"
 F=$(mkfix nobefore boot-AFTER missing boot-AFTER no no not-found)
-run_replay "$F" >/dev/null 2>&1; check 'boot-before 缺失' 1 $?
+OUT=$(run_replay "$F" 2>&1)
+check_msg 'boot-before 两处都缺失' "$OUT" '两处 boot-before 都不存在'
+
+echo
+echo '=== 3b) 只有宿主侧缺失、guest 侧仍在 → 必须**通过**（回退路径）==='
+F=$(mkfix guestonly boot-AFTER boot-BEFORE boot-AFTER no no not-found)
+OUT=$(run_replay "$F" 2>&1)
+check 'guest 侧副本可独立支撑' 0 $?
+
+echo
+echo '=== 3c) 宿主侧与 guest 侧不一致（覆盖层被换过？）→ 必须判红 ==='
+printf 'boot-DIFFERENT\n' > "$RUNDIR/cx-linux-guest/boot-before-powercut.txt"
+F=$(mkfix mismatch boot-AFTER boot-BEFORE boot-AFTER no no not-found)
+OUT=$(run_replay "$F" 2>&1)
+check_msg '两侧 boot-before 不一致' "$OUT" '宿主侧与客机内的 boot-before 不一致'
+rm -f "$RUNDIR/cx-linux-guest/boot-before-powercut.txt"
 
 echo
 echo '=== 4) 待删目标仍在 → 必须判红 ==='
@@ -291,6 +310,35 @@ printf 'boot-2nd\n' > "$RUNDIR/cx-linux-guest/boot-before-reboot2.txt"
 printf 'resumed_at=x\nboot_id=boot-AFTER\n' > "$RUNDIR/cx-linux-guest/proof-after-first.txt"
 OUT=$(run_phase replay2 "$F" 2>&1)
 check_msg 'wants 链接残留' "$OUT" 'enable 符号链接仍在'
+
+echo
+echo '=== 22) 结构断言：断电前必须 flush guest 脏页 ==='
+# 为什么用源码断言而不是行为断言：
+#   fixture 垫片只**回放** ssh 的返回值，不会真的执行 guest 内的 sync ——
+#   所以「删掉 sync」在行为层永远测不出来（那只有真跑 QEMU 才能覆盖）。
+# 但这条正是 CI 首次真跑（run 42982388969）丢数据的直接修复，
+# 被人「顺手删掉」的风险很高，必须有一条能立刻变红的钉子。
+POWERCUT_BODY=$(awk '/^powercut\)/{f=1} f{print} /^  ;;$/{if(f)exit}' "$TARGET")
+if printf '%s' "$POWERCUT_BODY" | grep -q 'sync; sync; sync'; then
+  echo "  ✔ powercut 内含 sync; sync; sync"; PASS=$((PASS+1))
+else
+  echo "  ✖ powercut 内缺少 sync（断电会丢未落盘的登记）"; FAIL=$((FAIL+1))
+fi
+SYNC_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'sync; sync; sync' | head -1 | cut -d: -f1)
+# 只匹配**非注释**的 kill：powercut 段里注释也提到 `kill -KILL`（解释用），
+# 拿它当行号会得出「sync 排在 kill 之后」的错误结论。
+KILL_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'kill -KILL' | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1)
+if [ -n "$SYNC_LINE" ] && [ -n "$KILL_LINE" ] && [ "$SYNC_LINE" -lt "$KILL_LINE" ]; then
+  echo "  ✔ sync 在 kill -KILL 之前"; PASS=$((PASS+1))
+else
+  echo "  ✖ sync 必须排在 kill -KILL 之前（sync=$SYNC_LINE kill=$KILL_LINE）"; FAIL=$((FAIL+1))
+fi
+# 用 kill -KILL 而不是 systemctl poweroff：后者走有序关闭，就不是「拔电源」了。
+if printf '%s' "$POWERCUT_BODY" | grep -qE 'systemctl (poweroff|halt|shutdown)'; then
+  echo "  ✖ powercut 不得用 systemctl poweroff/halt（那就不是拔电源）"; FAIL=$((FAIL+1))
+else
+  echo "  ✔ powercut 用的是 kill -KILL，不是有序关机"; PASS=$((PASS+1))
+fi
 
 echo
 echo "结果：$PASS 通过 / $FAIL 失败"

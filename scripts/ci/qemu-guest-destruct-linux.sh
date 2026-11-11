@@ -478,6 +478,27 @@ powercut)
   PRE_ACTIVE=$(ssh_guest 'systemctl is-active cx-destruct-resume.service 2>/dev/null || true')
   say "断电前 unit is-active=${PRE_ACTIVE:-unknown}"
 
+  # ── 断电前强制 flush guest 脏页（2026-11-11 CI 首次真跑暴露的真问题）─────────
+  #
+  # 现象（run 42982388969 / job 130395775452）：register 全绿，powercut 后 replay 全红 ——
+  # /var/lib/cx-destruct/ 整个目录的内容消失，而 /etc/systemd/system/ 下的 unit 文件还在。
+  #
+  # 根因：`cache=writeback` 下 guest 写入先进**宿主 page cache**，`kill -KILL` QEMU 时
+  # 未 flush 的页全部丢失。register 先写 unit（`systemctl daemon-reload` 会触发元数据同步，
+  # 所以活下来了），后写 /var/lib/cx-destruct/*（还在 page cache）⇒ 正好是观测到的形态。
+  #
+  # ⚠️ 这**不是**掩盖问题。真实拔电源前，系统本来就会周期性 flush
+  #    （`dirty_writeback_centisecs` 默认 5 秒 = 最多 5 秒的脏页）。
+  #    要验证的命题是「**登记已落盘后**断电，重启仍能续删」，
+  #    而不是「没落盘就断电会丢数据」—— 后者是文件系统的已知行为，不需要验证，
+  #    拿它当红信号只会让这条作业永远测不出真问题。
+  #
+  # 三次 sync：第一次把数据页写下、第二次确保 inode/元数据、第三次兜住前两次之间
+  # 新产生的脏页。给 2 秒让 QEMU 的 IO 线程真正完成落盘（-daemonize 下 writeback 是异步的）。
+  say '断电前 flush guest 脏页（cache=writeback 下不 flush 会丢未落盘的登记）'
+  ssh_guest 'sync; sync; sync' || say '（sync 失败，忽略：断电本来就可能丢数据，但会记录在这）'
+  sleep 2
+
   PID=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "${PID:-}" ] || ! kill -0 "$PID" 2>/dev/null; then
     say "断言失败：找不到存活的 QEMU 进程（pid=${PID:-none}），无法断电"
@@ -606,13 +627,50 @@ replay2)
 replay)
   FAIL=0
   BOOT_AFTER=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
-  BOOT_BEFORE=$(ssh_guest "cat $G_BOOT_BEFORE 2>/dev/null || echo missing")
-  say "boot_before=$BOOT_BEFORE"
   say "boot_after =$BOOT_AFTER"
 
-  # ① 真的重启过：内核 boot_id 变了。缺这条，「重启后文件没了」可能只是没重启。
-  if [ "$BOOT_BEFORE" = missing ] || [ "$BOOT_BEFORE" = "$BOOT_AFTER" ]; then
-    say '断言失败：boot_id 未变化（客机没有真的重启）'; FAIL=1
+  # ── boot_id 变化的判据（2026-11-11 修正：原来会把「文件丢失」误报成「没重启」）──
+  #
+  # 旧写法 `BOOT_BEFORE=$(ssh_guest "cat $G_BOOT_BEFORE || echo missing")` 有两个缺陷：
+  #   ① 把「文件不存在」与「文件内容恰好是 missing」混成一态；
+  #   ② 断言只说「boot_id 未变化」，于是**断电丢数据**被误诊成**没重启** —— 
+  #      CI 首次真跑就是这么误判的（boot_before=missing 却报「客机没有真的重启」）。
+  #
+  # 现在优先用**宿主侧**副本 `$WORK/boot-before-powercut.txt`：
+  #   它是 powercut 在 kill -KILL 之前写到 runner 磁盘上的，**不受断电影响**。
+  #   guest 内那份（$G_BOOT_BEFORE）是 register 写的，断电后可能丢失 ——
+  #   拿它做判据等于让「被测对象」自己证明自己，而且一丢就误诊。
+  # guest 内副本降级为交叉核对：两边都有时必须一致。
+  HOST_BOOT_BEFORE_FILE="$WORK/boot-before-powercut.txt"
+  HOST_BOOT_BEFORE=$(cat "$HOST_BOOT_BEFORE_FILE" 2>/dev/null || echo __ABSENT__)
+  GUEST_BOOT_BEFORE=$(ssh_guest "cat $G_BOOT_BEFORE 2>/dev/null || echo __ABSENT__")
+  # 归一化：把「空串」与测试垫片的历史默认值 `missing` 都当成「不存在」。
+  # 不归一化的话，`missing` 会被当成一个合法的 boot_id 值采用 ——
+  # 那正是 CI 首次真跑误判的放大器（`boot_before=missing` 被拿去和 boot_after 比）。
+  case "$HOST_BOOT_BEFORE" in ''|missing) HOST_BOOT_BEFORE=__ABSENT__ ;; esac
+  case "$GUEST_BOOT_BEFORE" in ''|missing) GUEST_BOOT_BEFORE=__ABSENT__ ;; esac
+  say "boot_before(宿主侧)=$HOST_BOOT_BEFORE"
+  say "boot_before(客机内)=$GUEST_BOOT_BEFORE"
+
+  if [ "$HOST_BOOT_BEFORE" = __ABSENT__ ] && [ "$GUEST_BOOT_BEFORE" = __ABSENT__ ]; then
+    say '断言失败：两处 boot-before 都不存在 —— 登记阶段没落盘，或者断电把数据丢了'
+    say '  ⚠️ 这**不是**「客机没有重启」（boot_after 已经变了就说明重启过），'
+    say '     而是「登记的 boot_id 没保存下来」。两种原因要分开看，否则会修错地方。'
+    FAIL=1
+  else
+    # 宿主侧优先；宿主侧缺失时退到 guest 内副本（例如单独跑 replay 的场景）。
+    BOOT_BEFORE="$HOST_BOOT_BEFORE"
+    [ "$BOOT_BEFORE" = __ABSENT__ ] && BOOT_BEFORE="$GUEST_BOOT_BEFORE"
+    say "boot_before(采用)=$BOOT_BEFORE"
+    # 两边都有时必须一致：不一致说明覆盖层被换过或 guest 侧被篡改，那后面的断言都不可信。
+    if [ "$HOST_BOOT_BEFORE" != __ABSENT__ ] && [ "$GUEST_BOOT_BEFORE" != __ABSENT__ ] \
+       && [ "$HOST_BOOT_BEFORE" != "$GUEST_BOOT_BEFORE" ]; then
+      say '断言失败：宿主侧与客机内的 boot-before 不一致（覆盖层被换过？）'
+      FAIL=1
+    fi
+    if [ "$BOOT_BEFORE" = "$BOOT_AFTER" ]; then
+      say '断言失败：boot_id 未变化（客机真的没有重启）'; FAIL=1
+    fi
   fi
 
   # ② 缺口 3：**所有**登记的文件目标都已删（不只第一个）。
@@ -679,10 +737,17 @@ replay)
   fi
 
   # ④ 续删单元已自撤销。
+  #
+  # ⚠️ 关于 `unit_enabled=masked`（2026-11-11 CI 首次真跑观测到）：
+  #   `masked` 说明单元被 /dev/null 屏蔽 —— 这是 `systemctl disable --now` + 手工 rm 单元文件后
+  #   systemd 可能留下的状态。它**不是**本断言判红的原因（这里只断 `!= enabled`，masked 通过）。
+  #   真正判红的是 `unit_present=yes`：unit **文件还在** ⇒ 续删脚本根本没执行
+  #   （它跑完会 `rm` 掉自己）。所以「unit 文件还在」是对「续删没跑」的**因果正确**判红，
+  #   不是断言逻辑错误。修复方向是让续删真的跑起来（断电前 flush 脏页），不是放宽断言。
   UNIT_PRESENT=$(ssh_guest "test -f $G_UNIT && echo yes || echo no")
   UNIT_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo not-found')
   say "unit_present=$UNIT_PRESENT unit_enabled=$UNIT_ENABLED"
-  [ "$UNIT_PRESENT" = no ] || { say '断言失败：续删单元文件未自撤销'; FAIL=1; }
+  [ "$UNIT_PRESENT" = no ] || { say '断言失败：续删单元文件未自撤销（续删脚本没执行过才会这样）'; FAIL=1; }
   [ "$UNIT_ENABLED" != enabled ] || { say '断言失败：续删单元仍 enabled'; FAIL=1; }
 
   if [ "$FAIL" -ne 0 ]; then
