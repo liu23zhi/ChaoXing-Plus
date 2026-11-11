@@ -1,0 +1,53 @@
+{
+  "version": "0.1.0",
+  "host": "native",
+  "startedAt": "2026-11-10T19:34:46.960Z",
+  "finishedAt": "2026-11-10T19:44:46.961Z",
+  "mode": "launch",
+  "durationMs": 600000,
+  "clientPid": 4321,
+  "port": 51000,
+  "attached": false,
+  "ownershipVerified": true,
+  "success": true,
+  "executionMode": "normal",
+  "injectStrategy": "hybrid",
+  "stopReason": "duration",
+  "injectMode": "cdp-port",
+  "commandLineInjected": false,
+  "injectEvidence": {
+    "endpointReady": true,
+    "proxyHook": false,
+    "proxyHookRequired": false,
+    "bundleInPage": false,
+    "bundleSentinelRejected": false,
+    "verified": false,
+    "reason": "bundle-unverified"
+  },
+  "endpointProbe": {
+    "attempts": 2,
+    "elapsedMs": 40,
+    "listenerSeen": true,
+    "ownershipVerified": true,
+    "versionResponseReceived": true,
+    "lastReason": "ready",
+    "reasonCounts": {
+      "no-listener": 0,
+      "listener-not-owned": 0,
+      "listener-query-failed": 0,
+      "listener-binding-rejected": 0,
+      "http-failed": 0,
+      "invalid-version": 0,
+      "browser-mismatch": 0,
+      "ready": 2
+    }
+  },
+  "totals": {
+    "contexts": 1,
+    "bootstraps": 1,
+    "bundles": 1,
+    "errors": 0,
+    "reconnects": 0,
+    "pageSessions": 1
+  }
+}

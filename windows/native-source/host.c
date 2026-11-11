@@ -475,6 +475,9 @@ static BOOL h_destruct_lock_ready = FALSE;
 static CX_WIPE h_wipe;
 static BOOL h_wipe_ready = FALSE;
 static BOOL h_dll_proxy_mode = FALSE;
+/* 客户端静态导入表里确实有代理载体 DLL（= plan.proxyUsable）。host-session.inc 结尾判定
+   「代理日志缺失是否等于失败」时必须靠它区分两种完全不同的情形，所以提到全局。 */
+static BOOL h_proxy_carrier_expected = FALSE;
 static WCHAR h_pipe_extra_args[512];
 static BOOL h_proxy_auto_installed;
 static WCHAR h_gui_inject_mode[16];
@@ -1853,23 +1856,31 @@ static BOOL h_proxy_log_path(DWORD clientPid, WCHAR *out, DWORD cap) {
     return TRUE;
 }
 typedef enum H_PROXY_HOOK_STATE {
-    H_PROXY_HOOK_UNKNOWN = 0, /* 日志不存在：不能据此判定失败 */
+    H_PROXY_HOOK_UNKNOWN = 0, /* 无法判定：日志不存在且无法证明 DLL 该被加载，或日志存在但无定论 */
     H_PROXY_HOOK_CONFIRMED,   /* 日志证明 cef_initialize 已被接管 */
-    H_PROXY_HOOK_FAILED       /* 日志证明代理没拿到端口或钩子失败 */
+    H_PROXY_HOOK_FAILED,      /* 日志证明代理没拿到端口或钩子失败 */
+    H_PROXY_HOOK_ABSENT       /* 客户端确实导入了载体 DLL，却没有任何代理日志 → DLL 根本没跑起来 */
 } H_PROXY_HOOK_STATE;
 
-static H_PROXY_HOOK_STATE h_proxy_hook_state(DWORD clientPid) {
+/* proxyCarrierExpected 由调用方给：客户端静态导入表里确实有该载体 DLL 时为 TRUE
+   （plan.proxyUsable，见 h_plan_inject）。这一点是区分「代理没被加载」与「本来就不该有日志」的唯一依据：
+     - 代理根本没被安装（cdp-port 路径）→ 无日志是正常的，必须仍是 UNKNOWN；
+     - 代理已安装且客户端会加载它 → 无日志只能说明 DLL 没跑起来，这是真失败（ABSENT）。
+   绝不能仅凭「无日志」判失败：tests/injection-tests.c 的
+   "absent proxy log is unknown, not failed" 钉的就是第一种情形。 */
+static H_PROXY_HOOK_STATE h_proxy_hook_state(DWORD clientPid, BOOL proxyCarrierExpected) {
     /* 同样是 /Gs9999999：大缓冲区只能在静态区。 */
     static WCHAR path[HOST_PATH_CAP];
     HANDLE file;
     DWORD size;
     if (!h_proxy_log_path(clientPid, path, HOST_PATH_CAP)) return H_PROXY_HOOK_UNKNOWN;
-    /* 文件存在才算"有证据"：不存在的日志不能当成失败。 */
+    /* 日志缺失的含义取决于载体是否该被加载，不能一概而论。 */
     file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return H_PROXY_HOOK_UNKNOWN;
+    if (file == INVALID_HANDLE_VALUE) return proxyCarrierExpected ? H_PROXY_HOOK_ABSENT : H_PROXY_HOOK_UNKNOWN;
     size = GetFileSize(file, NULL);
     CloseHandle(file);
+    /* 空日志或超限日志同样无法定论：DLL 起来了但还没来得及写，或日志被别的东西撑坏。 */
     if (size == INVALID_FILE_SIZE || !size || size > H_PROXY_LOG_CAP) return H_PROXY_HOOK_UNKNOWN;
     if (h_file_contains_ci(path, "cef_initialize patched (pushret)")
         || h_file_contains_ci(path, "cef_initialize intercepted")
@@ -3150,6 +3161,11 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
         }
         h_report.injectMode = h_inject_channel_name(plan.channel);
         h_report.injectEvidence.proxyHookRequired = plan.channel == H_INJECT_CHANNEL_DLL_PROXY;
+        /* 记下「客户端会不会加载载体 DLL」，供结尾判定「代理日志缺失」是否等于失败。
+           注意不能用 proxyHookRequired：它是「选了 dll-proxy」，而临时安装的代理在
+           加壳客户端上 proxyUsable 恒为 FALSE（静态导入表看不到壳运行期加载的 winmm）。
+           那种情况无日志只是「无法判定」，不能升级成失败——所以这里只信静态导入表。 */
+        h_proxy_carrier_expected = plan.proxyUsable;
         if (plan.channel == H_INJECT_CHANNEL_DLL_PROXY) {
             BOOL present = plan.proxyPresent;
             if (!present) {

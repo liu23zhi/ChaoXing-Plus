@@ -582,25 +582,35 @@ static void test_proxy_log_evidence(void) {
     if (!h_proxy_log_path(pid, path, MAX_PATH)) ExitProcess(2);
     check("proxy log path names the client pid", h_wcontains(path, L"cxhook-"));
     DeleteFileW(path);
-    check("absent proxy log is unknown, not failed", h_proxy_hook_state(pid) == H_PROXY_HOOK_UNKNOWN);
+    check("absent proxy log is unknown, not failed", h_proxy_hook_state(pid, FALSE) == H_PROXY_HOOK_UNKNOWN);
+    // 同一个「无日志」在「客户端确实导入载体 DLL」时含义完全不同：DLL 应该被加载却没有日志，
+    // 说明它根本没跑起来。这是 t70 里报的 P0：这条路径以前和 UNKNOWN 混在一起，整轮照样 ok=true。
+    check("absent proxy log with an expected carrier is ABSENT, not unknown",
+          h_proxy_hook_state(pid, TRUE) == H_PROXY_HOOK_ABSENT);
 
     file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
     WriteFile(file, confirmed, (DWORD)(sizeof(confirmed) - 1), &written, NULL);
     CloseHandle(file);
-    check("proxy log with cef hook evidence is confirmed", h_proxy_hook_state(pid) == H_PROXY_HOOK_CONFIRMED);
+    check("proxy log with cef hook evidence is confirmed", h_proxy_hook_state(pid, FALSE) == H_PROXY_HOOK_CONFIRMED);
+    // 日志存在时载体期望值不该改变结论：CONFIRMED 优先于 ABSENT 判定。
+    check("carrier expectation does not override a confirmed log",
+          h_proxy_hook_state(pid, TRUE) == H_PROXY_HOOK_CONFIRMED);
 
     file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
     WriteFile(file, failed, (DWORD)(sizeof(failed) - 1), &written, NULL);
     CloseHandle(file);
-    check("proxy log without an injection port is failed", h_proxy_hook_state(pid) == H_PROXY_HOOK_FAILED);
+    check("proxy log without an injection port is failed", h_proxy_hook_state(pid, FALSE) == H_PROXY_HOOK_FAILED);
 
     file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) ExitProcess(2);
     WriteFile(file, unrelated, (DWORD)(sizeof(unrelated) - 1), &written, NULL);
     CloseHandle(file);
-    check("proxy log without hook evidence stays unknown", h_proxy_hook_state(pid) == H_PROXY_HOOK_UNKNOWN);
+    check("proxy log without hook evidence stays unknown", h_proxy_hook_state(pid, FALSE) == H_PROXY_HOOK_UNKNOWN);
+    // 日志存在但无定论时也不能升级成 ABSENT：DLL 确实跑过（日志是它写的），只是没写下结论。
+    check("inconclusive log stays unknown even when the carrier is expected",
+          h_proxy_hook_state(pid, TRUE) == H_PROXY_HOOK_UNKNOWN);
     DeleteFileW(path);
 }
 

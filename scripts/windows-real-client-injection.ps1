@@ -43,6 +43,9 @@ $script:cdpPort = 0
 $script:cdpPrefix = ''
 $script:captureGuard = $null
 $script:captureGuardHandle = $null
+# Set only when the report says the bundle never proved itself in the page; printed again at the very
+# end so the warning survives the PASS line and the cleanup noise.
+$script:injectVerifiedWarning = ''
 
 function Find-SevenZip {
   foreach ($name in @('7z.exe', '7zz.exe')) {
@@ -392,6 +395,90 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   # The run ends either when the duration elapses or when the client is closed/killed first; both
   # leave a complete report, so the counters above are what actually prove the injection.
   if ($report.stopReason -notin @('duration', 'client-exit')) { throw "Unexpected stop reason for ${CaseName}: $($report.stopReason)" }
+  # The counters above prove the host and the CDP transport worked; they stay green even when the page
+  # never ran the bundle. injectEvidence is the only part of the report that proves the bundle really
+  # landed in the page main world: bundleInPage comes from the main-world sentinel
+  # (host-session.inc:186-202) and verified is endpointReady && bundleInPage &&
+  # (!proxyHookRequired || proxyHook) (audit.c:264-271).
+  # Grading is deliberately split into three tiers, because a known-bad baseline must not be confused
+  # with a regression:
+  #   injectEvidence absent or a missing evidence field -> red   (the report contract changed)
+  #   bundleSentinelRejected = true                    -> red   (the page explicitly said no)
+  #   reason = proxy-carrier-absent                    -> red   (the carrier DLL never ran at all)
+  #   endpointReady + bundleInPage = false             -> red   (the chain ran and the bundle still
+  #                                                              never landed: this is the case that
+  #                                                              "only a working feature can be true"
+  #                                                              guards)
+  #   verified = false on its own                      -> yellow warning + injectVerifiedSummary
+  # The red tier for "chain ran, bundle did not land" is what makes this matrix meaningful: without it
+  # a report with pageSessions>=1 / bootstraps>=1 / bundles>=1 and bundleInPage=false passes, which is
+  # exactly the state all six client cases were in on 2026-11-10. The yellow tier only covers the
+  # genuinely-ambiguous window (endpoint up, bootstrap not yet acknowledged) so that resting-bad
+  # baselines do not drown out new regressions.
+  $evidence = $report.injectEvidence
+  if (-not $evidence) {
+    throw "Injection report has no injectEvidence object for ${CaseName}: the injection contract changed"
+  }
+  foreach ($evidenceField in @('bundleInPage', 'verified', 'reason', 'bundleSentinelRejected')) {
+    if (-not $evidence.PSObject.Properties[$evidenceField]) {
+      throw "Injection report injectEvidence is missing '$evidenceField' for ${CaseName}: the injection contract changed"
+    }
+  }
+  # The chain "really ran" only when the CDP endpoint answered AND the bootstrap reached the page.
+  # pageSessions is deliberately NOT part of this: a page session only proves the WebSocket
+  # connected; when the bootstrap never arrives it is still >= 1, and that case means the chain
+  # never came up rather than that the bundle failed to land.
+  $chainRan = [bool]$evidence.endpointReady -and [int]$report.totals.bootstraps -ge 1
+  $bundleLanded = [bool]$evidence.bundleInPage
+  $verifiedTrue = if ([bool]$evidence.verified) { 1 } else { 0 }
+  $verifiedFalse = 1 - $verifiedTrue
+  $injectSummary = [ordered]@{
+    total                  = 1
+    verifiedTrue           = $verifiedTrue
+    verifiedFalse          = $verifiedFalse
+    bundleInPage           = $bundleLanded
+    bundleSentinelRejected = [bool]$evidence.bundleSentinelRejected
+    reason                 = [string]$evidence.reason
+    chainRan               = $chainRan
+    strictFailures         = @()
+  }
+  if ([bool]$evidence.bundleSentinelRejected) { $injectSummary.strictFailures = @('bundle-sentinel-rejected') }
+  # A carrier that should have been loaded wrote no log at all: the proxy never executed, so nothing
+  # downstream of it can be trusted. host.c h_proxy_hook_state returns ABSENT for this and only this case.
+  if ([string]$evidence.reason -eq 'proxy-carrier-absent') { $injectSummary.strictFailures += 'proxy-carrier-absent' }
+  # The decisive tier: the transport and the bootstrap both worked, yet the page never proved the bundle
+  # ran. A page that accepted the command but did not execute the bundle is a failure, not a warning.
+  if ($chainRan -and -not $bundleLanded -and -not [bool]$evidence.bundleSentinelRejected) {
+    $injectSummary.strictFailures += 'bundle-not-in-page'
+  }
+  # The report is the artifact CI uploads, so the summary must travel with it on pass and on failure.
+  try {
+    $report | Add-Member -NotePropertyName 'injectVerifiedSummary' -NotePropertyValue ([pscustomobject]$injectSummary) -Force
+    [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    Write-Host "[real-client] unable to record injectVerifiedSummary in the report: $($_.Exception.Message)"
+  }
+  Write-Host "[real-client] injectEvidence bundleInPage=$($evidence.bundleInPage) verified=$($evidence.verified) sentinelRejected=$($evidence.bundleSentinelRejected) reason=$($evidence.reason) chainRan=$chainRan injectVerifiedSummary verifiedFalse=$verifiedFalse/$($injectSummary.total) strictFailures=$($injectSummary.strictFailures -join ',')"
+  if ($verifiedFalse -gt 0) {
+    $script:injectVerifiedWarning = "INJECT_BUNDLE_UNVERIFIED case=$CaseName verifiedFalse=$verifiedFalse/$($injectSummary.total) bundleInPage=$($evidence.bundleInPage) bundleSentinelRejected=$($evidence.bundleSentinelRejected) reason=$($evidence.reason): the CDP chain worked but the page never proved the bundle ran"
+    Write-Host "::warning::$($script:injectVerifiedWarning)"
+  }
+  # Explicit rejection is not "could not tell": the page answered false or threw, which means the bundle
+  # was accepted by the transport and did not run. host-session.inc:186-202 keeps that distinction.
+  if ([bool]$evidence.bundleSentinelRejected) {
+    throw "The page rejected the injected bundle for ${CaseName}: injectEvidence.bundleSentinelRejected=true reason=$($evidence.reason) (the main-world sentinel answered with an explicit false or threw)"
+  }
+  # Carrier never loaded: the client imports the proxy DLL and the DLL is on disk, so no log at all means
+  # the DLL was never executed (blocked, renamed or failed to load). Nothing downstream can be trusted.
+  if ([string]$evidence.reason -eq 'proxy-carrier-absent') {
+    throw "The proxy carrier DLL never ran for ${CaseName}: injectEvidence.reason=proxy-carrier-absent (the client imports the carrier and the DLL is installed, but the proxy wrote no log, so it was never loaded)"
+  }
+  # The decisive tier. `verified` alone cannot carry this: it also folds in proxyHook, so a dll-proxy run
+  # with a fine hook but an unlanded bundle would still read verified=false for the wrong reason. Testing
+  # the two transport counters plus bundleInPage directly is what isolates "chain ran, bundle did not".
+  if ($chainRan -and -not $bundleLanded) {
+    throw "The page never proved the injected bundle ran for ${CaseName}: endpointReady=$($evidence.endpointReady) pageSessions=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) bundleInPage=$($evidence.bundleInPage) reason=$($evidence.reason) (the CDP chain and the bootstrap acknowledged, but the main-world sentinel never became true)"
+  }
   Write-HostDiagnostics
   Write-Host "REAL_CLIENT_INJECTION_PASS $CaseName mode=$InjectMode"
 } catch {
@@ -471,6 +558,8 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
     Write-Host "[real-client] shell repair failed: $($_.Exception.Message)"
   }
   Write-Host "[real-client] summary case=$CaseName stage=$stage stopReason=$($report.stopReason) success=$($report.success) pages=$($report.totals.pageSessions) bootstraps=$($report.totals.bootstraps) bundles=$($report.totals.bundles) errors=$($report.totals.errors) probe=$($report.endpointProbe.lastReason)/$($report.endpointProbe.attempts) entry=$($entry.Reason) affinity=$affinitySnapshot hook=$hookLog"
+  # Repeated at the end of the run so the yellow state cannot hide between the PASS line and cleanup.
+  if ($script:injectVerifiedWarning) { Write-Host "[real-client] WARNING $($script:injectVerifiedWarning)" }
   Save-ArtifactManifest -CaseName $CaseName
   if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
