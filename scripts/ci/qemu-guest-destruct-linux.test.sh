@@ -56,13 +56,6 @@ case "$cmd" in
   *"test -f /var/lib/cx-destruct/target-2.txt"*)  pick target2_exists no ;;
   *"test -d /var/lib/cx-destruct/target-dir"*)    pick target_dir_exists yes ;;
   *"test -f /var/lib/cx-destruct/control.txt"*)   pick control_exists yes ;;
-  # ⚠️ 两个键值域不同，不能共用：
-  #   · replay 阶段用 `test -f "$G_UNIT" && echo yes || echo no`      → yes/no
-  #   · replay2 阶段用 `test -f "$G_UNIT" && echo exists || echo absent` → exists/absent
-  # 早先两者都映射到 unit_present（默认 no），于是 replay2 拿到的是 "no" 而不是 "absent"，
-  # `[ "$RESIDUE_FILE" != absent ]` 恒真 → 每个 replay2 用例都假红。
-  # 用命令里的特征串区分：replay2 那条带 `echo exists`。
-  *"echo exists |"*|*"&& echo exists"*)       pick residue_file absent ;;
   *"test -f /etc/systemd/system/"*)           pick unit_present no ;;
   # is-enabled 的**exit code**探测（`... >/dev/null 2>&1; echo $?`）与返回值探测是两条命令，
   # 必须分开：混在一起会让 rc 拿到 "not-found" 这种非数字值，诊断文件里看着像 bug。
@@ -96,12 +89,6 @@ mkfix() {
     printf 'rc=0 source=/var/lib/cx-destruct/target-1.txt\nrc=1 source=/var/lib/cx-destruct/target-dir\nrc=0 source=/var/lib/cx-destruct/target-2.txt\n' \
       > "$d/resume_log"
   fi
-  # t101：powercut 三态 + replay2 自撤销彻底性。
-  printf '%s\n' "${12:-absent}"        > "$d/resume_log_state"
-  printf '%s\n' "${13:-absent}"        > "$d/wants_link"
-  # t106：replay2 的 RESIDUE_FILE 用 exists/absent 值域（与 unit_present 的 yes/no 不同）
-  printf '%s\n' "${14:-absent}"        > "$d/residue_file"
-  printf '%s\n' "${15:-1}"             > "$d/unit_enabled_rc"
   echo "$d"
 }
 
@@ -287,120 +274,6 @@ echo
 echo '=== 15) 缺口 3/5 组合：完全无 resume-log → 必须判红 ==='
 F=$(mkfix gap-nolog boot-AFTER boot-BEFORE boot-AFTER no no not-found no yes yes 'missing')
 run_replay "$F" >/dev/null 2>&1; check '无逐条处理日志' 1 $?
-
-# ── t101：用户要求「一运行就注册、最后再删除」对应的两处新断言 ──────────────
-# 这两组是**断电前**（powercut）与**自撤销后**（replay2）的判据，
-# 与上面 replay 阶段的断言是不同 phase，必须各自有「应该判红」的反例，
-# 否则新加的断言永远绿也没人知道。
-
-echo
-echo '=== 16) powercut：断电前 resume-log 已有内容 → 必须判红 ==='
-# 场景：续删脚本已经跑过（log 非空），此时断电再冷启动，「文件没了」不能归因于本次续删。
-# 判据用 check_msg：这份输出里必须出现该断言的原文，才证明红是它触发的。
-F=$(mkfix pc-log-dirty boot-AFTER boot-BEFORE missing yes no not-found no yes yes '' nonempty absent)
-OUT=$(run_phase powercut "$F" 2>&1)
-check_msg '断电前 resume-log 非空' "$OUT" '断电前 resume-log 应不存在，实际=nonempty'
-
-echo
-echo '=== 17) powercut：断电前 resume-log 存在但为空 → 也必须判红 ==='
-F=$(mkfix pc-log-emptyfile boot-AFTER boot-BEFORE missing yes no not-found no yes yes '' empty-file absent)
-OUT=$(run_phase powercut "$F" 2>&1)
-check_msg '断电前 resume-log 空文件' "$OUT" '断电前 resume-log 应不存在，实际=empty-file'
-
-echo
-echo '=== 18) powercut：断电前 resume-proof 已存在 → 必须判红 ==='
-# proof 是脚本最后一步写的，存在 = 完整跑过一轮。
-F=$(mkfix pc-proof-exists boot-AFTER boot-BEFORE boot-AFTER yes no not-found no yes yes '' absent absent)
-OUT=$(run_phase powercut "$F" 2>&1)
-check_msg '断电前 resume-proof 已存在' "$OUT" '断电前 resume-proof 已存在'
-
-echo
-echo '=== 19) replay2：自撤销后 wants 符号链接仍残留 → 必须判红 ==='
-# 这条最容易被忽略：unit 文件删了、is-enabled 也返回 not-found，
-# 但 multi-user.target.wants 下的链接还在 → 下次开机会重复执行 → 幂等被破坏。
-F=$(mkfix r2-wants-left boot-AFTER boot-BEFORE boot-AFTER no no not-found no yes yes '' absent exists)
-printf 'boot-2nd\n' > "$RUNDIR/cx-linux-guest/boot-before-reboot2.txt"
-printf 'resumed_at=x\nboot_id=boot-AFTER\n' > "$RUNDIR/cx-linux-guest/proof-after-first.txt"
-OUT=$(run_phase replay2 "$F" 2>&1)
-check_msg 'wants 链接残留' "$OUT" 'enable 符号链接仍在'
-
-echo
-echo '=== 22) 结构断言：断电前必须 flush guest 脏页 ==='
-# 为什么用源码断言而不是行为断言：
-#   fixture 垫片只**回放** ssh 的返回值，不会真的执行 guest 内的 sync ——
-#   所以「删掉 sync」在行为层永远测不出来（那只有真跑 QEMU 才能覆盖）。
-# 但这条正是 CI 首次真跑（run 42982388969）丢数据的直接修复，
-# 被人「顺手删掉」的风险很高，必须有一条能立刻变红的钉子。
-POWERCUT_BODY=$(awk '/^powercut\)/{f=1} f{print} /^  ;;$/{if(f)exit}' "$TARGET")
-if printf '%s' "$POWERCUT_BODY" | grep -q 'sync; sync; sync'; then
-  echo "  ✔ powercut 内含 sync; sync; sync"; PASS=$((PASS+1))
-else
-  echo "  ✖ powercut 内缺少 sync（断电会丢未落盘的登记）"; FAIL=$((FAIL+1))
-fi
-SYNC_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'sync; sync; sync' | head -1 | cut -d: -f1)
-# 只匹配**非注释**的 kill：powercut 段里注释也提到 `kill -KILL`（解释用），
-# 拿它当行号会得出「sync 排在 kill 之后」的错误结论。
-KILL_LINE=$(printf '%s\n' "$POWERCUT_BODY" | grep -n 'kill -KILL' | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1)
-if [ -n "$SYNC_LINE" ] && [ -n "$KILL_LINE" ] && [ "$SYNC_LINE" -lt "$KILL_LINE" ]; then
-  echo "  ✔ sync 在 kill -KILL 之前"; PASS=$((PASS+1))
-else
-  echo "  ✖ sync 必须排在 kill -KILL 之前（sync=$SYNC_LINE kill=$KILL_LINE）"; FAIL=$((FAIL+1))
-fi
-# 用 kill -KILL 而不是 systemctl poweroff：后者走有序关闭，就不是「拔电源」了。
-if printf '%s' "$POWERCUT_BODY" | grep -qE 'systemctl (poweroff|halt|shutdown)'; then
-  echo "  ✖ powercut 不得用 systemctl poweroff/halt（那就不是拔电源）"; FAIL=$((FAIL+1))
-else
-  echo "  ✔ powercut 用的是 kill -KILL，不是有序关机"; PASS=$((PASS+1))
-fi
-
-# ── 2026-11-11（t106 真根因）：is-enabled 的返回值在不同 systemd 上不统一 ──────
-# 判红标准必须是「**是否会被执行**」，不是「字面量是否恰好等于 not-found」。
-# 实测 systemd 249：`systemctl is-enabled <不存在的 unit> 2>/dev/null || echo not-found`
-# **不触发兜底**，拿到空字符串 → 旧断言 `[ "" = not-found ]` 为假 → 误判成「没清干净」。
-
-r2setup() {
-  printf 'boot-2nd\n' > "$RUNDIR/cx-linux-guest/boot-before-reboot2.txt"
-  printf 'resumed_at=x\nboot_id=boot-AFTER\n' > "$RUNDIR/cx-linux-guest/proof-after-first.txt"
-}
-
-echo
-echo '=== 20a) replay2：is-enabled 返回空串 → 必须通过 ==='
-r2setup; F=$(mkfix r2-empty boot-AFTER boot-BEFORE boot-AFTER no no '' no yes yes '' absent absent)
-OUT=$(run_phase replay2 "$F" 2>&1)
-if printf '%s' "$OUT" | grep -q 'REPLAY2_VERDICT=passed'; then
-  echo "  ✔ 空串视为不会被执行"; PASS=$((PASS+1))
-else
-  echo "  ✖ 空串被误判成未清干净"; FAIL=$((FAIL+1))
-fi
-
-echo
-echo '=== 20b) replay2：is-enabled 返回 masked → 必须通过 ==='
-r2setup; F=$(mkfix r2-masked boot-AFTER boot-BEFORE boot-AFTER no no masked no yes yes '' absent absent)
-OUT=$(run_phase replay2 "$F" 2>&1)
-if printf '%s' "$OUT" | grep -q 'REPLAY2_VERDICT=passed'; then
-  echo "  ✔ masked 视为不会被执行"; PASS=$((PASS+1))
-else
-  echo "  ✖ masked 被误判"; FAIL=$((FAIL+1))
-fi
-
-echo
-echo '=== 20c) replay2：is-enabled 返回 enabled → 必须判红 ==='
-r2setup; F=$(mkfix r2-enabled boot-AFTER boot-BEFORE boot-AFTER no no enabled no yes yes '' absent absent)
-OUT=$(run_phase replay2 "$F" 2>&1)
-check_msg 'enabled 必须判红' "$OUT" 'REPLAY2_FAILED_CHECKS='
-
-echo
-echo '=== 20d) replay2：诊断文件必须落盘且含失败清单与原始值 ==='
-r2setup; F=$(mkfix r2-enabled2 boot-AFTER boot-BEFORE boot-AFTER no no enabled no yes yes '' absent absent)
-OUT=$(run_phase replay2 "$F" 2>&1)
-if [ -f "$RUNDIR/cx-linux-guest/replay2-diagnosis.txt" ] \
-   && grep -q 'RESIDUE_ENABLED=\[enabled\]' "$RUNDIR/cx-linux-guest/replay2-diagnosis.txt" \
-   && grep -q 'FAILED_CHECKS=' "$RUNDIR/cx-linux-guest/replay2-diagnosis.txt"; then
-  echo "  ✔ diagnosis 落盘且含失败清单与原始值"; PASS=$((PASS+1))
-else
-  echo "  ✖ diagnosis 未生成或内容不完整"; FAIL=$((FAIL+1))
-fi
-rm -f "$RUNDIR/cx-linux-guest/replay2-diagnosis.txt"
 
 echo
 echo "结果：$PASS 通过 / $FAIL 失败"

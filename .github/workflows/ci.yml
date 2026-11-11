@@ -1901,9 +1901,6 @@ jobs:
             ${{ runner.temp }}/cx-linux-guest/boot-before-powercut.txt
             ${{ runner.temp }}/cx-linux-guest/proof-after-first.txt
             ${{ runner.temp }}/cx-linux-guest/boot-before-reboot2.txt
-            # 2026-11-11：replay2 判红时 GitHub 会回收 job 日志（gh run view 只剩 82 字节），
-            # 这份文件是唯一能看出「哪条断言红、各变量是什么」的证据。
-            ${{ runner.temp }}/cx-linux-guest/replay2-diagnosis.txt
           if-no-files-found: warn
           retention-days: 14
 

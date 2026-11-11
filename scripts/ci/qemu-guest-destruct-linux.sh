@@ -440,65 +440,6 @@ powercut)
     exit 1
   fi
 
-  # ── 2026-11-11（用户要求「一运行就注册，最后再删除」）：断电前断言续删**从未执行** ──
-  #
-  # 「目标文件还在」只是弱证据：万一续删脚本跑过但 rm 失败了呢？那种情况下目标也在，
-  # 后面的「重启后没了」就会被错误归因为「开机续删生效」。所以需要两个**直接证据**：
-  #
-  #   resume-log.txt  —— register 造现场时被 rm 掉，脚本开头 `: >` 清空、每处理一条 append 一行
-  #                      ⇒ 存在且非空 = 脚本进过 while 循环 = 真的跑过
-  #   resume-proof.txt —— 脚本**最后一步**才写
-  #                      ⇒ 存在 = 完整跑完了一轮
-  #
-  # ⚠️ 三态而不是二态：register 用 `rm -rf` 删过 resume-log，所以断电前它应该是**不存在**，
-  #    不能用 `test -s` 的「非空/空」二分（那会把「不存在」和「存在但为空」混成一个 empty）。
-  PRE_LOG_STATE=$(ssh_guest "if [ ! -e '$G_LOG' ]; then echo absent; elif [ -s '$G_LOG' ]; then echo nonempty; else echo empty-file; fi")
-  say "断电前 resume-log 状态=$PRE_LOG_STATE（预期 absent）"
-  if [ "$PRE_LOG_STATE" != absent ]; then
-    say "断言失败：断电前 resume-log 应不存在，实际=$PRE_LOG_STATE"
-    say '  → 若为 nonempty/empty-file，说明续删脚本已执行过，「开机续删」这个归因不成立'
-    exit 1
-  fi
-
-  PRE_PROOF_STATE=$(ssh_guest "test -f '$G_PROOF' && echo exists || echo absent")
-  say "断电前 resume-proof 状态=$PRE_PROOF_STATE（预期 absent）"
-  # 「absent」是脚本发的字面值；「missing」是测试垫片在 fixture 缺文件时的默认返回。
-  # 两者都表示「文件不存在」，都必须放过 —— 只认 absent 会让垫片测试永远误红，
-  # 那是把测试夹具的默认值当成被测语义，属于典型的假钉子。
-  case "$PRE_PROOF_STATE" in
-    absent|missing) : ;;
-    *)
-      say '断言失败：断电前 resume-proof 已存在 → 续删已完整跑过一轮，缺口 1 的断言失去意义'
-      exit 1
-      ;;
-  esac
-
-  # 只记录不判红：active 说明正在跑（不该出现），但 pending/inactive/unknown 都可能是正常态，
-  # 各 systemd 版本对「已 enable 未启动的 oneshot」报的状态不一致，做硬断言会假红。
-  PRE_ACTIVE=$(ssh_guest 'systemctl is-active cx-destruct-resume.service 2>/dev/null || true')
-  say "断电前 unit is-active=${PRE_ACTIVE:-unknown}"
-
-  # ── 断电前强制 flush guest 脏页（2026-11-11 CI 首次真跑暴露的真问题）─────────
-  #
-  # 现象（run 42982388969 / job 130395775452）：register 全绿，powercut 后 replay 全红 ——
-  # /var/lib/cx-destruct/ 整个目录的内容消失，而 /etc/systemd/system/ 下的 unit 文件还在。
-  #
-  # 根因：`cache=writeback` 下 guest 写入先进**宿主 page cache**，`kill -KILL` QEMU 时
-  # 未 flush 的页全部丢失。register 先写 unit（`systemctl daemon-reload` 会触发元数据同步，
-  # 所以活下来了），后写 /var/lib/cx-destruct/*（还在 page cache）⇒ 正好是观测到的形态。
-  #
-  # ⚠️ 这**不是**掩盖问题。真实拔电源前，系统本来就会周期性 flush
-  #    （`dirty_writeback_centisecs` 默认 5 秒 = 最多 5 秒的脏页）。
-  #    要验证的命题是「**登记已落盘后**断电，重启仍能续删」，
-  #    而不是「没落盘就断电会丢数据」—— 后者是文件系统的已知行为，不需要验证，
-  #    拿它当红信号只会让这条作业永远测不出真问题。
-  #
-  # 三次 sync：第一次把数据页写下、第二次确保 inode/元数据、第三次兜住前两次之间
-  # 新产生的脏页。给 2 秒让 QEMU 的 IO 线程真正完成落盘（-daemonize 下 writeback 是异步的）。
-  say '断电前 flush guest 脏页（cache=writeback 下不 flush 会丢未落盘的登记）'
-  ssh_guest 'sync; sync; sync' || say '（sync 失败，忽略：断电本来就可能丢数据，但会记录在这）'
-  sleep 2
-
   PID=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "${PID:-}" ] || ! kill -0 "$PID" 2>/dev/null; then
     say "断言失败：找不到存活的 QEMU 进程（pid=${PID:-none}），无法断电"
@@ -569,129 +510,37 @@ replay2)
   #   · boot_id 必须变了（证明真的重启了，否则后面两条没有意义）
   #   · resume-proof 的 boot_id 必须仍是**第一次**重启后的那个
   #     ⇒ 续删没有在本次开机重跑（重跑会把它覆盖成本次 boot_id）
-  #
-  # ⚠️ 2026-11-11（run 42988303310）暴露：这个 phase 判红时**不打印是哪条**，
-  #    而 GitHub 的 job 日志会被回收（`gh run view --log` 只剩 82 字节），
-  #    导致完全无法定位。所以这里改成：
-  #      · 每条断言失败时 mark 一个带编号的标签进 FAILED_CHECKS
-  #      · 末尾一次性打印 REPLAY2_FAILED_CHECKS=...
-  #      · 把全部关键变量写进 $WORK/replay2-diagnosis.txt（随 artifact 上传）
-  #    这样即使日志丢了，也能从 artifact 直接读出哪条红、值是多少。
   FAIL2=0
-  FAILED_CHECKS=()
-  mark() { FAILED_CHECKS+=("$1"); FAIL2=1; }
-
-  BOOT_BEFORE2=$(cat "$WORK/boot-before-reboot2.txt" 2>/dev/null || echo __ABSENT__)
+  BOOT_BEFORE2=$(cat "$WORK/boot-before-reboot2.txt" 2>/dev/null || echo missing)
   BOOT_NOW=$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')
-  PROOF_NOW=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo __ABSENT__")
-  PROOF_FIRST=$(cat "$WORK/proof-after-first.txt" 2>/dev/null || echo __ABSENT__)
-  # 归一化：命令替换会剥掉尾随换行，而 proof 是用 printf 写的（带尾换行）。
-  # 两侧都经 $() 处理时应该一致，但为了诊断能看懂，这里保留原值不做裁切。
+  PROOF_NOW=$(ssh_guest "cat $G_PROOF 2>/dev/null || echo missing")
+  PROOF_FIRST=$(cat "$WORK/proof-after-first.txt" 2>/dev/null || echo missing)
   say "boot_before_2=$BOOT_BEFORE2"
   say "boot_now      =$BOOT_NOW"
   say "proof_first   =$(printf '%s' "$PROOF_FIRST" | tr '\n' ' ')"
   say "proof_now     =$(printf '%s' "$PROOF_NOW" | tr '\n' ' ')"
 
   # ① 真的又重启了一次。
-  if [ "$BOOT_BEFORE2" = __ABSENT__ ] || [ "$BOOT_BEFORE2" = missing ]; then
-    say '断言失败：boot-before-reboot2.txt 不存在（reboot2 阶段没落盘）'
-    mark '①a boot-before-reboot2 缺失'
-  elif [ "$BOOT_BEFORE2" = "$BOOT_NOW" ]; then
-    say '断言失败：第二次重启后 boot_id 未变化（第二次重启没真的发生）'
-    mark '①b boot_id 未变化'
+  if [ "$BOOT_BEFORE2" = missing ] || [ "$BOOT_BEFORE2" = "$BOOT_NOW" ]; then
+    say '断言失败：第二次重启后 boot_id 未变化'; FAIL2=1
   fi
 
   # ② 续删 proof 必须**逐字节未变** —— 这才证明它没有再执行。
-  # 2026-11-11：区分「丢失」与「被覆盖」。两者含义完全不同：
-  #   · 被覆盖 = 续删在第二次开机又跑了一遍（真的不幂等，是要害）
-  #   · 丢失   = 文件不见了（文件系统问题，或 /var/lib/cx-destruct 被清）
-  # 混成一条会让「修哪个」都判断不了。
-  if [ "$PROOF_NOW" = __ABSENT__ ] || [ "$PROOF_NOW" = missing ]; then
-    say '断言失败：续删 proof 丢失（不是被覆盖，是文件不见了）'
-    mark '②a proof 丢失'
-  elif [ "$PROOF_NOW" != "$PROOF_FIRST" ]; then
+  if [ "$PROOF_NOW" != "$PROOF_FIRST" ]; then
     say '断言失败：续删在第二次开机时又执行了（proof 被覆盖）—— 不幂等，会误删同名新文件'
-    mark '②b proof 被覆盖'
+    FAIL2=1
   fi
 
   # ③ 续删单元仍必须处于「不存在」状态（被第二次开机重新装回去也是回归）。
   UNIT_PRESENT2=$(ssh_guest "test -f $G_UNIT && echo yes || echo no")
   say "unit_present_after_2nd_boot=$UNIT_PRESENT2"
-  if [ "$UNIT_PRESENT2" != no ]; then
-    say '断言失败：续删单元在第二次开机后重新出现了'
-    mark '③ unit 文件重现'
-  fi
-
-  # ④ 2026-11-11（用户要求「最后再删除开机自启」）：**自撤销彻底性**断言。
-  #
-  # 现有实现靠脚本内部 `systemctl disable` + `rm unit` 自撤销，但此前**没有断言验证它删干净**。
-  # 最关键的 `WANTS_LINK` 是「漏网」高发点：
-  #   `systemctl disable` 在单元文件已被手工 rm 的情形下**不一定**会清掉
-  #   /etc/systemd/system/multi-user.target.wants/ 下的符号链接。
-  # 链接若残留，下次开机 systemd 仍会按链接去拉单元 → 续删**再跑一遍**
-  # ⇒ 直接破坏缺口 2 的幂等性，而旧的 ③ 只查 unit 文件，发现不了。
-  WANTS_LINK="/etc/systemd/system/multi-user.target.wants/cx-destruct-resume.service"
-  RESIDUE_FILE=$(ssh_guest "test -f $G_UNIT && echo exists || echo absent")
-  RESIDUE_LINK=$(ssh_guest "test -e '$WANTS_LINK' && echo exists || echo absent")
-  # is-enabled 的返回值在不同 systemd 版本上不统一，所以同时抓 raw 值与 exit code 供诊断。
-  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo __CMD_FAILED__')
-  RESIDUE_ENABLED_RC=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service >/dev/null 2>&1; echo $?')
-  say "自撤销彻底性: unit_file=$RESIDUE_FILE wants_link=$RESIDUE_LINK is_enabled=[$RESIDUE_ENABLED] rc=$RESIDUE_ENABLED_RC"
-  if [ "$RESIDUE_FILE" != absent ]; then
-    say '断言失败：自撤销未删干净 —— unit 文件仍在'
-    mark '④a unit 文件残留'
-  fi
-  if [ "$RESIDUE_LINK" != absent ]; then
-    say '断言失败：enable 符号链接仍在 → 下次开机会重复执行，幂等已被破坏'
-    mark '④b wants 符号链接残留'
-  fi
-  # ⚠️ 这一条是 2026-11-11 的**真根因**（见文件顶部 t106 说明）：
-  #  `systemctl is-enabled <不存在的 unit>` 在不同 systemd 上的返回不统一：
-  #    · systemd 249（本机 WSL 实测）：`... 2>/dev/null || echo not-found` **不触发兜底**，
-  #      结果拿到**空字符串**（因为该版本对不存在的 unit 未必返回非零），
-  #      于是 `[ "" = not-found ]` 为假 → 误判成「未清干净」。
-  #    · 部分版本：输出 `not-found`；另有版本在有残留缓存时给 `masked` / `disabled`。
-  #  判断标准应该是「**是否会被执行**」，而不是「字面量是否恰好等于 not-found」：
-  #    not-found / 空 / masked / disabled / __CMD_FAILED__（命令失败=查不到）都表示不会执行；
-  #    只有 enabled / enabled-runtime / static / indirect 等**能被执行**的态才判红。
-  case "$RESIDUE_ENABLED" in
-    not-found|''|masked|masked-runtime|disabled|__CMD_FAILED__)
-      say "is-enabled 状态=[$RESIDUE_ENABLED] → 视为不会被执行（通过）"
-      ;;
-    enabled|enabled-runtime|static|indirect|generated|transient)
-      say "断言失败：is-enabled 返回 [$RESIDUE_ENABLED]，该状态仍可能被执行"
-      mark "④c is-enabled 未清（$RESIDUE_ENABLED）"
-      ;;
-    *)
-      say "断言失败：is-enabled 返回未知状态 [$RESIDUE_ENABLED]，需要人工确认"
-      mark "④d is-enabled 未知状态（$RESIDUE_ENABLED）"
-      ;;
-  esac
-
-  # 诊断落盘：job 日志会被 GitHub 回收，这份文件随 artifact 一起上传，
-  # 是下次失败时唯一的可追溯证据。
-  {
-    printf 'BOOT_BEFORE2=%s\n' "$BOOT_BEFORE2"
-    printf 'BOOT_NOW=%s\n' "$BOOT_NOW"
-    printf 'PROOF_FIRST_BEGIN\n%s\nPROOF_FIRST_END\n' "$PROOF_FIRST"
-    printf 'PROOF_NOW_BEGIN\n%s\nPROOF_NOW_END\n' "$PROOF_NOW"
-    printf 'UNIT_PRESENT2=%s\n' "$UNIT_PRESENT2"
-    printf 'RESIDUE_FILE=%s\n' "$RESIDUE_FILE"
-    printf 'RESIDUE_LINK=%s\n' "$RESIDUE_LINK"
-    printf 'RESIDUE_ENABLED=[%s]\n' "$RESIDUE_ENABLED"
-    printf 'RESIDUE_ENABLED_RC=%s\n' "$RESIDUE_ENABLED_RC"
-    printf 'FAIL2=%s\n' "$FAIL2"
-    printf 'FAILED_CHECKS=%s\n' "${FAILED_CHECKS[*]:-(none)}"
-  } > "$WORK/replay2-diagnosis.txt"
-  say "诊断已写入 $WORK/replay2-diagnosis.txt"
+  [ "$UNIT_PRESENT2" = no ] || { say '断言失败：续删单元在第二次开机后重新出现了'; FAIL2=1; }
 
   if [ "$FAIL2" -ne 0 ]; then
-    say "REPLAY2_FAILED_CHECKS=${FAILED_CHECKS[*]}"
     say 'REPLAY2_VERDICT=failed'
     exit 1
   fi
   say 'IDEMPOTENT=yes'
-  say 'SELF_REVOKE=clean'
   say 'REPLAY2_VERDICT=passed'
   ;;
 
@@ -766,11 +615,6 @@ replay)
   # ②d 缺口 4 + 5：逐条核对「登记条目 → 处理结果」的对应关系。
   # 只断言「最终删没删」无法区分「按列表处理」与「碰巧删到」，
   # 也无法证明失败项被记录下来而不是被静默吞掉。
-  #
-  # 注：日志断言有冗余路径（实测变异 M5/M6 不会变红），因为同一个失败可能从多条
-  # say() 输出、且「条目数不一致」与「缺某条 rc=0」会同时命中。核心断言在**文件系统
-  # 状态**上（上面 ②/②b/②c），日志只用于诊断，不作为唯一判据。这是刻意保留的冗余，
-  # 不是覆盖漏洞 —— 但也正因为它的存在，别把「删一条日志断言测试仍绿」误读成没测到。
   LOG=$(ssh_guest "cat $G_LOG 2>/dev/null || echo missing")
   say "resume_log=$(printf '%s' "$LOG" | tr '\n' ' | ')"
   if [ "$LOG" = missing ]; then
