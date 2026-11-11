@@ -1677,11 +1677,36 @@ jobs:
   # 所以「有设备、无权限」这个卡点已经在提权后消失了，剩下只缺客机镜像。
   #
   # 它能证明什么 / 不能证明什么（不许把 Linux 客机说成 Windows RunOnce 已覆盖）：
-  #   能：QEMU 在托管 runner 上真跑得起来、guest 真能重启、重启后的自动化真会执行、
-  #       执行完真会删目标并自撤销。
-  #   不能：HKCU\...\RunOnce 的登记/撤销；WM_QUERYENDSESSION 时序；
-  #         MOVEFILE_DELAY_UNTIL_REBOOT 重启后消失。那三条仍只有 qemu-shutdown-destruct
-  #         的 Windows 客机链路能覆盖。
+  #   能（2026-11-11 t98 补全后共 12 项）：
+  #     · QEMU 在托管 runner 上真跑得起来、guest 真能重启；
+  #     · 续删单元真的执行、目标真的被删、单元真的自撤销；
+  #     · **强制断电后仍能续删**（kill -KILL QEMU 等价拔电源，再用同一覆盖层冷启动）
+  #       —— 这条排除了「有序 shutdown 顺手把活干了」这个混淆项；
+  #     · **多次重启只执行一次**（第二次开机后 resume-proof 逐字节未变）；
+  #     · **多目标按列表处理**（3 个登记目标 + 1 个未登记对照必须存活）；
+  #     · **登记值本身正确**（targets.txt 字节级、unit 的 ExecStart、脚本可执行位）；
+  #     · **异常路径不中断列表**（列表中间插一个目录，rm -f 必失败，后续条目仍被删）。
+  #   不能（Windows 专属，Linux 客机无从覆盖）：
+  #     · HKCU\...\RunOnce 的登记与撤销 —— 由 wiring-probe 覆盖（重放命令串）；
+  #     · WM_QUERYENDSESSION / WM_ENDSESSION 时序；
+  #     · MOVEFILE_DELAY_UNTIL_REBOOT / PendingFileRenameOperations 重启后消失。
+  #
+  #   ⚠️ 缺口（如实记录，不许当成已覆盖）：
+  #     PendingFileRenameOperations 在真实 Windows 重启后的清除行为，目前**无验证**。
+  #
+  #     为什么「在线下载镜像」也解决不了（已实测，不是推测）：
+  #       · 镜像能拿到 —— 微软确实提供 Windows Server 2022 评估版真 VHD
+  #         （LinkID=2195166，10208214528 B = 9.51 GiB，Range GET 返回 HTTP 206
+  #          且前 8 字节 = conectix 魔数，已实测可读）。
+  #         注意 LinkID=2195280 是 **ISO**（5044094976 B），不是 VHD，别混。
+  #       · 但 PendingFileRenameOperations 与 RunOnce 都是 **Windows 运行时**写进注册表的。
+  #         qemu-nbd 离线挂载只能看 NTFS 文件系统，看不到注册表项；
+  #         要让 Windows 写它们，必须先在客机里执行代码 ⇒ 又回到注入通道问题。
+  #       · Windows 评估版默认既不开 OpenSSH Server 也不开 WinRM。
+  #         走 unattend 完整装机 20-40 min，叠加 9.51 GiB 下载（1-3 min）+ 转换（1-2 min）
+  #         + 两轮重启 = 35-50 min，会撞 qemu-shutdown-destruct 的 45 min 上限。
+  #     ⇒ 结论：要么人工准备「预装 SSH + purge-tests.exe」的 Windows qcow2 并配置
+  #       repo variable CX_QEMU_GUEST_IMAGE，要么接受这条覆盖缺失。当前选后者。
   # ---------------------------------------------------------------------------
 
   qemu-destruct-linux-guest:
@@ -1691,9 +1716,16 @@ jobs:
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
     if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
-    # 硬上限：30 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
-    # + 客机冷启动（≤7 min）+ 登记/重启/断言（~5 min），再留余量。
-    timeout-minutes: 30
+    # 硬上限：50 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
+    # + 客机冷启动（≤7 min）× 3 轮（首次 / 断电后冷启动 / 第二次重启）
+    # + 登记/断言（~5 min）+ 证据收集（~2 min），再留余量。
+    #
+    # 2026-11-11（t98）：30 → 50。原来只有一轮重启，现在是一轮断电 + 一轮重启，
+    # 冷启动次数从 1 变 3（boot / powercut 后冷启动 / reboot2）。
+    # 实测基线约 12-18 分钟，加两轮后估 18-26 分钟；刻意留到 50 而不卡 42，
+    # 因为客机冷启动时间在共享 runner 上波动明显（实测 3-7 分钟）。
+    # 若实测稳定超 35 分钟再回来调。
+    timeout-minutes: 50
     # 独立 concurrency + 不取消：中途被新 push 取消会留下「已登记、未续删」的客机，
     # 与 vm-shutdown-destruct 的理由一致。宁可排队也不取消。
     concurrency:
