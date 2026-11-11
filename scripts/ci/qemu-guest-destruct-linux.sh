@@ -634,8 +634,22 @@ replay2)
   RESIDUE_FILE=$(ssh_guest "test -f $G_UNIT && echo exists || echo absent")
   RESIDUE_LINK=$(ssh_guest "test -e '$WANTS_LINK' && echo exists || echo absent")
   # is-enabled 的返回值在不同 systemd 版本上不统一，所以同时抓 raw 值与 exit code 供诊断。
-  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo __CMD_FAILED__')
+  # ⚠️ 取 is-enabled 状态时必须**只取第一行**：
+  #   `cmd 2>/dev/null || echo __CMD_FAILED__` 在 cmd 输出 stdout 但返回非零时，
+  #   会把 stdout 与兜底值**拼成两行**（实测得到 "not-found\n__CMD_FAILED__"），
+  #   而下面的 case 是整值匹配 ⇒ 永远匹配不上白名单。
+  #   所以显式 head -n1 归一化，再用单独的 rc 探测判断命令是否失败。
+  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null | head -n1')
   RESIDUE_ENABLED_RC=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service >/dev/null 2>&1; echo $?')
+  # 命令本身失败（rc 非 0 且 rc 非 1/3/4 这类「未安装/未启用」的合法码）时给一个显式标记，
+  # 避免空串与「真的查不到」混淆。systemd 的合法码：1=disabled、3=static、4=not-found。
+  case "${RESIDUE_ENABLED_RC:-}" in
+    0|1|3|4) : ;;
+    *)
+      say "警告：is-enabled 返回异常退出码 ${RESIDUE_ENABLED_RC}，按「查不到」处理"
+      RESIDUE_ENABLED="__CMD_FAILED__"
+      ;;
+  esac
   say "自撤销彻底性: unit_file=$RESIDUE_FILE wants_link=$RESIDUE_LINK is_enabled=[$RESIDUE_ENABLED] rc=$RESIDUE_ENABLED_RC"
   if [ "$RESIDUE_FILE" != absent ]; then
     say '断言失败：自撤销未删干净 —— unit 文件仍在'
