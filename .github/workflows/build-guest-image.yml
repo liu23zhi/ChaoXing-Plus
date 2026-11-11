@@ -107,98 +107,127 @@ jobs:
           accessible || { echo '::error title=KVM 不可读写::提权失败'; exit 1; }
           echo 'KVM_ACCESSIBLE=yes'
 
+      - name: 修复 DNS（runner 解析不了 ubuntu.com 系列）
+        # ⚠️ 2026-11-11 实测：托管 runner 的默认 DNS 解析不了
+        #    azure.archive.ubuntu.com / archive.ubuntu.com / ports.ubuntu.com，
+        #    而 github.com 返回 200 —— 是 DNS 局部故障，不是网络全断。
+        #    直接改用公共 DNS（8.8.8.8 / 1.1.1.1），让 apt 恢复正常。
+        #    sudo 已确认可用（KVM 提权那步就是 sudo）。
+        timeout-minutes: 3
+        run: |
+          set -u
+          echo "=== 当前 DNS 配置 ==="
+          cat /etc/resolv.conf 2>/dev/null || true
+          echo
+          echo "=== 改前解析测试 ==="
+          getent hosts archive.ubuntu.com || echo "  archive.ubuntu.com 解析失败"
+          getent hosts github.com >/dev/null && echo "  github.com 可解析"
+          echo
+          # Ubuntu 24.04 用 systemd-resolved；直接改 /etc/resolv.conf 可能被覆盖，
+          # 所以两条都做：先改 resolved 的配置，再直接覆盖 resolv.conf。
+          echo "=== 设置公共 DNS ==="
+          sudo mkdir -p /etc/systemd/resolved.conf.d
+          printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1 8.8.4.4\nFallbackDNS=1.0.0.1\n' | \
+            sudo tee /etc/systemd/resolved.conf.d/cx-dns.conf >/dev/null
+          # 直接覆盖（resolved 不生效时的兜底；CI runner 可以这么做）
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n' | \
+            sudo tee /etc/resolv.conf >/dev/null
+          sudo systemctl restart systemd-resolved 2>/dev/null || true
+          sleep 2
+          echo
+          echo "=== 改后 DNS 配置 ==="
+          cat /etc/resolv.conf 2>/dev/null || true
+          echo
+          echo "=== 改后解析测试 ==="
+          OK=no
+          for h in archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com; do
+            if getent hosts "$h" >/dev/null 2>&1; then
+              echo "  $h 解析成功 -> $(getent hosts $h | head -1 | awk '{print $1}')"
+              OK=yes
+            else
+              echo "  $h 仍解析失败"
+            fi
+          done
+          echo "DNS_FIXED=$OK"
+          echo "DNS_FIXED=$OK" >> "$GITHUB_ENV"
+          # 不在这里 exit 1 —— 后面「安装依赖」有 docker 降级路径，
+          # DNS 修不好也不会硬卡住。但要留下明确记录。
+          if [ "$OK" != yes ]; then
+            echo "::warning title=公共 DNS 也没修好::后续依赖 docker 降级路径"
+          fi
+
       - name: 安装依赖
-        # ⚠️ 2026-11-11 实测：托管 runner 的 DNS **解析不了 ubuntu.com 系列域名**，
-        #    但 github.com 正常（HTTP 200）。日志实证：
-        #      azure.archive.ubuntu.com 不可达
-        #      archive.ubuntu.com 不可达
-        #      ports.ubuntu.com 不可达
-        #      (archive.ubuntu.com 解析失败)
-        #      github.com http=200
-        #    且 `apt-get update -qq` 在索引全失败时**仍返回 0**（假成功），
-        #    导致 install 拿残缺索引无限重试。
-        #    ⇒ 本步骤改成「优先用 runner 预装的，apt 只作可选补充」，
-        #      即使 apt 完全不可用也能跑完。
+        # 用户 2026-11-11 要求：**优先用 apt 安装**（DNS 已在上一一步修好）。
+        # 保留 docker 降级作为兜底，但不再是主路径。
         timeout-minutes: 12
         run: |
           set -u
-          echo "=== 已预装的工具检查 ==="
-          for b in docker curl tar unzip ssh python3; do
-            if command -v "$b" >/dev/null 2>&1; then echo "  $b = $(command -v $b)"; else echo "  $b 缺失"; fi
-          done
-
-          NEED_QEMU_IMG=no
-          NEED_QEMU_SYS=no
-          command -v qemu-img >/dev/null 2>&1 || NEED_QEMU_IMG=yes
-          command -v qemu-system-x86_64 >/dev/null 2>&1 || NEED_QEMU_SYS=yes
-          echo "缺 qemu-img=$NEED_QEMU_IMG 缺 qemu-system=$NEED_QEMU_SYS"
-
-          # ① 先试 apt（给 8 分钟上限）。DNS 坏掉时会快速失败，不阻塞后续。
-          if [ "$NEED_QEMU_IMG" = yes ] || [ "$NEED_QEMU_SYS" = yes ]; then
-            echo "=== 尝试 apt 安装 qemu（可能因 DNS 失败，属预期） ==="
-            APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
-            apt_ok=no
-            if timeout 120 sudo apt-get update -qq --error-on-any-failure $APT_OPTS > /tmp/aptup.log 2>&1; then
-              if timeout 240 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                   --error-on-any-failure $APT_OPTS qemu-utils qemu-system-x86 > /tmp/aptinst.log 2>&1; then
-                apt_ok=yes
+          echo "=== DNS 当前状态 ==="
+          cat /etc/resolv.conf 2>/dev/null | head -5 || true
+          getent hosts archive.ubuntu.com >/dev/null 2>&1 \
+            && echo "  archive.ubuntu.com 可解析" \
+            || echo "  archive.ubuntu.com 解析失败（将走 docker 降级）"
+          echo
+          # ── 主路径：apt ──────────────────────────────────────────────────
+          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          apt_ok=no
+          for attempt in 1 2 3; do
+            echo "=== apt-get update 第 $attempt 次 ==="
+            # ⚠️ update 在索引全失败时仍返回 0，必须加 --error-on-any-failure
+            if timeout 150 sudo apt-get update -qq --error-on-any-failure $APT_OPTS 2>&1 | tail -10; then
+              echo "update 成功"
+              echo "=== apt-get install ==="
+              if timeout 300 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                   --error-on-any-failure $APT_OPTS \
+                   qemu-utils qemu-system-x86 2>&1 | tail -10; then
+                apt_ok=yes; break
               fi
             fi
-            if [ "$apt_ok" = yes ]; then
-              echo "apt 安装成功"
-            else
-              echo "apt 不可用（DNS 问题，属环境限制）："
-              tail -5 /tmp/aptup.log 2>/dev/null || true
-              tail -5 /tmp/aptinst.log 2>/dev/null || true
-            fi
-          fi
-
-          # ② apt 不行就从 docker 镜像里**提取 qemu 二进制**。
-          #    runner 必有 docker（本 workflow 后面就要用它跑 dockurr/windows）。
-          #    用 dockurr/windows 本身：它内部就有 qemu-system-x86_64（那是它的核心）。
-          command -v qemu-img >/dev/null 2>&1 || {
-            echo "=== apt 未装到 qemu-img，改从 docker 镜像提取 ==="
-            # 先把 dockurr/windows 拉下来（后面本来也要用，不算额外开销）
+            echo "第 $attempt 次失败，10 秒后重试"
+            sleep 10
+          done
+          echo "APT_OK=$apt_ok"
+          echo
+          # ── 兜底：docker 提取 qemu ────────────────────────────────────────
+          if ! command -v qemu-img >/dev/null 2>&1; then
+            echo "=== apt 未装到 qemu-img，走 docker 提取 ==="
             docker pull docker.io/dockurr/windows:latest 2>&1 | tail -3 || true
             CID=$(docker create docker.io/dockurr/windows:latest 2>/dev/null || echo "")
             if [ -n "$CID" ]; then
-              echo "  临时容器 = $CID"
               mkdir -p "$RUNNER_TEMP/qemu-bin"
-              # 提取 qemu 二进制及其依赖的共享库
-              for f in qemu-system-x86_64 qemu-img qemu-storage-daemon; do
-                docker cp "$CID:/usr/bin/$f" "$RUNNER_TEMP/qemu-bin/" 2>/dev/null && echo "  提取 $f" || true
+              for f in qemu-system-x86_64 qemu-img; do
+                docker cp "$CID:/usr/bin/$f" "$RUNNER_TEMP/qemu-bin/" 2>/dev/null \
+                  && echo "  提取 $f" || true
               done
               docker rm -f "$CID" >/dev/null 2>&1 || true
               chmod +x "$RUNNER_TEMP/qemu-bin/"* 2>/dev/null || true
-              ls -la "$RUNNER_TEMP/qemu-bin" 2>/dev/null || true
             fi
-          }
-
-          # ③ 最终断言：qemu-img 必须可用（它是压缩/取盘的关键）
+          fi
+          echo
+          # ── 最终断言 ─────────────────────────────────────────────────────
           if command -v qemu-img >/dev/null 2>&1; then
             echo "qemu-img = $(command -v qemu-img)"
             qemu-img --version | head -1
           elif [ -x "$RUNNER_TEMP/qemu-bin/qemu-img" ]; then
             echo "qemu-img 来自 docker 提取"
-            export PATH="$RUNNER_TEMP/qemu-bin:$PATH"
             echo "$RUNNER_TEMP/qemu-bin" >> "$GITHUB_PATH"
-            "$RUNNER_TEMP/qemu-bin/qemu-img" --version | head -1 || echo "（提取的 qemu-img 可能缺共享库，后续用 docker 跑）"
+            export PATH="$RUNNER_TEMP/qemu-bin:$PATH"
+            "$RUNNER_TEMP/qemu-bin/qemu-img" --version | head -1 \
+              || echo "（提取的二进制可能缺共享库）"
           else
-            echo "::error title=qemu-img 不可用::apt 因 DNS 失败，docker 提取也没成功"
-            echo "--- 环境诊断 ---"
+            echo "::error title=qemu-img 不可用::apt 与 docker 都没成功"
             cat /etc/resolv.conf 2>/dev/null || true
-            getent hosts archive.ubuntu.com || echo "(archive.ubuntu.com 解析失败)"
+            getent hosts archive.ubuntu.com || echo "(解析失败)"
             docker --version || echo "(无 docker)"
             exit 1
           fi
-
-          # qemu-system-x86_64 不在这里硬断言 —— 「验证 SSH」那步会用它，
-          # 若不可用会在那步明确失败（且已有 setup-steps 证据兜底）。
-          command -v qemu-system-x86_64 >/dev/null 2>&1 && {
-            qemu-system-x86_64 --version | head -1
-            qemu-system-x86_64 -accel help 2>/dev/null | head -3 || true
-          } || echo "注意：qemu-system-x86_64 当前不可用（验证 SSH 步骤可能需要它）"
-
+          command -v qemu-system-x86_64 >/dev/null 2>&1 \
+            && qemu-system-x86_64 --version | head -1 \
+            || echo "注意：qemu-system-x86_64 当前不可用"
+          command -v qemu-system-x86_64 >/dev/null 2>&1 \
+            && { qemu-system-x86_64 -accel help 2>/dev/null | head -3 || true; } || true
+          echo
           df -h /
       - name: 准备 SSH 密钥
         id: keys
@@ -387,10 +416,10 @@ jobs:
 
             # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
             #
-            # ⚠️ 2026-11-11（t111）：这一段原先用 `Add-WindowsCapability ... | Out-Null`，
+            # ⚠️ 2026-11-11（t111）：这一段原先用 \`Add-WindowsCapability ... | Out-Null\`，
             #    把**成败静默掉了**。而它在无人值守环境里最常见的失败原因是拿不到
             #    Windows Update 源（dockur 的 NAT 能否出网未验证）。
-            #    失败后 Set-Service/Start-Service 会连环报错，但 $ErrorActionPreference='Continue'
+            #    失败后 Set-Service/Start-Service 会连环报错，但 \$ErrorActionPreference='Continue'
             #    让它继续往下走，最后只留一行模糊的 status。
             #    ⇒ 改成：抓返回码、显式记录 State、失败立刻回传 StepReport。
             # ⭐ 2026-11-11 关键：**优先用离线 zip**，完全不依赖 Windows Update。
@@ -400,38 +429,38 @@ jobs:
             #    因为 QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时而非 refused。
             #    zip 是微软官方 PowerShell/Win32-OpenSSH 发行包，随 OEM 进镜像，
             #    解压 + install-sshd.ps1 即可，确定性最高。
-            $osshZip = 'C:\OEM\OpenSSH-Win64.zip'
-            $osshDir = 'C:\Program Files\OpenSSH-Win64'
-            $osshMode = 'capability'
-            if (Test-Path $osshZip) {
+            \$osshZip = 'C:\OEM\OpenSSH-Win64.zip'
+            \$osshDir = 'C:\Program Files\OpenSSH-Win64'
+            \$osshMode = 'capability'
+            if (Test-Path \$osshZip) {
               Say 'OpenSSH install mode=offline-zip'
               try {
-                if (-not (Test-Path $osshDir)) {
-                  Expand-Archive -LiteralPath $osshZip -DestinationPath 'C:\Program Files' -Force -ErrorAction Stop
+                if (-not (Test-Path \$osshDir)) {
+                  Expand-Archive -LiteralPath \$osshZip -DestinationPath 'C:\Program Files' -Force -ErrorAction Stop
                 }
-                $sshdExe = Join-Path $osshDir 'sshd.exe'
-                Say "offline: sshd.exe exists=$(Test-Path $sshdExe)"
+                \$sshdExe = Join-Path \$osshDir 'sshd.exe'
+                Say "offline: sshd.exe exists=\$(Test-Path \$sshdExe)"
                 # host key 首次必须生成，否则 sshd 起不来
-                & (Join-Path $osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: $_" }
+                & (Join-Path \$osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: \$_" }
                 # 注册服务 + 自启 + 防火墙规则
-                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: $_" }
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: \$_" }
                 # sshd 需要能找到自身 dll
-                $env:Path = "$osshDir;$env:Path"
-                [Environment]::SetEnvironmentVariable('Path', "$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
-                $osshMode = 'offline-zip-ok'
+                \$env:Path = "\$osshDir;\$env:Path"
+                [Environment]::SetEnvironmentVariable('Path', "\$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
+                \$osshMode = 'offline-zip-ok'
               } catch {
-                Say "ERROR offline zip install failed: $_"
-                $osshMode = 'offline-zip-failed'
+                Say "ERROR offline zip install failed: \$_"
+                \$osshMode = 'offline-zip-failed'
               }
-              StepReport 'OpenSSHInstallMode' $osshMode
+              StepReport 'OpenSSHInstallMode' \$osshMode
             } else {
               Say 'WARN OpenSSH zip 不在 OEM，回退到 Windows Update（可能失败）'
               StepReport 'OpenSSHInstallMode' 'fallback-capability-no-zip'
             }
 
             # 下面这段是 WU 路径：只有在没有 zip 时才真正执行。
-            # 有 zip 成功时 $osshMode=offline-zip-ok，跳过 WU 避免无谓联网等待。
-            if ($osshMode -notlike 'offline-zip-ok') {
+            # 有 zip 成功时 \$osshMode=offline-zip-ok，跳过 WU 避免无谓联网等待。
+            if (\$osshMode -notlike 'offline-zip-ok') {
             # 1) 装 OpenSSH Server（回退路径）
             \$capErr = ''
             \$capAdded = 'not-attempted'
