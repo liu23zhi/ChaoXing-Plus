@@ -24,6 +24,11 @@ import { createTestDirectory, resolveTestPath } from './test-helpers/temp-direct
 // 按 ANSI 解码，dot-source 路径变乱码后直接失败。所有 .ps1 都必须经这个带 BOM 的写法生成。
 import { writePowerShellScript, runPowerShellScript } from './test-helpers/windows-script.mjs';
 
+// 2026-11-11: artifact filename localized to Chinese (user request). Built from the same
+// code points as scripts/windows-real-client-injection.ps1 so the two sides cannot drift.
+const ARTIFACT_REPORT_SUFFIX = String.fromCharCode(0x6CE8, 0x5165, 0x62A5, 0x544A) + '.json';
+
+
 const windowsOnly = process.platform === 'win32' ? undefined : 'Windows PowerShell injection assertion regression';
 const source = resolveTestPath('scripts', 'windows-real-client-injection.ps1');
 const CASE_NAME = 'inject';
@@ -271,7 +276,7 @@ try {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const line = result.stdout.split(/\r?\n/u).findLast((value) => value.startsWith('{'));
   assert.ok(line, `harness must report the script outcome:\n${result.stdout}\n${result.stderr}`);
-  const artifactPath = path.join(runner, `cx-real-client-${CASE_NAME}-report.json`);
+  const artifactPath = path.join(runner, `cx-real-client-${CASE_NAME}-${ARTIFACT_REPORT_SUFFIX}`);
   return {
     output: result.stdout,
     error: JSON.parse(line).Error,

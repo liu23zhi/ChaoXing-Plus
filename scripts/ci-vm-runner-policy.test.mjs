@@ -88,7 +88,9 @@ test('ci.yml 的 runner 标签与必要检查名保持不变', async () => {
   const workflow = await read(WORKFLOW);
   assert.match(workflow, /runs-on: \[self-hosted, windows, cx-vm\]/u, 'self-hosted cx-vm 策略不变');
   assert.match(workflow, /name: 关机自毁与开机续删（虚拟机）/u, '既有 job 名不得改动');
-  assert.match(workflow, /vars\.CX_VM_ENABLED == 'true'/u, '变量门不变');
+  // 2026-11-11 用户三次要求「不要跳过任务」：CX_VM_ENABLED 变量门已取消，
+  // 否则该作业在从未配置该变量时永远 skip（且历史上还因此假绿）。
+  assert.doesNotMatch(workflow, /vars\.CX_VM_ENABLED/u, '变量门已取消（用户要求不跳过）');
   // 托管 runner 上的语义验证作业必须保留，否则「RunOnce 命令串是否可执行」
   // 会退回到「从未验证」。
   assert.match(workflow, /^ {2}wiring-probe:$/mu, 'wiring-probe 作业必须保留');
@@ -102,10 +104,14 @@ test('wiring-probe 必须真跑两阶段语义验证，不能只验证接线', a
   // 1) 触发：push / pull_request / workflow_dispatch 三档都跑。
   //    2026-11-10 合并时用户要求「完整 ci 添加上完整的关机自毁测试」，本作业
   //    是唯一能在托管 runner 上跑完整两阶段的作业，因此不再限定手动触发。
-  assert.match(job, /^\s+if: \|/mu, 'wiring-probe 必须显式声明 if 块');
-  assert.match(job, /github\.event_name == 'push'/u, '必须在 push 时运行（主干保护）');
-  assert.match(job, /github\.event_name == 'pull_request'/u, '必须在 pull_request 时运行（完整 CI 要求）');
-  assert.match(job, /github\.event_name == 'workflow_dispatch'/u, '必须保留手动触发');
+  assert.match(job, /^\s+if:/mu, 'wiring-probe 必须显式声明 if');
+  // 2026-11-11: if 不再按 event 分支。continue-on-error 仍可引用 event_name
+  // （那是「PR 上放行失败」，不是跳过作业，与「不跳过任务」不冲突）。
+  const ifLine = job.split('\n').find((l) => /^\s+if:/.test(l)) || '';
+  assert.doesNotMatch(ifLine, /github\.event_name/u, 'wiring-probe 的 if 不得再按 event_name 限制');
+  assert.match(ifLine, /needs\.gate\.result/u, 'wiring-probe 的 if 必须仍受 gate.result 约束');
+  assert.doesNotMatch(ifLine, /pull_request/u, 'wiring-probe 的 if 不得再按 pull_request 分支');
+  // 手动触发统一在 workflow 级（见下一条断言），作业 if 不再重复判定。
   assert.doesNotMatch(workflow, /^ {2}schedule:/mu, '不得挂 schedule');
 
   // 2) continue-on-error 只允许对 pull_request 一档放宽。
@@ -201,7 +207,10 @@ test('KVM 巡检段：轻量只读，不进 PR 门禁', async () => {
   //   ① 巡检段的 if 不按事件类型分支（只受日判重闸控制，不是 pass/fail 闸门）
   //   ② 它自己写明失败不阻塞 PR
   assert.doesNotMatch(job, /pull_request/u, 'KVM 巡检的 if 不得按 pull_request 单独判定');
-  assert.match(job, /if: needs\.gate\.outputs\.skip != 'yes'/u, 'KVM 巡检必须只受日判重闸控制');
+  assert.match(job, /if: needs\.gate\.result == 'success'/u, 'KVM 巡检只受 gate.result 约束（判重已取消）');
+  const kvmIf = job.split('\n').find((l) => /^\s+if:/.test(l)) || '';
+  assert.doesNotMatch(kvmIf, /needs\.gate\.outputs\.(skip|sha_verified)/u,
+    'KVM 巡检的 if 不得再读任何判重输出（outputs 段透传展示不算闸门）');
   assert.match(job, /红叉不影响任何 PR 的必需检查/u, '必须写明巡检失败不阻塞 PR');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
 

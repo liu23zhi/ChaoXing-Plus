@@ -69,24 +69,22 @@ async function qemuJobSection() {
   return jobSection(raw, 'qemu-shutdown-destruct');
 }
 
-test('QEMU 自毁作业只由 push 到 main 与手动触发，绝不进 PR 检查', async () => {
+test('QEMU 自毁作业已取消 event 限制（PR 上也跑）', async () => {
   const workflow = withoutComments(await read(WORKFLOW));
   const job = await qemuJobSection();
 
-  // 触发已统一在 ci.yml 的 workflow 级（它同时服务日常构建，必须挂 pull_request），
-  // 所以「不挂 pull_request」这条约束的对象只能是**作业自身的 if**。
-  // 原意是「45 分钟的 QEMU 链路不得压到每个 PR 上」，这里按事件白名单断言。
-  assert.match(job, /github\.event_name == 'push'/u, 'QEMU 作业必须在 push 到 main 时尝试');
-  assert.match(job, /github\.event_name == 'workflow_dispatch'/u, 'QEMU 作业必须支持手动触发');
-  assert.doesNotMatch(job, /github\.event_name == 'pull_request'/u, 'QEMU 作业不得在 pull_request 上运行');
+  // 2026-11-11 用户明确要求「不要跳过任务」：作业 if 不再按 event_name 分支。
+  // 历史：原写法限定 push/workflow_dispatch，PR 上整条 45 分钟链路被 skip；
+  // 后来发现「跳过却 success」是假绿（t96），最终改成 job 级只判 gate.result。
+  assert.doesNotMatch(job, /github\.event_name/u,
+    'QEMU 作业不得再按 event_name 限制（PR 上也要跑）');
+  assert.match(job, /needs\.gate\.result/u, 'QEMU 作业必须仍受 gate.result 约束');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
   // ci.yml 现在是唯一入口，不再是 callee，不得再声明 workflow_call。
   assert.doesNotMatch(workflow, /^ {2}workflow_call:\s*$/mu, 'ci.yml 已是唯一入口，不得再声明 workflow_call');
   assert.doesNotMatch(workflow, /^ {2}schedule:\s*$/mu, '不得再有 schedule（已改 push + 手动）');
   assert.doesNotMatch(workflow, /cron:/u, '不得残留任何 cron 表达式');
-
-  assert.match(job, /needs: gate/u, 'QEMU 作业必须经过日判重闸');
 });
 
 test('ci.yml#qemu-shutdown-destruct 必须跑在托管 ubuntu-24.04 上，不得退回 self-hosted', async () => {
