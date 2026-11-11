@@ -243,12 +243,12 @@ jobs:
           WORK="$RUNNER_TEMP/guest"
           PUBKEY=$(cat "$WORK/id.pub")
 
-          # ── OpenSSH 离线包（关键）────────────────────────────────────────
-          # 为什么不靠 Windows Update：Add-WindowsCapability 需要联网从 WU 拉，
-          # dockur 容器内 Windows 的 NAT 能否走到 WU 不保证。实测后果是
-          # 「Connection timed out during banner exchange」= sshd 从未装上。
-          # 这里把微软官方的 Win32-OpenSSH zip（约 5 MB）下到 OEM 目录，
-          # 随 $OEM$ 一起进镜像，客机内离线解压即可 —— 完全确定性。
+          # ── OpenSSH 离线包（关键，2026-11-11）────────────────────────────
+          # 为什么不靠 Windows Update：Add-WindowsCapability 对 OpenSSH.Server
+          # 是从 WU 拉包，dockur 容器内 Windows 走 NAT，能否出网无保证。
+          # 装不上的后果是 sshd 根本不存在，而宿主侧只看到「banner exchange 超时」
+          # —— QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时。
+          # 这里把微软官方 Win32-OpenSSH zip（约 4.9 MB）下到 OEM，随 $OEM$ 进镜像。
           OSSH_URL="https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
           if ! curl -fL --retry 3 --retry-delay 2 --max-time 180 \
                -o "$WORK/oem/OpenSSH-Win64.zip" "$OSSH_URL"; then
@@ -257,12 +257,11 @@ jobs:
           fi
           OSSH_SIZE=$(stat -c %s "$WORK/oem/OpenSSH-Win64.zip")
           echo "OpenSSH-Win64.zip = $OSSH_SIZE 字节"
-          # 体积断言：正常约 4.9 MB；小于 1 MB 说明拿到的是错误页
           if [ "$OSSH_SIZE" -lt 1000000 ]; then
-            echo "::error title=OpenSSH 离线包体积异常::只有 $OSSH_SIZE 字节"
+            echo "::error title=OpenSSH 包体积异常::只有 $OSSH_SIZE 字节（预期约 4.9 MB）"
             exit 1
           fi
-          # 校验是真 zip（前两字节 PK\x03\x04）
+          # zip 魔数必须是 PK\x03\x04，防止拿到 HTML 错误页
           OSSH_MAGIC=$(head -c 4 "$WORK/oem/OpenSSH-Win64.zip" | od -An -tx1 | tr -d ' \n')
           echo "zip magic = $OSSH_MAGIC"
           case "$OSSH_MAGIC" in
@@ -283,53 +282,154 @@ jobs:
           \$log = 'C:\OEM\setup.log'
           function Say(\$m) { "\$([datetime]::UtcNow.ToString('o')) \$m" | Tee-Object -FilePath \$log -Append }
 
+          # ── 2026-11-11（t111）：把每一步的结果**实时**回传到宿主侧 ──
+          #
+          # 为什么必须有：上一轮 SSH 连不上，而宿主机唯一能看到的证据（setup.log）
+          # 要等 install.bat 跑完才回传；一旦中途出问题或回传失败，宿主机就完全瞎了。
+          # 这个函数在**每一步执行完立刻**追加一行到 \\host.lan\Data\setup-steps.txt，
+          # 于是即使 SSH 完全不通、即使 install.bat 后面崩了，
+          # 宿主侧 /data 里也已经留下了「做到了哪一步、每步结果是什么」。
+          #
+          # 用 AppendAllText 而不是 Set-Content：每次只追加一行，不重写整个文件，
+          # 这样即使中途断电也不会把已写的内容丢光。
+          \$stepsFile = '\\\\host.lan\\Data\\setup-steps.txt'
+          \$stepsLocal = 'C:\OEM\setup-steps.txt'
+          function StepReport(\$name, \$value) {
+            \$line = "{0} {1} = {2}" -f [datetime]::UtcNow.ToString('HH:mm:ss'), \$name, \$value
+            # 本地一份（客机内可查）
+            try { Add-Content -LiteralPath \$stepsLocal -Value \$line -Encoding ascii -ErrorAction SilentlyContinue } catch { }
+            # 共享一份（宿主 /data 可查）—— 这是关键通道
+            try { Add-Content -LiteralPath \$stepsFile -Value \$line -Encoding ascii -ErrorAction SilentlyContinue } catch { }
+            Say "STEP \$line"
+          }
+          # 立刻写一行「活着」，这样哪怕后面立刻崩了，宿主侧也能知道 setup.ps1 起过
+          StepReport 'SetupStart' 'begin'
+
           try {
             Say 'setup start'
 
-            # 1) 装 OpenSSH Server。
-            # ⚠️ 2026-11-11 关键修正：原实现用 Add-WindowsCapability，
-            #    它**需要联网从 Windows Update 下载**。dockur 容器内 Windows 的 NAT
-            #    能否走到 WU 并不保证 —— 实测结果为「SSH banner 超时」，即 sshd 从未装上。
-            #    ⇒ 改用 Win32-OpenSSH 的**离线 zip**（5MB，随 OEM 一起进镜像），
-            #      完全绕开 Windows Update。这是微软官方在 GitHub 发布的发行包。
-            #    这样即使镜像里完全没有外网，也能确定性地装上 sshd。
+            # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
+            #
+            # ⚠️ 2026-11-11（t111）：这一段原先用 `Add-WindowsCapability ... | Out-Null`，
+            #    把**成败静默掉了**。而它在无人值守环境里最常见的失败原因是拿不到
+            #    Windows Update 源（dockur 的 NAT 能否出网未验证）。
+            #    失败后 Set-Service/Start-Service 会连环报错，但 $ErrorActionPreference='Continue'
+            #    让它继续往下走，最后只留一行模糊的 status。
+            #    ⇒ 改成：抓返回码、显式记录 State、失败立刻回传 StepReport。
+            # ⭐ 2026-11-11 关键：**优先用离线 zip**，完全不依赖 Windows Update。
+            #    Add-WindowsCapability 对 OpenSSH.Server 这种「按需功能」是从 WU 拉包，
+            #    dockur 容器内 Windows 走 NAT，能否走到 WU 不保证。装不上的后果是
+            #    sshd 根本不存在，而宿主侧只看到「banner exchange 超时」——
+            #    因为 QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时而非 refused。
+            #    zip 是微软官方 PowerShell/Win32-OpenSSH 发行包，随 OEM 进镜像，
+            #    解压 + install-sshd.ps1 即可，确定性最高。
             $osshZip = 'C:\OEM\OpenSSH-Win64.zip'
             $osshDir = 'C:\Program Files\OpenSSH-Win64'
+            $osshMode = 'capability'
             if (Test-Path $osshZip) {
-              Say 'installing OpenSSH from offline zip'
-              if (-not (Test-Path $osshDir)) {
-                Expand-Archive -LiteralPath $osshZip -DestinationPath 'C:\Program Files' -Force
+              Say 'OpenSSH install mode=offline-zip'
+              try {
+                if (-not (Test-Path $osshDir)) {
+                  Expand-Archive -LiteralPath $osshZip -DestinationPath 'C:\Program Files' -Force -ErrorAction Stop
+                }
+                $sshdExe = Join-Path $osshDir 'sshd.exe'
+                Say "offline: sshd.exe exists=$(Test-Path $sshdExe)"
+                # host key 首次必须生成，否则 sshd 起不来
+                & (Join-Path $osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: $_" }
+                # 注册服务 + 自启 + 防火墙规则
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: $_" }
+                # sshd 需要能找到自身 dll
+                $env:Path = "$osshDir;$env:Path"
+                [Environment]::SetEnvironmentVariable('Path', "$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
+                $osshMode = 'offline-zip-ok'
+              } catch {
+                Say "ERROR offline zip install failed: $_"
+                $osshMode = 'offline-zip-failed'
               }
-              $sshdExe = Join-Path $osshDir 'sshd.exe'
-              Say "sshd.exe exists=$(Test-Path $sshdExe) path=$sshdExe"
-              # 生成 host key（首次必须；否则 sshd 起不来）
-              & (Join-Path $osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: $_" }
-              # install-sshd.ps1 会注册服务、设自启、加防火墙规则
-              & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: $_" }
-              # 把 OpenSSH 目录加进 PATH（sshd 需要能找到自身 dll）
-              $env:Path = "$osshDir;$env:Path"
-              [Environment]::SetEnvironmentVariable('Path', "$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
+              StepReport 'OpenSSHInstallMode' $osshMode
             } else {
-              # 兜底：没有 zip 才退回 Windows Update（可能失败，但至少日志能看出来）
-              Say 'WARN OpenSSH zip missing from OEM, falling back to Windows Update'
-              $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-              Say "capability state=$($cap.State)"
-              if ($cap -and $cap.State -ne 'Installed') {
-                Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+              Say 'WARN OpenSSH zip 不在 OEM，回退到 Windows Update（可能失败）'
+              StepReport 'OpenSSHInstallMode' 'fallback-capability-no-zip'
+            }
+
+            # 下面这段是 WU 路径：只有在没有 zip 时才真正执行。
+            # 有 zip 成功时 $osshMode=offline-zip-ok，跳过 WU 避免无谓联网等待。
+            if ($osshMode -notlike 'offline-zip-ok') {
+            # 1) 装 OpenSSH Server（回退路径）
+            \$capErr = ''
+            \$capAdded = 'not-attempted'
+            try {
+              \$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+              if (-not \$cap) {
+                \$capErr = 'capability-not-offered'
+                Say "ERROR OpenSSH.Server capability 不存在（此 SKU 未提供？）"
+              } elseif (\$cap.State -eq 'Installed') {
+                \$capAdded = 'already-installed'
+                Say 'OpenSSH.Server already installed'
+              } else {
+                Say "installing OpenSSH.Server (was \$(\$cap.State))"
+                # 不加 Out-Null：要能拿到异常与返回码
+                \$r = Add-WindowsCapability -Online -Name \$cap.Name -ErrorAction Stop
+                \$capAdded = "ok(rc=\$(\$r.RestartNeeded))"
+                Say "Add-WindowsCapability 完成 RestartNeeded=\$(\$r.RestartNeeded)"
               }
+            } catch {
+              \$capAdded = 'failed'
+              \$capErr = \$_.Exception.Message
+              Say "ERROR Add-WindowsCapability 失败: \$capErr"
+              Say '  → 常见原因：dockur NAT 出不了网，拉不到 Windows Update 源'
             }
-            # 无论走哪条路，都确保服务在、能起
-            Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
-            Start-Service sshd -ErrorAction SilentlyContinue
-            $svc = Get-Service sshd -ErrorAction SilentlyContinue
-            if ($svc) {
-              Say "sshd status=$($svc.Status) startup=$($svc.StartType)"
+            StepReport 'AddWindowsCapability' \$capAdded
+            if (\$capErr) { StepReport 'AddWindowsCapabilityError' \$capErr }
+
+            # 装完必须复核一次 State —— 返回码 ok 不等于真的变成 Installed
+            try {
+              \$capAfter = (Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1).State
+            } catch { \$capAfter = 'query-failed' }
+            Say "OpenSSH.Server state-after=\$capAfter"
+            StepReport 'OpenSSHServerStateAfter' "\$capAfter"
+
+            }  # end of WU fallback branch (offline-zip 成功时跳过)
+            # sshd 服务是否存在（装不上时这里就是 False，一目了然）
+            \$svcExists = \$null -ne (Get-Service -Name sshd -ErrorAction SilentlyContinue)
+            Say "sshd service exists=\$svcExists"
+            StepReport 'SshdServiceExists' "\$svcExists"
+
+            if (\$svcExists) {
+              try {
+                Set-Service -Name sshd -StartupType Automatic
+                StepReport 'SetServiceStartup' 'ok'
+              } catch {
+                StepReport 'SetServiceStartup' "failed: \$(\$_.Exception.Message)"
+              }
+              try {
+                Start-Service sshd
+                StepReport 'StartService' 'ok'
+              } catch {
+                StepReport 'StartService' "failed: \$(\$_.Exception.Message)"
+              }
+              \$sshdStatus = (Get-Service sshd).Status
+              \$sshdStartType = (Get-Service sshd).StartType
+              Say "sshd status=\$sshdStatus startup=\$sshdStartType"
+              StepReport 'SshdStatus' "\$sshdStatus"
+              StepReport 'SshdStartType' "\$sshdStartType"
             } else {
-              Say 'ERROR sshd service not found after install'
+              Say 'ERROR sshd 服务不存在 —— OpenSSH Server 没装上，SSH 必然连不通'
+              StepReport 'SshdStatus' 'service-missing'
             }
-            # 关键：把「22 端口谁在听」写进日志，宿主侧能直接看到是不是 sshd
-            Say "netstat22:"
-            netstat -ano | Select-String ':22 ' | ForEach-Object { Say "  $_" }
+
+            # sshd 进程在不在（比服务状态更硬：服务 Running 也可能进程早退了）
+            \$sshProc = @(Get-Process -Name sshd -ErrorAction SilentlyContinue).Count
+            Say "sshd processes=\$sshProc"
+            StepReport 'SshdProcessCount' "\$sshProc"
+
+            # 22 端口监听状态。这是「宿主侧连不通」时最直接的证据：
+            # 没有 LISTENING 就说明 sshd 没在听，而不是防火墙或密钥问题。
+            try {
+              \$listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
+            } catch { \$listen = 'query-failed' }
+            Say "port22 listening-entries=\$listen"
+            StepReport 'Port22Listen' "\$listen"
 
             # 2) 防火墙放行 22。漏这条的现象是「端口拒绝」，极易误判成 sshd 没起。
             if (-not (Get-NetFirewallRule -Name 'CX-SSHD-22' -ErrorAction SilentlyContinue)) {
@@ -375,9 +475,21 @@ jobs:
             Say "verify whoami=\$(whoami)"
             Say "verify exe=\$(Test-Path 'C:\cx\native\purge-tests.exe')"
             Say "verify keys=\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            StepReport 'VerifyExe' "\$(Test-Path 'C:\cx\native\purge-tests.exe')"
+            StepReport 'VerifyKeys' "\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            # 最终结论行：宿主侧只读这一行就能判断「镜像是好是坏」
+            \$sshOk = \$false
+            try {
+              \$svc = Get-Service sshd -ErrorAction SilentlyContinue
+              \$listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
+              if (\$svc -and \$svc.Status -eq 'Running' -and \$listen -gt 0) { \$sshOk = \$true }
+            } catch { }
+            StepReport 'SSH_VERDICT' \$(if (\$sshOk) { 'READY' } else { 'NOT-READY' })
             Say 'setup done'
           } catch {
             Say "FATAL \$(\$_.Exception.Message)"
+            StepReport 'FATAL' \$_.Exception.Message
+            StepReport 'SSH_VERDICT' 'SETUP-CRASHED'
           }
           PSSETUP
 
@@ -711,50 +823,203 @@ jobs:
           sha256sum "$WORK/guest.qcow2" | tee "$WORK/guest.qcow2.sha256"
           df -h /
 
+      # ── 离线检查：不启动 Windows 就能判断镜像配好没 ────────────────────────
+      #
+      # 为什么值得加：SSH 验证要冷启动 Windows（3-7 分钟一轮），
+      # 而失败时我们既不知道是「文件没写对」还是「sshd 没起来」。
+      # 用 libguestfs 直接读 qcow2 里的 NTFS，能秒级回答：
+      #   administrators_authorized_keys 在不在？内容是不是我们的公钥？
+      #   purge-tests.exe 在不在？
+      #   sshd_config 有没有被改坏？
+      # 这样即使 SSH 那一步失败，也能立刻区分「镜像内容错」与「服务没起」。
+      #
+      # ⚠️ 这不是 SSH 验证的替代品，只是**更快的分类器**：
+      #    文件在 ≠ sshd 能连。所以下面失败只警告，不阻断（SSH 才是硬门禁）。
+      - name: 离线检查镜像内容（libguestfs）
+        id: offline
+        if: always()
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          OUT="$SNAP/offline-check.txt"
+          : > "$OUT"
+          IMG="$WORK/guest.qcow2"
+          if [ ! -f "$IMG" ]; then
+            echo "SKIP: 没有 $IMG" | tee -a "$OUT"; exit 0
+          fi
+
+          # libguestfs 依赖一个可引导的 appliance；失败就如实记录，不硬做。
+          if ! command -v virt-filesystems >/dev/null 2>&1; then
+            echo '安装 libguestfs-tools...' | tee -a "$OUT"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              libguestfs-tools linux-image-generic >/dev/null 2>&1 || true
+          fi
+          if ! command -v virt-filesystems >/dev/null 2>&1; then
+            echo 'SKIP: libguestfs-tools 装不上' | tee -a "$OUT"; exit 0
+          fi
+          export LIBGUESTFS_BACKEND=direct
+          export LIBGUESTFS_MEMSIZE=2048
+
+          echo '=== 分区布局 ===' | tee -a "$OUT"
+          # Server 2022 是 GPT：通常 /dev/sda1 = EFI(MSR), /dev/sda2 = MSR,
+          # /dev/sda3 = Windows C:。所以不能硬编码 sda2，必须列出来探测。
+          virt-filesystems -a "$IMG" --all --long 2>&1 | tee -a "$OUT" || {
+            echo 'ERROR virt-filesystems 失败（appliance 起不来？）' | tee -a "$OUT"; exit 0; }
+
+          # 在列出的文件系统里找 Windows 分区：认 /Windows/System32 存在即为 C:
+          WINPART=""
+          for fs in $(virt-filesystems -a "$IMG" --filesystems 2>/dev/null); do
+            if virt-ls -a "$IMG" -m "$fs" /Windows/System32 >/dev/null 2>&1; then
+              WINPART="$fs"; break
+            fi
+          done
+          if [ -z "$WINPART" ]; then
+            echo 'ERROR 找不到 Windows 分区（NTFS 可能挂不上）' | tee -a "$OUT"; exit 0
+          fi
+          echo "WINDOWS_PARTITION=$WINPART" | tee -a "$OUT"
+
+          # 逐项核对镜像里该有的东西
+          echo '=== /ProgramData/ssh ===' | tee -a "$OUT"
+          virt-ls -a "$IMG" -m "$WINPART" /ProgramData/ssh 2>&1 | tee -a "$OUT" || true
+
+          AK_EXISTS=no
+          if virt-ls -a "$IMG" -m "$WINPART" /ProgramData/ssh 2>/dev/null | grep -qx 'administrators_authorized_keys'; then
+            AK_EXISTS=yes
+            echo '=== administrators_authorized_keys 内容 ===' | tee -a "$OUT"
+            virt-cat -a "$IMG" -m "$WINPART" /ProgramData/ssh/administrators_authorized_keys 2>&1 | tee -a "$OUT" || true
+            # 与本次使用的公钥比对（去掉注释差异后比较 base64 主体）
+            V_PUB=$(virt-cat -a "$IMG" -m "$WINPART" /ProgramData/ssh/administrators_authorized_keys 2>/dev/null \
+                    | awk '{print $2}' | head -1)
+            L_PUB=$(awk '{print $2}' "$WORK/id.pub" 2>/dev/null | head -1)
+            if [ -n "$V_PUB" ] && [ "$V_PUB" = "$L_PUB" ]; then
+              echo 'PUBKEY_MATCH=yes' | tee -a "$OUT"
+            else
+              echo "PUBKEY_MATCH=no (image=${V_PUB:-none} local=${L_PUB:-none})" | tee -a "$OUT"
+            fi
+          fi
+          echo "AUTHORIZED_KEYS_EXISTS=$AK_EXISTS" | tee -a "$OUT"
+
+          EXE=no
+          if virt-ls -a "$IMG" -m "$WINPART" /cx/native 2>/dev/null | grep -qx 'purge-tests.exe'; then
+            EXE=yes
+          fi
+          echo "PURGE_TESTS_EXISTS=$EXE" | tee -a "$OUT"
+
+          # OpenSSH 是否真的装进了 System32\OpenSSH（这是 Add-WindowsCapability 的落地证据）
+          SSH_BIN=no
+          if virt-ls -a "$IMG" -m "$WINPART" /Windows/System32/OpenSSH >/dev/null 2>&1; then
+            SSH_BIN=yes
+            echo '=== /Windows/System32/OpenSSH ===' | tee -a "$OUT"
+            virt-ls -a "$IMG" -m "$WINPART" /Windows/System32/OpenSSH 2>&1 | tee -a "$OUT" || true
+          fi
+          echo "OPENSSH_BINARIES_EXISTS=$SSH_BIN" | tee -a "$OUT"
+
+          echo '=== 汇总 ===' | tee -a "$OUT"
+          {
+            echo "OFFLINE_AUTHORIZED_KEYS=$AK_EXISTS"
+            echo "OFFLINE_PURGE_TESTS=$EXE"
+            echo "OFFLINE_OPENSSH_BINARIES=$SSH_BIN"
+          } >> "$GITHUB_OUTPUT"
+
+          # 明确区分「装好了」与「装了一半」—— 这是本步骤的核心价值
+          if [ "$AK_EXISTS" = yes ] && [ "$EXE" = yes ] && [ "$SSH_BIN" = yes ]; then
+            echo 'OFFLINE_VERDICT=image-configured-correctly' | tee -a "$OUT"
+          else
+            echo "OFFLINE_VERDICT=image-incomplete (keys=$AK_EXISTS exe=$EXE sshbin=$SSH_BIN)" | tee -a "$OUT"
+            echo "::warning title=镜像离线检查不完整::keys=$AK_EXISTS exe=$EXE openssh=$SSH_BIN —— 若 SSH 也失败，优先查 Add-WindowsCapability 是否拉不到 Windows Update"
+          fi
+          # 只看文件不阻断：文件在也不代表 sshd 能连，SSH 那步才是硬门禁。
+
+      # ── 关键：在“验证 SSH”**之前**先传一次证据 ────────────────────────────
+      #
+      # 2026-11-11（t111）用 API 查出来：上一轮 run 43018341765 里
+      #   step 14「验证 SSH 可连」 status=in_progress conclusion=NULL
+      #   step 15..18（含 if: always() 的上传）status=pending conclusion=NULL
+      # 也就是说 **job 在 SSH 步骤运行期间被强制终止**，后面的 always() 步骤
+      # 根本没轮到执行 —— 所以 artifact total_count=0，不是路径写错，也不是
+      # if-no-files-found 把它吞了，是**那些步骤从未被调度**。
+      #
+      # 所以必须在上传步骤**位置上也往前挪**：SSH 之前先传一次“装完后的现场”。
+      # 这样即使 SSH 步骤把 job 挂死/被 timeout 杀掉，前面这段证据也已经落地。
+      # 名字带 -early 后缀，避免与最后那次全量快照互相覆盖。
+      - name: 先传一次证据（SSH 验证之前）
+        id: snap-early
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-image-diagnostics-early
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/guest-snapshot/
+            ${{ runner.temp }}/guest/data/
+            ${{ runner.temp }}/guest/oem/install.bat
+            ${{ runner.temp }}/guest/oem/setup.ps1
+            ${{ runner.temp }}/guest/guest.qcow2.sha256
+          if-no-files-found: warn
+          retention-days: 7
+
       # ── 硬验收：SSH 真的能连上 ─────────────────────────────────────────────
       # 不验证就交付 = 给下游一个黑盒。ci.yml 那边会因为「连不上」浪费 45 分钟。
       - name: 验证 SSH 可连
         id: verify
+        # 硬性时限：GitHub 的 job 级 timeout 到点会**直接杀进程**，
+        # 连 always() 的后续步骤都不跑（上一轮就是这样丢证据的）。
+        # 这里给步骤自己设 20 分钟上限，让它在 job 被杀之前**主动**收尾并 exit 1。
+        timeout-minutes: 20
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          # 2026-11-11（t111）：这个步骤的失败诊断**必须**落在 snapshot 目录里。
+          # 上一轮只把 ssh stderr 打进 stdout 与 Step Summary ——
+          # 而 GitHub 会回收 job 日志（实测 gh api .../logs 返回 BlobNotFound），
+          # 于是「失败原因」彻底消失，artifact 也是空的。现在所有证据都写文件。
+          VERIFY_LOG="$SNAP/ssh-verify.txt"
+          : > "$VERIFY_LOG"
+
           qemu-system-x86_64 \
             -enable-kvm -cpu host -smp 2 -m 4096 \
             -drive file="$WORK/guest.qcow2",if=virtio,cache=writeback \
             -nic "user,model=e1000,hostfwd=tcp:127.0.0.1:2222-:22" \
             -display none -vga none \
             -pidfile "$WORK/vqemu.pid" -daemonize
-          echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)"
+          echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)" | tee -a "$VERIFY_LOG"
 
-          # ⚠️ 2026-11-11：加 ConnectionAttempts=1 与 ServerAliveInterval，避免
-          #    单次尝试卡满 ConnectTimeout 后整体窗口被吃尽。
-          #    同时单独保留一份 -vvv 的输出文件，失败时全文进 artifact ——
-          #    「banner exchange 超时」只有 -vvv 才能区分是端口没人听、还是
-          #    sshd 在但协商卡住。
+          # -vvv 而不是 -v：要看到 kex/banner 协商停在哪一步。
+          # ConnectionAttempts=1：不重试，避免 10s × N 把步骤拖死。
           SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
-               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-               -o ConnectionAttempts=1 -o ServerAliveInterval=3 \
-               -o BatchMode=yes -o LogLevel=ERROR"
-          SSHV="ssh -vvv -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-                -o ConnectionAttempts=1 -o BatchMode=yes"
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+               -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR"
           READY=no
+          ATTEMPT=0
           DEADLINE=$(( $(date +%s) + 900 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
             if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then
               exec 3>&- 2>/dev/null || true
-              if $SSH "$GUEST_USER@127.0.0.1" 'whoami' >/tmp/whoami.txt 2>/tmp/ssherr.txt; then
+              # 每次尝试都留完整协商日志（最后一次会覆盖上一次，失败时分不清是哪次 ——
+              # 所以按 attempt 编号存，保留全部）
+              if $SSH -vvv "$GUEST_USER@127.0.0.1" 'whoami' >/tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
                 READY=yes; break
               fi
+              # 同时留一份简版 stderr 方便快速看
+              tail -20 "$SNAP/ssh-vvv-$ATTEMPT.txt" > /tmp/ssherr.txt 2>/dev/null || true
+            else
+              echo "attempt=$ATTEMPT tcp-connect-failed" >> "$VERIFY_LOG"
             fi
             sleep 10
           done
-          echo "SSH_READY=$READY"
+          echo "SSH_READY=$READY attempts=$ATTEMPT" | tee -a "$VERIFY_LOG"
+
           if [ "$READY" = yes ]; then
-            echo '=== SSH 实测 ==='
-            cat /tmp/whoami.txt
+            echo '=== SSH 实测 ===' | tee -a "$VERIFY_LOG"
+            cat /tmp/whoami.txt | tee -a "$VERIFY_LOG"
             $SSH "$GUEST_USER@127.0.0.1" \
-              'powershell -NoProfile -Command "(Get-Service sshd).Status; Test-Path C:/cx/native/purge-tests.exe"' || true
+              'powershell -NoProfile -Command "(Get-Service sshd).Status; (Get-NetTCPConnection -LocalPort 22 -State Listen).Count; Test-Path C:/cx/native/purge-tests.exe"' \
+              >> "$VERIFY_LOG" 2>&1 || true
             {
               echo '## SSH 验证：通过'
               echo ''
@@ -764,17 +1029,27 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo '::error title=SSH 连不上::镜像不可用，不要拿去给 ci.yml 用'
-            echo '--- ssh -vvv 全量（最多 120 行）---'
-            $SSHV "$GUEST_USER@127.0.0.1" 'whoami' > /tmp/sshvvv.txt 2>&1 || true
-            head -120 /tmp/sshvvv.txt || true
-            cp /tmp/sshvvv.txt "$RUNNER_TEMP/guest/ssh-vvv.log" 2>/dev/null || true
-            echo '--- ssh stderr ---'
-            cat /tmp/ssherr.txt 2>/dev/null || true
+            {
+              echo '--- SSH_READY=no ---'
+              echo "attempts=$ATTEMPT"
+              echo '--- 最后一次 ssh -vvv 尾部 60 行 ---'
+              tail -60 "$SNAP/ssh-vvv-$ATTEMPT.txt" 2>/dev/null || echo '(no vvv log)'
+              echo '--- guest 内 setup-steps.txt（若已回传，这是定位关键）---'
+              cat "$WORK/data/setup-steps.txt" 2>/dev/null || echo '(未回传 setup-steps.txt)'
+              echo '--- guest 内 setup.log 尾部 60 行 ---'
+              tail -60 "$WORK/data/setup.log" 2>/dev/null || echo '(未回传 setup.log)'
+              echo '--- /data 清单 ---'
+              ls -la "$WORK/data" 2>/dev/null || echo '(no /data)'
+            } >> "$VERIFY_LOG"
+            echo '--- 失败诊断已写入 ssh-verify.txt ---'
+            cat "$VERIFY_LOG"
             {
               echo '## SSH 验证：失败'
               echo ''
+              echo '**先看 artifact `guest-image-diagnostics` 里的 `ssh-verify.txt` 与 `data-setup-steps.txt`**'
+              echo ''
               echo '```'
-              cat /tmp/ssherr.txt 2>/dev/null || echo '(no stderr)'
+              tail -30 "$VERIFY_LOG"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
