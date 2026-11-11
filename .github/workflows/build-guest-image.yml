@@ -318,8 +318,11 @@ jobs:
           printf '%s\n' "$PUBKEY" > "$WORK/oem/id.pub"
 
           # install.bat：dockur 在安装最后一步执行它。
-          # 关键：跑完写 C:\OEM\install.done —— 这是 workflow 判断「配置完成」的标记
-          # （dockur 自己的 CI 也用同一个标记名，行为已在他们仓库验证过）。
+          #
+          # ⚠️ 关键（2026-11-11 修正）：宿主机的 /oem 是**只读输入**，客机往 C:\OEM 写东西
+          # 不会回到宿主机。/oem 里那个 install.done 永远等不到 —— 上一版就死在这里。
+          # 唯一能把信号送回宿主机的通道是 Samba 共享 \\host.lan\Data（宿主 /data）。
+          # 所以下面**两条都要做**：客机内留一份（本地可查），再 copy 一份到共享。
           cat > "$WORK/oem/install.bat" <<'BATEOF'
           @echo off
           setlocal
@@ -328,13 +331,39 @@ jobs:
 
           REM 执行 setup.ps1（放单独文件而不是内联，避免 bat 的转义地狱）
           powershell -NoProfile -ExecutionPolicy Bypass -File C:\OEM\setup.ps1
-          echo setup.ps1 exit=%ERRORLEVEL%
+          set SETUP_RC=%ERRORLEVEL%
+          echo setup.ps1 exit=%SETUP_RC%
 
-          REM 把 setup.log 一并留在 OEM 目录（dockur 会把 C:\OEM 暴露给宿主）
+          REM 把 setup.log 一并留在 OEM 目录（客机内可查）
           if exist C:\OEM\setup.log type C:\OEM\setup.log
 
           echo === CX OEM install end ===
+          REM 本地标记
           type nul > C:\OEM\install.done
+
+          REM ── 回传到宿主机 /data（唯一有效通道）──
+          REM \\host.lan\Data 是 dockur 的 Samba "Data" 共享，对应 docker 的 -v ...:/data。
+          REM 先写 .tmp 再 move，避免宿主机读到半截文件（与 dockur 自己 sync-log.bat 同手法）。
+          REM ⚠️ bat 的 `if (...) else (...)` 块里用 `&&` 会因解析规则出错，
+          REM    所以每个命令单独一行、各自判 errorlevel。
+          if exist C:\OEM\setup.log (
+            copy /Y C:\OEM\setup.log \\host.lan\Data\setup.tmp >nul 2>&1
+            move /Y \\host.lan\Data\setup.tmp \\host.lan\Data\setup.log >nul 2>&1
+          )
+
+          copy /Y C:\OEM\install.done \\host.lan\Data\install.tmp >nul 2>&1
+          if errorlevel 1 (
+            echo WARN could-not-copy-done-to-samba
+          ) else (
+            move /Y \\host.lan\Data\install.tmp \\host.lan\Data\install.done >nul 2>&1
+            echo done-marker-synced
+          )
+
+          REM install.log 由 dockur 的 LOG=Y 写入；存在才回传，不硬失败。
+          if exist C:\OEM\install.log (
+            copy /Y C:\OEM\install.log \\host.lan\Data\install.tmp >nul 2>&1
+            move /Y \\host.lan\Data\install.tmp \\host.lan\Data\install.log >nul 2>&1
+          )
           BATEOF
 
           # 去掉 heredoc 的公共前导空格（bat 对行首空格敏感）
@@ -360,10 +389,14 @@ jobs:
           START=$(date +%s)
           echo "INSTALL_START_EPOCH=$START" >> "$GITHUB_OUTPUT"
 
-          # 端口：容器的 Web Viewer(8006) 与 RDP 不暴露 —— 我们只用 SSH 验证，
-          # 而 SSH 由 install.bat 在客机内装好，之后靠 QEMU 的 hostfwd 访问。
-          # dockur 默认把 guest 放在容器内的桥接网络里，我们拿到 qcow2 后再自己起 QEMU 验证，
-          # 所以这里不需要对外暴露任何 guest 端口。
+          # 三个挂载点，各有明确用途（少一个就有一类信息永远看不到）：
+          #   /storage  —— 磁盘与 ISO（dockur 的主工作区）
+          #   /oem      —— **只读输入**：install.bat + 同目录附件，被 dockur 打进 ISO 的 $OEM$
+          #                客机写的东西**不会**回到这里，别拿它当回传通道
+          #   /data     —— **双向共享**：对应客机里的 \\host.lan\Data（Samba 的 Data 共享）。
+          #                这是唯一能把客机内进度传回宿主机的通道。见下方「等待安装完成」。
+          mkdir -p "$WORK/data"
+          # 8006 只绑 loopback：仅给本 job 抓安装界面截图用，不对外暴露。
           docker run -d --name cxwin \
             --device=/dev/kvm \
             -e VERSION="$VERSION" \
@@ -375,12 +408,16 @@ jobs:
             -e REGION=en-US \
             -e KEYBOARD=en-US \
             -e LOG=Y \
+            -p 127.0.0.1:8006:8006 \
             -v "$WORK/storage:/storage" \
             -v "$WORK/oem:/oem" \
+            -v "$WORK/data:/data" \
             docker.io/dockurr/windows:latest
           echo "CONTAINER_ID=$(docker ps -q --filter name=cxwin)"
           echo '=== 镜像版本 ==='
           docker inspect --format '{{.Config.Image}} {{.Image}}' cxwin || true
+          echo '=== 挂载确认（/data 必须在，否则进度与完成信号都看不到）==='
+          docker inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' cxwin || true
 
       - name: 等待安装完成
         id: wait
@@ -389,20 +426,96 @@ jobs:
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
+          DATA="$WORK/data"
           START=$(date +%s)
           DEADLINE=$(( START + INSTALL_TIMEOUT ))
           RESULT=timeout
+
+          # ── 完成判据（2026-11-11 修正：上一版查错了地方，必然死等）──
+          # 旧代码查 `$WORK/oem/install.done` —— 那是宿主机上的 /oem **只读输入**挂载源。
+          # 客机写 C:\OEM\install.done 只发生在客机内，永远不会出现在宿主机 /oem 里。
+          # 正确的回传通道是 Samba 共享 \\host.lan\Data → 宿主机 /data（见 docker run 的 -v）。
+          # 所以这里查 $DATA 下的标记；install.bat 会显式 copy 一份过去。
+          DONE_MARKER="$DATA/install.done"
+          # 兜底判据：即使 install.done 因故没回传，只要回传的 install.log 里
+          # 出现我们的收尾标记，也算完成 —— 一个信号失败不代表流程失败。
+          LOG_MARKER_TEXT='CX OEM install end'
+
+          # ── 进度信号：不再用「磁盘总量」──
+          # 旧版打 `du -sh storage`，它从 14G 涨到 15G 后就再也不动，完全无法区分
+          # 「装完了在等判据」与「卡在某个 Setup 界面」。改为盯**变化**：
+          #   · data/install.log 的大小与 mtime（dockur 的 LOG=Y 会持续写）
+          #   · docker logs 的行数（dockur 会打安装阶段）
+          #   · storage 下 qcow2 的 mtime + 大小
+          # 任一项在变 = 在推进；全都不变 = 卡住。
+          last_fp=''
+          last_change_ts=$START
+          stall_reported=no
+          stall_threshold=900      # 连续 15 分钟无任何信号变化 ⇒ 判疑似卡死
+          tick=0
+
+          fingerprint() {
+            # 把三个信号压成一个字符串，用于比较「这次和上次是否一样」。
+            local log_size=0 log_mtime=0 qcow_size=0 qcow_mtime=0 dlog_lines=0
+            [ -f "$DATA/install.log" ] && {
+              log_size=$(stat -c %s "$DATA/install.log" 2>/dev/null || echo 0)
+              log_mtime=$(stat -c %Y "$DATA/install.log" 2>/dev/null || echo 0)
+            }
+            local q
+            for q in "$WORK/storage/data.qcow2" "$WORK/storage/windows.qcow2"; do
+              if [ -f "$q" ]; then
+                qcow_size=$(stat -c %s "$q" 2>/dev/null || echo 0)
+                qcow_mtime=$(stat -c %Y "$q" 2>/dev/null || echo 0)
+                break
+              fi
+            done
+            dlog_lines=$(docker logs cxwin 2>&1 | wc -l || echo 0)
+            echo "log:${log_size}@${log_mtime} qcow:${qcow_size}@${qcow_mtime} dlog:${dlog_lines}"
+          }
+
+          report_progress() {
+            local fp="$1" now idle
+            now=$(date +%s)
+            idle=$(( now - last_change_ts ))
+            echo "[$(date -u +%T)] tick=${tick} idle=${idle}s  ${fp}"
+            # 判据三态：有变化 = 推进；无变化但短于阈值 = 观望；超过阈值 = 疑似卡死
+            if [ "$idle" -ge "$stall_threshold" ] && [ "$stall_reported" = no ]; then
+              echo "::warning title=疑似卡死::已连续 ${idle}s 无任何进度信号变化"
+              echo '--- docker ps ---'
+              docker ps -a --filter name=cxwin || true
+              echo '--- docker logs 尾部 80 行 ---'
+              docker logs cxwin 2>&1 | tail -80 || true
+              echo '--- /data 内容 ---'
+              ls -la "$DATA" 2>/dev/null || echo '(空或不存在)'
+              echo '--- /storage 内容 ---'
+              ls -la "$WORK/storage" 2>/dev/null || echo '(空或不存在)'
+              stall_reported=yes
+            fi
+          }
+
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-            # 完成判据用 install.done（dockur 自己的 CI 也用这个标记）
-            if [ -f "$WORK/oem/install.done" ]; then RESULT=done; break; fi
-            # 容器退出 = 安装失败（除非已 done）
+            tick=$(( tick + 1 ))
+
+            # 完成判据 ①：install.done 已回传到 /data
+            if [ -f "$DONE_MARKER" ]; then RESULT=done; break; fi
+            # 完成判据 ②：回传的 install.log 里有收尾标记
+            if [ -f "$DATA/install.log" ] && grep -q "$LOG_MARKER_TEXT" "$DATA/install.log" 2>/dev/null; then
+              RESULT=done-by-log; break
+            fi
+            # 容器退出 = 安装失败（除非上面已判 done）
             if ! docker ps -q --filter name=cxwin | grep -q .; then
               RESULT=container-exited; break
             fi
-            # 进度可见性：每 5 分钟打一次磁盘占用，便于判断是不是卡死
-            NOW=$(date +%s)
-            if [ $(( (NOW - START) % 300 )) -lt 20 ]; then
-              echo "[$(date -u +%T)] storage=$(du -sh "$WORK/storage" 2>/dev/null | cut -f1) done=$([ -f "$WORK/oem/install.done" ] && echo yes || echo no)"
+
+            CUR=$(fingerprint)
+            if [ "$CUR" != "$last_fp" ]; then
+              last_fp="$CUR"
+              last_change_ts=$(date +%s)
+              stall_reported=no
+            fi
+            # 每 2 分钟一行（tick % 6，因为 sleep 20）
+            if [ $(( tick % 6 )) -eq 1 ]; then
+              report_progress "$CUR"
             fi
             sleep 20
           done
@@ -412,27 +525,88 @@ jobs:
           echo "INSTALL_RESULT=$RESULT" >> "$GITHUB_OUTPUT"
           echo "INSTALL_ELAPSED_SEC=$ELAPSED" >> "$GITHUB_OUTPUT"
 
-          echo '=== install.log（若存在，dockur 会把 install.bat 输出写这里）==='
-          cat "$WORK/storage/install.log" 2>/dev/null | tail -50 || echo '(no install.log in storage)'
-          echo '=== docker logs 尾部 ==='
-          docker logs cxwin 2>&1 | tail -60 || true
+          echo '=== 完成判据现场 ==='
+          echo "DONE_MARKER_EXISTS=$([ -f "$DONE_MARKER" ] && echo yes || echo no)"
+          echo "DATA_DIR_LISTING:"
+          ls -la "$DATA" 2>/dev/null || echo '(no /data)'
+          echo '=== 回传的 install.log 尾部 80 行 ==='
+          tail -80 "$DATA/install.log" 2>/dev/null || echo '(no /data/install.log)'
+          echo '=== docker logs 尾部 120 行 ==='
+          docker logs cxwin 2>&1 | tail -120 || true
 
-          if [ "$RESULT" != done ]; then
-            echo "::error title=安装未完成::RESULT=$RESULT 耗时 ${ELAPSED}s；见上方 docker logs"
-            exit 1
+          if [ "$RESULT" = timeout ]; then
+            echo "::error title=安装超时::${ELAPSED}s 内既没拿到 install.done 也没看到收尾标记"
+          elif [ "$RESULT" = container-exited ] && [ ! -f "$DONE_MARKER" ]; then
+            echo "::error title=安装容器退出::未见完成标记，见上方 docker logs"
           fi
+          case "$RESULT" in
+            done|done-by-log) : ;;
+            *) exit 1 ;;
+          esac
+
+      # ── 失败/超时的完整现场快照 ────────────────────────────────────────────
+      # 上一版最大的问题之一：卡住时什么证据都没留下，只能靠猜。
+      # 这个步骤在任何非成功结局下都会跑（if: always() 由下一步的 artifact 承担
+      # 「一定上传」，这里只负责把证据尽可能抓全）。
+      - name: 抓取安装现场快照
+        id: snapshot
+        if: always()
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+
+          echo '=== 收集诊断到'"$SNAP"' ==='
+          # 1) 容器状态与日志（最关键：能看出 Setup 走到哪一步、有没有重启循环）
+          docker ps -a > "$SNAP/docker-ps-a.txt" 2>&1 || true
+          docker inspect cxwin > "$SNAP/docker-inspect.json" 2>&1 || true
+          docker logs cxwin > "$SNAP/docker-logs-full.txt" 2>&1 || true
+          docker logs cxwin 2>&1 | tail -300 > "$SNAP/docker-logs-tail300.txt" || true
+
+          # 2) 两个挂载点的完整清单（/data 是回传通道，/oem 是输入，对照着看就知道
+          #    客机到底有没有写出任何东西）
+          ls -laR "$WORK/data" > "$SNAP/data-listing.txt" 2>&1 || true
+          ls -laR "$WORK/oem" > "$SNAP/oem-listing.txt" 2>&1 || true
+          ls -la "$WORK/storage" > "$SNAP/storage-listing.txt" 2>&1 || true
+          du -sh "$WORK/storage" > "$SNAP/storage-size.txt" 2>&1 || true
+
+          # 3) 客机回传的日志（有就全文留档）
+          for f in install.log setup.log; do
+            if [ -f "$WORK/data/$f" ]; then
+              cp "$WORK/data/$f" "$SNAP/data-$f" || true
+            fi
+          done
+
+          # 4) VNC 截图：dockur 在 8006 暴露 Web Viewer，/snapshot 返回当前画面。
+          #    这是唯一能「看见」Windows Setup 卡在哪个界面的手段。
+          curl -s --max-time 20 -o "$SNAP/vnc-snapshot.png" \
+            "http://127.0.0.1:8006/snapshot" 2>/dev/null || echo 'vnc snapshot failed'
+          if [ -f "$SNAP/vnc-snapshot.png" ]; then
+            echo "VNC_SNAPSHOT_BYTES=$(stat -c %s "$SNAP/vnc-snapshot.png")"
+          else
+            echo 'VNC_SNAPSHOT=missing'
+          fi
+
+          echo '=== 快照内容 ==='
+          ls -la "$SNAP" || true
+          echo "SNAP_DIR=$SNAP" >> "$GITHUB_ENV"
 
       - name: 取出 qcow2 并核对 setup 结果
         id: extract
         run: |
           set -eu
           WORK="$RUNNER_TEMP/guest"
+          SETUP_RC_LINE=$(grep -oE 'setup\.ps1 exit=[0-9]+' "$WORK/data/install.log" 2>/dev/null | tail -1 || true)
+          echo "setup.ps1 退出码行：${SETUP_RC_LINE:-（未找到）}"
           echo '=== storage 目录 ==='
           ls -lh "$WORK/storage" || true
-          echo '=== OEM 目录（含 install.done / setup.log）==='
+          echo '=== /oem（只读输入：install.bat + 附件）==='
           ls -lh "$WORK/oem" || true
-          echo '=== setup.log 全文 ==='
-          cat "$WORK/oem/setup.log" 2>/dev/null || echo '(没有 setup.log —— install.bat 可能没执行)'
+          echo '=== /data（客机回传：install.done / install.log / setup.log）==='
+          ls -lh "$WORK/data" 2>/dev/null || true
+          echo '=== setup.log 全文（从 /data 回传的那份）==='
+          cat "$WORK/data/setup.log" 2>/dev/null || echo '(没有回传 setup.log —— install.bat 可能没执行，或 Samba 不可写)'
 
           # dockur 在 DISK_FMT=qcow2 时落盘 storage/data.qcow2（旧版本是 windows.qcow2）
           SRC=""
@@ -587,15 +761,18 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 失败时也导出诊断
-        if: failure()
+      # 无论成败都上传现场快照 —— 上一版卡了 45 分钟却什么都没留下，只能靠猜。
+      # 判据：只要有快照目录就传（`if: always()` 保证失败时也跑）。
+      - name: 上传安装现场快照
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: guest-image-diagnostics
           compression-level: 0
           path: |
-            ${{ runner.temp }}/guest/oem/setup.log
+            ${{ runner.temp }}/guest-snapshot/
             ${{ runner.temp }}/guest/oem/install.bat
-            ${{ runner.temp }}/guest/storage/install.log
+            ${{ runner.temp }}/guest/oem/setup.ps1
+            ${{ runner.temp }}/guest/oem/install.done
           if-no-files-found: warn
           retention-days: 7
