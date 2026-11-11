@@ -179,8 +179,13 @@ jobs:
 
           echo "尝试下载 artifact: $ART"
           set +e
-          gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art" 2>&1 | sed 's/^/  /'
+          # ⚠️ 不能把 gh 的输出用管道接 sed：那样 RC=$? 取到的是 **sed 的退出码**（恒 0），
+          #    gh 失败会被静默吞掉，后面 find 找不到文件才报错 —— 诊断信息会错位。
+          #    改为先落盘再打印，保住 gh 的退出码。
+          gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art" > "$WORK/art.log" 2>&1
           RC=$?
+          echo "--- gh run download 输出（前 20 行）---"
+          head -20 "$WORK/art.log" 2>/dev/null || true
           set -e
 
           if [ $RC -ne 0 ]; then
