@@ -403,14 +403,15 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
 
   // 每条都要同时命中「行标题」与「取哪个作业的 result」：
   // 只查标题会让「标题对、变量接错（比如三行全接 WIRING_PROBE_RESULT）」假通过。
+  //
+  // 2026-11-11 修正：VM 那一行不再是单条 printf —— 它按 VM_DESTRUCT_RESULT 的取值
+  // 分支成「跳过：缺 CX_VM_ENABLED」/「跳过：缺 cx-vm runner」/「正常结果」三种。
+  // 所以这一行改用「整段（含 if/else 各分支）都必须出现 $VM_DESTRUCT_RESULT」来断言，
+  // 强度不低于原来：三行全接同一个变量时它照样会红。
   const rows = [
     {
       label: '自毁续删语义验证（托管 runner，两阶段）',
       variable: 'WIRING_PROBE_RESULT',
-    },
-    {
-      label: '关机自毁（self-hosted cx-vm）',
-      variable: 'VM_DESTRUCT_RESULT',
     },
     {
       label: '关机自毁（托管 Ubuntu + QEMU + KVM）',
@@ -428,6 +429,35 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
       `「${label}」必须取 $${variable} 的结果，实际行：${line.trim()}`,
     );
   }
+
+  // VM 行单独断言：标题必须出现在 printf 里，且该段内必须引用 $VM_DESTRUCT_RESULT 与
+  // 两个缺失原因判据（CX_VM_ENABLED_VALUE 与 cx-vm runner 文案）。
+  const vmLines = section
+    .split('\n')
+    .filter((candidate) => candidate.includes('关机自毁（self-hosted cx-vm）') && candidate.includes('printf'));
+  assert.ok(vmLines.length > 0, 'summary 的 Step Summary 缺少「关机自毁（self-hosted cx-vm）」这一行');
+  assert.ok(
+    vmLines.some((line) => line.includes('$VM_DESTRUCT_RESULT')),
+    `「关机自毁（self-hosted cx-vm）」必须取 $VM_DESTRUCT_RESULT 的结果，实际：${vmLines.join(' | ').trim()}`,
+  );
+  // 关键：跳过时必须写明缺什么，不能只写「已跳过」—— 这正是用户反复追问的根因。
+  assert.ok(
+    vmLines.some((line) => line.includes('CX_VM_ENABLED')),
+    '「关机自毁（self-hosted cx-vm）」跳过时必须写明缺的是 CX_VM_ENABLED 变量',
+  );
+  assert.ok(
+    vmLines.some((line) => line.includes('cx-vm') && line.includes('runner')),
+    '「关机自毁（self-hosted cx-vm）」跳过时必须写明缺的是 cx-vm runner',
+  );
+  // summary 必须真的拿到变量值，否则上面的分支判断恒走 else，永远只报「缺 runner」。
+  // 断言要钉住 **env 定义行**（键名 + 取值）：只查子串会被
+  // `CX_VM_ENABLED_VALUE_UNUSED: x` 这类改名骗过（实测变异 M6 就是这么漏的）。
+  // 注意 `\r?$`：工作区文件是 CRLF，`$` 在 multiline 下不匹配 `\r`。
+  assert.match(
+    section,
+    /^\s+CX_VM_ENABLED_VALUE:\s*\$\{\{\s*vars\.CX_VM_ENABLED\s*\}\}\s*\r?$/mu,
+    'summary 的 env 必须定义 CX_VM_ENABLED_VALUE: ${{ vars.CX_VM_ENABLED }}，否则分不清缺变量还是缺 runner',
+  );
 });
 
 test('summary 的 env 四个关键变量都取自正确的作业输出', async () => {
@@ -457,42 +487,22 @@ test('gate 段里不再出现 ci-vm.yml', async () => {
   assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
 });
 
-test('gate 用 GITHUB_RUN_ID 排除当前 run 自己', async () => {
+test('gate 不再需要排除当前 run（已取消判重，不查历史 run）', async () => {
   const section = await jobSection('gate');
 
-  assert.match(
-    section,
-    /\[\s*"\$rid"\s*=\s*"\$\{GITHUB_RUN_ID\}"\s*\]\s*&&\s*continue/u,
-    'gate 必须逐条跳过当前 run：否则正在跑的自己会被数成「今天已跑过」',
+  // 2026-11-11：判重逻辑整体删除 —— 不再有「排除当前 run 自己」这回事，
+  // 因为 gate 已经不查任何历史 run。
+  // 保留本测试的作用是**钉住它不要回来**：若有人重新引入判重，
+  // 必然会带出 GITHUB_RUN_ID 排除逻辑，那时这里会红，提醒同步更新文档。
+  assert.ok(
+    !section.includes('GITHUB_RUN_ID'),
+    'gate 不得再引用 GITHUB_RUN_ID（已取消判重，不查历史 run）',
   );
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  //
-  // ⚠️ 推导顺序不能反（2026-11-10 独立终验抓到）：GITHUB_WORKFLOW_REF 形如
-  //   .github/workflows/ci.yml@refs/heads/main
-  // 必须先 %% @* 再去 basename，顺序颠倒会得到 main / merge / foo，
-  // gh api 查 /workflows/main/runs 404 → 被 || true 吞 → count 恒 0 → 判重静默失效。
-  const wfSection = section;
-  const stripAt = wfSection.indexOf('${GITHUB_WORKFLOW_REF%%@*}');
-  const stripSlash = wfSection.indexOf('${workflow_file##*/}');
-  assert.notEqual(stripAt, -1,
-    'gate 必须先用 %% @* 去掉 @<ref> 再取 basename：顺序反了会得到 main/merge/foo，判重恒失效');
-  assert.notEqual(stripSlash, -1,
-    'gate 必须第二步用 ##*/ 取 basename');
-  assert.ok(stripAt < stripSlash,
-    '推导顺序必须先是 %% @* 再是 ##*/，实际相反 —— 这会让 gh api 404、判重恒不生效');
-  assert.doesNotMatch(
-    section,
-    /GITHUB_WORKFLOW_REF##\*\/\}/u,
-    '不得再出现「先 ##*/ 后 %%@*」的错误顺序');
-  assert.doesNotMatch(
-    section,
-    /actions\/workflows\/ci-vm\.yml/u,
-    'gate 的 API 路径不能指向已删除的 ci-vm.yml',
+  assert.ok(
+    !section.includes('GITHUB_WORKFLOW_REF'),
+    'gate 不得再推导 workflow 文件名（已取消判重，不查 runs 列表）',
   );
 });
-
-// ───────────────────────── 6. 权限与触发 ─────────────────────────
 
 test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）', async () => {
   const children = topLevelChildren('permissions');
@@ -807,5 +817,105 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   assert.ok(
     buildSection.includes('if-no-files-found: error'),
     'windows-build 的 artifact 上传必须保持 if-no-files-found: error（否则失败也算成功，build 门失效）',
+  );
+});
+// ────────── 3. 判重口径必须按 commit，不能按日历 ──────────
+//
+// 2026-11-11 实测缺陷（run 42935345965 的 gate 日志）：
+//   「今天(UTC)=2026-11-11，本 workflow 中已成功的 KVM 巡检 job 数 = 1」
+//   ⇒ main 当天第 1 次 push 巡检成功后，第 2/3 次 push（**不同 commit**）
+//     全部 skipped ⇒ **main 的最新代码从来没有被 KVM 巡检验证过**。
+//   附带缺陷：旧口径跨分支，任何分支/PR 的成功都会挡住 main。
+//
+// 修法：按 commit sha 判重。这组断言要能抓住的回归形态：
+//   ① gate 改回按日期查（created=...）→ 红
+//   ② kvm-probe 改回看 gate.outputs.skip（日历口径）→ 红
+//   ③ kvm-probe 用 sha_verified 但这个 output 没在 gate 里定义 → 红（取值恒空=永不跳过）
+//   ④ 为了「消灭 skip」把 kvm-probe 改成恒 always() → 红（PR 上重复触发也会跑）
+
+test('gate 已取消一切判重：不再查任何历史 run', async () => {
+  const section = await jobSection('gate');
+
+  // 2026-11-11 最终口径（用户明确要求「不要限制每天跑一次，改成每次都跑」）：
+  // 判重逻辑整体删除，gate 不再调用 gh api 查历史 run。
+  //
+  // 演进史：
+  //   ① 曾按日历判重（created>=今天），实测 run 42935345965 让 main 后续 push 全 skip
+  //   ② 曾改为按 head_sha 判重，同一 commit 重复触发跳过
+  //   ③ 现在全部取消 —— 判重本身就是被否掉的东西
+
+  // 不得出现任何「查历史 run」的口径
+  assert.ok(
+    !section.includes('created=' + '%3E%3D'),
+    'gate 不得按日历窗口查历史 run（已取消判重）',
+  );
+  assert.ok(
+    !section.includes('head_sha=' + '$' + '{GITHUB_SHA}'),
+    'gate 不得按 commit sha 查历史 run（已取消判重）',
+  );
+
+  // 不得调用 gh api 数 job —— 那是判重的核心动作
+  assert.ok(
+    !/gh api[\s\S]*?test\("KVM 能力巡检"\)/u.test(section),
+    'gate 不得再统计历史 run 里的 KVM 巡检 job 数（已取消判重）',
+  );
+
+  // 必须仍然产出三个输出（下游 kvm-probe / summary 有引用，删了会取值报错）
+  for (const key of ['SKIP=', 'REASON=', 'SHA_VERIFIED=']) {
+    assert.ok(
+      section.includes(key),
+      `gate 必须仍然产出 ${key}（下游有引用；现在是常量，不表达判重结论）`,
+    );
+  }
+
+  // 三个输出必须是常量 no（不表达判重结论）
+  const gateSection = await jobSection('gate');
+  assert.match(
+    gateSection,
+    /skip:\s*"no"/u,
+    'gate 的 skip output 必须是常量 "no"（已取消判重，永远放行）',
+  );
+  assert.match(
+    gateSection,
+    /sha_verified:\s*"no"/u,
+    'gate 的 sha_verified output 必须是常量 "no"（已取消判重，永远放行）',
+  );
+});
+
+test('kvm-probe 每次 run 都跑，不再读任何判重输出', async () => {
+  const section = await jobSection('kvm-probe');
+  const condition = inlineValue(section, 'if');
+
+  // 正向对照：证明读到了 if
+  assert.ok(condition.length > 0, 'kvm-probe 必须有 if');
+
+  // 2026-11-11 最终口径：只在 gate 成功时跑，不读任何判重输出。
+  assert.ok(
+    condition.includes('needs.gate.result'),
+    `kvm-probe 的 if 必须以 needs.gate.result 为准，实际：${condition}`,
+  );
+
+  // 不得再读判重输出（两个历史口径都要禁掉）
+  assert.ok(
+    !condition.includes('needs.gate.outputs.sha_verified'),
+    `kvm-probe 不得再读 sha_verified（已取消判重），实际：${condition}`,
+  );
+  assert.ok(
+    !condition.includes('needs.gate.outputs.skip'),
+    `kvm-probe 不得再读 skip（已取消判重），实际：${condition}`,
+  );
+
+  // 仍然不得退化成恒 always()：gate 失败时确实不该跑。
+  assert.ok(
+    !/^always\(\s*\)$/u.test(condition.replace(/^\$\{\{\s*|\s*\}\}$/gu, '').trim()),
+    `kvm-probe 不得被改成恒 always()：gate 失败时不该跑，实际：${condition}`,
+  );
+
+  // 成本依据必须留在注释里，否则后人会误以为「每次都跑太贵」而重新加判重。
+  // kvm-probe 的 timeout 是 5 分钟（实测单次 < 40 秒），不是 45 分钟重活。
+  assert.match(
+    section,
+    /timeout-minutes:\s*5/u,
+    'kvm-probe 的 timeout 必须是 5 分钟（这是「每次都跑」可行的成本依据）',
   );
 });
