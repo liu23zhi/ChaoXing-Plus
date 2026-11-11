@@ -158,11 +158,12 @@ test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不�
     '必须支持手动触发时覆盖（用 github.event.inputs.guest_image，push 下 inputs.* 为 null）');
   assert.doesNotMatch(workflow, /[^.]inputs\.guest_image/u,
     '不得残留裸 inputs.* 写法（push 事件下为 null）');
-  // 2026-11-11（t96）：镜像「未配置」的判定从 job 内部挪到了 **job 级 if**，
-  // 所以 GitHub 显示 skipped（诚实：未执行不会被读成通过），而不是内部的 skip(){exit 0}（假绿）。
-  // job 内走到 image 步骤时，变量必然非空 —— 若仍为空那是工作流自身 bug，必须判红。
-  assert.match(workflow, /fail '内部错误：job 级 if 应已拦截空镜像/u,
-    'image 步骤必须保留空值兜底并判红（若走到这里仍为空，说明 if 与 env 取值不一致）');
+  // 2026-11-11（用户最终要求）：**不跳过** —— job 级 if 只判 gate.result，
+  // 不按 CX_QEMU_GUEST_IMAGE 是否为空跳过。所以「未配置」会正常走到 image 步骤，
+  // 由那里的 fail() 判红（exit 1），而不是 skip(){} + exit 0（假绿）。
+  // 判据：空值分支必须存在且给出**可操作**的配置指引，而不是含糊的「内部错误」。
+  assert.match(workflow, /fail '未配置客机镜像/u,
+    'image 步骤必须保留空值分支并判红，且给出可操作的配置指引');
   // skip(){ ... exit 0 } 是假绿指纹（run 42963390787 实测：客机一步没跑却报 success），不得再出现。
   assert.doesNotMatch(workflow, /skip\(\)\s*\{[^}]*exit\s+0/u,
     'qemu 段不得出现 skip(){ exit 0 } —— 那是 t96 修掉的假绿');
