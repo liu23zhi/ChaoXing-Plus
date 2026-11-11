@@ -732,3 +732,80 @@ test('整个 ci.yml（去注释）里不再有 ci-vm.yml 引用', async () => {
     'ci-vm.yml 已删除：注释可以讲历史，但去注释后的可执行内容里不许再引用它',
   );
 });
+
+// ────────── 2. 失败连锁：发布包验证不得被「假依赖」连带 skip ──────────
+//
+// 2026-11-11 实测的事故：windows-unit 因 mjs 清单不同步而失败，
+// windows-release 的 if 里写着 `needs.windows-unit.result == 'success'`，
+// 于是**发布包验证被连带 skip** —— 那一轮没有任何人知道发布包坏没坏。
+//
+// 判据（为什么这是缺陷而不是设计）：windows-release 的**唯一输入**是
+// windows-build 上传的 artifact `windows-ci-build-<sha>`；
+// windows-unit / windows-pause / windows-window / windows-browser
+// 都不产出它消费的任何东西，把它们写进 if 是假依赖。
+//
+// 同时必须保留 windows-build 这个真门：上传用 `if-no-files-found: error`，
+// build 失败就没有 artifact，download 步骤没有 continue-on-error，会直接失败。
+//
+// 这组断言要能抓住的三种回归形态：
+//   ① 把 unit/pause/window/browser 任一个写回 if → 红
+//   ② 把 windows-build 从 if 里去掉 → 红（build 失败时白跑）
+//   ③ 把 if 改成裸 always() → 红（PR 上不该跑的重活也会跑；且失去 !cancelled() 保护）
+
+test('windows-release 的 if 只把 windows-build 当硬门，不把单测/回归当硬门', async () => {
+  const section = await jobSection('windows-release');
+  const condition = inlineValue(section, 'if');
+
+  // 正向对照：证明读到的是本文件的 if（而不是空串导致的空转）。
+  assert.ok(condition.includes('always()'), `windows-release 的 if 必须含 always()，实际：${condition}`);
+
+  // ① 真门必须保留。
+  assert.ok(
+    condition.includes('needs.windows-build.result == \'success\''),
+    `windows-release 的 if 必须保留 windows-build 硬门，实际：${condition}`,
+  );
+
+  // ③ 不允许裸 always()：必须还有 !cancelled()，否则被取消时也会跑。
+  assert.ok(
+    condition.includes('!cancelled()'),
+    `windows-release 的 if 必须含 !cancelled()，实际：${condition}`,
+  );
+
+  // ② 假门必须不存在。逐个点名，失败信息直接说清是哪个把发布包验证连累了。
+  for (const fake of ['windows-unit', 'windows-pause', 'windows-window', 'windows-browser']) {
+    assert.ok(
+      !condition.includes(`needs.${fake}.result`),
+      `windows-release 的 if 不得依赖 ${fake} 的 result（它不产出本作业消费的任何产物，` +
+        `一旦它红，发布包验证会被连带 skip，于是没人知道发布包坏没坏）。实际：${condition}`,
+    );
+  }
+
+  // needs 仍应保留五个：needs 决定调度顺序，去掉会让发布包验证与浏览器回归抢 runner。
+  const needs = inlineValue(section, 'needs');
+  for (const upstream of ['windows-build', 'windows-unit', 'windows-pause', 'windows-window', 'windows-browser']) {
+    assert.ok(
+      needs.includes(upstream),
+      `windows-release 的 needs 仍须包含 ${upstream}（决定调度顺序，不等于硬门）。实际：${needs}`,
+    );
+  }
+});
+
+test('windows-release 消费的 artifact 只能由 windows-build 提供', async () => {
+  const section = await jobSection('windows-release');
+
+  // 这条是上面「假依赖」判定的**事实依据**：把本作业下载的 artifact 名钉住，
+  // 并验证它确实来自 windows-build 的上传。
+  // 若将来本作业开始消费别的作业产物，这条会红，提醒重新评估哪些 needs 是真依赖。
+  const downloads = [...section.matchAll(/name:\s*(windows-ci-build-\$\{\{ github\.sha \}\})/gu)].map((m) => m[1]);
+  assert.ok(downloads.length > 0, `windows-release 必须下载共享构建产物，实际段内未找到`);
+
+  const buildSection = await jobSection('windows-build');
+  assert.ok(
+    buildSection.includes('name: windows-ci-build-${{ github.sha }}'),
+    'windows-build 必须上传 windows-release 消费的那个 artifact',
+  );
+  assert.ok(
+    buildSection.includes('if-no-files-found: error'),
+    'windows-build 的 artifact 上传必须保持 if-no-files-found: error（否则失败也算成功，build 门失效）',
+  );
+});
