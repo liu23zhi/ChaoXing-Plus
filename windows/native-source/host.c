@@ -55,6 +55,11 @@ typedef struct H_NATIVE_PAGE {
     BOOL uiReady;
     int uiContext;
     DWORD uiEpoch, uiDelivered, uiRetryAt;
+    /* t89：bundle 落地哨兵的重试状态。bundle ACK 只代表源码已送达，
+       不代表它执行完；ACK 后立刻探一次必然探不到（实测 13ms–1.77s 就失败，
+       而超时是 120000ms）。所以改成「延迟首探 + 有限次重探」。 */
+    DWORD bundleProbeAt;   /* 下次允许探测的时刻；0 = 还没排期 */
+    DWORD bundleProbeCount; /* 已经探测过几次 */
     CX_SESSION_STATS reported;
 } H_NATIVE_PAGE;
 
@@ -77,10 +82,22 @@ static CX_SESSION_TASK h_current_task;
 static BOOL h_task_pending;
 static int h_current_context;
 static DWORD h_command_timeout = 10000;
-/* 最近一次 h_send_eval_checked 是否拿到页面给出的"明确否定"：
-   CDP 应答里带 error/exceptionDetails，或 boolean 结果不是 true。
-   超时/断连等传输问题不算否定，避免把一次抖动当成注入失败。 */
-static BOOL h_last_eval_rejected;
+/* 最近一次 requireTrue 求值的三态结果。
+   t89：这里以前是一个 BOOL h_last_eval_rejected，把三种完全不同的情形压成两态，
+   导致「我没问到」被记成「页面说没跑」——正是在 CI 上观察到
+   bundleInPage=false 且 bundleSentinelRejected=false 却仍然红的那条路径的来源。
+   三态语义：
+     EVAL_CONFIRMED    页面回了应答且值为 true    → 成功
+     EVAL_REJECTED     页面**明确**回了 false/抛异常/非 boolean 值
+                       → 可以判定「页面说没跑」，允许升级为失败
+     EVAL_UNCONFIRMED  没拿到有效应答（超时/断连/取消/JSON 解析失败/应答缺 result）
+                       → 只能说「我没问到」，**不允许**当成页面否定 */
+typedef enum H_EVAL_STATE {
+    H_EVAL_UNCONFIRMED = 0,
+    H_EVAL_CONFIRMED,
+    H_EVAL_REJECTED
+} H_EVAL_STATE;
+static H_EVAL_STATE h_last_eval_state = H_EVAL_UNCONFIRMED;
 static DWORD h_client_pid, h_started, h_duration;
 static DWORD h_bundles_completed;
 static int h_exit_code;
@@ -2486,7 +2503,7 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
     int received, count, result, exception, remote, type, value;
     if (replyOut) *replyOut = NULL;
     if (lengthOut) *lengthOut = 0;
-    h_last_eval_rejected = FALSE;
+    h_last_eval_state = H_EVAL_UNCONFIRMED;
     tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, sizeof(JT) * HOST_REPLY_TOKENS);
     if (!tokens) { h_error(error, errorCap, L"out of memory parsing CDP response"); return FALSE; }
     for (;;) {
@@ -2496,9 +2513,11 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
         wait = h_command_timeout - elapsed;
         if (wait > 100) wait = 100;
         received = net_ws_read_timeout(ws, &reply, &length, wait, error, errorCap);
+        /* 传输层读失败：确实没问到页面，保持 UNCONFIRMED。 */
         if (received < 0) break;
         if (!received) continue;
         count = jparse(reply, (int)length, tokens, HOST_REPLY_TOKENS);
+        /* 应答无法解析：同样是"没问到"，不能算页面否定。 */
         if (count <= 0) { h_error(error, errorCap, L"invalid or oversized CDP JSON response"); net_free(reply); reply = NULL; break; }
         if (jkey(reply, tokens, 0, "method") >= 0) h_dispatch_event(reply, length);
         if ((DWORD)jint(reply, tokens, jkey(reply, tokens, 0, "id"), -1) != id) { net_free(reply); reply = NULL; continue; }
@@ -2506,16 +2525,27 @@ static BOOL h_wait_reply(NET_WS *ws, DWORD id, BOOL requireTrue, char **replyOut
         exception = result >= 0 ? jkey(reply, tokens, result, "exceptionDetails") : -1;
         if (jkey(reply, tokens, 0, "error") >= 0 || exception >= 0 || result < 0) {
             /* 页面确实回了话，只是回了错误：这是明确否定，不是传输抖动。 */
-            h_last_eval_rejected = TRUE;
+            h_last_eval_state = H_EVAL_REJECTED;
             h_error(error, errorCap, L"CDP command returned an error or exception"); net_free(reply); reply = NULL; break;
         }
         remote = result >= 0 ? jkey(reply, tokens, result, "result") : -1;
         type = remote >= 0 ? jkey(reply, tokens, remote, "type") : -1;
         value = remote >= 0 ? jkey(reply, tokens, remote, "value") : -1;
-        if (requireTrue && (!jeq(reply, tokens, type, "boolean") || value < 0 || tokens[value].type != 'p' || !jeq(reply, tokens, value, "true"))) {
-            /* 页面回了应答但值不是 true：同样是明确否定。 */
-            h_last_eval_rejected = TRUE;
-            h_error(error, errorCap, L"DOM script did not acknowledge execution (CSP, syntax or runtime failure)"); net_free(reply); reply = NULL; break;
+        if (!requireTrue) {
+            /* 不要求 true：拿到 result 就算确认。 */
+            h_last_eval_state = H_EVAL_CONFIRMED;
+        } else if (jeq(reply, tokens, type, "boolean") && value >= 0 && tokens[value].type == 'p' && jeq(reply, tokens, value, "true")) {
+            h_last_eval_state = H_EVAL_CONFIRMED;
+        } else if (jeq(reply, tokens, type, "boolean")) {
+            /* 页面明确回了 boolean 且不是 true：这是"页面说没有"，允许升级。 */
+            h_last_eval_state = H_EVAL_REJECTED;
+            h_error(error, errorCap, L"DOM script did not acknowledge execution (the page answered false)"); net_free(reply); reply = NULL; break;
+        } else {
+            /* t89：非 boolean（undefined / string / object / 完全缺 result.result）不再是 REJECTED。
+               这一支以前和上面的 false 共用同一个 REJECTED，导致「页面回了个不是布尔的东西」
+               被记成「页面明确说没跑」。它实际上什么都没证明，只能是 UNCONFIRMED。 */
+            h_last_eval_state = H_EVAL_UNCONFIRMED;
+            h_error(error, errorCap, L"DOM script returned a non-boolean acknowledgement; cannot decide"); net_free(reply); reply = NULL; break;
         }
         if (replyOut) { *replyOut = reply; if (lengthOut) *lengthOut = length; }
         else net_free(reply);

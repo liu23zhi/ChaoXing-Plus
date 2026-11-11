@@ -626,44 +626,130 @@ static void test_bundle_sentinel(void) {
     cx_options_init(&h_base_options);
     error[0] = 0;
 
+    /* ---- t89：探针改成"延迟首探 + 有限次重探"，所以用例要先推进 fakeTick 再探 ---- */
+#define T89_ADVANCE_MS(ms) (fakeTick += (ms))
+
     /* 确认：页面回答 boolean true → 注入落地 */
-    ZeroMemory(&h_report, sizeof(h_report));
-    scriptReplyMode = 0; calls = 0; failures = 0; cancelReadMode = 0;
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
+    scriptReplyMode = 0; calls = 0; failures = 0; cancelReadMode = 0; transportErrorMode = FALSE;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
     h_probe_bundle_sentinel(&page);
     check("bundle sentinel confirms a true page acknowledgement", h_report.injectEvidence.bundleInPage
         && !h_report.injectEvidence.bundleSentinelRejected);
 
-    /* 明确否定：页面回答 boolean false → 拒绝 */
-    ZeroMemory(&h_report, sizeof(h_report));
+    /* 明确否定：页面回答 boolean false → 拒绝，且不再重试 */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
     scriptReplyMode = 1; calls = 0;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
     h_probe_bundle_sentinel(&page);
     check("bundle sentinel records an explicit false acknowledgement", !h_report.injectEvidence.bundleInPage
         && h_report.injectEvidence.bundleSentinelRejected);
+    before = calls;
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_INTERVAL_MS * 2);
+    h_probe_bundle_sentinel(&page);
+    check("bundle sentinel stops probing after an explicit rejection", calls == before);
 
     /* 明确否定：脚本抛异常 */
-    ZeroMemory(&h_report, sizeof(h_report));
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
     scriptReplyMode = 3; calls = 0;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
     h_probe_bundle_sentinel(&page);
     check("bundle sentinel records a page exception as rejection", !h_report.injectEvidence.bundleInPage
         && h_report.injectEvidence.bundleSentinelRejected);
 
-    /* 无法判定：传输层错误不升级为否定 */
-    ZeroMemory(&h_report, sizeof(h_report));
+    /* 无法判定：传输层错误不升级为否定（且会继续重试） */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
     scriptReplyMode = 0; calls = 0; transportErrorMode = TRUE;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
     h_probe_bundle_sentinel(&page);
     check("bundle sentinel transport failure is unknown, not rejected", !h_report.injectEvidence.bundleInPage
         && !h_report.injectEvidence.bundleSentinelRejected);
     transportErrorMode = FALSE;
 
     /* 已确认后不重复探测 */
-    ZeroMemory(&h_report, sizeof(h_report));
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1;
     h_report.injectEvidence.bundleInPage = TRUE;
     before = calls;
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_INTERVAL_MS * 4);
     h_probe_bundle_sentinel(&page);
-    check("bundle sentinel probe runs once per run", calls == before);
-    scriptReplyMode = 0;
+    check("bundle sentinel probe stops once confirmed", calls == before);
+
+    /* ================= t89 新增：三条钉子 ================= */
+
+    /* #1 首次未确认、第二次确认 → bundleInPage = TRUE
+       这是"探早了"的直接回归：旧实现只探一次，第一次探不到就永远 false。 */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
+    scriptReplyMode = 2; calls = 0; transportErrorMode = FALSE; /* 首次：undefined（非 boolean → 未确认） */
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
+    h_probe_bundle_sentinel(&page);
+    {
+        BOOL firstUnconfirmed = !h_report.injectEvidence.bundleInPage
+            && !h_report.injectEvidence.bundleSentinelRejected;
+        scriptReplyMode = 0; /* 第二次：true */
+        T89_ADVANCE_MS(H_BUNDLE_PROBE_INTERVAL_MS + 1);
+        h_probe_bundle_sentinel(&page);
+        check("t89 #1 retry confirms the bundle when the first probe was too early",
+              firstUnconfirmed && h_report.injectEvidence.bundleInPage
+              && !h_report.injectEvidence.bundleSentinelRejected);
+    }
+
+    /* #2 探测次数用尽仍未确认 → bundleInPage=false 且 bundleSentinelRejected=false（不诬告）
+       这条正是当前缺陷的钉子：绝不该把"我没问到"记成"页面说没跑"。 */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
+    scriptReplyMode = 2; calls = 0; transportErrorMode = FALSE; /* 永远 undefined */
+    h_schedule_bundle_probe(&page);
+    {
+        DWORD i;
+        for (i = 0; i < H_BUNDLE_PROBE_MAX + 3; ++i) {
+            T89_ADVANCE_MS(H_BUNDLE_PROBE_INTERVAL_MS + 1);
+            h_probe_bundle_sentinel(&page);
+        }
+        check("t89 #2 exhausted probes stay unconfirmed and never claim the page rejected",
+              !h_report.injectEvidence.bundleInPage
+              && !h_report.injectEvidence.bundleSentinelRejected
+              && page.bundleProbeCount == H_BUNDLE_PROBE_MAX);
+    }
+
+    /* #3 页面明确回 false → bundleSentinelRejected = TRUE（与 #2 形成对照） */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
+    scriptReplyMode = 1; calls = 0; transportErrorMode = FALSE;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
+    h_probe_bundle_sentinel(&page);
+    check("t89 #3 an explicit page false still upgrades to rejected",
+          !h_report.injectEvidence.bundleInPage
+          && h_report.injectEvidence.bundleSentinelRejected);
+
+    /* #4 非 boolean 应答（string "true"）不再被当成否定 —— host.c 三态拆分的钉子。
+       旧代码把这一支和 boolean false 共用同一个 rejected，属于"证据不足被写成证据显示没跑"。 */
+    ZeroMemory(&h_report, sizeof(h_report)); ZeroMemory(&page, sizeof(page));
+    page.ws = (NET_WS *)1; page.nextId = 1;
+    scriptReplyMode = 4; calls = 0; transportErrorMode = FALSE;
+    h_schedule_bundle_probe(&page);
+    T89_ADVANCE_MS(H_BUNDLE_PROBE_DELAY_MS + 1);
+    h_probe_bundle_sentinel(&page);
+    check("t89 #4 a non-boolean acknowledgement is unconfirmed, not rejected",
+          !h_report.injectEvidence.bundleInPage
+          && !h_report.injectEvidence.bundleSentinelRejected
+          && h_last_eval_state == H_EVAL_UNCONFIRMED);
+
+    scriptReplyMode = 0; transportErrorMode = FALSE;
     ZeroMemory(&h_report, sizeof(h_report));
     error[0] = 0;
+#undef T89_ADVANCE_MS
 }
 
 void __stdcall InjectionTestMain(void) {

@@ -107,7 +107,13 @@ test('compiled native injection honors strategy order, retry limits and unique r
     'bundle sentinel records an explicit false acknowledgement',
     'bundle sentinel records a page exception as rejection',
     'bundle sentinel transport failure is unknown, not rejected',
-    'bundle sentinel probe runs once per run'
+    'bundle sentinel probe stops once confirmed',
+    'bundle sentinel stops probing after an explicit rejection',
+    // t89：探针重试 + 三态拆分
+    't89 #1 retry confirms the bundle when the first probe was too early',
+    't89 #2 exhausted probes stay unconfirmed and never claim the page rejected',
+    't89 #3 an explicit page false still upgrades to rejected',
+    't89 #4 a non-boolean acknowledgement is unconfirmed, not rejected'
   ]) assert.ok(result.stdout.includes(`PASS ${regression}`), result.stdout);
 });
 
