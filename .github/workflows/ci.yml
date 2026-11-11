@@ -739,6 +739,7 @@ jobs:
           echo "SHA_VERIFIED=no"
           echo "REASON=已取消判重：每次 run 都执行"
 
+
   kvm-probe:
     name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
     needs: gate
@@ -891,6 +892,143 @@ jobs:
   # 断言「续删命令确实执行且目标被删」。不真关机 —— 托管 runner 关机就没了。
   # ---------------------------------------------------------------------------
 
+  vm-shutdown-destruct:
+    name: 关机自毁与开机续删（虚拟机）
+    needs: gate
+    # 2026-11-11: 完全取消限制（用户三次要求「不要跳过任务」）。
+    # ⚠️ 当前仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]）。
+    # 去掉变量门后本作业会 **queued** 而非 skipped —— 这是「不跳过」的真实代价，
+    # 注册 cx-vm runner 后即正常执行。
+    # ⚠️ 刻意不看 gate.outputs.skip：自毁作业是「完整 CI 里必须有」的部分。
+    if: needs.gate.result == 'success'
+    runs-on: [self-hosted, windows, cx-vm]
+    # ⚠️ 独立 concurrency + 不取消：本作业会真关机。若被新 push 中途取消，
+    # -Stage shutdown 已登记的 RunOnce 永不执行 -Stage resume，
+    # 虚拟机将停在「已登记、未续删」状态。宁可排队也不能取消。
+    concurrency:
+      group: cx-vm-destruct-${{ github.ref }}
+      cancel-in-progress: false
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # build-windows.ps1 依赖 dist-windows 下的页面资源与 windows/native-build/hook
+      # 的代理产物；缺任何一项都会直接 throw「Missing injection asset」。
+      # 与主 CI 一致：先扩展包，再 Windows 注入资源（发布口径用 --release）。
+      - name: 构建扩展包与 Windows 注入资源
+        run: |
+          npm run build
+          npm run build:windows -- --release
+
+      - name: 记录基线快照标记
+        shell: pwsh
+        run: |
+          # 快照本身由 runner 镜像层负责；这里只记录起点，便于失败时对照。
+          $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          "CX_VM_SNAPSHOT_BASELINE=$stamp" | Out-File -FilePath "$env:RUNNER_TEMP\cx-vm-baseline.txt" -Encoding utf8
+          Write-Output "基线标记 $stamp"
+
+      - name: 断言起点干净（无残留登记与临时目录）
+        shell: pwsh
+        run: |
+          ./scripts/vm/assert-clean.ps1 -Stage baseline
+
+      - name: 构建原生测试产物
+        shell: pwsh
+        run: |
+          # 复用仓库既有构建脚本，不新增一套编译流程。
+          # -BuildTests 是 switch（不带值）；与 package.json 的 build:native 同口径调用。
+          # 测试产物（injection-tests.exe / purge-tests.exe 等）不签名，脚本内没有 signtool 环节，
+          # 因此这里不需要任何「允许未签名」开关。
+          ./windows/native-source/build-windows.ps1 -BuildTests
+
+      - name: 关机自毁端到端
+        shell: pwsh
+        run: |
+          ./scripts/vm/run-shutdown-destruct.ps1 -Stage shutdown
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 开机续删与强制关机保障
+        shell: pwsh
+        run: |
+          ./scripts/vm/run-shutdown-destruct.ps1 -Stage resume
+        env:
+          CX_NATIVE_PURGE_EXE: ${{ github.workspace }}\windows\native-build\bin\purge-tests.exe
+          CX_NATIVE_HOST_EXE: ${{ github.workspace }}\windows\native-build\bin\chaoxing_plus.exe
+
+      - name: 断言终点干净（自毁后无残留）
+        if: always()
+        shell: pwsh
+        run: |
+          ./scripts/vm/assert-clean.ps1 -Stage teardown
+
+      - name: 上传证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cx-vm-destruct-evidence
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/cx-vm-*.txt
+            ${{ runner.temp }}/cx-purge-*.log
+            ${{ runner.temp }}/cx-purge-*.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 还原虚拟机快照
+        if: always()
+        shell: pwsh
+        run: |
+          # 快照还原交给 runner 自身的 VM 管理层（Hyper-V / VMware / Proxmox），
+          # 由 VM_RESTORE_COMMAND 注入；未配置时只告警，不掩盖前面的失败。
+          if ([string]::IsNullOrWhiteSpace($env:VM_RESTORE_COMMAND)) {
+            Write-Warning '未配置 VM_RESTORE_COMMAND；本次运行后虚拟机不会自动还原，请人工核对。'
+            exit 0
+          }
+          Invoke-Expression $env:VM_RESTORE_COMMAND
+        env:
+          VM_RESTORE_COMMAND: ${{ vars.CX_VM_RESTORE_COMMAND }}
+
+  # 自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完整两阶段。
+  #
+  # 它能证明什么（这才是重点）：
+  #
+  #   1. shutdown 阶段真的把待删文件登记进了**真实 HKCU RunOnce**（不是测试子键）
+  #   2. 注册表里存下的那条 command 串，**按原文执行**之后
+  #      → 目标文件被删、RunOnce 登记被撤销、续删脚本自删
+  #
+  #   第 2 条正是 `-NoShutdown` 盖不住的那一半：-NoShutdown 只证明「登记正确」，
+  #   而这里执行的是 Windows 登录时会执行的**同一条命令串**
+  #   （注册表里存什么就执行什么，`cmd /c <stored command>`）。
+  #
+  # 它盖不住什么（如实标注，不许当成已覆盖）：
+  #
+  #   · 登录会话真的去读 RunOnce 这个**触发动作**本身 —— 需要真重启。
+  #   · `WM_QUERYENDSESSION` / `WM_ENDSESSION` 在真实关机流程中的时序。
+  #   · `shutdown.exe /s` 真的走自毁路径（这条由 cx-vm 的关机作业覆盖）。
+  #   · `MOVEFILE_DELAY_UNTIL_REBOOT` 项重启后消失 —— 需要真重启。
+  #
+  # 结论：这个作业把「RunOnce 命令串是否可执行、执行后是否删净并自撤销」
+  # 从「从未验证」变成「每次手动触发都验证」。真正的重启语义仍留给 cx-vm，
+  # 所以本作业**不能替代** cx-vm 的关机作业，只能补上它常年跑不起来时的缺口。
+  #
+  # 为什么现在去掉 continue-on-error：它原先存在的理由是缺陷 c/d
+  # （purge-tests.c 不读 CX_PURGE_TEST_STAGE/TARGET）——这两条已由 PR #29 修掉，
+  # 本地实跑 `-Stage shutdown -NoShutdown` 与 `-Stage resume -ReplayRunOnce` 均 exit 0。
+  # 保留 continue-on-error 会让它永远绿，等于没有门禁。
+
   wiring-probe:
     name: 自毁续删语义验证（不关机，托管 runner）
     needs: gate
@@ -1030,31 +1168,9 @@ jobs:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
     needs: gate
-    # ── 触发条件（2026-11-11 合并两方意图）────────────────────────────────
-    #
-    # 【意图 1：用户要求「不要跳过任务」（captain 侧，优先级高）】
-    #   不按 event_name / 变量门跳过 —— PR 上也跑，每次都跑。
-    #
-    # 【意图 2：t96 修的假绿（必须保留）】
-    #   旧行为：job 总会启动，内部发现「客机镜像未配置」就 exit 0（成功），
-    #   只在 Step Summary 里写「跳过不等于验证通过」—— job 结论仍是 success。
-    #   用户实测抓到：run 42963390787 明明什么都没跑却显示绿色。
-    #   ⇒ 已修：内部 skip 不再 exit 0，改为 `::error` + exit 1（见「解析客机镜像」步骤）。
-    #   所以「未配置镜像」现在会**如实失败**，而不是伪装成成功。
-    #
-    # 【两者的交点】
-    #   意图 1 要求「不跳过」，意图 2 要求「不撒谎」。
-    #   合起来的正确语义 = **跑，跑不了就红**（不是 skipped、不是 success）。
-    #   这正是用户「跳过不等于验证通过」的原话要求。
-    #
-    # ⚠️ 代价（已知并接受）：本仓库从未配置过 CX_QEMU_GUEST_IMAGE
-    #   （gh api /actions/variables 只有 EXAMINATION_CLIENT_DATABASE_1/2），
-    #   所以这条作业会持续红，直到配置镜像。这是「不跳过」的真实代价，
-    #   用户明确选择不跳过，故按此实现。
-    #
-    # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
-    #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
-    #   绝对路径或 https URL；外加 secret `CX_QEMU_GUEST_SSH_KEY`。
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
+    # 镜像未配置时作业内部会 skip 而不是 fail。
+    # 刻意不看 gate.outputs.skip：日判重不约束自毁作业。
     if: needs.gate.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。

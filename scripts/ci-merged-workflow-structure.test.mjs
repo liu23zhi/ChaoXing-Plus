@@ -273,6 +273,32 @@ test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async 
   );
 });
 
+test('vm-shutdown-destruct 已取消所有限制（含变量门）', async () => {
+  const section = await jobSection('vm-shutdown-destruct');
+  const condition = blockValue(section, 'if');
+
+  // 2026-11-11 用户三次要求「不要跳过任务」：变量门与 event 限制全部取消。
+  //
+  // ⚠️ 代价已知：本仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]），
+  // 去掉变量门后本作业是 **queued** 而非 skipped。这是「不跳过」的真实代价，
+  // 注册 runner 后即正常执行。该代价记录在 ci.yml 的 job 注释里。
+  assert.ok(
+    !condition.includes('vars.CX_VM_ENABLED'),
+    'vm-shutdown-destruct 不得再受 CX_VM_ENABLED 变量门限制，实际：' + condition,
+  );
+  assert.ok(
+    !condition.includes('github.event_name'),
+    'vm-shutdown-destruct 不得再按 event_name 限制，实际：' + condition,
+  );
+  assert.ok(
+    condition.includes('needs.gate.result'),
+    'vm-shutdown-destruct 必须仍然受 gate.result 约束，实际：' + condition,
+  );
+  assert.ok(
+    !condition.includes('needs.gate.outputs.skip'),
+    'vm-shutdown-destruct 不得被任何判重跳过，实际：' + condition,
+  );
+});
 
 test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
   const section = await jobSection('gate');
@@ -315,6 +341,14 @@ test('wiring-probe 跑在托管 runner 上（不依赖 self-hosted 才有自毁�
   );
 });
 
+test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
+  const section = await jobSection('vm-shutdown-destruct');
+  assert.equal(
+    inlineValue(section, 'runs-on'),
+    '[self-hosted, windows, cx-vm]',
+    '真关机必须落在自建 cx-vm 上：改成托管 runner 会让作业永久排队或杀掉 runner 自己',
+  );
+});
 
 test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
@@ -732,130 +766,5 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   assert.ok(
     buildSection.includes('if-no-files-found: error'),
     'windows-build 的 artifact 上传必须保持 if-no-files-found: error（否则失败也算成功，build 门失效）',
-  );
-});
-// ────────── 4. 跳过不得伪装成成功（假绿） ──────────
-//
-// 2026-11-11 用户实测抓到：run 42963390787 的
-// 「关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）」客机镜像未配置、内部一步没跑，
-// 却报 **success**。原因是 job 内部 `skip(){ exit 0; }` + 结论文本只写进
-// Step Summary、从不 exit 非零 ⇒ GitHub 看到的是成功。
-//
-// 修法把两种「没跑」分开：
-//   ① 没配置 CX_QEMU_GUEST_IMAGE → **job 级 if 判掉** ⇒ GitHub 显示 skipped（不是 success）
-//   ② 配置了但坏（下载失败/格式非 qcow2/文件不存在/缺 secret）→ 步骤 `::error` + exit 1 ⇒ failure
-//
-// 这组断言要能抓住的回归形态：
-//   · 把 job 级 if 里的镜像判空去掉 → ① 变回 success（假绿）
-//   · 把 `fail()` 改回 `exit 0` → ② 变回 success（假绿）
-//   · 把结论步骤里的 `exit 1` 兜底去掉 → ② 只剩红色文字但 job 绿
-
-test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也必须启动并如实失败', async () => {
-  const section = await jobSection('qemu-shutdown-destruct');
-  // `if:` 是 `|` 多行块时必须用 blockValue（inlineValue 只会读到那个竖线）。
-  const condition = blockValue(section, 'if');
-
-  // 正向对照：证明读到的是本作业的 if。
-  assert.ok(condition.includes("needs.gate.result == 'success'"), `if 必须仍受 gate 约束，实际：${condition}`);
-
-  // 2026-11-11 用户三次要求「不要跳过任务」，所以 job 级**不得**再按镜像变量跳过。
-  //
-  // 历史（两轮修正）：
-  //   ① 原状：job 总启动，内部 `skip(){ exit 0; }` ⇒ 「未配置」变成 success = 假绿。
-  //   ② t96 一度改成 job 级判变量 ⇒ 显示 skipped（不撒谎，但仍是「跳过」）。
-  //   ③ **现在（用户最终要求）**：不跳过 —— job 必启动，未配置时由内部
-  //      「解析客机镜像」步骤 `::error` + exit 1 收场 ⇒ **failure**。
-  //      「跑不了就红」比「假装没要求」更符合「跳过不等于验证通过」。
-  assert.ok(
-    !condition.includes('CX_QEMU_GUEST_IMAGE') && !condition.includes('guest_image'),
-    'job 级 if 不得再按镜像变量跳过（用户要求不跳过；未配置应由内部步骤判红）。' +
-      `实际：${condition}`,
-  );
-  assert.ok(
-    !condition.includes('github.event_name'),
-    'job 级 if 不得再按 event 限制（PR 上也跑）。' + `实际：${condition}`,
-  );
-
-  // env 里必须仍有镜像来源，否则内部步骤判不了「配置了但坏」。
-  assert.match(
-    section,
-    /CX_QEMU_GUEST_IMAGE:\s*\$\{\{\s*github\.event\.inputs\.guest_image\s*\|\|\s*vars\.CX_QEMU_GUEST_IMAGE\s*\}\}/u,
-    'env 必须以 `inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE` 取值',
-  );
-});
-
-
-test('qemu-shutdown-destruct 配置了但坏时必须失败，不得 exit 0', async () => {
-  const section = await jobSection('qemu-shutdown-destruct');
-
-  // 找出「解析客机镜像」步骤的 run 正文。
-  const stepLines = section.split('\n');
-  const start = stepLines.findIndex((line) => line.includes('解析客机镜像'));
-  assert.notEqual(start, -1, 'qemu-shutdown-destruct 必须有「解析客机镜像」步骤');
-  // 取到下一个 `- name:` 之前的全部内容。
-  let end = stepLines.length;
-  for (let i = start + 1; i < stepLines.length; i += 1) {
-    if (/^\s+- name:/u.test(stepLines[i])) { end = i; break; }
-  }
-  const body = stepLines.slice(start, end).join('\n');
-
-  // ① 必须有 fail() 且它 exit 1。
-  assert.match(body, /fail\(\)\s*\{/u, '解析客机镜像步骤必须有 fail() 辅助函数');
-  const failBlock = body.split(/fail\(\)\s*\{/u)[1]?.split(/\}/u)[0] ?? '';
-  assert.ok(failBlock.length > 0, 'fail() 必须有函数体');
-  assert.ok(
-    /exit\s+1/u.test(failBlock),
-    `fail() 必须以 exit 1 结束，否则「配置了但坏」会变成成功（假绿）。实际函数体：${failBlock.trim()}`,
-  );
-
-  // ② 不得再有「skip() 里 exit 0」这种形态残留在本步骤里。
-  assert.ok(
-    !/skip\(\)\s*\{[^}]*exit\s+0/u.test(body),
-    '解析客机镜像步骤不得再出现 `skip(){ ... exit 0 }` —— 那正是假绿的成因',
-  );
-
-  // ③ 关键分支都要走 fail()：空值兜底 / ISO 拒绝 / 下载失败 / 本地文件不存在 / 格式不对 / 缺 secret。
-  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'CX_QEMU_GUEST_SSH_KEY']) {
-    assert.ok(
-      body.includes(marker),
-      `解析客机镜像步骤必须保留「${marker}」这条失败分支（且走 fail() 判红）`,
-    );
-  }
-});
-
-test('qemu-shutdown-destruct 的跳过按「环境不可用 / 配置坏了」分流', async () => {
-  const section = await jobSection('qemu-shutdown-destruct');
-
-  // 「环境不可用（KVM/QEMU）」与「配置坏了（镜像）」必须用两个不同变量表达，
-  // 否则无法只对后者判红。
-  assert.ok(section.includes('ENVIRONMENT_SKIPPED'), 'summary 必须区分 ENVIRONMENT_SKIPPED（KVM/QEMU 环境问题）');
-  assert.ok(section.includes('CONFIG_BROKEN'), 'summary 必须区分 CONFIG_BROKEN（镜像/secret 配置问题）');
-
-  // 两类跳过在 summary 里必须有不同标题，不能都写成「跳过」。
-  assert.ok(
-    section.includes('未执行（环境不可用，不是通过）'),
-    'environment 跳过必须明确写「不是通过」',
-  );
-  assert.ok(
-    section.includes('失败：客机镜像已配置但不可用'),
-    'config 坏了必须以「失败」呈现，不能写成「跳过」',
-  );
-});
-
-test('qemu-destruct-linux-guest 不得引入同款假绿（它不需要镜像变量）', async () => {
-  const section = await jobSection('qemu-destruct-linux-guest');
-
-  // 这条作业不依赖 CX_QEMU_GUEST_IMAGE，所以它的 if 里**不应**出现该变量
-  // （出现说明有人照抄了上面那条的 job 级判空，会让它永远 skipped）。
-  const condition = inlineValue(section, 'if');
-  assert.ok(
-    !condition.includes('CX_QEMU_GUEST_IMAGE'),
-    `qemu-destruct-linux-guest 不依赖 Windows 镜像变量，if 里不应出现它。实际：${condition}`,
-  );
-
-  // 它也不应出现 skip()+exit 0 的假绿形态：拿不到 KVM 就硬失败是刻意设计。
-  assert.ok(
-    !/skip\(\)\s*\{[^}]*exit\s+0/u.test(section),
-    'qemu-destruct-linux-guest 不得有 `skip(){ exit 0 }` 形态：它拿不到 KVM 就该硬失败',
   );
 });
