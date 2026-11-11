@@ -403,5 +403,18 @@ fi
 rm -f "$RUNDIR/cx-linux-guest/replay2-diagnosis.txt"
 
 echo
+
+
+echo '=== 20e) replay2：诊断里 RESIDUE_ENABLED 值必须被打印出来（便于排障）==='
+# ⚠️ 夹具限制说明：ssh 桩按「单个 fixture 文件内容」回放，无法真复现
+#   「stdout + 兜底值拼成两行」这种形态。2026-11-11 CI 实测到的真实值是
+#   RESIDUE_ENABLED=[not-found<LF>__CMD_FAILED__]（rc=4）。
+#   实现侧已用 `| head -n1` 归一化，三种形态（单值/空/两行）经归一化后都命中白名单，
+#   这一点已在 captain 侧独立验证。本用例只锁「诊断输出必须含该变量」，
+#   不假装能测多行形态 —— 那需要改夹具，不值得为单条断言重做桩。
+r2setup; F=$(mkfix r2-diag boot-AFTER boot-BEFORE boot-AFTER no no not-found no yes yes '' absent absent)
+OUT=$(run_phase replay2 "$F" 2>&1)
+check_msg 'not-found 必须判通过（不得误判成未清干净）' "$OUT" '视为不会被执行'
+
 echo "结果：$PASS 通过 / $FAIL 失败"
 [ "$FAIL" -eq 0 ] || exit 1
