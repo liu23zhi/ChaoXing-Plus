@@ -89,6 +89,9 @@ mkfix() {
     printf 'rc=0 source=/var/lib/cx-destruct/target-1.txt\nrc=1 source=/var/lib/cx-destruct/target-dir\nrc=0 source=/var/lib/cx-destruct/target-2.txt\n' \
       > "$d/resume_log"
   fi
+  # t101：powercut 三态 + replay2 自撤销彻底性。
+  printf '%s\n' "${12:-absent}"        > "$d/resume_log_state"
+  printf '%s\n' "${13:-absent}"        > "$d/wants_link"
   echo "$d"
 }
 
@@ -274,6 +277,42 @@ echo
 echo '=== 15) 缺口 3/5 组合：完全无 resume-log → 必须判红 ==='
 F=$(mkfix gap-nolog boot-AFTER boot-BEFORE boot-AFTER no no not-found no yes yes 'missing')
 run_replay "$F" >/dev/null 2>&1; check '无逐条处理日志' 1 $?
+
+# ── t101：用户要求「一运行就注册、最后再删除」对应的两处新断言 ──────────────
+# 这两组是**断电前**（powercut）与**自撤销后**（replay2）的判据，
+# 与上面 replay 阶段的断言是不同 phase，必须各自有「应该判红」的反例，
+# 否则新加的断言永远绿也没人知道。
+
+echo
+echo '=== 16) powercut：断电前 resume-log 已有内容 → 必须判红 ==='
+# 场景：续删脚本已经跑过（log 非空），此时断电再冷启动，「文件没了」不能归因于本次续删。
+# 判据用 check_msg：这份输出里必须出现该断言的原文，才证明红是它触发的。
+F=$(mkfix pc-log-dirty boot-AFTER boot-BEFORE missing yes no not-found no yes yes '' nonempty absent)
+OUT=$(run_phase powercut "$F" 2>&1)
+check_msg '断电前 resume-log 非空' "$OUT" '断电前 resume-log 应不存在，实际=nonempty'
+
+echo
+echo '=== 17) powercut：断电前 resume-log 存在但为空 → 也必须判红 ==='
+F=$(mkfix pc-log-emptyfile boot-AFTER boot-BEFORE missing yes no not-found no yes yes '' empty-file absent)
+OUT=$(run_phase powercut "$F" 2>&1)
+check_msg '断电前 resume-log 空文件' "$OUT" '断电前 resume-log 应不存在，实际=empty-file'
+
+echo
+echo '=== 18) powercut：断电前 resume-proof 已存在 → 必须判红 ==='
+# proof 是脚本最后一步写的，存在 = 完整跑过一轮。
+F=$(mkfix pc-proof-exists boot-AFTER boot-BEFORE boot-AFTER yes no not-found no yes yes '' absent absent)
+OUT=$(run_phase powercut "$F" 2>&1)
+check_msg '断电前 resume-proof 已存在' "$OUT" '断电前 resume-proof 已存在'
+
+echo
+echo '=== 19) replay2：自撤销后 wants 符号链接仍残留 → 必须判红 ==='
+# 这条最容易被忽略：unit 文件删了、is-enabled 也返回 not-found，
+# 但 multi-user.target.wants 下的链接还在 → 下次开机会重复执行 → 幂等被破坏。
+F=$(mkfix r2-wants-left boot-AFTER boot-BEFORE boot-AFTER no no not-found no yes yes '' absent exists)
+printf 'boot-2nd\n' > "$RUNDIR/cx-linux-guest/boot-before-reboot2.txt"
+printf 'resumed_at=x\nboot_id=boot-AFTER\n' > "$RUNDIR/cx-linux-guest/proof-after-first.txt"
+OUT=$(run_phase replay2 "$F" 2>&1)
+check_msg 'wants 链接残留' "$OUT" 'enable 符号链接仍在'
 
 echo
 echo "结果：$PASS 通过 / $FAIL 失败"
