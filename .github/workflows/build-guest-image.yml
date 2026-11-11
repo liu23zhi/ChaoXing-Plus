@@ -243,6 +243,33 @@ jobs:
           WORK="$RUNNER_TEMP/guest"
           PUBKEY=$(cat "$WORK/id.pub")
 
+          # ── OpenSSH 离线包（关键）────────────────────────────────────────
+          # 为什么不靠 Windows Update：Add-WindowsCapability 需要联网从 WU 拉，
+          # dockur 容器内 Windows 的 NAT 能否走到 WU 不保证。实测后果是
+          # 「Connection timed out during banner exchange」= sshd 从未装上。
+          # 这里把微软官方的 Win32-OpenSSH zip（约 5 MB）下到 OEM 目录，
+          # 随 $OEM$ 一起进镜像，客机内离线解压即可 —— 完全确定性。
+          OSSH_URL="https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
+          if ! curl -fL --retry 3 --retry-delay 2 --max-time 180 \
+               -o "$WORK/oem/OpenSSH-Win64.zip" "$OSSH_URL"; then
+            echo "::error title=下载 OpenSSH 离线包失败::$OSSH_URL"
+            exit 1
+          fi
+          OSSH_SIZE=$(stat -c %s "$WORK/oem/OpenSSH-Win64.zip")
+          echo "OpenSSH-Win64.zip = $OSSH_SIZE 字节"
+          # 体积断言：正常约 4.9 MB；小于 1 MB 说明拿到的是错误页
+          if [ "$OSSH_SIZE" -lt 1000000 ]; then
+            echo "::error title=OpenSSH 离线包体积异常::只有 $OSSH_SIZE 字节"
+            exit 1
+          fi
+          # 校验是真 zip（前两字节 PK\x03\x04）
+          OSSH_MAGIC=$(head -c 4 "$WORK/oem/OpenSSH-Win64.zip" | od -An -tx1 | tr -d ' \n')
+          echo "zip magic = $OSSH_MAGIC"
+          case "$OSSH_MAGIC" in
+            504b0304*) echo 'zip 魔数正确' ;;
+            *) echo "::error title=OpenSSH 包不是 zip::magic=$OSSH_MAGIC"; exit 1 ;;
+          esac
+
           # 密码里若有 % 会让 bat 的 %VAR% 展开出问题；这里限制字符集并校验。
           case "$GUEST_PASSWORD" in
             *%*|*\'*|*\"*) echo '::error title=密码含特殊字符::bat 里会导致展开异常，请改用字母数字与 -_.!'; exit 1 ;;
@@ -259,17 +286,50 @@ jobs:
           try {
             Say 'setup start'
 
-            # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
-            \$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-            if (\$cap -and \$cap.State -ne 'Installed') {
-              Say "installing OpenSSH.Server (was \$(\$cap.State))"
-              Add-WindowsCapability -Online -Name \$cap.Name | Out-Null
+            # 1) 装 OpenSSH Server。
+            # ⚠️ 2026-11-11 关键修正：原实现用 Add-WindowsCapability，
+            #    它**需要联网从 Windows Update 下载**。dockur 容器内 Windows 的 NAT
+            #    能否走到 WU 并不保证 —— 实测结果为「SSH banner 超时」，即 sshd 从未装上。
+            #    ⇒ 改用 Win32-OpenSSH 的**离线 zip**（5MB，随 OEM 一起进镜像），
+            #      完全绕开 Windows Update。这是微软官方在 GitHub 发布的发行包。
+            #    这样即使镜像里完全没有外网，也能确定性地装上 sshd。
+            $osshZip = 'C:\OEM\OpenSSH-Win64.zip'
+            $osshDir = 'C:\Program Files\OpenSSH-Win64'
+            if (Test-Path $osshZip) {
+              Say 'installing OpenSSH from offline zip'
+              if (-not (Test-Path $osshDir)) {
+                Expand-Archive -LiteralPath $osshZip -DestinationPath 'C:\Program Files' -Force
+              }
+              $sshdExe = Join-Path $osshDir 'sshd.exe'
+              Say "sshd.exe exists=$(Test-Path $sshdExe) path=$sshdExe"
+              # 生成 host key（首次必须；否则 sshd 起不来）
+              & (Join-Path $osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: $_" }
+              # install-sshd.ps1 会注册服务、设自启、加防火墙规则
+              & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: $_" }
+              # 把 OpenSSH 目录加进 PATH（sshd 需要能找到自身 dll）
+              $env:Path = "$osshDir;$env:Path"
+              [Environment]::SetEnvironmentVariable('Path', "$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
             } else {
-              Say "OpenSSH.Server state=\$(\$cap.State)"
+              # 兜底：没有 zip 才退回 Windows Update（可能失败，但至少日志能看出来）
+              Say 'WARN OpenSSH zip missing from OEM, falling back to Windows Update'
+              $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+              Say "capability state=$($cap.State)"
+              if ($cap -and $cap.State -ne 'Installed') {
+                Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+              }
             }
-            Set-Service -Name sshd -StartupType Automatic
-            Start-Service sshd
-            Say "sshd status=\$((Get-Service sshd).Status) startup=\$((Get-Service sshd).StartType)"
+            # 无论走哪条路，都确保服务在、能起
+            Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
+            Start-Service sshd -ErrorAction SilentlyContinue
+            $svc = Get-Service sshd -ErrorAction SilentlyContinue
+            if ($svc) {
+              Say "sshd status=$($svc.Status) startup=$($svc.StartType)"
+            } else {
+              Say 'ERROR sshd service not found after install'
+            }
+            # 关键：把「22 端口谁在听」写进日志，宿主侧能直接看到是不是 sshd
+            Say "netstat22:"
+            netstat -ano | Select-String ':22 ' | ForEach-Object { Say "  $_" }
 
             # 2) 防火墙放行 22。漏这条的现象是「端口拒绝」，极易误判成 sshd 没起。
             if (-not (Get-NetFirewallRule -Name 'CX-SSHD-22' -ErrorAction SilentlyContinue)) {
@@ -666,9 +726,18 @@ jobs:
             -pidfile "$WORK/vqemu.pid" -daemonize
           echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)"
 
+          # ⚠️ 2026-11-11：加 ConnectionAttempts=1 与 ServerAliveInterval，避免
+          #    单次尝试卡满 ConnectTimeout 后整体窗口被吃尽。
+          #    同时单独保留一份 -vvv 的输出文件，失败时全文进 artifact ——
+          #    「banner exchange 超时」只有 -vvv 才能区分是端口没人听、还是
+          #    sshd 在但协商卡住。
           SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
-               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+               -o ConnectionAttempts=1 -o ServerAliveInterval=3 \
                -o BatchMode=yes -o LogLevel=ERROR"
+          SSHV="ssh -vvv -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                -o ConnectionAttempts=1 -o BatchMode=yes"
           READY=no
           DEADLINE=$(( $(date +%s) + 900 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
@@ -695,6 +764,10 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo '::error title=SSH 连不上::镜像不可用，不要拿去给 ci.yml 用'
+            echo '--- ssh -vvv 全量（最多 120 行）---'
+            $SSHV "$GUEST_USER@127.0.0.1" 'whoami' > /tmp/sshvvv.txt 2>&1 || true
+            head -120 /tmp/sshvvv.txt || true
+            cp /tmp/sshvvv.txt "$RUNNER_TEMP/guest/ssh-vvv.log" 2>/dev/null || true
             echo '--- ssh stderr ---'
             cat /tmp/ssherr.txt 2>/dev/null || true
             {
