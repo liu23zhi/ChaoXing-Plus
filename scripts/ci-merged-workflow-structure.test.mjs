@@ -256,43 +256,74 @@ test('每个作业段都能抽出且各有 name / runs-on', async () => {
 
 // ───────── 3. 「完整 CI 也跑关机自毁测试」这件事真的成立（核心） ─────────
 
-test('wiring-probe 的 if 覆盖 push / pull_request / workflow_dispatch 三种触发', async () => {
+test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async () => {
   const section = await jobSection('wiring-probe');
   const condition = blockValue(section, 'if');
 
+  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
   assert.ok(
-    condition.includes("github.event_name == 'push'"),
-    `wiring-probe 必须在 push 时运行（自毁续删语义是完整 CI 的一部分），实际：\n${condition}`,
+    !condition.includes('github.event_name'),
+    'wiring-probe 不得再按 event_name 限制，实际：' + condition,
   );
   assert.ok(
-    condition.includes("github.event_name == 'pull_request'"),
-    `wiring-probe 必须在 pull_request 时运行，实际：\n${condition}`,
+    condition.includes('needs.gate.result'),
+    'wiring-probe 必须仍然受 gate.result 约束（gate 挂了才不跑），实际：' + condition,
   );
   assert.ok(
-    condition.includes("github.event_name == 'workflow_dispatch'"),
-    `wiring-probe 必须保留手动触发，实际：\n${condition}`,
-  );
-  // 三条用 || 串起来才叫「三种触发都跑」；用 && 或单独写死某一种都要红。
-  assert.match(
-    condition.replace(/\s+/gu, ' '),
-    /github\.event_name == 'push' \|\| github\.event_name == 'pull_request' \|\| github\.event_name == 'workflow_dispatch'/u,
-    `三种触发必须并列（||），不能只留其中一种，实际：\n${condition}`,
-  );
-  // 日判重闸不能被顺手删掉：删了 kvm-probe 就会和自毁作业重复跑。
-  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，**不约束三条自毁作业**。
-  // 因为用户要求「完整 CI 里必须有完整关机自毁测试」，若自毁作业也被日判重跳过，
-  // 就退回了「关机自毁从未在 CI 里跑过」的老状态。
-  // 所以这里断言的是「只受 gate.result 约束，不看 gate.outputs.skip」。
-  assert.ok(
-    condition.includes("needs.gate.result == 'success'"),
-    `wiring-probe 必须受 gate.result 约束（gate 跑挂了才不跑），实际：\n${condition}`,
-  );
-  assert.ok(
-    !condition.includes("needs.gate.outputs.skip"),
-    `wiring-probe 不得被日判重跳过 —— 那会让「完整 CI 有自毁测试」失效，实际：\n${condition}`,
+    !condition.includes('needs.gate.outputs.skip'),
+    'wiring-probe 不得被任何判重跳过，实际：' + condition,
   );
 });
 
+test('vm-shutdown-destruct 已取消所有限制（含变量门）', async () => {
+  const section = await jobSection('vm-shutdown-destruct');
+  const condition = blockValue(section, 'if');
+
+  // 2026-11-11 用户三次要求「不要跳过任务」：变量门与 event 限制全部取消。
+  //
+  // ⚠️ 代价已知：本仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]），
+  // 去掉变量门后本作业是 **queued** 而非 skipped。这是「不跳过」的真实代价，
+  // 注册 runner 后即正常执行。该代价记录在 ci.yml 的 job 注释里。
+  assert.ok(
+    !condition.includes('vars.CX_VM_ENABLED'),
+    'vm-shutdown-destruct 不得再受 CX_VM_ENABLED 变量门限制，实际：' + condition,
+  );
+  assert.ok(
+    !condition.includes('github.event_name'),
+    'vm-shutdown-destruct 不得再按 event_name 限制，实际：' + condition,
+  );
+  assert.ok(
+    condition.includes('needs.gate.result'),
+    'vm-shutdown-destruct 必须仍然受 gate.result 约束，实际：' + condition,
+  );
+  assert.ok(
+    !condition.includes('needs.gate.outputs.skip'),
+    'vm-shutdown-destruct 不得被任何判重跳过，实际：' + condition,
+  );
+});
+
+test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
+  const section = await jobSection('gate');
+
+  // 2026-11-11 最终口径：判重逻辑整体删除。
+  assert.ok(
+    !section.includes('GITHUB_RUN_ID'),
+    'gate 不得再引用 GITHUB_RUN_ID（已取消判重，不查历史 run）',
+  );
+  assert.ok(
+    !section.includes('GITHUB_WORKFLOW_REF'),
+    'gate 不得再推导 workflow 文件名（已取消判重，不查 runs 列表）',
+  );
+  assert.ok(
+    !section.includes('head_sha='),
+    'gate 不得再按 commit sha 查历史 run（已取消判重）',
+  );
+
+  // 三个输出保留为常量，仅为不破坏下游引用。
+  for (const key of ['SKIP=', 'REASON=', 'SHA_VERIFIED=']) {
+    assert.ok(section.includes(key), `gate 必须仍然产出 ${key}（下游有引用）`);
+  }
+});
 test('wiring-probe 的 continue-on-error 只在 PR 上放行', async () => {
   const section = await jobSection('wiring-probe');
   assert.equal(
@@ -312,26 +343,6 @@ test('wiring-probe 跑在托管 runner 上（不依赖 self-hosted 才有自毁�
   );
 });
 
-test('vm-shutdown-destruct 由仓库变量开启，不再要求手动触发', async () => {
-  const section = await jobSection('vm-shutdown-destruct');
-  const condition = blockValue(section, 'if');
-
-  assert.ok(
-    condition.includes("vars.CX_VM_ENABLED == 'true'"),
-    `vm-shutdown-destruct 必须保留 CX_VM_ENABLED 变量门（托管 runner 没有 cx-vm 标签，硬跑会永久排队），实际：\n${condition}`,
-  );
-  // ⚠️ 2026-11-10 captain 裁决：日判重只省 kvm-probe 的成本，不约束自毁作业。
-  // 真关机是「完整 CI 里必须有」的那部分，被日判重跳过等于退回「从未跑过」。
-  assert.ok(
-    condition.includes("needs.gate.result == 'success'"),
-    `vm-shutdown-destruct 必须受 gate.result 约束，实际：\n${condition}`,
-  );
-  assert.ok(
-    !condition.includes("needs.gate.outputs.skip"),
-    `vm-shutdown-destruct 不得被日判重跳过，实际：\n${condition}`,
-  );
-});
-
 test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
   const section = await jobSection('vm-shutdown-destruct');
   assert.equal(
@@ -341,34 +352,27 @@ test('vm-shutdown-destruct 仍固定在 self-hosted cx-vm 上', async () => {
   );
 });
 
-test('qemu-shutdown-destruct 在 push 与手动触发时都运行，不是只手动', async () => {
+test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
   const condition = blockValue(section, 'if');
   const squashed = condition.replace(/\s+/gu, ' ');
 
+  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
   assert.ok(
-    condition.includes("github.event_name == 'push'"),
-    `qemu-shutdown-destruct 必须在 push 时运行，实际：\n${condition}`,
+    !condition.includes('github.event_name'),
+    'qemu-shutdown-destruct 不得再按 event_name 限制（PR 上也要跑），实际：' + condition,
   );
-  assert.match(
-    squashed,
-    /github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'/u,
-    `必须是 push ∪ workflow_dispatch 两个触发，实际：\n${condition}`,
+  assert.ok(
+    condition.includes('needs.gate.result'),
+    'qemu-shutdown-destruct 必须仍然要求 gate 成功，实际：' + condition,
   );
-  // 旧写法（只手动触发）会退化成「CI 里从来没有 QEMU 自毁记录」。
+  // 旧写法会把「推送后从未跑过」变成永久缺口。
   assert.doesNotMatch(
     squashed,
-    /^\s*needs\.gate\.outputs\.skip != 'yes' &&\s*\(?github\.event_name == 'workflow_dispatch'\)?\s*$/u,
-    `不能是「只 workflow_dispatch」的旧写法，实际：\n${condition}`,
-  );
-  // PR 上不跑是刻意的（45 分钟 + 客机镜像），这一条防止有人好心把它加进 pull_request。
-  assert.ok(
-    !condition.includes("github.event_name == 'pull_request'"),
-    `qemu-shutdown-destruct 不该跑 pull_request（成本太高），实际：\n${condition}`,
+    /github\.event_name == 'push' \|\| github\.event_name == 'workflow_dispatch'/u,
+    '不得回退成只认 push/workflow_dispatch，实际：' + condition,
   );
 });
-
-// ───────────────────── 4. summary 汇总完整 ─────────────────────
 
 test('summary.needs 精确包含 15 个上游作业', async () => {
   const section = await jobSection('summary');
@@ -456,43 +460,6 @@ test('gate 段里不再出现 ci-vm.yml', async () => {
   assert.match(section, /SKIP=/u, 'gate 必须仍然产出 SKIP 输出');
   assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
 });
-
-test('gate 用 GITHUB_RUN_ID 排除当前 run 自己', async () => {
-  const section = await jobSection('gate');
-
-  assert.match(
-    section,
-    /\[\s*"\$rid"\s*=\s*"\$\{GITHUB_RUN_ID\}"\s*\]\s*&&\s*continue/u,
-    'gate 必须逐条跳过当前 run：否则正在跑的自己会被数成「今天已跑过」',
-  );
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  // 查的必须是「本 workflow」，不能用硬编码的文件名（合并后只剩 ci.yml 一个）。
-  //
-  // ⚠️ 推导顺序不能反（2026-11-10 独立终验抓到）：GITHUB_WORKFLOW_REF 形如
-  //   .github/workflows/ci.yml@refs/heads/main
-  // 必须先 %% @* 再去 basename，顺序颠倒会得到 main / merge / foo，
-  // gh api 查 /workflows/main/runs 404 → 被 || true 吞 → count 恒 0 → 判重静默失效。
-  const wfSection = section;
-  const stripAt = wfSection.indexOf('${GITHUB_WORKFLOW_REF%%@*}');
-  const stripSlash = wfSection.indexOf('${workflow_file##*/}');
-  assert.notEqual(stripAt, -1,
-    'gate 必须先用 %% @* 去掉 @<ref> 再取 basename：顺序反了会得到 main/merge/foo，判重恒失效');
-  assert.notEqual(stripSlash, -1,
-    'gate 必须第二步用 ##*/ 取 basename');
-  assert.ok(stripAt < stripSlash,
-    '推导顺序必须先是 %% @* 再是 ##*/，实际相反 —— 这会让 gh api 404、判重恒不生效');
-  assert.doesNotMatch(
-    section,
-    /GITHUB_WORKFLOW_REF##\*\/\}/u,
-    '不得再出现「先 ##*/ 后 %%@*」的错误顺序');
-  assert.doesNotMatch(
-    section,
-    /actions\/workflows\/ci-vm\.yml/u,
-    'gate 的 API 路径不能指向已删除的 ci-vm.yml',
-  );
-});
-
-// ───────────────────────── 6. 权限与触发 ─────────────────────────
 
 test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）', async () => {
   const children = topLevelChildren('permissions');

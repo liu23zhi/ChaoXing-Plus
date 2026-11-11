@@ -172,7 +172,8 @@ jobs:
     permissions:
       contents: read
     needs: windows-build
-    if: ${{ needs.windows-build.result == 'success' && github.event_name != 'pull_request' }}
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。只要求构建成功。
+    if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 10
     outputs:
@@ -574,7 +575,8 @@ jobs:
     permissions:
       contents: read
     needs: [windows-build, windows-real-client-discovery]
-    if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' && github.event_name != 'pull_request' }}
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
+    if: ${{ !cancelled() && needs.windows-build.result == 'success' && needs.windows-real-client-discovery.result == 'success' }}
     # Point this at a machine that can satisfy the client's environment check (camera + zh-CN input
     # method) by setting the repository variable REAL_CLIENT_RUNNER, e.g.
     #   ["self-hosted","windows","cx-exam"]
@@ -680,107 +682,32 @@ jobs:
 
 
   gate:
-    name: 是否今天已验证过（手动恒运行，CI 调用才判重）
+    name: 前置门（已取消一切判重，每次 run 都放行）
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     outputs:
-      skip: ${{ steps.gate.outputs.SKIP }}
-      reason: ${{ steps.gate.outputs.REASON }}
+      # 三个输出保留为常量，仅为不破坏下游引用（kvm-probe / summary）。
+      # 它们**不再表达任何判重结论** —— 判重逻辑已整体删除。
+      skip: "no"
+      reason: "已取消判重：每次 run 都执行（用户 2026-11-11 明确要求）"
+      sha_verified: "no"
     steps:
-      - name: 日判重
-        id: gate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: ${{ github.event_name }}
-          FORCE: ${{ github.event.inputs.force }}
+      - name: 放行
         run: |
-          set -eu
-          today_utc=$(date -u +%Y-%m-%d)
+          echo "已取消一切判重，本次 run 直接放行。"
+          echo "SKIP=no"
+          echo "SHA_VERIFIED=no"
+          echo "REASON=已取消判重：每次 run 都执行"
 
-          # 手动触发 → 一定运行（用户要求：手动拉起则一定要跑）
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=手动触发（workflow_dispatch），一定运行" >> "$GITHUB_OUTPUT"
-            echo "今天(UTC)=$today_utc → 手动触发，运行"
-            exit 0
-          fi
-
-          # 手动触发时显式勾选 force → 运行（合并进 ci.yml 后已无 workflow_call 调用方，
-          # 此分支只服务 workflow_dispatch 的 force 输入；push/PR 下 github.event.inputs.force
-          # 为空字符串，走 ${FORCE:-false} 兜底为 false，不会误入。）
-          if [ "${FORCE:-false}" = "true" ]; then
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=手动触发时勾选了 force" >> "$GITHUB_OUTPUT"
-            echo "今天(UTC)=$today_utc → force=true，运行"
-            exit 0
-          fi
-          # 2026-11-10：ci-vm.yml 已并入本文件，原「workflow_call 的调用不在 callee
-          # 自己的 runs 列表里产生记录」这个坑随之消失 —— 现在可以直接查**本 workflow**
-          # 今天的 runs。同时必须排除当前这次 run 自己（$GITHUB_RUN_ID）：
-          # 否则将来若放宽「只看 completed」的条件，正在跑的自己会被数成「已跑过」。
-          count=0
-          # ⚠️ 顺序不能反：GITHUB_WORKFLOW_REF 形如
-          #   .github/workflows/ci.yml@refs/heads/main
-          #   .github/workflows/ci.yml@refs/pull/42/merge
-          # 必须先去掉 @<ref> 再取 basename。反过来做会得到 main / merge / foo，
-          # gh api 拿它查 /workflows/main/runs 会 404，被 `|| true` 吞掉 → count 恒 0，
-          # 判重静默失效（kvm-probe 每天都跑，等于没有日判重）。
-          #   先 %% @* 后 ##*/：三种 ref 都得 ci.yml
-          workflow_file="${GITHUB_WORKFLOW_REF%%@*}"
-          workflow_file="${workflow_file##*/}"
-          run_ids=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?created=%3E%3D${today_utc}T00:00:00Z&per_page=30" \
-            --jq '.workflow_runs[].id' 2>/dev/null || true)
-          for rid in $run_ids; do
-            # 排除当前 run 自己
-            [ "$rid" = "${GITHUB_RUN_ID}" ] && continue
-            # 只看已完成的 run（in_progress 的还没产出结果，不能算「已跑过」）
-            rstatus=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}" --jq '.status' 2>/dev/null || echo unknown)
-            [ "$rstatus" = "completed" ] || continue
-            # job name 匹配 "KVM 能力巡检"：合并后实际 name 是
-            # "KVM 能力巡检（托管 runner，只读）"，子串匹配仍命中。
-            hit=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${rid}/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name | test("KVM 能力巡检")) | select(.conclusion == "success")] | length' 2>/dev/null || echo 0)
-            count=$((count + hit))
-          done
-          echo "今天(UTC)=$today_utc，本 workflow 中已成功的 KVM 巡检 job 数 = $count（已排除当前 run ${GITHUB_RUN_ID}）"
-          if [ "$count" -gt 0 ]; then
-            echo "SKIP=yes" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)已有 $count 条成功的 KVM 巡检记录，CI 调用跳过本次（手动触发可强制运行）" >> "$GITHUB_OUTPUT"
-          else
-            echo "SKIP=no" >> "$GITHUB_OUTPUT"
-            echo "REASON=今天(UTC $today_utc)还没有成功的巡检记录，执行" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: 跳过说明
-        if: steps.gate.outputs.SKIP == 'yes'
-        run: |
-          set -eu
-          echo "::notice title=KVM 能力巡检已跳过::${{ steps.gate.outputs.REASON }}"
-          {
-            echo '## KVM 能力巡检（已跳过）'
-            echo ''
-            echo "- 原因：${{ steps.gate.outputs.REASON }}"
-            echo ''
-            echo '> 要强制运行：在 Actions 页面选本 workflow 点 `Run workflow`（手动触发一定运行）。'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ---------------------------------------------------------------------------
-  # KVM 能力巡检：托管 ubuntu-24.04，只读，不安装/不下载/不启动虚拟机。
-  #
-  # 已知基线（2026-11-09 实测，run 42588732951 / 42590175761）：
-  #   /dev/kvm       存在，crw-rw---- 1 root kvm 10, 232
-  #   作业用户       uid=1001(runner)，**不在 kvm 组**
-  #   -r / -w        均失败 → KVM_ACCESSIBLE=no
-  #   kvm 模块       kvm_amd / kvm / irqbypass 已加载（宿主已开嵌套虚拟化）
-  #   sudo           免密可用；chmod 666 /dev/kvm 实测 8 ms 生效
-  # ⇒ 结论是「有设备、无权限」，不是「没有嵌套虚拟化」。
-  # ---------------------------------------------------------------------------
 
   kvm-probe:
     name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
     needs: gate
-    if: needs.gate.outputs.skip != 'yes'
+    # 2026-11-11 最终口径（用户两次要求）：**取消一切判重，每次 run 都跑**。
+    # 旧写法按日历判重，实测 run 42935345965：main 当天第 1 次 push 巡检成功后，
+    # 后续不同 commit 的 push 全部 skipped ⇒ main 的最新代码从未被巡检验证过。
+    # 代价依据：timeout 是 5 分钟、实测单次 < 40 秒，不是重活。
+    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -924,14 +851,12 @@ jobs:
   vm-shutdown-destruct:
     name: 关机自毁与开机续删（虚拟机）
     needs: gate
-    # 三重保护：变量开启、非 PR、（不再要求手动触发）。
-    # 托管 runner 没有 cx-vm 标签，硬跑会永久排队，所以变量门必须留。
-    # ⚠️ 刻意**不看** gate.outputs.skip：日判重只省 kvm-probe 的成本，
-    # 自毁作业是「完整 CI 里必须有」的那部分，跳过等于退回「从未在 CI 里跑过」。
-    if: |
-      needs.gate.result == 'success' &&
-      vars.CX_VM_ENABLED == 'true' &&
-      (github.event_name != 'pull_request' || github.event.inputs.include_vm_destruct != 'false')
+    # 2026-11-11: 完全取消限制（用户三次要求「不要跳过任务」）。
+    # ⚠️ 当前仓库 runners total_count = 0（无 [self-hosted, windows, cx-vm]）。
+    # 去掉变量门后本作业会 **queued** 而非 skipped —— 这是「不跳过」的真实代价，
+    # 注册 cx-vm runner 后即正常执行。
+    # ⚠️ 刻意不看 gate.outputs.skip：自毁作业是「完整 CI 里必须有」的部分。
+    if: needs.gate.result == 'success'
     runs-on: [self-hosted, windows, cx-vm]
     # ⚠️ 独立 concurrency + 不取消：本作业会真关机。若被新 push 中途取消，
     # -Stage shutdown 已登记的 RunOnce 永不执行 -Stage resume，
@@ -1068,9 +993,7 @@ jobs:
     # PR 上挂 continue-on-error：它约 40 分钟且受宿主环境影响，不该阻塞代码评审；
     # push 到 main 与手动触发时严格（失败即红），这样真正的回归会被抓住。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁语义验证。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    if: needs.gate.result == 'success'
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
     # 同上：两阶段必须跑完（shutdown 登记 → resume 重放断言）。
@@ -1202,12 +1125,10 @@ jobs:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
     needs: gate
-    # 只在 push 到 main 与手动触发时出现：45 分钟且要求客机镜像可用。
-    # PR 不跑（成本太高）；镜像未配置时作业内部会 skip 而不是 fail。
-    # 刻意不看 gate.outputs.skip：同上，日判重不约束自毁作业。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
+    # 镜像未配置时作业内部会 skip 而不是 fail。
+    # 刻意不看 gate.outputs.skip：日判重不约束自毁作业。
+    if: needs.gate.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
     timeout-minutes: 45
@@ -1817,11 +1738,9 @@ jobs:
   qemu-destruct-linux-guest:
     name: 关机销毁与开机续删（托管 Ubuntu + QEMU + Linux 客机，真实重启）
     needs: gate
-    # 与 qemu-shutdown-destruct 同口径：push 到 main 与手动触发时跑，PR 不跑。
+    # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
-    if: |
-      needs.gate.result == 'success' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     # 硬上限：30 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
     # + 客机冷启动（≤7 min）+ 登记/重启/断言（~5 min），再留余量。
