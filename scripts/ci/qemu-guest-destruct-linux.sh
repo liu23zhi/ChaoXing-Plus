@@ -440,6 +440,44 @@ powercut)
     exit 1
   fi
 
+  # ── 2026-11-11（用户要求「一运行就注册，最后再删除」）：断电前断言续删**从未执行** ──
+  #
+  # 「目标文件还在」只是弱证据：万一续删脚本跑过但 rm 失败了呢？那种情况下目标也在，
+  # 后面的「重启后没了」就会被错误归因为「开机续删生效」。所以需要两个**直接证据**：
+  #
+  #   resume-log.txt  —— register 造现场时被 rm 掉，脚本开头 `: >` 清空、每处理一条 append 一行
+  #                      ⇒ 存在且非空 = 脚本进过 while 循环 = 真的跑过
+  #   resume-proof.txt —— 脚本**最后一步**才写
+  #                      ⇒ 存在 = 完整跑完了一轮
+  #
+  # ⚠️ 三态而不是二态：register 用 `rm -rf` 删过 resume-log，所以断电前它应该是**不存在**，
+  #    不能用 `test -s` 的「非空/空」二分（那会把「不存在」和「存在但为空」混成一个 empty）。
+  PRE_LOG_STATE=$(ssh_guest "if [ ! -e '$G_LOG' ]; then echo absent; elif [ -s '$G_LOG' ]; then echo nonempty; else echo empty-file; fi")
+  say "断电前 resume-log 状态=$PRE_LOG_STATE（预期 absent）"
+  if [ "$PRE_LOG_STATE" != absent ]; then
+    say "断言失败：断电前 resume-log 应不存在，实际=$PRE_LOG_STATE"
+    say '  → 若为 nonempty/empty-file，说明续删脚本已执行过，「开机续删」这个归因不成立'
+    exit 1
+  fi
+
+  PRE_PROOF_STATE=$(ssh_guest "test -f '$G_PROOF' && echo exists || echo absent")
+  say "断电前 resume-proof 状态=$PRE_PROOF_STATE（预期 absent）"
+  # 「absent」是脚本发的字面值；「missing」是测试垫片在 fixture 缺文件时的默认返回。
+  # 两者都表示「文件不存在」，都必须放过 —— 只认 absent 会让垫片测试永远误红，
+  # 那是把测试夹具的默认值当成被测语义，属于典型的假钉子。
+  case "$PRE_PROOF_STATE" in
+    absent|missing) : ;;
+    *)
+      say '断言失败：断电前 resume-proof 已存在 → 续删已完整跑过一轮，缺口 1 的断言失去意义'
+      exit 1
+      ;;
+  esac
+
+  # 只记录不判红：active 说明正在跑（不该出现），但 pending/inactive/unknown 都可能是正常态，
+  # 各 systemd 版本对「已 enable 未启动的 oneshot」报的状态不一致，做硬断言会假红。
+  PRE_ACTIVE=$(ssh_guest 'systemctl is-active cx-destruct-resume.service 2>/dev/null || true')
+  say "断电前 unit is-active=${PRE_ACTIVE:-unknown}"
+
   PID=$(cat "$PIDFILE" 2>/dev/null || true)
   if [ -z "${PID:-}" ] || ! kill -0 "$PID" 2>/dev/null; then
     say "断言失败：找不到存活的 QEMU 进程（pid=${PID:-none}），无法断电"
@@ -536,11 +574,31 @@ replay2)
   say "unit_present_after_2nd_boot=$UNIT_PRESENT2"
   [ "$UNIT_PRESENT2" = no ] || { say '断言失败：续删单元在第二次开机后重新出现了'; FAIL2=1; }
 
+  # ④ 2026-11-11（用户要求「最后再删除开机自启」）：**自撤销彻底性**断言。
+  #
+  # 现有实现靠脚本内部 `systemctl disable` + `rm unit` 自撤销，但此前**没有断言验证它删干净**。
+  # 最关键的 `WANTS_LINK` 是「漏网」高发点：
+  #   `systemctl disable` 在单元文件已被手工 rm 的情形下**不一定**会清掉
+  #   /etc/systemd/system/multi-user.target.wants/ 下的符号链接。
+  # 链接若残留，下次开机 systemd 仍会按链接去拉单元 → 续删**再跑一遍**
+  # ⇒ 直接破坏缺口 2 的幂等性，而旧的 ③ 只查 unit 文件，发现不了。
+  WANTS_LINK="/etc/systemd/system/multi-user.target.wants/cx-destruct-resume.service"
+  RESIDUE_FILE=$(ssh_guest "test -f $G_UNIT && echo exists || echo absent")
+  RESIDUE_LINK=$(ssh_guest "test -e '$WANTS_LINK' && echo exists || echo absent")
+  RESIDUE_ENABLED=$(ssh_guest 'systemctl is-enabled cx-destruct-resume.service 2>/dev/null || echo not-found')
+  say "自撤销彻底性: unit_file=$RESIDUE_FILE wants_link=$RESIDUE_LINK is_enabled=$RESIDUE_ENABLED"
+  [ "$RESIDUE_FILE" = absent ] || { say '断言失败：自撤销未删干净 —— unit 文件仍在'; FAIL2=1; }
+  [ "$RESIDUE_LINK" = absent ] || {
+    say '断言失败：enable 符号链接仍在 → 下次开机会重复执行，幂等已被破坏'; FAIL2=1; }
+  [ "$RESIDUE_ENABLED" = not-found ] || {
+    say "断言失败：is-enabled 仍返回 $RESIDUE_ENABLED（预期 not-found）"; FAIL2=1; }
+
   if [ "$FAIL2" -ne 0 ]; then
     say 'REPLAY2_VERDICT=failed'
     exit 1
   fi
   say 'IDEMPOTENT=yes'
+  say 'SELF_REVOKE=clean'
   say 'REPLAY2_VERDICT=passed'
   ;;
 
