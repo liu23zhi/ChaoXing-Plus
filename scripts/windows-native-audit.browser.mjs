@@ -296,7 +296,7 @@ async function runFixture(extra = [], prepare = async () => {}, interact = async
 }
 
 test('compiled native duration writes default audit logs and a successful JSON report', { skip: !executable }, async () => {
-  const value = await runFixture();
+  const value = await runFixture(['--duration', '4000']);
   const report = await readReport(value.reportPath);
   assertErrorTotals(report, await readLogs(value.dataDir));
 });
