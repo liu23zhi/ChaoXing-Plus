@@ -20,7 +20,7 @@ import { access, readFile } from 'node:fs/promises';
 const WORKFLOW = '.github/workflows/ci.yml';
 const REMOVED_WORKFLOW = '.github/workflows/ci-vm.yml';
 
-// 合并后的 15 个作业，顺序与文件中的实际顺序一致（顺序本身也是断言目标：
+// 合并后的 17 个作业，顺序与文件中的实际顺序一致（顺序本身也是断言目标：
 // 自毁三件套必须排在 gate/kvm-probe 之后、summary 之前）。
 const EXPECTED_JOBS = [
   'source',
@@ -41,11 +41,16 @@ const EXPECTED_JOBS = [
   // 放在 qemu-shutdown-destruct 之后、summary 之前：它与前者同属 QEMU 自毁族，
   // 但前者依赖 Windows qcow2（可能 skip），本作业不 skip、拿不到 KVM 就硬失败。
   'qemu-destruct-linux-guest',
+  // 2026-11-12 合并：原 build-guest-image.yml 的独立 workflow 并入本文件。
+  // 理由：用户要求「优先读 cache，读不到就构建」，而 cache 键必须与
+  //   qemu-shutdown-destruct 在同一 workflow 内共享。
+  'build-guest-image',
   'summary',
 ];
 
-// summary 汇总了哪些作业（15 项，不含它自己）。
+// summary 汇总了哪些作业（16 项，不含它自己）。
 const EXPECTED_SUMMARY_NEEDS = [
+  'build-guest-image',
   'source',
   'windows-build',
   'windows-unit',
@@ -218,9 +223,9 @@ test('ci.yml 里不再有任何本地 workflow 复用调用', async () => {
   assert.doesNotMatch(text, /uses:\s*\.\/\.github\/workflows\/ci-vm\.yml/u);
 });
 
-// ─────────────────────── 2. 16 个作业全在且顺序合理 ───────────────────────
+// ─────────────────────── 2. 17 个作业全在且顺序合理 ───────────────────────
 
-test('jobs 块恰好是合并后的 16 个作业，顺序精确', async () => {
+test('jobs 块恰好是合并后的 17 个作业，顺序精确', async () => {
   const names = await jobNames();
   assert.deepEqual(
     names,
@@ -420,7 +425,7 @@ test('gate 段里不再出现 ci-vm.yml', async () => {
   assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
 });
 
-test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）', async () => {
+test('permissions 里 actions 必须有写权限（cache save 需要；write 同时含 read）', async () => {
   const children = topLevelChildren('permissions');
   const values = new Map(
     children
@@ -432,10 +437,12 @@ test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）',
       }),
   );
 
+  // 2026-11-12：build-guest-image 作业要 actions/cache/save，需要 write。
+  // GitHub 的 write 权限**包含** read，所以 gate / kvm-probe 读 run 列表不受影响。
   assert.equal(
     values.get('actions'),
-    'read',
-    '必须给 actions: read —— 缺了 gate 读不到 run 列表，kvm-probe 判重失效',
+    'write',
+    '必须是 actions: write —— build-guest-image 要 save cache；write 同时满足 gate 读 run 列表',
   );
   assert.equal(values.get('contents'), 'read', 'contents 必须是 read');
 });
@@ -776,11 +783,19 @@ test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也
     'job 级 if 不得再按 event 限制（PR 上也跑）。' + `实际：${condition}`,
   );
 
-  // env 里必须仍有镜像来源，否则内部步骤判不了「配置了但坏」。
+  // 2026-11-12：镜像来源已从「仓库变量 / 手动输入」改为「build-guest-image 作业
+  // 存入的 Actions Cache」。用户要求「优先读 cache，读不到就构建」，
+  // 而 cache 键必须与 build-guest-image 在同一 workflow 内共享。
+  // 镜像来源：手动输入可覆盖，默认走 cache 恢复出来的文件。
   assert.match(
     section,
-    /CX_QEMU_GUEST_IMAGE:\s*\$\{\{\s*github\.event\.inputs\.guest_image\s*\|\|\s*vars\.CX_QEMU_GUEST_IMAGE\s*\}\}/u,
-    'env 必须以 `inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE` 取值',
+    /CX_QEMU_GUEST_IMAGE:[^\n]*guest-cache\/guest\.qcow2/u,
+    'env 必须指向 cache 恢复出来的 guest-cache/guest.qcow2',
+  );
+  // 反证：不得再回退到仓库变量（那会与 cache 路径冲突）
+  assert.ok(
+    !section.includes('vars.CX_QEMU_GUEST_IMAGE'),
+    '不得再引用 vars.CX_QEMU_GUEST_IMAGE —— 镜像来源已统一为 cache',
   );
 });
 

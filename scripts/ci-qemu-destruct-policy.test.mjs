@@ -149,9 +149,20 @@ test('ci.yml#qemu-shutdown-destruct 拿不到 KVM 时必须走 skip 而不是 fa
 test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不得下载 Windows ISO', async () => {
   const workflow = await qemuJobSection();
 
-  // 镜像来源：手动输入优先，其次 repo variable；两者都空 → skip。
+  // 2026-11-12：镜像来源已统一为 build-guest-image 作业存入的 Actions Cache。
+  // 用户要求「优先读 cache，读不到就构建」，cache 键在同一 workflow 内共享。
   assert.match(workflow, /CX_QEMU_GUEST_IMAGE/u, '必须用 CX_QEMU_GUEST_IMAGE 作为镜像占位变量');
-  assert.match(workflow, /vars\.CX_QEMU_GUEST_IMAGE/u, '必须支持仓库变量');
+  assert.match(
+    workflow,
+    /guest-cache\/guest\.qcow2/u,
+    '镜像必须指向 cache 恢复出来的 guest-cache/guest.qcow2',
+  );
+  // 反证：不得再回退到仓库变量（那会绕过 cache，与用户要求冲突）
+  assert.doesNotMatch(
+    workflow,
+    /vars\.CX_QEMU_GUEST_IMAGE/u,
+    '不得再引用 vars.CX_QEMU_GUEST_IMAGE —— 镜像来源已统一为 cache',
+  );
   // ci.yml 是普通 workflow：push 事件下 inputs.* 上下文为 null，
   // 因此必须写 github.event.inputs.*（写成裸 inputs.* 会在非手动触发下取到空值）。
   assert.match(workflow, /github\.event\.inputs\.guest_image/u,
