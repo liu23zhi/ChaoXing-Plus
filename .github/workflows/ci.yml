@@ -2370,7 +2370,7 @@ jobs:
       - name: 生成 OEM install.bat
         if: steps.havecache.outputs.CACHE_HIT != 'yes'
         env:
-          GUEST_PASSWORD: ${{ github.event.inputs.guest_password }}
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password || 'Cx-Guest-2026!' }}
           GUEST_USER: ${{ env.GUEST_USER }}
         run: |
           set -eu
@@ -2714,10 +2714,10 @@ jobs:
         if: steps.havecache.outputs.CACHE_HIT != 'yes'
         id: install
         env:
-          GUEST_PASSWORD: ${{ github.event.inputs.guest_password }}
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password || 'Cx-Guest-2026!' }}
           GUEST_USER: ${{ env.GUEST_USER }}
-          VERSION: ${{ github.event.inputs.version }}
-          DISK_SIZE: ${{ github.event.inputs.disk_size }}
+          VERSION: ${{ github.event.inputs.version || '2022' }}
+          DISK_SIZE: ${{ github.event.inputs.disk_size || '32G' }}
         run: |
           set -eu
           WORK="$RUNNER_TEMP/guest"
@@ -2768,7 +2768,7 @@ jobs:
         if: steps.havecache.outputs.CACHE_HIT != 'yes'
         id: wait
         env:
-          INSTALL_TIMEOUT: ${{ github.event.inputs.install_timeout_sec }}
+          INSTALL_TIMEOUT: ${{ github.event.inputs.install_timeout_sec || '3600' }}
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"

@@ -874,3 +874,51 @@ test('qemu-destruct-linux-guest 不得引入同款假绿（它不需要镜像变
     'qemu-destruct-linux-guest 不得有 `skip(){ exit 0 }` 形态：它拿不到 KVM 就该硬失败',
   );
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43180686322 实测暴露）：所有 github.event.inputs.* 必须有兜底
+//
+// 背景：这份 workflow 有三种触发（push / pull_request / workflow_dispatch）。
+// 只有 workflow_dispatch 会填 inputs，另两种事件下 github.event.inputs.* 是空。
+//
+// 实测事故：'构建 Windows 客机镜像（cache 优先）' 在 pull_request 上失败于
+// '等待安装完成'，但同样的代码在 workflow_dispatch（run 43174597077）上是绿的。
+// 根因是 INSTALL_TIMEOUT 取到空串，导致 bash 的算术展开 START + (空) 失败；
+// 同时 VERSION / DISK_SIZE / GUEST_PASSWORD 也是空串，docker run 参数残缺。
+//
+// 这条测试是通用防护：凡是出现 github.event.inputs.X 的地方，
+// 必须同时有 || 兜底，否则非 dispatch 事件下就是空串。
+test('所有 github.event.inputs.* 都必须有 || 兜底（非 dispatch 事件下为空）', async () => {
+  const raw = await readFile(WORKFLOW, 'utf8');
+  const lines = raw.split('\n');
+  const offenders = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*#/u.test(line)) continue;
+    if (!/github\.event\.inputs\.[A-Za-z_][A-Za-z0-9_]*/u.test(line)) continue;
+    if (/\|\|/u.test(line)) continue;
+    offenders.push(`L${i + 1}: ${line.trim()}`);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    '以下位置使用了 github.event.inputs.* 但没有 || 兜底。' +
+      'push / pull_request 事件下这些值是空串：\n' + offenders.join('\n'),
+  );
+});
+
+// 正向对照：确认这四处真的有兜底（防止上面的断言因「一个都没匹配到」而空转）
+test('build-guest-image 的四个关键 inputs 确实带了默认值', async () => {
+  const raw = await readFile(WORKFLOW, 'utf8');
+  const required = [
+    ['VERSION', "github.event.inputs.version || '"],
+    ['DISK_SIZE', "github.event.inputs.disk_size || '"],
+    ['INSTALL_TIMEOUT', "github.event.inputs.install_timeout_sec || '"],
+    ['GUEST_PASSWORD', "github.event.inputs.guest_password || '"],
+  ];
+  for (const [name, needle] of required) {
+    assert.ok(raw.includes(needle), `${name} 必须带 || 默认值，实际找不到：${needle}`);
+  }
+});
