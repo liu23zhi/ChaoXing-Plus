@@ -1153,16 +1153,16 @@ jobs:
           VERIFY_LOG="$SNAP/ssh-verify.txt"
           : > "$VERIFY_LOG"
 
+          # ⚠️ 2026-11-12：网卡型号必须与 dockur 装 Windows 时**一致**。
+          #   dockur 的 ADAPTER 默认是 virtio-net-pci（见其 docs/environment.md），
+          #   Windows 里装的是 virtio 网卡驱动。用 e1000 会因无驱动而不通。
+          #   证据：客机内 setup-steps.txt 显示 SshdStatus=Running / Port22Listen=2 /
+          #   SSH_VERDICT=READY，说明 sshd 正常，问题在网卡。
+          #   ⚠️ 注意：这些注释必须放在 qemu 命令**之前**，绝不能插进续行里 ——
+          #   否则 shell 会把 # 当成参数传给 qemu，命令直接失败。
           qemu-system-x86_64 \
             -enable-kvm -cpu host -smp 2 -m 4096 \
             -drive file="$WORK/guest.qcow2",if=virtio,cache=writeback \
-            # ⚠️ 2026-11-12：网卡型号必须与 dockur 装 Windows 时**一致**。
-            #   dockur 的 ADAPTER 默认是 `virtio-net-pci`（见其 docs/environment.md），
-            #   而 Windows 里装的是 **virtio 网卡驱动**。
-            #   原来这里写 `model=e1000` —— Windows 没有 e1000 的驱动 ⇒ 网卡根本没起来
-            #   ⇒ 宿主侧看到「banner exchange 超时」（TCP 由 slirp 代答，不通是必然的）。
-            #   证据：客机内自检 setup-steps.txt 显示 SshdStatus=Running / Port22Listen=2
-            #   / SSH_VERDICT=READY，说明 sshd 完全正常，问题在**网卡没通**。
             -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22" \
             -display none -vga none \
             -pidfile "$WORK/vqemu.pid" -daemonize
