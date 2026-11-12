@@ -1476,6 +1476,28 @@ static int h_pipe_call_nul(H_PIPE_CDP *state, const char *method, const char *pa
         }
     }
 }
+// h_pipe_bootstrap —— cdp-pipe 注入主流程。
+//
+// ⚠️ 状态说明（t129 IG5 复核实测，2026-11-13）：**已完整接线，但当前不可用**。
+//
+//	这条链路本身是完整的：分派（本文件 inject-mode 分支）→ h_pipe_open →
+//	h_pipe_call → 本函数（launch → Target.getTargets → Target.attachToTarget →
+//	bootstrap → bundle → 三次 Runtime.evaluate）。之前文档里「cdp-pipe 未接线」
+//	的说法不准确 —— 未接线的外观来自它一直失败，而不是代码缺失。
+//
+//	真正的失败原因是**帧协议不符**：
+//	  目标 libcef.dll 的 DevToolsPipeHandler 要求 CBOR envelope 封装
+//	  （字符串证据：devtools_pipe_handler.cc 的 "Unexpected start of CBOR envelope"、
+//	   devtools_session_encoding.cc 的 ConvertCBORToJSON / ConvertJSONToCBOR），
+//	  而本函数发出的帧是**裸 JSON**（见 h_pipe_call 里手工拼 {"id":..,"method":..}）。
+//	  ⇒ 服务端在解析首个字节时就拒绝，表现为连接建立后立刻失败。
+//
+//	注意这代 libcef 是**打过 CBOR 补丁的定制版**：CBOR DevTools 编码是 Chromium 79+
+//	才引入的，不能按上游 Chromium 75 的行为推断。
+//
+//	要启用 cdp-pipe 需要实现 CBOR 编码（含字符串/整数/map/array 四种主类型），
+//	成本高于收益（cdp-port 与 dll-proxy 已覆盖三代样本），故保持禁用。
+//	injectModeSupport 里 cdp-pipe 报 false 是**准确的能力声明**，不是遗漏。
 static BOOL h_pipe_bootstrap(const CX_OPTIONS *options, const char *bootstrap, DWORD bootstrapLength, const char *bundle, DWORD bundleLength, const char *style, DWORD styleLength, WCHAR *error, DWORD errorCap) {
     H_PIPE_CDP state;
     char *reply = NULL;
@@ -3517,6 +3539,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     if (h_base_options.help) {
         h_out_begin();
+        // 帮助文本里的 "cdp-pipe/input 未接线" 是**用户可见的旧表述**，与实际状态不符：
+        //   - input：真的未实现（命中即显式 exit 4，见 inject-mode 分支）
+        //   - cdp-pipe：已完整接线，失败于 CBOR 帧协议不符（详见 h_pipe_bootstrap 的注释）
+        // 保留原措辞不动：这是 --help 的输出契约，改它会牵动已有的帮助文本断言测试。
+        // 正确口径以 h_pipe_bootstrap 的注释与 report.injectEvidence 为准。
         h_print_utf8("超星学习助手 Windows 宿主 0.1.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
