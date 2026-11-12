@@ -611,7 +611,7 @@ test('整个 ci.yml（去注释）里不再有 ci-vm.yml 引用', async () => {
 // 于是**发布包验证被连带 skip** —— 那一轮没有任何人知道发布包坏没坏。
 //
 // 判据（为什么这是缺陷而不是设计）：windows-release 的**唯一输入**是
-// windows-build 上传的 artifact `windows-ci-build-<sha>`；
+// windows-build 上传的 artifact `Windows 原生测试可执行文件-<sha>`；
 // windows-unit / windows-pause / windows-window / windows-browser
 // 都不产出它消费的任何东西，把它们写进 if 是假依赖。
 //
