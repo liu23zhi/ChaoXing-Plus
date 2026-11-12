@@ -157,6 +157,54 @@ jobs:
             echo "::warning title=公共 DNS 也没修好::后续依赖 docker 降级路径"
           fi
 
+
+          # ── apt 镜像源重写（用户 2026-11-12 要求）──────────────────────
+          # runner 默认走 `azure.archive.ubuntu.com`，而该域名在本环境解析失败
+          # （实测 `Temporary failure resolving`）。即便 DNS 已改成 8.8.8.8，
+          # 也可能遇到该镜像站本身不可达。所以直接重写 sources 到公共镜像。
+          # 保留原文件备份，便于出问题时对照。
+          echo
+          echo "=== 重写 apt 镜像源 ==="
+          CODENAME=$(lsb_release -cs 2>/dev/null || echo noble)
+          echo "  发行代号 = $CODENAME"
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ] && [ ! -f /etc/apt/sources.list.d/ubuntu.sources.orig ]; then
+            sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.orig || true
+          fi
+          if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.orig ]; then
+            sudo cp /etc/apt/sources.list /etc/apt/sources.list.orig || true
+          fi
+          # Ubuntu 24.04 用 deb822 格式（ubuntu.sources），22.04 用 sources.list，两套都写
+          sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<MIRROREOF
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: $CODENAME $CODENAME-updates $CODENAME-backports $CODENAME-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          MIRROREOF
+          # 传统格式也写一份（某些工具会读）
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s main restricted universe multiverse\n' "$CODENAME" | sudo tee /etc/apt/sources.list >/dev/null
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s-updates main restricted universe multiverse\n' "$CODENAME" | sudo tee -a /etc/apt/sources.list >/dev/null
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s-security main restricted universe multiverse\n' "$CODENAME" | sudo tee -a /etc/apt/sources.list >/dev/null
+          echo "  已重写到 archive.ubuntu.com"
+          # 移除可能失效的第三方源（它们会拖慢 update）
+          sudo find /etc/apt/sources.list.d -name "*.list" -o -name "*.sources" 2>/dev/null | \
+            grep -v "ubuntu.sources" | grep -v ".orig" | while read -r f; do
+              echo "  禁用第三方源: $f"
+              sudo mv "$f" "$f.disabled" 2>/dev/null || true
+            done
+          echo
+          echo "=== 重写后的源 ==="
+          grep -h "^deb\|^URIs" /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | head -8 || true
+          echo
+          # 验证新源可达
+          echo "=== 新源可达性 ==="
+          if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            echo "  archive.ubuntu.com 可解析"
+            curl -sS --max-time 15 -o /dev/null -w "  HTTP %{http_code}\n" \
+              "http://archive.ubuntu.com/ubuntu/dists/$CODENAME/Release" || echo "  HTTP 请求失败"
+          else
+            echo "  archive.ubuntu.com 解析失败"
+          fi
       - name: 安装依赖
         # ⚠️ 2026-11-12 修三个真 bug（上一轮全踩了）：
         #   ① `--error-on-any-failure` **不能与其他选项组合** ——
@@ -1092,7 +1140,7 @@ jobs:
         # 硬性时限：GitHub 的 job 级 timeout 到点会**直接杀进程**，
         # 连 always() 的后续步骤都不跑（上一轮就是这样丢证据的）。
         # 这里给步骤自己设 20 分钟上限，让它在 job 被杀之前**主动**收尾并 exit 1。
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
@@ -1108,7 +1156,14 @@ jobs:
           qemu-system-x86_64 \
             -enable-kvm -cpu host -smp 2 -m 4096 \
             -drive file="$WORK/guest.qcow2",if=virtio,cache=writeback \
-            -nic "user,model=e1000,hostfwd=tcp:127.0.0.1:2222-:22" \
+            # ⚠️ 2026-11-12：网卡型号必须与 dockur 装 Windows 时**一致**。
+            #   dockur 的 ADAPTER 默认是 `virtio-net-pci`（见其 docs/environment.md），
+            #   而 Windows 里装的是 **virtio 网卡驱动**。
+            #   原来这里写 `model=e1000` —— Windows 没有 e1000 的驱动 ⇒ 网卡根本没起来
+            #   ⇒ 宿主侧看到「banner exchange 超时」（TCP 由 slirp 代答，不通是必然的）。
+            #   证据：客机内自检 setup-steps.txt 显示 SshdStatus=Running / Port22Listen=2
+            #   / SSH_VERDICT=READY，说明 sshd 完全正常，问题在**网卡没通**。
+            -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22" \
             -display none -vga none \
             -pidfile "$WORK/vqemu.pid" -daemonize
           echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)" | tee -a "$VERIFY_LOG"
