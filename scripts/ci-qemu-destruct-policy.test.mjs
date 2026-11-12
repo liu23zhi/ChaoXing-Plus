@@ -78,7 +78,8 @@ test('QEMU 自毁作业已取消 event 限制（PR 上也跑）', async () => {
   // 后来发现「跳过却 success」是假绿（t96），最终改成 job 级只判 gate.result。
   assert.doesNotMatch(job, /github\.event_name/u,
     'QEMU 作业不得再按 event_name 限制（PR 上也要跑）');
-  assert.match(job, /needs\.gate\.result/u, 'QEMU 作业必须仍受 gate.result 约束');
+  // 2026-11-12：gate 已删除，QEMU 作业不再受 gate 约束，改为受 build-guest-image 约束。
+  assert.match(job, /needs\.build-guest-image\.result/u, 'QEMU 作业必须受 build-guest-image.result 约束');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
   // ci.yml 现在是唯一入口，不再是 callee，不得再声明 workflow_call。

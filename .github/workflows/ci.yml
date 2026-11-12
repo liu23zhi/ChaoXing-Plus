@@ -140,7 +140,7 @@ concurrency:
 # 客机镜像的 cache key。build-guest-image 用它 save，
 # qemu-shutdown-destruct 用它 restore。改版本号（v1→v2）即作废旧镜像。
 env:
-  GUEST_IMAGE_CACHE_KEY: cx-win2022-guest-qcow2-v3
+  GUEST_IMAGE_CACHE_KEY: cx-win2022-guest-qcow2-v4
 
 jobs:
   source:
@@ -704,15 +704,36 @@ jobs:
                     $attempts = 2
           for ($attempt = 1; $attempt -le $attempts; $attempt++) {
             Write-Host "::group::真实客户端注入尝试 $attempt/$attempts"
-            ./scripts/windows-real-client-injection.ps1 `
-              -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
-              -InjectMode '${{ matrix.inject_mode }}' `
-              -DatabaseBase64 $compactDb `
-              -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
-              -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
-              -PanelAllPages
-            $code = $LASTEXITCODE
-            Write-Host "::endgroup::"
+            # ⚠️ 2026-11-12（run 43236880067 实测）：注入脚本用 throw 报告失败，
+            #   而 throw 是 terminating error，在 pwsh run 块里会直接中断整个块，
+            #   根本走不到下面 `$code = $LASTEXITCODE` —— 这就是「重试失效」的根因：
+            #   第一次失败后整个 run 块被终止，第二次尝试从未执行。
+            #   ⇒ 用 try/catch 包住调用，把失败统一转成退出码，让重试循环真正跑起来。
+            $code = 0
+            try {
+              & ./scripts/windows-real-client-injection.ps1 `
+                -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
+                -InjectMode '${{ matrix.inject_mode }}' `
+                -DatabaseBase64 $compactDb `
+                -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
+                -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
+                -PanelAllPages `
+                -ErrorAction Stop
+              $code = $LASTEXITCODE
+              if ($null -eq $code) { $code = 0 }
+            } catch {
+              Write-Host "::warning::注入脚本抛出异常：$($_.Exception.Message)"
+              $code = 1
+              # ⚠️ 2026-11-12：脚本 throw 时内部清理函数（Stop-ClientProcess）不会执行，
+              #   客户端进程可能残留，导致第二次尝试因 profile 目录被占用而失败。
+              #   这里兜底清理：按映像名杀 CXExam.exe 与 chaoxing_plus.exe。
+              try {
+                Get-Process -Name 'CXExam','chaoxing_plus' -ErrorAction SilentlyContinue |
+                  Stop-Process -Force -ErrorAction SilentlyContinue
+                Write-Host '::warning::已兜底清理残留的 CXExam.exe / chaoxing_plus.exe 进程'
+              } catch { }
+              Start-Sleep -Seconds 3
+            }
             if ($code -eq 0) { exit 0 }
             Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'cx-real-client-*' -File -ErrorAction SilentlyContinue | ForEach-Object {
               $extension = [IO.Path]::GetExtension($_.Name)
@@ -744,32 +765,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  gate:
-    name: 前置校验（每次运行都放行，不做历史判重）
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    outputs:
-      # 三个输出保留为常量，仅为不破坏下游引用（kvm-probe / summary）。
-      # 它们**不再表达任何判重结论** —— 判重逻辑已整体删除。
-      skip: "no"
-      reason: "已取消判重：每次 run 都执行（用户 2026-11-11 明确要求）"
-      sha_verified: "no"
-    steps:
-      - name: 放行
-        run: |
-          echo "已取消一切判重，本次 run 直接放行。"
-          echo "SKIP=no"
-          echo "SHA_VERIFIED=no"
-          echo "REASON=已取消判重：每次 run 都执行"
-
   kvm-probe:
     name: KVM 硬件虚拟化能力巡检（只读）
-    needs: gate
     # 2026-11-11 最终口径（用户两次要求）：**取消一切判重，每次 run 都跑**。
     # 旧写法按日历判重，实测 run 42935345965：main 当天第 1 次 push 巡检成功后，
     # 后续不同 commit 的 push 全部 skipped ⇒ main 的最新代码从未被巡检验证过。
     # 代价依据：timeout 是 5 分钟、实测单次 < 40 秒，不是重活。
-    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -778,8 +779,6 @@ jobs:
       # （jobs.gate.outputs.skip|reason）。合并后 workflow_call 层消失，
       # kvm-probe 必须自己转发；否则 summary 的「跳过（原因）」恒为空，
       # 「因日判重而跳过」与「压根没执行」无法区分。
-      skipped: ${{ needs.gate.outputs.skip }}
-      reason: ${{ needs.gate.outputs.reason }}
     steps:
       - name: 设备节点与作业用户
         run: |
@@ -916,13 +915,11 @@ jobs:
 
   wiring-probe:
     name: 自毁登记与续删语义验证（不真实关机）
-    needs: gate
     # 完整自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完两阶段。
     # 这是「完整 CI 也跑关机自毁测试」的落地链路，因此 push / PR / 手动都跑。
     # PR 上挂 continue-on-error：它约 40 分钟且受宿主环境影响，不该阻塞代码评审；
     # push 到 main 与手动触发时严格（失败即红），这样真正的回归会被抓住。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁语义验证。
-    if: needs.gate.result == 'success'
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
     # 同上：两阶段必须跑完（shutdown 登记 → resume 重放断言）。
@@ -1052,7 +1049,7 @@ jobs:
     concurrency:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
-    needs: [gate, build-guest-image]
+    needs: [build-guest-image]
     # ── 触发条件（2026-11-11 合并两方意图）────────────────────────────────
     #
     # 【意图 1：用户要求「不要跳过任务」（captain 侧，优先级高）】
@@ -1078,7 +1075,7 @@ jobs:
     # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
     #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
     #   绝对路径或 https URL。密钥不需要 secret —— 随镜像一起存于 Actions Cache。
-    if: needs.gate.result == 'success' && needs.build-guest-image.result == 'success'
+    if: needs.build-guest-image.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
     timeout-minutes: 45
@@ -1661,9 +1658,13 @@ jobs:
               exit 1
             fi
 
+            # ⚠️ 2026-11-12（run 43236880067 实测）：加了 UTF-8 BOM 后，远端文件
+            #   比本地源文件**多 3 字节**（BOM = EF BB BF）。所以大小校验必须
+            #   用「本地 + 3」对比，否则每轮都误判「大小不符」。
             REMOTE_SIZE=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Get-Item '${FINAL}').Length" 2>/dev/null | tr -d "\r\n ")
-            log "  $bn 客机大小=${REMOTE_SIZE:-?} 本地=$LOCAL_SIZE"
-            [ "${REMOTE_SIZE:-0}" = "$LOCAL_SIZE" ] || { log "::error title=大小不符::$bn"; exit 1; }
+            EXPECT_SIZE=$(( LOCAL_SIZE + 3 ))
+            log "  $bn 客机大小=${REMOTE_SIZE:-?} 期望=$EXPECT_SIZE（本地 $LOCAL_SIZE + BOM 3）"
+            [ "${REMOTE_SIZE:-0}" = "$EXPECT_SIZE" ] || { log "::error title=大小不符::$bn 客机=${REMOTE_SIZE:-?} 期望=$EXPECT_SIZE"; exit 1; }
             log "  wrote $bn"
           done
           log "step2-ok"
@@ -1798,40 +1799,69 @@ jobs:
       - name: 阶段二后半：客机内重放并断言痕迹已删
         id: replay
         if: steps.image.outputs.image_ok == 'yes'
+        # ⚠️ 2026-11-12：对齐阶段一的详细输出改造。
+        #   原缺陷：
+        #     ① `set -eu` + `REPLAY_RC=0` 但 ssh 失败会被 set -e 直接中断，走不到赋值；
+        #     ② 用 scp 取证（此前实测 scp 在 Windows sshd 上 exit 255 不可靠）；
+        #     ③ 无 tee，主日志看不到客机侧输出，只能事后翻 artifact。
         run: |
-          set -eu
+          set -u
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          REPLAY_LOG="$SNAP/replay-stage.txt"
+          : > "$REPLAY_LOG"
+          log() { echo "$@" | tee -a "$REPLAY_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
 
-          # 先取回证据：重放断言可能失败，失败时更需要证据落盘，所以取证在断言之前。
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "$USER_HOST:C:/cx/evidence/*" "$RUNNER_TEMP/" 2>/dev/null || echo '（重放阶段开始前暂无证据文件）'
+          log "=== 阶段二后半：重放 + 断言 ==="
 
+          # ① 语法预检（对齐阶段一：解析错误必须变成非零，不能被 -File 的 0 吞掉）
+          log "--- 重放脚本语法预检 ---"
+          SYNTAX_PS='$errs=@(); $null=[System.Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText("C:/cx/scripts/vm/qemu-guest-destruct.ps1"), [ref]$errs); if ($errs.Count -gt 0) { Write-Output ("SYNTAX-ERR count=" + $errs.Count); exit 3 } else { Write-Output "SYNTAX-OK" }'
+          SYNTAX_ENC=$(printf '%s' "$SYNTAX_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          SYNTAX_OUT=$($SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $SYNTAX_ENC" 2>&1 | tr -d "\r")
+          log "$SYNTAX_OUT"
+          case "$SYNTAX_OUT" in
+            *SYNTAX-OK*) log "语法预检通过" ;;
+            *) log "::error title=重放脚本语法错误::$(echo "$SYNTAX_OUT" | head -6 | tr '\n' ' ')"; exit 1 ;;
+          esac
+
+          # ② 取证（用 base64 读回，不用 scp —— 对齐部署步骤的可靠方案）
+          log "--- 取回重放前证据 ---"
+          EVID_PS='if (Test-Path "C:/cx/evidence") { Get-ChildItem "C:/cx/evidence" | ForEach-Object { Write-Output ("--- " + $_.Name + " (" + $_.Length + " B) ---"); Get-Content $_.FullName } } else { Write-Output "MISSING C:/cx/evidence" }'
+          EVID_ENC=$(printf '%s' "$EVID_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REPLAY_LOG" 2>&1 || log "（取重放前证据失败）"
+
+          # ③ 执行重放（保留退出码）
+          log "--- 执行 -Phase replay ---"
           REPLAY_RC=0
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" || REPLAY_RC=$?
-          echo "REPLAY_EXIT_CODE=$REPLAY_RC"
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REPLAY_LOG" || REPLAY_RC=$?
+          log "REPLAY_EXIT_CODE=$REPLAY_RC"
 
-          # 收尾自毁断言：与 vm-shutdown-destruct 的 teardown 同口径 —— 只读检查，不替自毁擦屁股；
-          # 而且**必须真的判红**（这里不能 `|| true`，否则「自毁没清干净」会被静默吞掉，
-          # 那正是这条作业存在的意义）。
+          # ④ 收尾断言（teardown：只读检查，不替自毁擦屁股，必须真判红）
+          log "--- 执行 teardown 断言 ---"
           CLEAN_RC=0
-          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' || CLEAN_RC=$?
-          echo "TEARDOWN_ASSERT_EXIT_CODE=$CLEAN_RC"
+          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' 2>&1 | tee -a "$REPLAY_LOG" || CLEAN_RC=$?
+          log "TEARDOWN_ASSERT_EXIT_CODE=$CLEAN_RC"
 
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "$USER_HOST:C:/cx/evidence/*" "$RUNNER_TEMP/" 2>/dev/null || echo '（重放阶段暂无证据文件）'
+          # ⑤ 取回重放后证据
+          log "--- 取回重放后证据 ---"
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REPLAY_LOG" 2>&1 || log "（取重放后证据失败）"
 
-          # 两个退出码都要保留：先报断言失败，再报重放失败（若都失败，重放更接近根因）。
+          # ⑥ 两个退出码都保留：先报断言失败，再报重放失败
           if [ "$CLEAN_RC" -ne 0 ]; then
-            echo "::error title=自毁残留::teardown 断言发现残留（exit=$CLEAN_RC），见上传的证据文件"
+            log "::error title=自毁残留::teardown 断言发现残留（exit=$CLEAN_RC），见 replay-stage.txt 与上传证据"
           fi
           if [ "$REPLAY_RC" -ne 0 ]; then
-            echo "::error title=重放失败::qemu-guest-destruct.ps1 -Phase replay 退出码 $REPLAY_RC"
+            log "::error title=重放失败::qemu-guest-destruct.ps1 -Phase replay 退出码 $REPLAY_RC，见 replay-stage.txt"
           fi
           if [ "$CLEAN_RC" -ne 0 ] || [ "$REPLAY_RC" -ne 0 ]; then
             exit 1
           fi
+          log "replay-stage-ok"
 
       - name: 上传证据
         if: always()
@@ -2076,10 +2106,8 @@ jobs:
 
   qemu-destruct-linux-guest:
     name: Linux 客机强制断电自毁与开机续删（真实重启）
-    needs: gate
     # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
-    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     # 硬上限：50 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
     # + 客机冷启动（≤7 min）× 3 轮（首次 / 断电后冷启动 / 第二次重启）
@@ -2260,10 +2288,7 @@ jobs:
     concurrency:
       group: cx-guest-image-${{ github.ref }}
       cancel-in-progress: false
-    needs: gate
-    if: needs.gate.result == 'success'
     env:
-      CACHE_KEY: cx-win2022-guest-qcow2-v3
       GUEST_USER: runner
     steps:
       - name: 检出代码
@@ -2280,7 +2305,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/guest-cache
-          key: ${{ env.CACHE_KEY }}
+          key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
           # 不用 restore-keys：镜像必须精确命中，拿错版本比没有更糟
           fail-on-cache-miss: false
 
@@ -3665,7 +3690,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CACHE_DIR }}
-          key: ${{ env.CACHE_KEY }}
+          key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
 
       - name: 结论写入 Step Summary
         if: always()
@@ -3685,7 +3710,7 @@ jobs:
             echo "| 安装耗时 | ${INSTALL_ELAPSED:-?} s |"
             echo "| 压缩后体积 | ${FINAL_GIB:-?} GiB |"
             echo "| SSH 验证 | ${SSH_READY:-未执行} |"
-            echo "| cache key | \`$CACHE_KEY\` |"
+            echo "| cache key | \`$GUEST_IMAGE_CACHE_KEY\` |"
             echo ''
             if [ "${SSH_READY:-}" = yes ]; then
               echo '### ✅ 镜像可用，已存入 cache'
@@ -3694,7 +3719,7 @@ jobs:
               echo ''
               echo '- 无需任何 secret：SSH 密钥对随镜像一起存入 Actions Cache'
               echo '- ci.yml 侧用 `actions/cache/restore@v4` 取回，'
-              echo "  key = \`$CACHE_KEY\`"
+              echo "  key = \`$GUEST_IMAGE_CACHE_KEY\`"
               echo ''
               echo '> cache 7 天未访问会被清理；ci.yml 每次 push 都 restore 就会续期。'
             else
@@ -3725,7 +3750,7 @@ jobs:
   summary:
     name: 持续集成结果汇总
     runs-on: ubuntu-24.04
-    needs: [build-guest-image, source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
+    needs: [build-guest-image, source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -3745,9 +3770,6 @@ jobs:
           WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
           QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
-          GATE_REASON: ${{ needs.gate.outputs.reason }}
-          KVM_PROBE_SKIPPED: ${{ needs.kvm-probe.outputs.skipped }}
-          KVM_PROBE_REASON: ${{ needs.kvm-probe.outputs.reason }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -3775,17 +3797,10 @@ jobs:
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
-            if [[ "$KVM_PROBE_SKIPPED" == "yes" ]]; then
-              printf '| KVM 能力巡检（只读，非关机自毁） | 跳过（%s） |\n' "$KVM_PROBE_REASON"
-            else
-              printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
-            fi
+            printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
             printf '| 关机自毁（托管 Ubuntu + QEMU + KVM） | %s |\n' "$(result_label "$QEMU_DESTRUCT_RESULT")"
             printf '| 关机销毁/开机续删（QEMU + Linux 客机，真实重启） | %s |\n' "$(result_label "$QEMU_LINUX_DESTRUCT_RESULT")"
-            if [[ -n "$GATE_REASON" ]]; then
-              printf '| 判重闸说明 | %s |\n' "$GATE_REASON"
-            fi
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"

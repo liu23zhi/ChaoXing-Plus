@@ -116,7 +116,8 @@ test('wiring-probe 必须真跑两阶段语义验证，不能只验证接线', a
   // （那是「PR 上放行失败」，不是跳过作业，与「不跳过任务」不冲突）。
   const ifLine = job.split('\n').find((l) => /^\s+if:/.test(l)) || '';
   assert.doesNotMatch(ifLine, /github\.event_name/u, 'wiring-probe 的 if 不得再按 event_name 限制');
-  assert.match(ifLine, /needs\.gate\.result/u, 'wiring-probe 的 if 必须仍受 gate.result 约束');
+  // 2026-11-12：gate 已删除，wiring-probe 无条件运行（无 job 级 if）。
+  assert.doesNotMatch(ifLine, /needs\.gate\.result/u, 'wiring-probe 不得再受 gate.result 约束（gate 已删）');
   assert.doesNotMatch(ifLine, /pull_request/u, 'wiring-probe 的 if 不得再按 pull_request 分支');
   // 手动触发统一在 workflow 级（见下一条断言），作业 if 不再重复判定。
   assert.doesNotMatch(workflow, /^ {2}schedule:/mu, '不得挂 schedule');
@@ -214,9 +215,10 @@ test('KVM 巡检段：轻量只读，不进 PR 门禁', async () => {
   //   ① 巡检段的 if 不按事件类型分支（只受日判重闸控制，不是 pass/fail 闸门）
   //   ② 它自己写明失败不阻塞 PR
   assert.doesNotMatch(job, /pull_request/u, 'KVM 巡检的 if 不得按 pull_request 单独判定');
-  assert.match(job, /if: needs\.gate\.result == 'success'/u, 'KVM 巡检只受 gate.result 约束（判重已取消）');
+  // 2026-11-12：gate 已删除，KVM 巡检无条件运行（无 job 级 if）。
+  assert.doesNotMatch(job, /needs\.gate\.result/u, 'KVM 巡检不得再受 gate.result 约束（gate 已删）');
   const kvmIf = job.split('\n').find((l) => /^\s+if:/.test(l)) || '';
-  assert.doesNotMatch(kvmIf, /needs\.gate\.outputs\.(skip|sha_verified)/u,
+  assert.doesNotMatch(kvmIf, /needs\.gate\./u,
     'KVM 巡检的 if 不得再读任何判重输出（outputs 段透传展示不算闸门）');
   assert.match(job, /红叉不影响任何 PR 的必需检查/u, '必须写明巡检失败不阻塞 PR');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');

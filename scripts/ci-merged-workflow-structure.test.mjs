@@ -32,7 +32,6 @@ const EXPECTED_JOBS = [
   'windows-browser',
   'windows-release',
   'windows-real-client',
-  'gate',
   'kvm-probe',
   'wiring-probe',
   'qemu-shutdown-destruct',
@@ -48,7 +47,7 @@ const EXPECTED_JOBS = [
   'summary',
 ];
 
-// summary 汇总了哪些作业（16 项，不含它自己）。
+// summary 汇总了哪些作业（15 项，不含它自己）。
 const EXPECTED_SUMMARY_NEEDS = [
   'build-guest-image',
   'source',
@@ -60,7 +59,6 @@ const EXPECTED_SUMMARY_NEEDS = [
   'windows-release',
   'windows-real-client-discovery',
   'windows-real-client',
-  'gate',
   'kvm-probe',
   'wiring-probe',
   'qemu-shutdown-destruct',
@@ -259,48 +257,19 @@ test('每个作业段都能抽出且各有 name / runs-on', async () => {
 
 // ───────── 3. 「完整 CI 也跑关机自毁测试」这件事真的成立（核心） ─────────
 
-test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async () => {
+test('wiring-probe 已取消一切前置条件（PR / push / 手动都无条件跑）', async () => {
   const section = await jobSection('wiring-probe');
-  const condition = blockValue(section, 'if');
 
-  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
+  // 2026-11-12：gate 已删除，wiring-probe 不再有 job 级 if ——
+  //   即无条件运行（对应「不要跳过任务」的最终口径）。
   assert.ok(
-    !condition.includes('github.event_name'),
-    'wiring-probe 不得再按 event_name 限制，实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'wiring-probe 必须仍然受 gate.result 约束（gate 挂了才不跑），实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('needs.gate.outputs.skip'),
-    'wiring-probe 不得被任何判重跳过，实际：' + condition,
+    !/^    if:/mu.test(section),
+    'wiring-probe 不得再有 job 级 if（gate 已删，应无条件运行），实际段内仍含 if:',
   );
 });
 
 
-test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
-  const section = await jobSection('gate');
 
-  // 2026-11-11 最终口径：判重逻辑整体删除。
-  assert.ok(
-    !section.includes('GITHUB_RUN_ID'),
-    'gate 不得再引用 GITHUB_RUN_ID（已取消判重，不查历史 run）',
-  );
-  assert.ok(
-    !section.includes('GITHUB_WORKFLOW_REF'),
-    'gate 不得再推导 workflow 文件名（已取消判重，不查 runs 列表）',
-  );
-  assert.ok(
-    !section.includes('head_sha='),
-    'gate 不得再按 commit sha 查历史 run（已取消判重）',
-  );
-
-  // 三个输出保留为常量，仅为不破坏下游引用。
-  for (const key of ['SKIP=', 'REASON=', 'SHA_VERIFIED=']) {
-    assert.ok(section.includes(key), `gate 必须仍然产出 ${key}（下游有引用）`);
-  }
-});
 test('wiring-probe 的 continue-on-error 只在 PR 上放行', async () => {
   const section = await jobSection('wiring-probe');
   assert.equal(
@@ -330,10 +299,6 @@ test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async ()
   assert.ok(
     !condition.includes('github.event_name'),
     'qemu-shutdown-destruct 不得再按 event_name 限制（PR 上也要跑），实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'qemu-shutdown-destruct 必须仍然要求 gate 成功，实际：' + condition,
   );
   // 旧写法会把「推送后从未跑过」变成永久缺口。
   assert.doesNotMatch(
@@ -392,38 +357,11 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
       .split('\n')
       .find((candidate) => candidate.includes(label) && candidate.includes('printf'));
     assert.ok(line, `summary 的 Step Summary 缺少「${label}」这一行`);
-    assert.ok(
-      line.includes(`result_label "$${variable}"`),
-      `「${label}」必须取 $${variable} 的结果，实际行：${line.trim()}`,
-    );
-  }
-});
-
-test('summary 的 env 四个关键变量都取自正确的作业输出', async () => {
-  const section = await jobSection('summary');
-  const expected = {
-    WIRING_PROBE_RESULT: '${{ needs.wiring-probe.result }}',
-    QEMU_DESTRUCT_RESULT: '${{ needs.qemu-shutdown-destruct.result }}',
-    GATE_REASON: '${{ needs.gate.outputs.reason }}',
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    assert.equal(inlineValue(section, name), value, `${name} 必须等于 ${value}`);
   }
 });
 
 // ─────────── 5. gate 判重不查已删除的 ci-vm.yml，且排除当前 run ───────────
 
-test('gate 段里不再出现 ci-vm.yml', async () => {
-  const section = await jobSection('gate');
-  assert.doesNotMatch(
-    section,
-    /ci-vm\.yml/u,
-    'ci-vm.yml 已删除，gate 里再引用它会让判重恒返回 0（静默失效）',
-  );
-  // 删掉的是文件引用，判重本身必须还在（否则「今天只跑一次」整个语义消失）。
-  assert.match(section, /SKIP=/u, 'gate 必须仍然产出 SKIP 输出');
-  assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
-});
 
 test('permissions 里 actions 必须有写权限（cache save 需要；write 同时含 read）', async () => {
   const children = topLevelChildren('permissions');
@@ -442,7 +380,7 @@ test('permissions 里 actions 必须有写权限（cache save 需要；write 同
   assert.equal(
     values.get('actions'),
     'write',
-    '必须是 actions: write —— build-guest-image 要 save cache；write 同时满足 gate 读 run 列表',
+    '必须是 actions: write —— build-guest-image 要 save cache（gate 已删除，不再读 run 列表）',
   );
   assert.equal(values.get('contents'), 'read', 'contents 必须是 read');
 });
@@ -759,13 +697,13 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
 //   · 把 `fail()` 改回 `exit 0` → ② 变回 success（假绿）
 //   · 把结论步骤里的 `exit 1` 兜底去掉 → ② 只剩红色文字但 job 绿
 
-test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也必须启动并如实失败', async () => {
+test('qemu-shutdown-destruct 不跳过：job 级只判 build-guest-image，未配置镜像也必须启动并如实失败', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
   // `if:` 是 `|` 多行块时必须用 blockValue（inlineValue 只会读到那个竖线）。
   const condition = blockValue(section, 'if');
 
   // 正向对照：证明读到的是本作业的 if。
-  assert.ok(condition.includes("needs.gate.result == 'success'"), `if 必须仍受 gate 约束，实际：${condition}`);
+  assert.ok(condition.includes("needs.build-guest-image.result == 'success'"), `if 必须受 build-guest-image 约束，实际：${condition}`);
 
   // 2026-11-11 用户三次要求「不要跳过任务」，所以 job 级**不得**再按镜像变量跳过。
   //

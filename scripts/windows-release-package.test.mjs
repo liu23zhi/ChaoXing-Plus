@@ -481,7 +481,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   for (const required of [
     'source', 'windows-build', 'windows-unit', 'windows-pause', 'windows-window',
     'windows-browser', 'windows-release', 'windows-real-client-discovery',
-    'windows-real-client', 'gate', 'kvm-probe', 'wiring-probe',
+    'windows-real-client', 'kvm-probe', 'wiring-probe',
     'qemu-shutdown-destruct', 'qemu-destruct-linux-guest', 'build-guest-image',
   ]) {
     assert.ok(
