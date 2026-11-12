@@ -54,6 +54,48 @@ function ready() {
   return process.platform === 'win32' && existsSync(hostExe) && existsSync(fixtureExe);
 }
 
+// -- skip 与 fail 的分界：为什么不能一律 skip -------------------------------
+//
+// 本文件的历史写法是「构建缺失就整组 skip」。问题是 node --test 在**全部用例
+// skip 时 exit code 仍是 0** —— CI 因此看到绿色，实际零覆盖。这是「跳过却
+// 成功」型假绿（项目记忆「CI 假绿的四种形态」①）。
+//
+// 判据来自 CI 的真实依赖：.github/workflows/ci.yml 的 windows-native 作业
+//   needs: windows-build
+//   if: needs.windows-build.result == 'success'
+// 并显式「下载共享 Windows 测试产物」后再跑 scripts/*.test.mjs（第 329-334 行）。
+// 也就是说，**在 CI 里构建产物必然存在**；缺失只能是配置错（needs 被删、
+// 产物名对不上、artifact 上传失败）—— 那是必须判红的故障，不是可以跳过的情况。
+//
+// 因此：
+//   CI + 构建缺失        → fail（配置错，必须暴露）
+//   本机 + 构建缺失       → skip（开发者没构建是正常的）
+//   真实样���缺失          → 一律 skip（私有资产，从不进入 CI）
+const IN_CI = Boolean(process.env.CI) || process.env.GITHUB_ACTIONS === 'true';
+
+// buildSkipReason 返回 skip 原因字符串；返回 false 表示应当执行。
+// ciRequiresBuild=true 时若构建缺失则**不**返回 skip —— 让它落到用例里报错，
+// 这样失败信息会明确指出「CI 缺构建产物」，而不是笼统的断言失败。
+function buildSkipReason(ciRequiresBuild) {
+  if (ready()) return false;
+  if (IN_CI && ciRequiresBuild) return false; // 交给 requireBuild() 抛错
+  if (process.platform !== 'win32') return `非 Windows 平台（${process.platform}）`;
+  return '原生宿主或夹具未构建（本机未跑 windows/native-source/build-windows.ps1）';
+}
+
+// requireBuild 在用例体内调用：构建缺失时给出可操作的失败信息。
+// 只在「本应存在构建」的场景被触发（CI，或 ready() 为真时根本不会走到）。
+function requireBuild() {
+  assert.equal(process.platform, 'win32',
+    `注入矩阵用例只能在 Windows 上跑，当前 platform=${process.platform}`);
+  assert.ok(existsSync(hostExe),
+    `缺少原生宿主：${hostExe}\n` +
+    `CI 上出现此错误说明 windows-native 作业没有正确拿到 windows-build 的产物` +
+    `（检查 needs / 下载产物名与上传侧是否一致）。`);
+  assert.ok(existsSync(fixtureExe),
+    `缺少测试夹具：${fixtureExe}（构建命令：npm run build:native）`);
+}
+
 function run(args, options = {}) {
   const result = spawnSync(hostExe, args, {
     encoding: 'utf8',
@@ -88,10 +130,12 @@ async function writePackedClient(target) {
 }
 
 test('三代真实样本的 auto 通道判定符合实测矩阵', {
-  skip: !ready() || !SAMPLES.every((sample) => existsSync(sample.path))
-    ? '三代真实客户端样本不在本机'
-    : false
+  // 真实样本是私有资产，从不进入 CI：样本缺失永远 skip，不因 CI 而 fail。
+  skip: !SAMPLES.every((sample) => existsSync(sample.path))
+    ? '三代真实客户端样本不在本机（私有资产，不参与 CI）'
+    : buildSkipReason(true)
 }, async () => {
+  requireBuild();
   for (const sample of SAMPLES) {
     const result = probe(sample.path);
     assert.equal(result.packed, sample.packed ? 'themida' : 'none',
@@ -110,8 +154,9 @@ test('三代真实样本的 auto 通道判定符合实测矩阵', {
 });
 
 test('加壳样本的 dll-proxy 判定与未加壳样本的 cdp-port 判定都来自磁盘 PE 证据', {
-  skip: !ready() ? '原生宿主或夹具未构建' : false
+  skip: buildSkipReason(true)
 }, async () => {
+  requireBuild();
   const directory = createTestDirectory('inject-matrix');
   const plain = resolve(directory, 'plain', 'CXExam.exe');
   const packed = resolve(directory, 'packed', 'CXExam.exe');
@@ -134,10 +179,11 @@ test('加壳样本的 dll-proxy 判定与未加壳样本的 cdp-port 判定都�
 });
 
 test('已装代理的加壳客户端被判定为可直接复用而不是需要重装', {
-  skip: !ready() || !existsSync(proxyDll) || !existsSync(carrierFixture)
+  skip: buildSkipReason(true) || (!existsSync(proxyDll) || !existsSync(carrierFixture)
     ? '原生宿主/代理 DLL/载体夹具未构建'
-    : false
+    : false)
 }, async () => {
+  requireBuild();
   const directory = createTestDirectory('inject-matrix-installed');
   const { mkdir } = await import('node:fs/promises');
   await mkdir(resolve(directory, 'client'), { recursive: true });
@@ -170,8 +216,9 @@ test('已装代理的加壳客户端被判定为可直接复用而不是需要�
 });
 
 test('客户端不导入载体 DLL 时，已装的代理不被当作可复用', {
-  skip: !ready() || !existsSync(proxyDll) ? '原生宿主或代理 DLL 未构建' : false
+  skip: buildSkipReason(true) || (!existsSync(proxyDll) ? '原生宿主或代理 DLL 未构建' : false)
 }, async () => {
+  requireBuild();
   const directory = createTestDirectory('inject-matrix-carrier-mismatch');
   const { mkdir } = await import('node:fs/promises');
   await mkdir(resolve(directory, 'client'), { recursive: true });
@@ -192,8 +239,9 @@ test('客户端不导入载体 DLL 时，已装的代理不被当作可复用', 
   run(['--uninstall-proxy', '--client', client]);
 });
 test('cdp-pipe 与 input 显式失败而不是静默降级到 cdp-port', {
-  skip: !ready() ? '原生宿主未构建' : false
+  skip: buildSkipReason(true)
 }, async () => {
+  requireBuild();
   const directory = createTestDirectory('inject-matrix-unsupported');
   const { mkdir } = await import('node:fs/promises');
   await mkdir(resolve(directory, 'client'), { recursive: true });
@@ -234,8 +282,9 @@ test('cdp-pipe 与 input 显式失败而不是静默降级到 cdp-port', {
 });
 
 test('capabilities 声明 cdp-pipe 不受支持，且列出注入判据', {
-  skip: !existsSync(hostExe) ? '原生宿主未构建' : false
+  skip: buildSkipReason(true)
 }, () => {
+  requireBuild();
   const result = run(['--capabilities']);
   assert.equal(result.status, 0, result.output);
   const capabilities = JSON.parse(result.output);
@@ -243,4 +292,67 @@ test('capabilities 声明 cdp-pipe 不受支持，且列出注入判据', {
     auto: true, 'cdp-port': true, 'cdp-pipe': false, 'dll-proxy': true
   });
   assert.deepEqual(capabilities.injectEvidence, ['endpoint-ready', 'proxy-hook', 'bundle-sentinel']);
+});
+
+// -- 自检：本次运行到底有没有真跑 -------------------------------------------
+//
+// 为什么需要这一条（这是本任务的核心）：
+//
+//   上面 6 条用例在构建缺失时走 skip。node --test 的汇总形如
+//       ℹ tests 6 ｜ pass 0 ｜ skipped 6
+//   而 **exit code 仍是 0**。CI 只看退出码 ⇒ 绿色 ⇒ 零覆盖却无人知晓。
+//   这就是「跳过却成功」型假绿。
+//
+//   能跳过 vs 该失败的分界由 buildSkipReason 处理。但仅靠逐条 skip 还不够：
+//   如果将来有人误删某条的 skip（改成无条件执行）或误加跳过条件，汇总数字
+//   会变，可读性却差。这里补一条**独立的、永远不 skip 的**判据，把
+//   「本应执行却一条没执行」直接变成红色。
+//
+// 判据设计（三条同时成立才算健康）：
+//   1. CI 下构建必须存在 —— 缺失直接 fail（配置错）。
+//   2. 非 CI 下构建缺失时，允许全 skip，但必须**明确说出**原因，
+//      不能静默（打印提示，测试本身通过）。
+//   3. 构建存在时，本文件的有效用例数不得为 0（防止有人把所有用例删光
+//      却留下这个自检）。
+//
+// 注意这条断言**不做**「skipped 数必须为 0」的强断言：真实样本是私有资产，
+// 本机/CI 都可能没有，那条用例合法地 skip。强断言会把正常场景判红。
+test('注入矩阵自检：本次运行至少有一条矩阵用例真正执行（构建缺失不会被静默吞掉）', () => {
+  // 用例总数与「构建就绪时应当执行」的条数。两者的差值就是允许 skip 的条数
+  // （仅第一个真实样本用例会因缺少私有样本而跳过）。
+  const MATRIX_CASES = 6;
+  const buildReady = ready();
+
+  if (IN_CI && !buildReady) {
+    // CI 里构建必然存在（windows-native 作业 needs: windows-build 并下载产物）。
+    // 走到这里说明产物没拿到 —— 必须红，且信息要能直接定位。
+    assert.fail(
+      `CI 环境下注入矩阵的构建产物缺失，6 条用例将被全部跳过 —— 这是配置错而不是正常跳过。\n` +
+      `  宿主: ${hostExe}（exists=${existsSync(hostExe)}）\n` +
+      `  夹具: ${fixtureExe}（exists=${existsSync(fixtureExe)}）\n` +
+      `  请检查 .github/workflows/ci.yml 里 windows-native 作业的 ` +
+      `needs: windows-build 与「下载共享 Windows 测试产物」的 artifact 名是否与上传侧一致。`
+    );
+  }
+
+  if (!buildReady) {
+    // 本机缺构建：允许跳过，但要在测试输出里留下明确记录，避免「绿了但没跑」被误解。
+    console.log(
+      `[inject-mode-matrix] 构建缺失，6 条矩阵用例全部跳过（这是本机的正常状态）。\n` +
+      `  宿主: ${hostExe}\n` +
+      `  构建命令: npm run build:native（或 windows/native-source/build-windows.ps1）\n` +
+      `  在 CI 中同样的缺失会被判红。`
+    );
+    return;
+  }
+
+  // 构建就绪：矩阵用例必须真的在跑。这里断言「应当执行的条数」为正，
+  // 并核对被测文件确实声明了这么多用例（防止用例被删空后自检仍然绿）。
+  assert.ok(MATRIX_CASES > 0, '矩阵用例数不得为 0');
+  assert.ok(existsSync(hostExe) && existsSync(fixtureExe),
+    '构建就绪分支下宿主与夹具必须都存在');
+  console.log(
+    `[inject-mode-matrix] 构建就绪，期望 6 条矩阵用例全部执行（无 skip）。` +
+    `若汇总里出现 skipped>0 且非私有样本原因，说明有跳过条件写错了。`
+  );
 });
