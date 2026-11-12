@@ -32,18 +32,18 @@ function Get-PurgeRunOnceValues {
     $item = Get-ItemProperty -LiteralPath $runOnceKey -ErrorAction SilentlyContinue
     if ($null -eq $item) { return @() }
     return @(
-        $item.PSObject.Properties
-        | Where-Object { $_.Name -like "$valuePrefix*" }
-        | ForEach-Object { $_.Name }
+        $item.PSObject.Properties |
+        Where-Object { $_.Name -like "$valuePrefix*" } |
+        ForEach-Object { $_.Name }
     )
 }
 
 function Get-PurgeTempDirs {
     # 排除测试自己用的 cx-purge-tests-*，避免把并行用例的工作目录当成残留。
     return @(
-        Get-ChildItem -LiteralPath $env:TEMP -Directory -ErrorAction SilentlyContinue
-        | Where-Object { $_.Name -like "$tempPrefix*" -and $_.Name -notlike 'cx-purge-tests-*' }
-        | ForEach-Object { $_.FullName }
+        Get-ChildItem -LiteralPath $env:TEMP -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$tempPrefix*" -and $_.Name -notlike 'cx-purge-tests-*' } |
+        ForEach-Object { $_.FullName }
     )
 }
 
