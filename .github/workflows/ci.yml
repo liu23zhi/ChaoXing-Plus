@@ -1640,8 +1640,24 @@ jobs:
             log "  $bn 分块传输完成（$BLOCKS 块）"
 
             # 解码
-            if ! $SSH "$USER_HOST" "powershell -NoProfile -Command \$b=[IO.File]::ReadAllText('${TMPB64}');[IO.File]::WriteAllBytes('${FINAL}',[Convert]::FromBase64String(\$b));Remove-Item '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1; then
+            # ⚠️ 2026-11-12（run 43231941986 实测）：**必须补 UTF-8 BOM**。
+            #   源脚本是 UTF-8 无 BOM（git 里不应存 BOM），含大量中文注释。
+            #   base64 传的是字节，传输本身正确（大小一致），但
+            #   **Windows PowerShell 5.1 读无 BOM 的 UTF-8 文件会按 ANSI/GBK 解码**
+            #   ⇒ 中文注释变乱码 ⇒ 语法解析失败：
+            #     At qemu-guest-destruct.ps1:48 char:29
+            #     + throw "�����`�,~�r�,s�o�: $vmScript"
+            #     Unexpected token 's�o�:' in expression or statement.
+            #   所以解码后立刻在文件头写 3 字节 BOM(EF BB BF)，5.1 才会按 UTF-8 读。
+            if ! $SSH "$USER_HOST" "powershell -NoProfile -Command \$b=[IO.File]::ReadAllText('${TMPB64}');\$bytes=[Convert]::FromBase64String(\$b);\$bom=[byte[]](0xEF,0xBB,0xBF);[IO.File]::WriteAllBytes('${FINAL}', \$bom + \$bytes);Remove-Item '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1; then
               log "::error title=解码失败::$bn"
+              exit 1
+            fi
+            # 复核 BOM 真的写进去了（前 3 字节 EF BB BF）
+            BOMCHK=$($SSH "$USER_HOST" "powershell -NoProfile -Command \$h=[IO.File]::ReadAllBytes('${FINAL}')[0..2]; if (\$h[0] -eq 239 -and \$h[1] -eq 187 -and \$h[2] -eq 191) { 'BOM-OK' } else { 'BOM-MISSING:' + (\$h -join ',') }" 2>/dev/null | tr -d "\r\n ")
+            log "  $bn BOM 检查 = ${BOMCHK:-?}"
+            if [ "${BOMCHK:-}" != "BOM-OK" ]; then
+              log "::error title=BOM 写入失败::$bn 实际 ${BOMCHK:-?}（PowerShell 5.1 会把中文读成乱码）"
               exit 1
             fi
 
@@ -1706,6 +1722,20 @@ jobs:
 
           # ── 执行登记阶段（保留退出码，不用 set -e 直接中断）──────────────────
           log "=== 执行 -Phase register ==="
+          # ⚠️ 2026-11-12（run 43231941986 实测）：**powershell -File 在解析错误时返回 0**。
+          #   那一轮脚本因中文乱码解析失败（Unexpected token），但 RC 仍是 0，
+          #   于是「登记阶段成功」是假的 —— 什么都没执行。
+          #   ⇒ 先用 PSParser 做语法预检，把解析错误变成明确的非零退出。
+          log "=== 语法预检（PSParser）==="
+          SYNTAX_PS='$errs=@(); $null=[System.Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText("C:/cx/scripts/vm/qemu-guest-destruct.ps1"), [ref]$errs); if ($errs.Count -gt 0) { Write-Output ("SYNTAX-ERR count=" + $errs.Count); $errs | Select-Object -First 5 | ForEach-Object { Write-Output ("  line " + $_.Token.StartLine + ": " + $_.Message) }; exit 3 } else { Write-Output "SYNTAX-OK" }'
+          SYNTAX_ENC=$(printf '%s' "$SYNTAX_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          SYNTAX_OUT=$($SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $SYNTAX_ENC" 2>&1 | tr -d "\r")
+          log "$SYNTAX_OUT"
+          case "$SYNTAX_OUT" in
+            *SYNTAX-OK*) log "语法预检通过" ;;
+            *) log "::error title=客机侧脚本语法错误::$(echo "$SYNTAX_OUT" | head -6 | tr '\n' ' ')"; exit 1 ;;
+          esac
+
           RC=0
           $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REG_LOG" || RC=$?
           log "register exit code = $RC"

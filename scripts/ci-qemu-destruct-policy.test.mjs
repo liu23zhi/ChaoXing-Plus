@@ -430,3 +430,49 @@ test('ci.yml#qemu-destruct-linux-guest 必须按链路接入 5 个覆盖缺口',
   assert.match(workflow, /proof-after-first\.txt/u, '证据必须包含第一次续删的 proof');
   assert.match(workflow, /boot-before-reboot2\.txt/u, '证据必须包含第二次重启前的 boot_id');
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43231941986 实测）：传给客机的 .ps1 必须补 UTF-8 BOM
+//
+// 事故链：
+//   ① 三个脚本是 UTF-8 **无 BOM**（git 里不该存 BOM），含大量中文注释；
+//   ② base64 分块传输的是**字节**，传输本身正确（远端大小与本地逐字节一致）；
+//   ③ 但 **Windows PowerShell 5.1 读无 BOM 的 UTF-8 会按 ANSI/GBK 解码**
+//      ⇒ 中文注释变乱码 ⇒ 语法解析失败：
+//        At qemu-guest-destruct.ps1:48 char:29
+//        + throw "�����`�,~�r�,s�o�: $vmScript"
+//        Unexpected token 's�o�:' in expression or statement.
+//   ④ 更隐蔽：`powershell -File` 在**解析错误时返回 0**，于是
+//      「register exit code = 0」是假的，实际一条命令都没执行。
+//
+// 因此必须同时钉住两件事：
+//   A. 部署时解码后写入 UTF-8 BOM(EF BB BF)
+//   B. 阶段一执行前用 PSParser 做语法预检（把解析错误变成非零退出）
+test('客机侧 .ps1 必须补 UTF-8 BOM，且执行前做语法预检', async () => {
+  const workflow = await readFile(WORKFLOW, 'utf8');
+
+  // A. 解码写入时必须拼接 BOM 三字节
+  assert.match(
+    workflow,
+    /0xEF,0xBB,0xBF/u,
+    '部署客机脚本时必须在解码后写入 UTF-8 BOM（PowerShell 5.1 否则按 ANSI 解码，中文注释变乱码）',
+  );
+  // A2. 必须有 BOM 实际写入结果的校验，不能只写不验
+  assert.match(
+    workflow,
+    /BOM-OK/u,
+    '必须复核 BOM 真的写进去了（只写不验的话，写入静默失败仍会得到乱码脚本）',
+  );
+
+  // B. 语法预检：解析错误必须变成非零退出
+  assert.match(
+    workflow,
+    /\[System\.Management\.Automation\.PSParser\]::Tokenize/u,
+    '执行前必须用 PSParser 做语法预检：powershell -File 在解析错误时返回 0，会把「什么都没跑」伪装成成功',
+  );
+  assert.match(
+    workflow,
+    /SYNTAX-OK/u,
+    '语法预检必须有明确的通过标识，便于日志判断',
+  );
+});
