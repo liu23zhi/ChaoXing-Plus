@@ -648,6 +648,28 @@ jobs:
             Say "verify whoami=\$(whoami)"
             Say "verify exe=\$(Test-Path 'C:\cx\native\purge-tests.exe')"
             Say "verify keys=\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            # ⚠️ 2026-11-12：宿主侧 SSH 连不上（banner exchange 超时），
+            #   而客机内 sshd 显示 Running。必须记录**客机的网络实况**：
+            #   IP 地址、网关、sshd 实际监听在哪些地址（0.0.0.0 还是具体 IP）。
+            #   只记「监听条数」无法判断 slirp 能不能转发到。
+            try {
+              \$ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.IPAddress -notlike '127.*' } |
+                ForEach-Object { "\$(\$_.InterfaceAlias)=\$(\$_.IPAddress)/\$(\$_.PrefixLength)" }
+              Say "guest-ip: \$(\$ips -join ', ')"
+              StepReport 'GuestIP' (\$ips -join ';')
+              \$gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Select-Object -First 1).NextHop
+              Say "guest-gateway: \$gw"
+              StepReport 'GuestGateway' "\$gw"
+              # sshd 实际监听地址（netstat 的 LocalAddress 列）
+              \$ls = netstat -ano | Select-String ':22\s' | ForEach-Object { (\$_ -split '\s+')[1] }
+              Say "sshd-listen-addrs: \$(\$ls -join ', ')"
+              StepReport 'SshdListenAddrs' (\$ls -join ';')
+              # 关键：sshd 是否监听在 0.0.0.0（否则 slirp 转发不进来）
+              \$any = \$ls | Where-Object { \$_ -like '0.0.0.0:22' -or \$_ -like '[::]:22' }
+              if (\$any) { StepReport 'SshdBoundAny' 'yes' } else { StepReport 'SshdBoundAny' 'NO' }
+            } catch { Say "network-diag failed: \$_" }
             StepReport 'VerifyExe' "\$(Test-Path 'C:\cx\native\purge-tests.exe')"
             StepReport 'VerifyKeys' "\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
             # 最终结论行：宿主侧只读这一行就能判断「镜像是好是坏」
@@ -1168,6 +1190,24 @@ jobs:
             -pidfile "$WORK/vqemu.pid" -daemonize
           echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)" | tee -a "$VERIFY_LOG"
 
+          # ⚠️ 2026-11-12：-daemonize 会**立即返回**，即使子进程随后崩溃。
+          #   pidfile 里写了 PID 只说明 fork 成功，不代表进程还活着。
+          #   实测（run 43144127992）：VERIFY_QEMU_PID=20207 写进去了，
+          #   但 31 次 SSH 尝试全部 banner 超时 —— 必须验证进程存活。
+          QPID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)
+          sleep 3
+          if ! kill -0 "$QPID" 2>/dev/null; then
+            echo "::error title=QEMU 启动后立即退出::pid=$QPID 已不存在" | tee -a "$VERIFY_LOG"
+            echo "--- qemu 启动日志 ---" | tee -a "$VERIFY_LOG"
+            cat "$WORK/qemu-verify.log" 2>/dev/null | tail -30 | tee -a "$VERIFY_LOG" || true
+            exit 1
+          fi
+          echo "QEMU_ALIVE=yes pid=$QPID" | tee -a "$VERIFY_LOG"
+          # 记录 qemu 的完整命令行，便于核对 nic 参数是否真的生效
+          ps -p "$QPID" -o args= 2>/dev/null | tee -a "$VERIFY_LOG" || true
+          # 宿主侧看 2222 是否在听（slirp 应该立刻监听）
+          (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 2222 | tee -a "$VERIFY_LOG" || echo "  2222 未监听" | tee -a "$VERIFY_LOG"
+
           # -vvv 而不是 -v：要看到 kex/banner 协商停在哪一步。
           # ConnectionAttempts=1：不重试，避免 10s × N 把步骤拖死。
           SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
@@ -1175,6 +1215,9 @@ jobs:
                -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR"
           READY=no
           ATTEMPT=0
+          # 客机启动后网络需要时间就绪，先等 30s 再开始探测
+          echo "等待客机网络就绪..." | tee -a "$VERIFY_LOG"
+          sleep 30
           DEADLINE=$(( $(date +%s) + 900 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             ATTEMPT=$(( ATTEMPT + 1 ))
@@ -1190,7 +1233,7 @@ jobs:
             else
               echo "attempt=$ATTEMPT tcp-connect-failed" >> "$VERIFY_LOG"
             fi
-            sleep 10
+            sleep 15
           done
           echo "SSH_READY=$READY attempts=$ATTEMPT" | tee -a "$VERIFY_LOG"
 
