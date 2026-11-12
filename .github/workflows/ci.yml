@@ -1077,7 +1077,7 @@ jobs:
     #
     # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
     #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
-    #   绝对路径或 https URL；外加 secret `CX_QEMU_GUEST_SSH_KEY`。
+    #   绝对路径或 https URL。密钥不需要 secret —— 随镜像一起存于 Actions Cache。
     if: needs.gate.result == 'success' && needs.build-guest-image.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
@@ -1329,8 +1329,6 @@ jobs:
       - name: 解析客机镜像
         id: image
         if: steps.qemu.outputs.qemu_ok == 'yes'
-        env:
-          SSH_KEY: ${{ secrets.CX_QEMU_GUEST_SSH_KEY }}
         run: |
           set -u
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
@@ -1388,11 +1386,37 @@ jobs:
           qemu-img info --output=json "$RUNNER_TEMP/guest-overlay.qcow2" | tr -d ' \n'
           echo
 
-          if [ -z "${SSH_KEY:-}" ]; then
-            fail '缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道（这是配置缺失，不是镜像问题）'
+          # ── SSH 私钥来源（2026-11-12 修正）──────────────────────────────
+          # 用户要求：**打包镜像时顺便把 SSH 密钥一起打包进 cache**。
+          # 事实链：
+          #   ① build-guest-image 构建镜像时，把当时的公钥写进了客机的
+          #      C:\ProgramData\ssh\administrators_authorized_keys（OEM setup.ps1）；
+          #   ② 同一对密钥（guest-key / guest-key.pub）已被存入 Actions Cache；
+          #   ③ 所以 cache 里的 guest-key 才是与镜像**天然配对**的那把私钥。
+          #
+          # 用户 2026-11-12 明确要求：**不保留 secret**，密钥随镜像一起打包进 cache。
+          # 这不是偏好，是技术必然：
+          #   镜像里的公钥是构建时**随机生成**并写死进 administrators_authorized_keys 的，
+          #   任何人工维护的 secret 私钥**都不可能**与之配对。
+          #   保留 secret 只会误导「配了就能用」，掩盖真正该做的动作。
+          #
+          # 唯一来源：Actions Cache 里的 guest-cache/guest-key
+          #   （由「构建 Windows 客机镜像」与 guest.qcow2 一起存入，见该作业的
+          #    「存入 Actions Cache」步骤：cp "$WORK/id" "$CACHE_OUT/guest-key"）
+          KEY_SRC=''
+          if [ -f "$GITHUB_WORKSPACE/guest-cache/guest-key" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key" "$RUNNER_TEMP/guest-ssh-key"
+            chmod 600 "$RUNNER_TEMP/guest-ssh-key"
+            KEY_SRC='cache'
+          else
+            fail 'Actions Cache 里没有客机 SSH 私钥（guest-cache/guest-key）。请先成功跑一次「构建 Windows 客机镜像」——它会把密钥对随镜像一起存入 cache，本作业才能拿到与镜像内公钥配对的那把私钥。'
           fi
-          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/guest-ssh-key"
-          chmod 600 "$RUNNER_TEMP/guest-ssh-key"
+          echo "SSH_KEY_SOURCE=$KEY_SRC"
+          # 私钥必须能解析，否则后面 SSH 报的是「认证失败」而不是「key 坏了」，很难查。
+          if ! ssh-keygen -l -f "$RUNNER_TEMP/guest-ssh-key" >/dev/null 2>&1; then
+            fail "客机 SSH 私钥不可用（来源=$KEY_SRC）：文件无法被 ssh-keygen 解析"
+          fi
+          echo "私钥指纹: $(ssh-keygen -l -f "$RUNNER_TEMP/guest-ssh-key" | awk '{print $2}')"
 
           out image_ok yes
           out image_reason ''
@@ -1729,7 +1753,7 @@ jobs:
             echo '| 项 | 要求 |'
             echo '| --- | --- |'
             echo '| repo variable `CX_QEMU_GUEST_IMAGE` | 预装好的 **Windows qcow2** 的绝对路径或 https URL。**当前未配置** |'
-            echo '| secret `CX_QEMU_GUEST_SSH_KEY` | 客机内运行两阶段所需的 SSH 私钥 |'
+            echo '| Actions Cache | 客机 SSH 私钥（随镜像一起打包，无需任何 secret） |'
             echo '| 镜像内容 | 已安装 OpenSSH Server，并预置 `purge-tests.exe`（`build-windows.sh -BuildTests` 产物） |'
             echo '| 体积预算 | 5.6 GiB 量级，下载 + 冷启动约 10 分钟，故本作业只手动/定时触发 |'
             echo '| 为什么不支持 ISO | 体积、许可与冷启动时间都不合适；ISO 路径会在「解析客机镜像」里被显式拒绝 |'
@@ -3416,7 +3440,7 @@ jobs:
               echo ''
               echo '接下来在仓库设置：'
               echo ''
-              echo '- secret `CX_QEMU_GUEST_SSH_KEY` = 匹配本次公钥的私钥'
+              echo '- 无需任何 secret：SSH 密钥对随镜像一起存入 Actions Cache'
               echo '- ci.yml 侧用 `actions/cache/restore@v4` 取回，'
               echo "  key = \`$CACHE_KEY\`"
               echo ''

@@ -830,7 +830,9 @@ test('qemu-shutdown-destruct 配置了但坏时必须失败，不得 exit 0', as
   );
 
   // ③ 关键分支都要走 fail()：空值兜底 / ISO 拒绝 / 下载失败 / 本地文件不存在 / 格式不对 / 缺 secret。
-  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'CX_QEMU_GUEST_SSH_KEY']) {
+  // 2026-11-12：密钥来源已从 secret 改为 Actions Cache（用户明确要求不保留 secret），
+  // 所以这里不再断言 CX_QEMU_GUEST_SSH_KEY，改为断言新的可操作失败文案。
+  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'Actions Cache 里没有客机 SSH 私钥']) {
     assert.ok(
       body.includes(marker),
       `解析客机镜像步骤必须保留「${marker}」这条失败分支（且走 fail() 判红）`,
@@ -1082,4 +1084,53 @@ test('cache 必须携带密钥对，且 cache 命中时换成它（否则公私�
   // ③ 反向对照：确认「验证 SSH」用的就是 $WORK/id（与上面配对逻辑衔接）
   const verify = stepBody('验证 SSH 可连');
   assert.match(verify, /\$WORK\/id/u, '「验证 SSH 可连」必须用 WORK/id（与密钥步骤配对）');
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（用户明确要求）：SSH 密钥必须**随镜像一起打包进 cache**，且不保留 secret
+//
+// 背景：镜像里的公钥是构建时随机生成并写死进
+//   C:\ProgramData\ssh\administrators_authorized_keys 的。
+// 任何人工维护的 secret 私钥都不可能与之配对 —— 所以 secret 方案在技术上就是死路，
+// 保留它只会误导「配了就能用」，掩盖真正该做的动作（先跑构建把密钥对存进 cache）。
+//
+// run 43193689229 实证：关机自毁 job 报
+//   Error: 缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道
+test('SSH 密钥必须随镜像打包进 cache，且消费端不依赖 secret', async () => {
+  const wf = await workflow();
+
+  // ① 生产端：存入 cache 时必须带上密钥对
+  assert.match(
+    wf,
+    /cp "\$WORK\/id"\s+"\$CACHE_OUT\/guest-key"/u,
+    '「存入 Actions Cache」必须把私钥拷成 guest-key（否则 cache 里只有镜像没有私钥）',
+  );
+  assert.match(
+    wf,
+    /cp "\$WORK\/id\.pub"\s+"\$CACHE_OUT\/guest-key\.pub"/u,
+    '「存入 Actions Cache」必须把公钥拷成 guest-key.pub（便于核对与排障）',
+  );
+
+  // ② 消费端：关机自毁必须从 cache 取私钥
+  const qemu = await jobSection('qemu-shutdown-destruct');
+  assert.match(
+    qemu,
+    /guest-cache\/guest-key/u,
+    'qemu-shutdown-destruct 必须从 Actions Cache 的 guest-cache/guest-key 取私钥',
+  );
+
+  // ③ 反证：不得再引用那个 secret（用户明确要求不保留）
+  assert.doesNotMatch(
+    qemu,
+    /secrets\.CX_QEMU_GUEST_SSH_KEY/u,
+    'qemu-shutdown-destruct 不得再引用 secrets.CX_QEMU_GUEST_SSH_KEY：' +
+      '镜像里的公钥是随机生成并写死的，人工 secret 私钥不可能与之配对',
+  );
+
+  // ④ 拿不到密钥时必须如实失败（不能静默跳过，否则又是假绿）
+  assert.match(
+    qemu,
+    /Actions Cache 里没有客机 SSH 私钥/u,
+    '缺密钥时必须给出可操作的失败信息（指向「先跑构建作业」这个真正解法）',
+  );
 });
