@@ -477,3 +477,135 @@ test('客机侧 .ps1 必须补 UTF-8 BOM，且执行前做语法预检', async (
     '语法预检必须有明确的通过标识，便于日志判断',
   );
 });
+
+// ============================================================================
+// 2026-11-12（run 43254033725）：三层假绿
+//
+// 那一轮 job 报 success，但 artifact 里 register-stage.txt 显示实际全失败：
+//   purgeExe='C:/cx/native/purge-tests.exe'   ← 首尾带单引号
+//   purgeExeExists=False
+//   registeredAfter=（空） / targetExistsAfter=False / problems=3
+//   register exit code = 0                    ← 假通过
+// 三层原因彼此独立，必须分别钉住：修好一层而另两层回退，假绿仍然成立。
+// ============================================================================
+
+test('三层假绿·层1：-PurgeExe 的实参不得带引号（cmd.exe 不解析单引号）', async () => {
+  const job = await qemuJobSection();
+
+  // Windows OpenSSH 默认 shell 是 cmd.exe。cmd 不把单引号当定界符，会原样传给
+  // PowerShell ⇒ 远端收到 `'C:/cx/native/purge-tests.exe'`（首尾真的带引号）
+  // ⇒ 脚本内 Test-Path 失败。而前置体检走 `-Command (Test-Path -LiteralPath '...')`，
+  // 那里单引号是合法的 PowerShell 定界符，所以体检显示 True。
+  // 两种调用形式对单引号处理不同，正是「体检 True / 脚本 False」矛盾的来源。
+  // 只取实参本身：`${VAR}` 或裸路径，不带外层 bash 双引号。
+  // 直接写 \S+ 会把 `...="${VAR}"` 的收尾双引号一起吃进来，是假红来源。
+  const purgeArgs = [...job.matchAll(/-PurgeExe\s+(\$\{[^}]+\}|\S+)/gu)].map((m) => m[1]);
+  assert.ok(
+    purgeArgs.length >= 2,
+    `-PurgeExe 必须至少出现在 register 与 replay 两处，实际 ${purgeArgs.length} 处`,
+  );
+  for (const arg of purgeArgs) {
+    assert.doesNotMatch(
+      arg,
+      /^['"]/u,
+      `-PurgeExe 的实参不得以引号开头（cmd.exe 不解析单引号，引号会成为路径的一部分）：${arg}`,
+    );
+    assert.doesNotMatch(
+      arg,
+      /['"]$/u,
+      `-PurgeExe 的实参不得以引号结尾：${arg}`,
+    );
+    // 实参必须是「已展开的变量引用」或裸路径，不能是被引号包住的字面量
+    assert.match(
+      arg,
+      /^(?:\$\{[A-Z0-9_]+\}|[A-Za-z]:[^\s'"]*|[./][^\s'"]*)$/u,
+      `-PurgeExe 的实参形态不合法（不得被引号包裹）：${arg}`,
+    );
+  }
+
+  // 反向对照：前置体检用的 -LiteralPath '...' 是合法写法，必须保留。
+  // 没有这条，把「所有单引号」一刀切删掉也能让上面的断言变绿。
+  assert.match(
+    job,
+    /Test-Path -LiteralPath '/u,
+    '前置体检走 -Command 里的 -LiteralPath 引号是合法的，应保留（不要一刀切删引号）',
+  );
+});
+
+test('三层假绿·层2：teed 的退出码必须用 ${PIPESTATUS[0]}，且两个阶段块都要开 pipefail', async () => {
+  const job = await qemuJobSection();
+
+  // `$SSH ... | tee -a "$LOG" || RC=$?`：无 pipefail 时 $? 是 tee 的退出码，
+  // tee 写成功即 0 ⇒ ssh 的失败被完全吞掉。run 43254033725 的
+  // REPLAY_EXIT_CODE=0 / TEARDOWN_ASSERT_EXIT_CODE=0 就是这么来的。
+  const teeSites = [...job.matchAll(/\|\s*tee\b[^\n]*/gu)];
+  assert.ok(
+    teeSites.length >= 3,
+    `应当至少有 3 处「管道 + tee + 取退出码」（register/replay/teardown），实际 ${teeSites.length} 处`,
+  );
+
+  // 硬判据：不得再用 `$?` 捕获 teed 的退出码
+  assert.doesNotMatch(
+    job,
+    /\|\s*tee\b[^\n]*\|\|\s*[A-Z_]+=\$\?(?![{%])/u,
+    'teed 的退出码捕获不得写成 $?（那是 tee 的退出码）；必须用 ${PIPESTATUS[0]}',
+  );
+  assert.match(
+    job,
+    /\|\s*tee\b[^\n]*\|\|\s*[A-Z_]+=\$\{PIPESTATUS\[0\]\}/u,
+    'teed 的退出码捕获必须用 ${PIPESTATUS[0]}',
+  );
+
+  // 双保险：PIPESTATUS 与 pipefail 缺任一都能被绕过，两者都要在
+  const pipefailCount = (job.match(/^\s+set -o pipefail$/gmu) || []).length;
+  assert.ok(
+    pipefailCount >= 2,
+    `register 与 replay 两个 run 块都必须开 set -o pipefail，实际只有 ${pipefailCount} 处`,
+  );
+});
+
+test('三层假绿·层3：teardown 的「0 项通过」必须有配对判据，否则不构成任何证明', async () => {
+  const job = await qemuJobSection();
+
+  // assert-clean.ps1 的判据是「RunOnce=0 且 tempDir=0 ⇒ exit 0」。作为**终点**判据正确，
+  // 但单独使用没有判别力：登记阶段压根没登记成功时，teardown 看到的同样是 0 项
+  // ⇒ 判「干净」⇒ 假绿。所以必须配对：
+  //   段 A（起点）登记阶段 registeredAfter 非空
+  //   段 B（终点）teardown 0 残留
+  assert.match(
+    job,
+    /registeredAfter/u,
+    '门禁必须读登记阶段的 registeredAfter 作为配对判据的「起点」',
+  );
+  assert.match(
+    job,
+    /teardown 无可判别对象/u,
+    'registeredAfter 为空时必须判红并明确指出「无可判别对象」，不得静默通过',
+  );
+
+  // ⚠️ 反向对照：不得把段 A 写成「replay 之后仍必须 >0」——
+  // 重启后自毁已消费掉登记项，那本来就该是 0。写成 >0 说明把起点终点搞反了。
+  assert.doesNotMatch(
+    job,
+    /registeredAfter[^\n]*-gt\s+0[^\n]*exit\s+1/u,
+    '配对判据的起点是注册阶段（非空即成立），不是「必须 >0 个才通过」',
+  );
+});
+
+test('三层假绿·层4：不能只信退出码，必须交叉验证客机侧的 problem 行', async () => {
+  const job = await qemuJobSection();
+
+  // 客机侧契约是 problems>0 → exit 1（qemu-guest-destruct.ps1 L190-196），
+  // 但 `powershell -File` 遇到 Write-Error 时**可能仍返回 0**
+  // （run 43231941986 已实测）。所以退出码之外必须再数一遍 problem 行。
+  assert.match(
+    job,
+    /grep -c '\^problem: '/u,
+    '必须统计证据里的 problem 行，作为退出码之外的交叉验证',
+  );
+  const problemGuards = (job.match(/PROBLEMS" -gt 0/gmu) || []).length;
+  assert.ok(
+    problemGuards >= 2,
+    `register 与 replay 都必须有「problems>0 ⇒ 判红」分支，实际 ${problemGuards} 处`,
+  );
+});
