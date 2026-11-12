@@ -1430,74 +1430,146 @@ jobs:
           out image_reason ''
 
       # ── 启动客机 ─────────────────────────────────────────────────────────
-      - name: 启动 QEMU 客机并等待 SSH 回连
+      - name: 启动客机并等待 SSH 回连（复用 dockur 的 docker bridge，与镜像构建同一套网络）
         id: boot
         if: steps.image.outputs.image_ok == 'yes'
+        # ═══════════════════════════════════════════════════════════════════════
+        # 2026-11-12 用户要求：**参考「构建 Windows 客机镜像」那套能正常 SSH 的经验**。
+        #
+        # 那套为什么稳（已连续多轮 success）：
+        #   docker run dockurr/windows + --cap-add NET_ADMIN
+        #   ⇒ dockur 建**真实 NAT**（日志 Mode: NAT，客机 172.30.0.2）
+        #   ⇒ docker 用 -p 127.0.0.1:2222:22 做端口映射，行为确定。
+        #
+        # 本作业原来直接起 qemu-system-x86_64 + slirp（-nic user,hostfwd=...），
+        # 三个脆弱点：
+        #   ① slirp 先 accept 再转发 ⇒ 端口 LISTEN 不代表客机 sshd 就绪；
+        #   ② 镜像里的网卡配置是 dockur 安装时写死的（172.x 网段），与 slirp 的
+        #      10.0.2.15 不匹配 ⇒ 包发不出去（run 43147209781 已证实过这个坑）；
+        #   ③ 直启冷启动更慢，run 43200528695 在等待循环里卡了 12 分钟。
+        #
+        # ⇒ 改为复用 dockur 容器，与镜像构建完全同源，只保留一个外部接口：
+        #   ssh -i <key> -p 2222 runner@127.0.0.1
+        # ═══════════════════════════════════════════════════════════════════════
         run: |
           set -u
           SSH_PORT="${CX_QEMU_HOSTFWD_SSH}"
-          ROM="$GITHUB_WORKSPACE/guest-cache/windows.rom"
-          VARS_SRC="$GITHUB_WORKSPACE/guest-cache/windows.vars"
-          VARS="$RUNNER_TEMP/windows.vars"
-          cp "$VARS_SRC" "$VARS"
-          chmod 600 "$VARS"
-          # -enable-kvm 是硬要求：没有它冷启动会远超 45 分钟上限，宁可失败也不静默退 TCG。
-          # 绝对不能加 -no-reboot / -no-shutdown：这两个开关会让 QEMU 在客机重启时
-          # 直接退出进程，客机永远不会再上电，「登记 → 重启 → 重放」就断在第二步。
-          qemu-system-x86_64 \
-            -enable-kvm -machine q35 -cpu host -smp 4 -m 6144 \
-            -drive if=pflash,format=raw,readonly=on,file="$ROM" \
-            -drive if=pflash,format=raw,file="$VARS" \
-            -drive file="$RUNNER_TEMP/guest-overlay.qcow2",if=virtio,cache=writeback \
-            -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
-            -display none -vga none \
-            -pidfile "$RUNNER_TEMP/qemu.pid" \
-            > "$RUNNER_TEMP/qemu-stdout.log" 2>&1 &
-          QEMU_PID=$!
-          echo "$QEMU_PID" > "$RUNNER_TEMP/qemu-bg.pid"
-          echo "QEMU_PID=$QEMU_PID"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          DIAG="$SNAP/boot-diag.txt"
+          : > "$DIAG"
+          log() { echo "$@" | tee -a "$DIAG"; }
+          # ── 准备 dockur 的 storage 目录 ─────────────────────────────────────
+          # dockur 靠一整套 windows.* 状态文件判断「已安装」，缺了会重新下载 ISO 重装。
+          # 这里把已备好的镜像 + 状态文件拼成一个 storage 目录。
+          RUN_STORAGE="$RUNNER_TEMP/guest/run-storage"
+          mkdir -p "$RUN_STORAGE"
+          log "=== 准备 dockur storage ==="
+          if [ -f "$RUNNER_TEMP/guest/run-storage/data.qcow2" ]; then
+            log "  data.qcow2 已就位（由「把镜像放到验证用目录」准备）"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" "$RUN_STORAGE/data.qcow2"
+            log "  从 cache 复制 data.qcow2"
+          else
+            log "::error title=没有可用镜像::既无 run-storage/data.qcow2 也无 cache"
+            exit 1
+          fi
+          # 状态文件：cache 路径下在 guest-cache/，构建路径下在 guest/storage/
+          for src in "$GITHUB_WORKSPACE/guest-cache" "$RUNNER_TEMP/guest/storage"; do
+            [ -d "$src" ] || continue
+            for f in "$src"/windows.*; do
+              [ -e "$f" ] || continue
+              cp -a "$f" "$RUN_STORAGE/" && log "  状态文件 $(basename "$f")"
+            done
+          done
+          ls -la "$RUN_STORAGE" | tee -a "$DIAG"
+          # 必须至少有一个 windows.* 状态文件，否则 dockur 会判定「未安装」并重装
+          NSTATE=$(ls "$RUN_STORAGE"/windows.* 2>/dev/null | wc -l)
+          log "storage 状态文件数 = $NSTATE"
+          if [ "$NSTATE" -lt 3 ]; then
+            log "::error title=状态文件不足::只有 $NSTATE 个 windows.*，dockur 可能重新装系统"
+            exit 1
+          fi
 
+          # ── 启动 dockur 容器（与镜像构建同一套网络栈）────────────────────
+          log "=== 启动 dockurr/windows 容器（NAT + 端口映射）==="
+          docker rm -f cxdestruct >/dev/null 2>&1 || true
+          docker run -d --name cxdestruct \
+            --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            -e VERSION=2022 \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE=32G \
+            -e USERNAME="${CX_QEMU_GUEST_SSH_USER}" \
+            -e PASSWORD="Cx-Guest-2026!" \
+            -p 127.0.0.1:${SSH_PORT}:22 \
+            -v "$RUN_STORAGE:/storage" \
+            docker.io/dockurr/windows:latest >> "$DIAG" 2>&1
+          log "docker run rc=$?"
+          sleep 5
+          docker ps --filter name=cxdestruct --format "{{.Status}}" | tee -a "$DIAG" || true
+
+          # ── 等待 SSH（每轮打四项诊断）──────────────────────────────────────
           START=$(date +%s)
           READY=no
           KEY="$RUNNER_TEMP/guest-ssh-key"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
+          ATTEMPT=0
+          PORT_OPENED=no
           while [ $(( $(date +%s) - START )) -lt "$CX_QEMU_BOOT_TIMEOUT_SEC" ]; do
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo 'QEMU 进程已退出，日志尾部：'
-              tail -40 "$RUNNER_TEMP/qemu-stdout.log" || true
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            ELAPSED=$(( $(date +%s) - START ))
+
+            # ① 容器是否还活着
+            if ! docker ps --filter name=cxdestruct --format "{{.Names}}" | grep -q cxdestruct; then
+              log "attempt=$ATTEMPT t=$ELAPSED container-EXITED"
+              log "--- docker logs 尾部 40 行 ---"
+              docker logs cxdestruct 2>&1 | tail -40 | tee -a "$DIAG" || true
               break
             fi
+
+            # ② 端口是否打开
             if (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; then
               exec 3>&- 2>/dev/null || true
-              # 仅端口打开不代表 SSH 已可认证；必须做一次真实握手，避免 banner 超时。
-              if ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes \
-                "$USER_HOST" 'exit' >/dev/null 2>&1; then
-                READY=yes
-                break
-              fi
+              [ "$PORT_OPENED" = no ] && log "attempt=$ATTEMPT t=$ELAPSED port-OPENED（首次）"
+              PORT_OPENED=yes
+            else
+              log "attempt=$ATTEMPT t=$ELAPSED port-closed"
+              sleep 10
+              continue
+            fi
+
+            # ③ 真实 SSH 握手（-vv 落盘，失败能看到卡在 banner 还是认证）
+            if ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                 -o ConnectionAttempts=1 -o BatchMode=yes \
+                 -vv "$USER_HOST" 'exit' > /dev/null 2> "$SNAP/ssh-boot-$ATTEMPT.log"; then
+              READY=yes
+              log "attempt=$ATTEMPT t=$ELAPSED SSH-READY"
+              break
+            fi
+            LAST_ERR=$(tail -3 "$SNAP/ssh-boot-$ATTEMPT.log" 2>/dev/null | tr '\n' ' ' | cut -c1-200)
+            log "attempt=$ATTEMPT t=$ELAPSED ssh-FAILED: $LAST_ERR"
+
+            # ④ 每 3 轮打一次容器日志进展
+            if [ $(( ATTEMPT % 3 )) -eq 0 ]; then
+              CLINES=$(docker logs cxdestruct 2>&1 | wc -l)
+              CTAIL=$(docker logs cxdestruct 2>&1 | tail -1 | cut -c1-120)
+              log "  [docker] lines=$CLINES last=$CTAIL"
             fi
             sleep 10
           done
-          echo "GUEST_SSH_READY=$READY"
-          echo "BOOT_ELAPSED_SEC=$(( $(date +%s) - START ))"
-          echo "GUEST_BOOT_TIMEOUT_SEC=$CX_QEMU_BOOT_TIMEOUT_SEC"
-          echo '=== QEMU 启动日志（确认 kvm 加速生效）==='
-          head -20 "$RUNNER_TEMP/qemu-stdout.log" || true
-          # KVM 生效的直接证据：QEMU 会打印 KVM 版本或 accel=kvm。
-          if grep -qiE 'kvm|accel' "$RUNNER_TEMP/qemu-stdout.log"; then
-            echo 'QEMU_KVM_EVIDENCE=yes'
-          else
-            echo 'QEMU_KVM_EVIDENCE=no（日志无 kvm/accel 字样，需人工核对）'
-          fi
+          log "GUEST_SSH_READY=$READY"
+          log "BOOT_ELAPSED_SEC=$(( $(date +%s) - START ))"
+          log "BOOT_ATTEMPTS=$ATTEMPT  PORT_EVER_OPENED=$PORT_OPENED"
+          log "GUEST_BOOT_TIMEOUT_SEC=$CX_QEMU_BOOT_TIMEOUT_SEC"
+          # 保留容器日志作为完整证据
+          docker logs cxdestruct > "$SNAP/docker-destruct.log" 2>&1 || true
           if [ "$READY" != yes ]; then
-            echo '::error title=客机未在超时内回连::见上传的 qemu-stdout.log'
+            log "::error title=客机未在超时内回连::port_ever_opened=$PORT_OPENED attempts=$ATTEMPT 详见 boot-diag.txt / ssh-boot-*.log / docker-destruct.log"
             exit 1
           fi
-
-      # 把 guest 侧驱动脚本送进客机。scp 走同一条 SSH 通道，不需要额外共享。
-      # 注意引号：这些命令包在 bash 单引号里，反斜杠会原样传给 PowerShell，
-      # 所以路径必须写单反斜杠（写成 `C:\\cx` 会在 Windows 上创建一个名字带
-      # 双反斜杠的目录）。PowerShell 的转义符是反引号，不是反斜杠。
       - name: 部署客机侧驱动脚本
         id: deploy
         if: steps.image.outputs.image_ok == 'yes'
@@ -1677,19 +1749,24 @@ jobs:
         if: always()
         run: |
           set -u
-          # 覆盖层是一次性的，直接杀进程即可；母镜像全程未被写入。
+          # 2026-11-12：启动方式已改为 dockur 容器（复用镜像构建那套 docker bridge + NAT），
+          # 所以关停也要走 docker：杀容器即终止其内部 QEMU。
+          # 仍保留对旧 qemu-bg.pid 的兼容处理（若某轮回退到直启 QEMU）。
+          if docker ps -a --filter name=cxdestruct --format "{{.Names}}" | grep -q cxdestruct; then
+            echo "=== 关停 dockur 容器 cxdestruct ==="
+            docker stop -t 10 cxdestruct >/dev/null 2>&1 || true
+            docker rm -f cxdestruct >/dev/null 2>&1 || true
+            echo "容器已删除"
+          fi
           if [ -f "$RUNNER_TEMP/qemu-bg.pid" ]; then
             PID=$(cat "$RUNNER_TEMP/qemu-bg.pid")
             kill -TERM "$PID" 2>/dev/null || true
             sleep 3
             kill -KILL "$PID" 2>/dev/null || true
-            echo "已结束 QEMU 进程 $PID"
+            echo "已结束 QEMU 进程 $PID（兼容旧路径）"
           fi
           rm -f "$RUNNER_TEMP/guest-ssh-key"
           echo '已删除临时私钥'
-
-      # ── 结论 ─────────────────────────────────────────────────────────────
-      # 必须写清：KVM 是否可用、客机镜像是否配置、跳过原因、实际执行到了哪一步。
       - name: 结论写入 Step Summary
         if: always()
         env:

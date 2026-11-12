@@ -205,14 +205,26 @@ test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不�
     /^\s+qemu-img create -f qcow2 -b /mu,
     '必须用 qcow2 覆盖层保证母镜像不被写入（断言锚到行首，注释掉会变红）',
   );
-  // 覆盖层必须真的被 -drive 引用，否则建了也没用，客机仍在写母镜像。
+  // 2026-11-12：启动方式改为 dockur 容器（复用「构建客机镜像」那套已验证的
+  //   docker bridge + NAT），本仓库不再自己拼 qemu-system-x86_64 参数。
+  //   所以「-drive 指向覆盖层」这条**实现级**断言不再适用。
+  //
+  //   但它背后的性质必须继续成立：**母镜像不能被写入**。
+  //   docker 方案下的载体是：容器挂的是一份**一次性的 run-storage 副本**，
+  //   其中 data.qcow2 是从 cache/构建产物复制出来的（copy-on-write 语义由副本承担）。
+  //   ⇒ 断言改成两条性质级判据：
+  //     ① 启动前必须把镜像**复制**进 run-storage（而非直接把母文件挂进去）
+  //     ② 挂载点必须是 run-storage 目录
   assert.match(
     workflow,
-    /-drive file="\$RUNNER_TEMP\/guest-overlay\.qcow2"/u,
-    'QEMU 必须从覆盖层启动（-drive 指向 guest-overlay.qcow2）',
+    /cp "\$GITHUB_WORKSPACE\/guest-cache\/guest\.qcow2" "\$RUN_STORAGE\/data\.qcow2"/u,
+    '母镜像必须被复制进一次性的 run-storage，不能直接挂原始文件（否则客机写入会污染缓存镜像）',
   );
-  // 母镜像只读：不得以 rw 方式直接挂母镜像。
-  assert.doesNotMatch(workflow, /-drive file="\$RUNNER_TEMP\/guest-base\.qcow2"/u, '不得直接以读写方式挂母镜像');
+  assert.match(
+    workflow,
+    /-v "\$RUN_STORAGE:\/storage"/u,
+    '容器必须挂载一次性的 run-storage 目录（保证写入不落到缓存镜像上）',
+  );
 });
 
 test('ci.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让重启后客机永远不再上电）', async () => {
@@ -221,8 +233,15 @@ test('ci.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让
   // 「登记 → 重启 → 重放」会断在第二步，而 Step Summary 会误报成「重启后未回连」。
   assert.doesNotMatch(workflow, /(?:^|\s)-no-reboot\b/mu, '不得给 qemu 加 -no-reboot');
   assert.doesNotMatch(workflow, /(?:^|\s)-no-shutdown\b/mu, '不得给 qemu 加 -no-shutdown');
-  // QEMU 必须显式启用 KVM：没有它冷启动远超 45 分钟上限。
-  assert.match(workflow, /-enable-kvm/u, 'QEMU 必须显式 -enable-kvm');
+  // 2026-11-12：本作业已不再自己拼 QEMU 参数（改用 dockur 容器），
+  //   所以「-enable-kvm」这条实现级断言也不再适用。
+  //   但「必须用硬件虚拟化加速」这条件质必须成立 —— docker 方案下的载体是
+  //   给容器透传 /dev/kvm。缺了它 dockur 会退到 TCG，冷启动远超 45 分钟。
+  assert.match(
+    workflow,
+    /--device=\/dev\/kvm/u,
+    '容器必须透传 /dev/kvm（否则 dockur 退 TCG，冷启动远超 45 分钟上限）',
+  );
 });
 
 test('ci.yml#qemu-shutdown-destruct 的两阶段语义与 shutdown 作业一致，且不引用不存在的开关', async () => {
