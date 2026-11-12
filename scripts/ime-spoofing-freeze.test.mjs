@@ -46,8 +46,37 @@ test('CI 不执行封存工具，也不安装输入法', async () => {
   const workflow = await read('.github/workflows/ci.yml');
   assert.doesNotMatch(workflow, /windows-fake-ime/u, '不得残留伪装输入法 job');
   assert.doesNotMatch(workflow, /cx-fake-ime-modules|CX_FAKE_IME_/u, '不得残留产物名与开关');
-  assert.doesNotMatch(workflow, /Install-FakeInputMethod|build-cxime|Probe-ImeLoad|Language\.Basic~~~zh-CN|Add-WindowsCapability/u,
+  assert.doesNotMatch(workflow, /Install-FakeInputMethod|build-cxime|Probe-ImeLoad|Language\.Basic/u,
     '不得执行封存工具或安装语言包');
+  assert.doesNotMatch(workflow, /Add-WindowsCapability[^\n]*Language\./u,
+    'Add-WindowsCapability 不得用于安装语言包');
+
+  // 2026-11-12：`Add-WindowsCapability` 从「绝对禁用」放宽为「只许装 OpenSSH.Server」。
+  //
+  // 原断言把它整条拉黑，是因为当时它在 CI 里唯一出现的形式就是
+  //   Add-WindowsCapability -Online -Name 'Language.Basic~~~zh-CN~0.0.1.0'
+  // 即「装中文语言包」——那正是要冻结的行为。
+  //
+  // 本仓库随后把 Windows 客机镜像构建并入 ci.yml，同一条命令被用于
+  //   Add-WindowsCapability -Online -Name 'OpenSSH.Server*'
+  // 给客机装 SSH 服务端（dockur 镜像里没有预装，是两阶段自毁验证唯一的命令通道）。
+  // 它与输入法无关，属合法用途；若继续整条拉黑，等于用「防输入法」的守卫
+  // 挡住「装 SSH」，守卫会名不副实。
+  //
+  // 放宽的同时把守卫改精确：凡是 Get/Add-WindowsCapability 里出现的
+  // capability 名字面量，只允许 OpenSSH.Server 系列。出现任何其他 capability
+  // （尤其 Language.*）都判红。
+  //
+  // 注意 `-Name $cap.Name` 是变量间接引用（名字来自上面的 Get-WindowsCapability），
+  // 所以不能只做「每行必须含 OpenSSH.Server」这种字面断言 —— 那会误判。
+  // 做法：把两处名字都抓出来校验。
+  const capabilityNames = [...workflow.matchAll(/-Name\s+(?:'([^']+)'|"([^"]+)")/gu)]
+    .map((m) => m[1] ?? m[2])
+    .filter((name) => /^(?:OpenSSH|Language|Windows|Microsoft|Server)/u.test(name));
+  assert.ok(capabilityNames.length > 0, 'ci.yml 里应当至少有一处 capability 名字面量（OpenSSH.Server）');
+  for (const name of capabilityNames) {
+    assert.match(name, /^OpenSSH\.Server/u, `capability 只许用 OpenSSH.Server，实际：${name}`);
+  }
 });
 
 test('桌面准备只保留只读探针，状态固定为冻结', async () => {

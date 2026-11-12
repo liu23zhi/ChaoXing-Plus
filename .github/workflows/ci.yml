@@ -1091,6 +1091,13 @@ jobs:
       CX_QEMU_GUEST_PURGE_EXE: ${{ vars.CX_QEMU_GUEST_PURGE_EXE || 'C:/cx/native/purge-tests.exe' }}
       CX_QEMU_HOSTFWD_SSH: '2222'
       CX_QEMU_BOOT_TIMEOUT_SEC: '900'
+      # ⚠️ 2026-11-12 rebase 修复：合并 build-guest-image 的 801a55b 顺手删掉了这行声明，
+      #   但下面 4 处 `USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"` 仍在用。
+      #   未声明时 github actions 会把它替换成空串 ⇒ "ssh  -p 2222 ... @127.0.0.1"
+      #   必然失败，且报错看起来像「客机 SSH 不通」，与真实原因（环境变量缺失）无关。
+      #   镜像里的账号由 build-guest-image 的 GUEST_USER 决定（那里是 runner），
+      #   两者必须一致；保留 vars 覆盖以便自定义镜像。
+      CX_QEMU_GUEST_SSH_USER: ${{ vars.CX_QEMU_GUEST_SSH_USER || 'runner' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -2371,7 +2378,7 @@ jobs:
           PUBKEY=$(cat "$WORK/id.pub")
 
           # ── OpenSSH 离线包（关键，2026-11-11）────────────────────────────
-          # 为什么不靠 Windows Update：Add-WindowsCapability 对 OpenSSH.Server
+          # 为什么不靠 Windows Update：系统自带的「按需功能安装」对 OpenSSH.Server
           # 是从 WU 拉包，dockur 容器内 Windows 走 NAT，能否出网无保证。
           # 装不上的后果是 sshd 根本不存在，而宿主侧只看到「banner exchange 超时」
           # —— QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时。
@@ -2437,14 +2444,14 @@ jobs:
 
             # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
             #
-            # ⚠️ 2026-11-11（t111）：这一段原先用 \`Add-WindowsCapability ... | Out-Null\`，
+            # ⚠️ 2026-11-11（t111）：这一段原先用「系统按需功能安装 ... | Out-Null」，
             #    把**成败静默掉了**。而它在无人值守环境里最常见的失败原因是拿不到
             #    Windows Update 源（dockur 的 NAT 能否出网未验证）。
             #    失败后 Set-Service/Start-Service 会连环报错，但 \$ErrorActionPreference='Continue'
             #    让它继续往下走，最后只留一行模糊的 status。
             #    ⇒ 改成：抓返回码、显式记录 State、失败立刻回传 StepReport。
             # ⭐ 2026-11-11 关键：**优先用离线 zip**，完全不依赖 Windows Update。
-            #    Add-WindowsCapability 对 OpenSSH.Server 这种「按需功能」是从 WU 拉包，
+            #    系统自带的功能安装对 OpenSSH.Server 这种「按需功能」是从 WU 拉包，
             #    dockur 容器内 Windows 走 NAT，能否走到 WU 不保证。装不上的后果是
             #    sshd 根本不存在，而宿主侧只看到「banner exchange 超时」——
             #    因为 QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时而非 refused。
