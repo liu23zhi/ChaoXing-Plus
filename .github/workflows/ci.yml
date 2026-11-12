@@ -2276,7 +2276,12 @@ jobs:
           echo
           df -h /
       - name: 生成 SSH 密钥（每次随机，不落盘、不入库）
-        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        # ⚠️ 2026-11-12（run 43187143353 实测）：此处**不能**加 `if: CACHE_HIT != 'yes'`。
+        #   cache 命中时若跳过本步骤，$WORK/id 就不存在，而「验证 SSH 可连」硬编码用
+        #   `ssh -i $WORK/id` ⇒ ssh 找不到该 key ⇒ 回落到 ~/.ssh/id_rsa 等默认路径
+        #   ⇒ 日志里全是 "Trying private key: /home/runner/.ssh/id_rsa" +
+        #   "Permission denied (publickey)"，看起来像客机 sshd 问题，实际是本地缺 key。
+        #   密钥生成与镜像构建无关，任何路径都必须执行。
         id: keys
         # 用户 2026-11-12 要求：**每次都随机生成**，不再用 workflow_dispatch 输入、
         # 也不依赖 repo secret。理由：

@@ -983,3 +983,48 @@ test('build-guest-image 的 checkout 也在 cache restore 之前', async () => {
     );
   }
 });
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43187143353 实测暴露）：SSH 密钥步骤不能被 cache 门跳过
+//
+// 事故链：
+//   cache 命中 → 「生成 SSH 密钥」因 if: CACHE_HIT != 'yes' 被跳过
+//   → $WORK/id 不存在
+//   → 「验证 SSH 可连」执行 ssh -i $WORK/id，找不到 key
+//   → ssh 回落到 ~/.ssh/id_rsa 等默认路径
+//   → 日志里全是 "Trying private key: /home/runner/.ssh/id_rsa"
+//     + "Permission denied (publickey)"
+//   → 看起来像客机 sshd 问题，实际是本地缺 key（误诊成本极高）
+//
+// 判据：凡是「验证 SSH」用到的 key 路径，其生成步骤都不得带 cache 门。
+test('SSH 密钥生成步骤不得被 cache 门跳过（否则验证 SSH 会误诊为客机问题）', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\n');
+
+  // 找「生成 SSH 密钥」步骤
+  const kIdx = lines.findIndex((l) => l.includes('生成 SSH 密钥'));
+  assert.notEqual(kIdx, -1, 'build-guest-image 必须有「生成 SSH 密钥」步骤');
+
+  // 该步骤到下一个 - name: 之间不得有 if: 引用 havecache
+  let end = kIdx + 1;
+  while (end < lines.length && !/^\s+- name:/.test(lines[end])) end += 1;
+  const block = lines.slice(kIdx, end).join('\n');
+  assert.doesNotMatch(
+    block,
+    /if:\s*steps\.havecache\.outputs\.CACHE_HIT/u,
+    '「生成 SSH 密钥」不得带 `if: steps.havecache.outputs.CACHE_HIT != \'yes\'`：' +
+      'cache 命中时 $WORK/id 不存在，验证 SSH 会回落到默认 key 并报 Permission denied，' +
+      '极易误诊为客机 sshd 故障',
+  );
+
+  // 反向对照：确认「验证 SSH」确实在用 $WORK/id（否则本断言无意义）
+  const vIdx = lines.findIndex((l) => l.includes('验证 SSH 可连'));
+  assert.notEqual(vIdx, -1, '必须有「验证 SSH 可连」步骤');
+  let vEnd = vIdx + 1;
+  while (vEnd < lines.length && !/^\s+- name:/.test(lines[vEnd])) vEnd += 1;
+  const vBlock = lines.slice(vIdx, vEnd).join('\n');
+  assert.match(
+    vBlock,
+    /\$WORK\/id/u,
+    '「验证 SSH 可连」应当使用 $WORK/id（与密钥步骤配对）；两者路径不一致会再次产生本类误诊',
+  );
+});
