@@ -542,11 +542,25 @@ function Watch-ClientCaptureGuard {
         [int] $TimeoutSeconds = 600,
         [int] $PollMilliseconds = 200
     )
+    # Persist events to disk: this function runs in a separate runspace, so its Write-Host
+    # output never reaches the host process stdout and CI logs show no capture guard events.
+    # A JSONL file is the only way to carry the capture-window duration out of the runspace;
+
+    try {
+        if (-not (Get-Command Get-CaptureGuardEventsPath -ErrorAction SilentlyContinue)) {
+            . (Join-Path $PSScriptRoot 'windows-client-capture-guard.ps1')
+        }
+        $eventsPath = Get-CaptureGuardEventsPath -ProcessId $ProcessId
+    } catch {
+        $eventsPath = $null
+    }
+
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $previous = @{}
     $hidden = $false
     $hiddenSince = $null
     $events = 0
+    try {
     while ((Get-Date) -lt $deadline) {
         if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { break }
         $current = Get-ClientWindowAffinity -ProcessId $ProcessId
@@ -560,6 +574,9 @@ function Watch-ClientCaptureGuard {
                         $hidden = $true
                         $hiddenSince = Get-Date
                         $events++
+                        # Write the event before the log line: even if Write-Host is
+                        # discarded by the runspace, the evidence is already on disk.
+                        Write-CaptureGuardEvent -Path $eventsPath -Event 'on' -Hwnd ([string]$hwnd)
                         Write-Host "[real-client] capture guard on window=$hwnd affinity 1->0"
                     }
                 }
@@ -568,6 +585,7 @@ function Watch-ClientCaptureGuard {
                     if (Set-CdpCaptureGuard -Port $Port -Hidden $false) {
                         $hidden = $false
                         $hiddenSince = $null
+                        Write-CaptureGuardEvent -Path $eventsPath -Event 'off' -Hwnd ([string]$hwnd)
                         Write-Host "[real-client] capture guard off window=$hwnd affinity 0->1"
                     }
                 }
@@ -589,6 +607,12 @@ function Watch-ClientCaptureGuard {
     }
     if ($hidden -and (Get-Command Set-CdpCaptureGuard -ErrorAction SilentlyContinue)) {
         [void](Set-CdpCaptureGuard -Port $Port -Hidden $false)
+    }
+    } catch {
+        # Exceptions used to be swallowed silently. Record the reason, otherwise events=0
+        # cannot distinguish "no capture happened" from "it threw".
+        Write-CaptureGuardEvent -Path $eventsPath -Event 'error' -Message ([string]$_.Exception.Message)
+        throw
     }
     Write-Host "[real-client] capture guard stopped events=$events"
     return $events
