@@ -140,7 +140,7 @@ concurrency:
 # 客机镜像的 cache key。build-guest-image 用它 save，
 # qemu-shutdown-destruct 用它 restore。改版本号（v1→v2）即作废旧镜像。
 env:
-  GUEST_IMAGE_CACHE_KEY: cx-win2022-guest-qcow2-v2
+  GUEST_IMAGE_CACHE_KEY: cx-win2022-guest-qcow2-v3
 
 jobs:
   source:
@@ -1987,7 +1987,7 @@ jobs:
     needs: gate
     if: needs.gate.result == 'success'
     env:
-      CACHE_KEY: cx-win2022-guest-qcow2-v2
+      CACHE_KEY: cx-win2022-guest-qcow2-v3
       GUEST_USER: runner
     steps:
       - name: 检出代码
@@ -2303,6 +2303,36 @@ jobs:
             exit 1
           fi
           echo "KEY_FINGERPRINT=$(ssh-keygen -l -f "$WORK/id.pub" | awk '{print $2}')"
+
+          # ⚠️ 2026-11-12（run 43190313294 实测）：cache 命中时**必须换成缓存里的密钥对**。
+          #
+          #   矛盾：镜像在构建时就把当时的公钥写进了
+          #   C:\ProgramData\ssh\administrators_authorized_keys（OEM setup.ps1）。
+          #   cache 命中不重建镜像 ⇒ 客机里永远是**构建那次**的公钥。
+          #   而上面刚 ssh-keygen 出的是**新**密钥对 ⇒ 公私钥不配对
+          #   ⇒ sshd 回 packet type 51（拒绝）⇒ Permission denied (publickey)。
+          #
+          #   实测证据（ssh-vvv-1.txt）：
+          #     Offering public key: /home/runner/work/_temp/guest/id ED25519 SHA256:XjsCPahr…
+          #     we sent a publickey packet, wait for reply
+          #     receive packet: type 51          ← 服务端明确拒绝这个 key
+          #
+          #   修法：cache 里存了构建时的密钥对（见「存入 Actions Cache」），
+          #   这里用它们覆盖刚生成的那对。cache 未命中时保留新生成的。
+          if [ -f "$GITHUB_WORKSPACE/guest-cache/guest-key" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key"     "$WORK/id"
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key.pub" "$WORK/id.pub"
+            chmod 600 "$WORK/id"
+            echo "SSH_KEY_SOURCE=cache"
+            echo "  已换成 cache 里的密钥对"
+            echo "  指纹: $(ssh-keygen -l -f "$WORK/id.pub" | awk '{print $2}')"
+            if ! ssh-keygen -l -f "$WORK/id.pub" >/dev/null 2>&1; then
+              echo "::error title=cache 里的密钥不可用::guest-key.pub 无法解析"
+              exit 1
+            fi
+          else
+            echo "SSH_KEY_SOURCE=fresh"
+          fi
       - name: 下载 purge-tests.exe（来自 windows-build artifact）
         if: steps.havecache.outputs.CACHE_HIT != 'yes'
         id: getexe
@@ -3328,6 +3358,21 @@ jobs:
             cp -a "$f" "$CACHE_OUT/"
             echo "  缓存状态文件 $bn ($(stat -c %s "$f") 字节)"
           done
+          # ⚠️ 2026-11-12（run 43190313294 实测）：**必须把密钥对一起存**。
+          #   镜像里的 C:\ProgramData\ssh\administrators_authorized_keys 是
+          #   **构建那一刻**写进去的公钥（见 OEM setup.ps1 的 Set-Content）。
+          #   cache 命中时不重建镜像 ⇒ 客机里仍是旧公钥。
+          #   而「生成 SSH 密钥」每次运行都生成**新的**密钥对
+          #   ⇒ 新私钥对旧公钥 ⇒ sshd 回 type 51（拒绝）⇒ Permission denied。
+          #   正确做法：把这次构建用的密钥对一起缓存，restore 时用它替换掉
+          #   「生成 SSH 密钥」刚生成的那对（见「从 cache 恢复客机镜像」后的处理）。
+          #   私钥落在 Actions Cache 里是可接受的：cache 仅本仓库可读，且镜像本身
+          #   已含对应公钥，泄露私钥等价于泄露这个一次性测试客机的访问权。
+          cp "$WORK/id"     "$CACHE_OUT/guest-key"
+          cp "$WORK/id.pub" "$CACHE_OUT/guest-key.pub"
+          chmod 600 "$CACHE_OUT/guest-key"
+          echo "  缓存密钥对 guest-key / guest-key.pub"
+          echo "  公钥指纹: $(ssh-keygen -l -f "$CACHE_OUT/guest-key.pub" | awk '{print $2}')"
           echo "=== cache 内容 ==="
           ls -lh "$CACHE_OUT"
           # 断言：至少要有 qcow2 + 一个状态文件

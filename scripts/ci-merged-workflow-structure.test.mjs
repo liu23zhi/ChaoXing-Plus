@@ -1028,3 +1028,58 @@ test('SSH 密钥生成步骤不得被 cache 门跳过（否则验证 SSH 会误�
     '「验证 SSH 可连」应当使用 $WORK/id（与密钥步骤配对）；两者路径不一致会再次产生本类误诊',
   );
 });
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43190313294 实测暴露）：cache 必须把密钥对一起存
+//
+// 设计矛盾：镜像在**构建那一刻**就把当时生成的公钥写进了客机的
+//   C:\ProgramData\ssh\administrators_authorized_keys
+// （见 build-guest-image 的 OEM setup.ps1：Set-Content $ak (Get-Content C:\OEM\id.pub)）
+//
+// 而「生成 SSH 密钥」每次运行都 ssh-keygen 一对**新的**。
+// cache 命中时不重建镜像 ⇒ 客机里是旧公钥 + 本地是新私钥 ⇒ sshd 回 packet type 51。
+//
+// 实测证据（ssh-vvv-1.txt）：
+//   Offering public key: /home/runner/work/_temp/guest/id ED25519 SHA256:XjsCPahr…
+//   we sent a publickey packet, wait for reply
+//   receive packet: type 51              ← 明确拒绝
+//   runner@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).
+//
+// 因此两条约束必须同时成立，缺一即失败：
+//   ① 「存入 Actions Cache」必须带上 guest-key / guest-key.pub
+//   ② 「生成 SSH 密钥」在 cache 命中时必须用它们覆盖刚生成的那对
+test('cache 必须携带密钥对，且 cache 命中时换成它（否则公私钥不配对）', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\\n');
+
+  const stepBody = (needle) => {
+    const i = lines.findIndex((l) => l.includes(needle));
+    assert.notEqual(i, -1, `未找到步骤：${needle}`);
+    let e = i + 1;
+    while (e < lines.length && !/^\\s+- name:/.test(lines[e])) e += 1;
+    return lines.slice(i, e).join('\\n');
+  };
+
+  // ① 存入 cache 时带上密钥对
+  // 全文查（stepBody 因缩进差异会误判）
+  assert.match(section, /cp "\$WORK\/id\.pub"\s+"\$CACHE_OUT\/guest-key\.pub"/u, '「存入 Actions Cache」必须把公钥拷成 guest-key.pub');
+  assert.match(section, /cp "\$WORK\/id"\s+"\$CACHE_OUT\/guest-key"/u, '「存入 Actions Cache」必须把私钥拷成 guest-key（缺了它缓存里只有公钥，无法认证）');
+
+  // ② cache 命中时换成缓存密钥
+  const key = stepBody('生成 SSH 密钥');
+  assert.match(
+    key,
+    /SSH_KEY_SOURCE=cache/u,
+    '「生成 SSH 密钥」必须有 cache 命中分支：用 guest-cache/guest-key 覆盖刚生成的那对。' +
+      '否则客机里的旧公钥与本地新私钥不配对，sshd 会回 packet type 51',
+  );
+  assert.match(key, /SSH_KEY_SOURCE=fresh/u, 'cache 未命中时也必须标出 key 来源，便于日志诊断');
+  assert.match(
+    key,
+    /ssh-keygen -l/,
+    '换 key 后必须重新校验可用性（防止 cache 里的文件损坏）',
+  );
+
+  // ③ 反向对照：确认「验证 SSH」用的就是 $WORK/id（与上面配对逻辑衔接）
+  const verify = stepBody('验证 SSH 可连');
+  assert.match(verify, /\$WORK\/id/u, '「验证 SSH 可连」必须用 WORK/id（与密钥步骤配对）');
+});
