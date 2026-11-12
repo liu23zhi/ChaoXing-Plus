@@ -329,7 +329,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -403,7 +403,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -446,7 +446,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -497,7 +497,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -587,7 +587,7 @@ jobs:
       - name: 下载共享 Windows 构建产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 构建发布包
         run: npm run release:windows
@@ -659,7 +659,7 @@ jobs:
       - name: 下载共享 Windows 构建产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 校验私有客户端资产
         shell: pwsh

@@ -729,7 +729,7 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   // 这条是上面「假依赖」判定的**事实依据**：把本作业下载的 artifact 名钉住，
   // 并验证它确实来自 windows-build 的上传。
   // 若将来本作业开始消费别的作业产物，这条会红，提醒重新评估哪些 needs 是真依赖。
-  const downloads = [...section.matchAll(/name:\s*(windows-ci-build-\$\{\{ github\.sha \}\})/gu)].map((m) => m[1]);
+  const downloads = [...section.matchAll(/name:\s*(Windows 原生测试可执行文件-\$\{\{ github\.sha \}\})/gu)].map((m) => m[1]);
   assert.ok(downloads.length > 0, `windows-release 必须下载共享构建产物，实际段内未找到`);
 
   const buildSection = await jobSection('windows-build');
@@ -1135,4 +1135,46 @@ test('SSH 密钥必须随镜像打包进 cache，且消费端不依赖 secret', 
     /Actions Cache 里没有客机 SSH 私钥/u,
     '缺密钥时必须给出可操作的失败信息（指向「先跑构建作业」这个真正解法）',
   );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43210880751 实测暴露）：改了 artifact 名却没同步 download 侧
+//
+// 事故：把 windows-build 的 upload-artifact name 改成中文「Windows 原生测试可执行文件-<sha>」，
+//   但 6 个下游作业的 download-artifact 仍引用旧名 ⇒ 全部「下载共享 Windows 测试产物」失败。
+//
+// 教训：upload/download 的名字是成对契约，改任何一侧都要两侧一起改。
+//   这里加一条通用防护：凡是 download-artifact 引用的名字，必须能在
+//   某个 upload-artifact 的 name 里找到；找不到就是失配。
+test('所有 download-artifact 的 name 都必须有对应的 upload-artifact 提供', async () => {
+  const raw = await readFile(WORKFLOW, 'utf8');
+  const lines = raw.split('\n');
+
+  // 收集每个 artifact 步骤（upload/download）的 with.name。
+  // 用「最近一次 uses 是 upload 还是 download」来标记当前行属于哪个步骤。
+  const uploadNames = new Set();
+  const downloadNames = [];
+  let curKind = null;
+
+  for (const line of lines) {
+    if (line.includes('actions/upload-artifact@')) { curKind = 'upload'; continue; }
+    if (line.includes('actions/download-artifact@')) { curKind = 'download'; continue; }
+    // 遇到新步骤起始就重置（- name: / - uses: 缩进两格 + 短横线）
+    if (/^ {2}- (name|uses):/u.test(line)) { curKind = null; continue; }
+    // 在 artifact 步骤内，抓 with 块里的 name
+    if (curKind && /^ {10}name: (.+)$/u.test(line)) {
+      const nm = line.trim().replace(/^name: /, '');
+      if (curKind === 'upload') uploadNames.add(nm);
+      else downloadNames.push(nm);
+    }
+  }
+
+  const missing = downloadNames.filter((nm) => !uploadNames.has(nm));
+  assert.deepEqual(
+    missing,
+    [],
+    '以下 download-artifact 引用的 name 没有任何 upload-artifact 提供（改名时只改了一侧）：\n' +
+      missing.map((n) => '  - ' + n).join('\n'),
+  );
+  assert.ok(downloadNames.length > 0, '应有至少一个 download-artifact，否则本断言空转');
 });
