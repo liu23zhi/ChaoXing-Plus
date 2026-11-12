@@ -1695,6 +1695,10 @@ jobs:
         #   所以这一版：前置体检 → 执行 → **无论成败都取回证据**。
         run: |
           set -u
+          # ⚠️ pipefail 必须开：下面 `$SSH ... | tee -a "$LOG" || RC=$?` 的 `$?`
+          #   在无 pipefail 时取到的是 **tee 的退出码**，tee 写成功就返回 0
+          #   ⇒ ssh 失败被静默吞掉，整个阶段报「通过」（run 43254033725 实测）。
+          set -o pipefail
           KEY="$RUNNER_TEMP/guest-ssh-key"
           SNAP="$RUNNER_TEMP/guest-snapshot"
           mkdir -p "$SNAP"
@@ -1738,7 +1742,20 @@ jobs:
           esac
 
           RC=0
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REG_LOG" || RC=$?
+          # ⚠️ 2026-11-12（run 43254033725 实测）三处叠加让这里恒为「通过」：
+          #
+          #   ① `| tee ... || RC=$?` 取的是 **tee 的退出码**。已在本 run 块开头
+          #      开 `set -o pipefail`，并显式用 ${PIPESTATUS[0]} 取管道首段（ssh）。
+          #
+          #   ② `-PurgeExe '${...}'` 的单引号会被 cmd.exe 原样传给 PowerShell。
+          #      Windows OpenSSH 默认 shell 是 cmd.exe，cmd **不认单引号**，
+          #      远端真正收到的是 `'C:/cx/native/purge-tests.exe'`（首尾带引号）
+          #      ⇒ 脚本内 Test-Path 返回 False ⇒ purgeExeExists=False。
+          #      而前置体检走 `-Command (Test-Path -LiteralPath '...')`，
+          #      -Command 后面整段是 PowerShell 代码、单引号合法 ⇒ 那里显示 True。
+          #      两种调用形式对单引号处理不同，这就是「体检 True / 脚本 False」的来源。
+          #      修法：路径无空格，直接去掉单引号。
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe ${CX_QEMU_GUEST_PURGE_EXE}" 2>&1 | tee -a "$REG_LOG" || RC=${PIPESTATUS[0]}
           log "register exit code = $RC"
 
           # ── 无论成败都取回客机证据（关键：失败时证据最有用）─────────────────
@@ -1746,8 +1763,21 @@ jobs:
           EVID_PS='if (Test-Path "C:/cx/evidence") { Get-ChildItem "C:/cx/evidence" | ForEach-Object { Write-Output ("--- " + $_.Name + " (" + $_.Length + " B) ---"); Get-Content $_.FullName } } else { Write-Output "MISSING C:/cx/evidence" }'
           EVID_ENC=$(printf '%s' "$EVID_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
           $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REG_LOG" 2>&1 || log "（取证据失败，客机可能已不可达）"
+
+          # ⚠️ 交叉验证：不能只信退出码。
+          #   客机侧契约是 problems>0 → exit 1（qemu-guest-destruct.ps1 L190-196），
+          #   但 `powershell -File` 遇到 Write-Error 时**可能仍返回 0**
+          #   （run 43231941986 已实测过）。所以再数一遍证据里的 `problem: ` 行。
+          REG_PROBLEMS=$(grep -c '^problem: ' "$REG_LOG" 2>/dev/null || true)
+          REG_PROBLEMS=${REG_PROBLEMS:-0}
+          log "register problems=$REG_PROBLEMS"
+
           if [ "$RC" -ne 0 ]; then
             log "::error title=登记阶段失败::exit=$RC，详见 register-stage.txt（含客机内 cx-evidence 输出）"
+            exit 1
+          fi
+          if [ "$REG_PROBLEMS" -gt 0 ]; then
+            log "::error title=登记阶段有问题::客机侧报告 $REG_PROBLEMS 个 problem（退出码却是 0，属 powershell -File 吞错），详见 register-stage.txt"
             exit 1
           fi
           log "register-stage-ok"
@@ -1806,6 +1836,11 @@ jobs:
         #     ③ 无 tee，主日志看不到客机侧输出，只能事后翻 artifact。
         run: |
           set -u
+          # ⚠️ pipefail 必须开：本块有三处 `$SSH ... | tee -a "$LOG" || XXX_RC=$?`
+          #   （replay / teardown / 取证据）。无 pipefail 时 `$?` 是 tee 的退出码，
+          #   客机侧 exit 1 会被吞成 0 ⇒ REPLAY_EXIT_CODE/TEARDOWN_ASSERT_EXIT_CODE
+          #   恒为 0，下面的 if 判红分支永远不执行（run 43254033725 实测）。
+          set -o pipefail
           KEY="$RUNNER_TEMP/guest-ssh-key"
           SNAP="$RUNNER_TEMP/guest-snapshot"
           mkdir -p "$SNAP"
@@ -1836,16 +1871,42 @@ jobs:
           $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REPLAY_LOG" 2>&1 || log "（取重放前证据失败）"
 
           # ③ 执行重放（保留退出码）
+          #    单引号必须去掉：Windows OpenSSH 默认 shell 是 cmd.exe，cmd 不认单引号，
+          #    会把它们当字面字符传给 PowerShell ⇒ 远端拿到首尾带引号的伪路径
+          #    ⇒ 脚本内 Test-Path 失败，purgeExeExists=False，而退出码却是 0。
           log "--- 执行 -Phase replay ---"
           REPLAY_RC=0
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REPLAY_LOG" || REPLAY_RC=$?
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe ${CX_QEMU_GUEST_PURGE_EXE}" 2>&1 | tee -a "$REPLAY_LOG" || REPLAY_RC=${PIPESTATUS[0]}
           log "REPLAY_EXIT_CODE=$REPLAY_RC"
 
           # ④ 收尾断言（teardown：只读检查，不替自毁擦屁股，必须真判红）
           log "--- 执行 teardown 断言 ---"
           CLEAN_RC=0
-          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' 2>&1 | tee -a "$REPLAY_LOG" || CLEAN_RC=$?
+          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' 2>&1 | tee -a "$REPLAY_LOG" || CLEAN_RC=${PIPESTATUS[0]}
           log "TEARDOWN_ASSERT_EXIT_CODE=$CLEAN_RC"
+
+          # ④b teardown 的判别力（层 3）
+          #
+          #   assert-clean.ps1 -Stage teardown 的判据是「RunOnce 里 cxplus-purge-* 为 0
+          #   且 %TEMP% 里 cx-purge-* 为 0 ⇒ exit 0」。作为**终点**判据这是对的，
+          #   但单独用它没有判别力：如果登记阶段压根没登记成功，
+          #   teardown 看到的同样是「0 项」⇒ 判「干净」⇒ 假绿。
+          #   run 43254033725 正是这个形态：register 阶段 registeredAfter 为空、
+          #   problems=3，而 teardown 打出「RunOnce 项: 0 / 删除目标数: 0 / teardown 断言通过」。
+          #
+          #   ⇒ 正确判据必须**配对**，两段都成立才有意义：
+          #     段 A（起点）：登记阶段 registeredAfter 非空 —— 证明真的登记过
+          #     段 B（终点）：teardown 0 残留 —— 证明删干净了
+          #   只断言段 B = 用「没有东西可删」冒充「删干净了」，必须判红。
+          #
+          #   ⚠️ 段 A 不能改成「replay 之后仍必须 >0」—— 重启后自毁已把登记项消费掉，
+          #   那本来就该是 0。所以顺序是「注册时 >0」「teardown 时 =0」。
+          REG_COUNT=$(grep -oE 'registeredAfter=[^ ]*' "$REPLAY_LOG" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\r")
+          log "teardown 配对判据：登记阶段 registeredAfter=[${REG_COUNT}]"
+          if [ -z "${REG_COUNT}" ]; then
+            log "::error title=teardown 无可判别对象::登记阶段 registeredAfter 为空（从未真正登记）⇒ teardown 的「0 项」不构成「已删干净」的任何证明"
+            CLEAN_RC=1
+          fi
 
           # ⑤ 取回重放后证据
           log "--- 取回重放后证据 ---"
@@ -1859,6 +1920,14 @@ jobs:
             log "::error title=重放失败::qemu-guest-destruct.ps1 -Phase replay 退出码 $REPLAY_RC，见 replay-stage.txt"
           fi
           if [ "$CLEAN_RC" -ne 0 ] || [ "$REPLAY_RC" -ne 0 ]; then
+            exit 1
+          fi
+          # ⑦ 交叉验证：退出码之外再数一遍 problem 行（powershell -File 会吞 Write-Error 的退出码）
+          REPLAY_PROBLEMS=$(grep -c '^problem: ' "$REPLAY_LOG" 2>/dev/null || true)
+          REPLAY_PROBLEMS=${REPLAY_PROBLEMS:-0}
+          log "replay problems=$REPLAY_PROBLEMS"
+          if [ "$REPLAY_PROBLEMS" -gt 0 ]; then
+            log "::error title=重放阶段有问题::客机侧报告 $REPLAY_PROBLEMS 个 problem（退出码却是 0，属 powershell -File 吞错）"
             exit 1
           fi
           log "replay-stage-ok"
