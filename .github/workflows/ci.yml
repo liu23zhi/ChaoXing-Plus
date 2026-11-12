@@ -1487,22 +1487,68 @@ jobs:
         id: deploy
         if: steps.image.outputs.image_ok == 'yes'
         run: |
-          set -eu
+          set -u
+          # ⚠️ 2026-11-12（run 43197280267 实测）：本步骤原先用 scp 传三个 .ps1 到客机，
+          #   结果 exit code 255。255 是 SSH 客户端族的**通用**错误码，ssh 与 scp 都可能是它，
+          #   而 job 日志已被 GitHub 回收（gh api .../logs 返回 1 字节），无法区分是
+          #   L「ssh mkdir」失败还是 L「scp」失败 —— 所以这一版做两件事：
+          #    ① 换掉 scp：它有三个独立失败面（协议版本 / Subsystem sftp 未启用 /
+          #       Windows 目标路径写法），而 ssh + base64 写文件只有一个失败面；
+          #    ② 每一步单独打点，失败时立刻能定位是哪一步。
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          DEPLOY_LOG="$SNAP/deploy.txt"
+          : > "$DEPLOY_LOG"
+          log() { echo "$@" | tee -a "$DEPLOY_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
-          $SSH "$USER_HOST" 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\cx\scripts\vm, C:\cx\evidence, C:\cx\work | Out-Null; Test-Path C:\cx\scripts\vm"'
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1 \
-            "$USER_HOST:C:/cx/scripts/vm/"
-          # 复核：客机里三个脚本都在，缺一个就说明 scp 没走通，后面必然假失败。
-          $SSH "$USER_HOST" 'powershell -NoProfile -Command "Get-ChildItem C:\cx\scripts\vm -Name | Sort-Object"'
-          echo '客机侧脚本已部署：C:\cx\scripts\vm\'
 
-      # ── 客机内两阶段：登记 ────────────────────────────────────────────────
-      # 注意：这里的 env: 是**宿主**进程的环境变量，不会自动进入客机。
-      # 所以 purge 产物路径必须显式作为参数穿过 SSH 边界（-PurgeExe），
-      # 客机侧脚本再把它写进 $env:CX_NATIVE_PURGE_EXE 交给 run-shutdown-destruct.ps1。
+          # ── 步骤 1：连通性 + 建目录（单独打点）──────────────────────────────
+          log "=== step1: ssh 连通性与建目录 ==="
+          if ! $SSH "$USER_HOST" 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\cx\scripts\vm, C:\cx\evidence, C:\cx\work | Out-Null; Test-Path C:\cx\scripts\vm"' >> "$DEPLOY_LOG" 2>&1; then
+            log "::error title=客机 SSH 连通失败::ssh 到 ${USER_HOST} 失败，见 deploy.txt"
+            exit 1
+          fi
+          log "step1-ok"
+
+          # ── 步骤 2：用 base64 传文件（替代 scp，只有一个失败面）──────────────
+          #   为什么不用 scp：
+          #     · OpenSSH 9.0+ 的 scp 默认走 SFTP，需要客机 sshd 启用 `Subsystem sftp`；
+          #       Windows Server 2022 的默认 sshd_config 并不保证有这一行；
+          #     · 即使有，Windows 目标路径 C:/cx/... 在不同 scp 版本上解析不一致；
+          #     · scp 失败只回 255，不告诉你是协议、子系统还是路径的问题。
+          #   base64 + ssh 写入：只要 ssh 能跑 PowerShell 就能成功，与 sftp 无关。
+          log "=== step2: base64 传输脚本 ==="
+          for f in scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1; do
+            bn=$(basename "$f")
+            if [ ! -f "$f" ]; then
+              log "::error title=源脚本缺失::$f 不存在（本地就没有，不是传输问题）"
+              exit 1
+            fi
+            B64=$(base64 -w0 "$f")
+            # 用 PowerShell 解码写入；-EncodedCommand 避免引号与换行被 shell 吃掉
+            PS=$(printf '[IO.File]::WriteAllBytes("C:\\cx\\scripts\\vm\\%s", [Convert]::FromBase64String("%s"))' "$bn" "$B64")
+            ENC=$(printf '%s' "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+            if ! $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $ENC" >> "$DEPLOY_LOG" 2>&1; then
+              log "::error title=写入客机失败::$bn 写入 C:\\cx\\scripts\\vm 失败"
+              exit 1
+            fi
+            log "  wrote $bn"
+          done
+          log "step2-ok"
+
+          # ── 步骤 3：复核三个文件都在且大小非零 ─────────────────────────────
+          log "=== step3: 客机内复核 ==="
+          $SSH "$USER_HOST" 'powershell -NoProfile -Command "Get-ChildItem C:\cx\scripts\vm | ForEach-Object { \"$($_.Name)=$($_.Length)\" }"' >> "$DEPLOY_LOG" 2>&1 || true
+          COUNT=$($SSH "$USER_HOST" 'powershell -NoProfile -Command "(Get-ChildItem C:\cx\scripts\vm -Filter *.ps1).Count"' 2>/dev/null | tr -d "\r")
+          log "客机内 .ps1 数量 = ${COUNT:-unknown}"
+          if [ "${COUNT:-0}" != "3" ]; then
+            log "::error title=客机侧脚本数量不对::期望 3 个 .ps1，实际 ${COUNT:-unknown}（见 deploy.txt）"
+            exit 1
+          fi
+          log "客机侧脚本已部署：C:\\cx\\scripts\\vm\\（3 个 .ps1）"
       - name: 阶段一：客机内登记续删（不触发关机）
         id: register
         if: steps.image.outputs.image_ok == 'yes'

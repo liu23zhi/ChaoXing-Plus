@@ -663,7 +663,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   //     整条 QEMU 链路在镜像/密钥缺失时按设计跳过，不会阻塞任何 PR 或主干。
   // 原意是「CI 不得依赖需要人工配置的 secret 才能跑通」，因此改成允许清单 +
   // 明确「允许项必须是可缺省的」，而不是无条件放行所有 secrets.*。
-  const optionalSecrets = new Set(['GITHUB_TOKEN', 'CX_QEMU_GUEST_SSH_KEY']);
+  // 2026-11-12：`CX_QEMU_GUEST_SSH_KEY` 已从 ci.yml 移除（用户要求「不保留 secret」，
+  //   密钥改从 Actions Cache 取，与镜像内公钥天然配对）。白名单只剩 GITHUB_TOKEN。
+  const optionalSecrets = new Set(['GITHUB_TOKEN']);
   const secretRefs = [...workflow.matchAll(/secrets\.([A-Za-z0-9_]+)/gu)].map((m) => m[1]);
   const unexpectedSecrets = [...new Set(secretRefs)].filter((name) => !optionalSecrets.has(name));
   assert.deepEqual(
@@ -671,9 +673,30 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     [],
     `CI 不得依赖额外的人工 secret（只允许可缺省的 ${[...optionalSecrets].join(' / ')}），发现：${unexpectedSecrets.join(', ')}`,
   );
-  // 允许项也必须真的可缺省：QEMU 缺密钥时必须走 skip 分支而不是 throw。
-  assert.match(ciYml, /缺少 secret CX_QEMU_GUEST_SSH_KEY/u,
-    'QEMU 客机密钥缺失必须走 skip 并说明，不能把作业判红');
+  // 2026-11-12 需求变更：这条断言的方向**反了**，必须改写。
+  //
+  //   旧语义（2026-11-10）：密钥缺失要**走 skip**（当作「可缺省」），不能判红。
+  //   新语义（用户 2026-11-11 明确要求「不要跳过任务」+ 2026-11-12「不保留 secret」）：
+  //     跑不了就**如实判红**，因为 skip 会伪装成「这条链路已验证通过」。
+  //
+  //   历史教训（run 42963390787）：旧代码 `skip(){ exit 0 }` 让整个作业报 success，
+  //   而客机一步都没跑 —— 这是本项目最典型的假绿形态。
+  //
+  // 现在的判据：密钥拿不到时必须**判红**且给出可操作的失败信息。
+  //   注意文案已从「缺少 secret ...」改为「Actions Cache 里没有客机 SSH 私钥」，
+  //   因为密钥来源已从 secret 改为 cache（用户要求不保留 secret）。
+  assert.match(
+    ciYml,
+    /Actions Cache 里没有客机 SSH 私钥/u,
+    'QEMU 客机密钥缺失必须如实判红并给出可操作指引（指向「先跑构建作业」），' +
+      '不得静默 skip —— 那会让「关机自毁从未真正跑过」伪装成通过',
+  );
+  // 反证：不得再出现「缺 secret 就走 skip」的旧形态
+  assert.doesNotMatch(
+    ciYml,
+    /缺少 secret CX_QEMU_GUEST_SSH_KEY[^\n]*\n[^\n]*exit 0/u,
+    '不得保留「缺 secret 就 exit 0」的假绿分支',
+  );
   const nativeExecutables = [
     'CX_NATIVE_HOST_EXE', 'CX_NATIVE_INJECTION_EXE', 'CX_NATIVE_ASSETS_EXE', 'CX_NATIVE_OPTIONS_EXE',
     'CX_NATIVE_SESSION_EXE', 'CX_NATIVE_SELECTION_EXE', 'CX_NATIVE_TRANSPORT_EXE', 'CX_NATIVE_AUDIT_EXE',
