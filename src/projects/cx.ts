@@ -34,6 +34,11 @@ import {
 } from '../utils/work.js';
 import { $console } from './background.js';
 import {
+  collectSecretFontEvidence,
+  describeSecretFontRestorability,
+  evaluateSecretFontRestorability
+} from './cx-secret-font.js';
+import {
   collectTikuAdapterWarnings,
   resetTikuAdapterBalanceGuard,
   requestTikuAdapterAIFallback,
@@ -7240,6 +7245,23 @@ async function mappingRecognize(doc: Document = document) {
     }
     return buffer;
   };
+
+  // 以前这里是一道静默闸门：fontFaceEl 或映射表任一为假就整块跳过、**一个日志都不打**，
+  // 页面继续留着 .font-cxsecret 的错位字形送去题库搜索，表现为「答案明明对却填错」，
+  // 用户和日志都无从发现。现在把两种失败分开报出来。
+  const restorability = evaluateSecretFontRestorability(
+    collectSecretFontEvidence(doc),
+    typrMapping
+  );
+  const restorabilityWarning = describeSecretFontRestorability(restorability);
+  if (restorabilityWarning) {
+    $console.warn(`[chaoxing-plus] ${restorabilityWarning}`, {
+      reason: restorability.reason,
+      markedElementCount: restorability.markedElementCount,
+      fontFaceCount: restorability.fontFaceCount,
+      mappingEntryCount: restorability.mappingEntryCount
+    });
+  }
 
   if (fontFaceEl && Object.keys(typrMapping).length > 0) {
     const font = fontFaceEl.textContent?.match(/base64,([\w\W]+?)'/)?.[1];
