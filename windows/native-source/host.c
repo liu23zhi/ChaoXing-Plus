@@ -3539,16 +3539,18 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     if (h_base_options.help) {
         h_out_begin();
-        // 帮助文本里的 "cdp-pipe/input 未接线" 是**用户可见的旧表述**，与实际状态不符：
-        //   - input：真的未实现（命中即显式 exit 4，见 inject-mode 分支）
-        //   - cdp-pipe：已完整接线，失败于 CBOR 帧协议不符（详见 h_pipe_bootstrap 的注释）
-        // 保留原措辞不动：这是 --help 的输出契约，改它会牵动已有的帮助文本断言测试。
-        // 正确口径以 h_pipe_bootstrap 的注释与 report.injectEvidence 为准。
+        // --inject-mode 帮助行的口径（2026-11-13 修正）：
+        //   旧措辞把 cdp-pipe 与 input 并列归为同一个原因，与事实不符，故改为直述各自状态：
+        //   - cdp-pipe：**已完整接线**（分派 → h_pipe_open → h_pipe_call → h_pipe_bootstrap），
+        //     失败于帧协议不符 —— 目标 libcef 的 DevToolsPipeHandler 要求 CBOR envelope，
+        //     而本实现发裸 JSON（详见 h_pipe_bootstrap 函数头的注释与 task_doc/100-*.md）。
+        //   - input：真的未实现，命中即显式 exit 4（见 inject-mode 分支）。
+        // 原措辞会让运维误判为「装配缺失」而去白改代码，故改为直述协议不符。
         h_print_utf8("超星学习助手 Windows 宿主 0.1.0（原生原型）\n"
             "用法: chaoxing_plus.exe [参数]\n"
             "客户端: --client <path> | --client-index <n> | --client-first | --select-client\n"
             "扫描: --scan-mode common|fallback-all|all --scan-clients --list-clients --ui auto|gui|cli\n"
-    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto=三段式：已装代理→复用 dll-proxy，有 .themida 节→临时装 dll-proxy，否则 cdp-port；cdp-pipe/input 未接线，显式选择会以退出码 4 失败）\n"
+    "注入: --inject-mode auto|cdp-port|cdp-pipe|dll-proxy|input（auto=三段式：已装代理→复用 dll-proxy，有 .themida 节→临时装 dll-proxy，否则 cdp-port；cdp-pipe 已接线但帧协议不符 CBOR 帧、input 未实现，两者均不适用于考试客户端，显式选择 cdp-pipe 以退出码 4 失败）\n"
     "注入: --inject-proxy-dir <dir>（dll-proxy 模式检查 winmm.dll 的目录，默认客户端目录）\n"
     "注入: --show-inject-reasons（选择窗口显示注入方式不可用的原因；默认不显示）\n"
     "自毁: --self-destruct-key <shortcut>（可重复，最多 4 个） --self-destruct-on-fullscreen-exit\n"
