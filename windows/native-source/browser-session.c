@@ -272,6 +272,19 @@ static BOOL bs_launch(CX_BROWSER_SESSION *s, const CX_BROWSER_OPTIONS *options, 
     if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), NULL, NULL)) goto done;
     command = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BS_COMMAND_CAP * sizeof(WCHAR)); if (!command) goto done;
     at = bs_arg(command, BS_COMMAND_CAP, 0, options->browserPath);
+    // --remote-debugging-io-pipes=<readHandle>,<writeHandle> —— 把已创建的两个管道句柄
+    // 显式告诉浏览器子进程（配合上面的 PROC_THREAD_ATTRIBUTE_HANDLE_LIST 做句柄继承白名单）。
+    // 这是较新 Chromium 的正确做法。
+    //
+    // ⚠️ 路径适用范围（t129 IG5 复核实测，2026-11-13）：
+    //   该开关在**超星考试客户端的 libcef.dll 中 0 命中**（三代样本同一份 libcef，
+    //   97,297,400 B，SHA-256 E65E3A2C...）。也就是说这套 CEF 根本不认识它，
+    //   句柄无法通过该参数传进去 ⇒ 对考试客户端无效。
+    //
+    //   本文件服务的是**独立浏览器**（options->browserPath，通常是新版本 Chrome/Edge/
+    //   Chromium），那里该开关是存在且有效的，所以这段代码不能被删。
+    //   换句话说：这里走通 ≠ 考试客户端的 cdp-pipe 能走通，两者是不同引擎版本。
+    //   考试客户端的 pipe 路径见 host.c 的 h_pipe_bootstrap（受 CBOR 帧协议限制）。
     flag[0] = 0; i = bs_add(flag, 256, 0, L"--remote-debugging-io-pipes="); i = bs_num(flag, 256, i, (ULONG_PTR)childRead); i = bs_add(flag, 256, i, L","); bs_num(flag, 256, i, (ULONG_PTR)childWrite);
     at = bs_arg(command, BS_COMMAND_CAP, at, flag);
     at = bs_arg(command, BS_COMMAND_CAP, at, L"--remote-debugging-pipe");
