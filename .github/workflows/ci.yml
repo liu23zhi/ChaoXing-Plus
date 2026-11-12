@@ -3601,7 +3601,8 @@ jobs:
 
           SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-               -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR"
+               -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR \
+               -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
           READY=no
           ATTEMPT=0
           DEADLINE=$(( $(date +%s) + 600 ))
@@ -3609,7 +3610,13 @@ jobs:
             ATTEMPT=$(( ATTEMPT + 1 ))
             if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then
               exec 3>&- 2>/dev/null || true
-              if $SSH -vvv "${GUEST_USER}@127.0.0.1" "whoami" > /tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
+              # ⚠️ 2026-11-12（run 43249609736 实测）：**必须用 timeout 包住 ssh**。
+              #   ConnectTimeout 只控制 TCP 连接与密钥交换，**不控制认证阶段**。
+              #   实测：ssh-vvv-2.txt 里 `Authenticating to ... as 'runner'` 之后就没了，
+              #   整个 ssh 进程挂住 ⇒ while 循环的 sleep 15 永远不执行 ⇒
+              #   verify.txt 只有 attempt=1 就一直到 job 级 15 分钟超时被杀。
+              #   修法：外层 `timeout 25` 强杀，保证每轮最多 25 秒必然返回。
+              if timeout 25 $SSH -vvv "${GUEST_USER}@127.0.0.1" "whoami" > /tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
                 READY=yes; break
               fi
               echo "attempt=$ATTEMPT ssh-failed" >> "$VERIFY_LOG"
