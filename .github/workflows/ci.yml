@@ -1665,15 +1665,61 @@ jobs:
       - name: 阶段一：客机内登记续删（不触发关机）
         id: register
         if: steps.image.outputs.image_ok == 'yes'
+        # ⚠️ 2026-11-12（run 43227040550）：本步骤原先是**一行无诊断的 ssh**，失败后
+        #   既看不到客机侧输出、也取不回客机里的证据文件（证据随容器一起销毁）。
+        #   annotation 只有「Process completed with exit code 1」，无从定位。
+        #
+        #   失败的真实候选（都必须在日志里可判）：
+        #     ① 镜像里没有 purge-tests.exe（build-guest-image 的 offline-check
+        #        因 libguestfs 装不上而 SKIP，从未验证过它在不在）；
+        #     ② 客机内 RunOnce 登记失败；
+        #     ③ 待删目标文件没被创建。
+        #   脚本 qemu-guest-destruct.ps1 已把这三项写进 C:/cx/evidence/，
+        #   所以这一版：前置体检 → 执行 → **无论成败都取回证据**。
         run: |
-          set -eu
+          set -u
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          REG_LOG="$SNAP/register-stage.txt"
+          : > "$REG_LOG"
+          log() { echo "$@" | tee -a "$REG_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
-          # 客机镜像里必须已预置 purge-tests.exe（由 build-windows.ps1 -BuildTests 产出）。
-          # 本作业不构建原生宿主：那需要整个 Windows 工具链，超出 45 分钟预算。
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'"
 
+          # ── 前置体检：先确认那些会静默导致阶段一失败的配置 ──────────────────
+          log "=== 前置体检 ==="
+          PREEXE=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Test-Path -LiteralPath '${CX_QEMU_GUEST_PURGE_EXE}').ToString()" 2>/dev/null | tr -d "\r\n ")
+          log "purge-tests.exe 存在 = ${PREEXE:-?}（路径 ${CX_QEMU_GUEST_PURGE_EXE}）"
+          PREVM=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Test-Path -LiteralPath 'C:/cx/scripts/vm/run-shutdown-destruct.ps1').ToString()" 2>/dev/null | tr -d "\r\n ")
+          log "两阶段脚本存在 = ${PREVM:-?}"
+          log "--- 客机内 /cx/native 目录 ---"
+          $SSH "$USER_HOST" "powershell -NoProfile -Command if (Test-Path 'C:/cx/native') { Get-ChildItem 'C:/cx/native' | ForEach-Object { \$_.Name + '=' + \$_.Length } } else { 'MISSING C:/cx/native' }" 2>&1 | tee -a "$REG_LOG" || true
+
+          # 缺 purge-tests.exe 是**镜像配置问题**，不是被测逻辑缺陷：
+          # 明确判红并给出可操作指引，不进入阶段一冒充「跑过了」。
+          if [ "${PREEXE:-False}" != "True" ]; then
+            log "::error title=客机缺少 purge 测试产物::${CX_QEMU_GUEST_PURGE_EXE} 不存在。镜像需预置 build-windows.ps1 -BuildTests 的 purge-tests.exe（见 build-guest-image 的 OEM setup）"
+            exit 1
+          fi
+
+          # ── 执行登记阶段（保留退出码，不用 set -e 直接中断）──────────────────
+          log "=== 执行 -Phase register ==="
+          RC=0
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REG_LOG" || RC=$?
+          log "register exit code = $RC"
+
+          # ── 无论成败都取回客机证据（关键：失败时证据最有用）─────────────────
+          log "=== 取回客机证据 C:/cx/evidence ==="
+          EVID_PS='if (Test-Path "C:/cx/evidence") { Get-ChildItem "C:/cx/evidence" | ForEach-Object { Write-Output ("--- " + $_.Name + " (" + $_.Length + " B) ---"); Get-Content $_.FullName } } else { Write-Output "MISSING C:/cx/evidence" }'
+          EVID_ENC=$(printf '%s' "$EVID_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REG_LOG" 2>&1 || log "（取证据失败，客机可能已不可达）"
+          if [ "$RC" -ne 0 ]; then
+            log "::error title=登记阶段失败::exit=$RC，详见 register-stage.txt（含客机内 cx-evidence 输出）"
+            exit 1
+          fi
+          log "register-stage-ok"
       # ── 重启客机（由宿主触发，等价于真关机的后半程）──────────────────────
       - name: 阶段二前半：重启客机并等待回连
         id: reboot
