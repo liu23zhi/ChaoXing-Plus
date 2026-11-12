@@ -922,3 +922,64 @@ test('build-guest-image 的四个关键 inputs 确实带了默认值', async () 
     assert.ok(raw.includes(needle), `${name} 必须带 || 默认值，实际找不到：${needle}`);
   }
 });
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43183097873 实测暴露）：checkout 必须排在 cache restore 之前
+//
+// 事故：qemu-shutdown-destruct 报
+//   CX_QEMU_GUEST_IMAGE 指向的本地文件不存在：
+//   /home/runner/work/ChaoXing-Plus/ChaoXing-Plus/guest-cache/guest.qcow2
+//
+// 但前一步「确认镜像可用」是 SUCCESS —— 说明 restore 成功、文件当时在。
+// 真正的原因是那一步之后紧跟了第二个 `actions/checkout`，
+// 而 checkout 默认 clean: true 会清理工作区里的未跟踪文件，
+// 把刚恢复出来的 guest-cache/ 整个删掉。
+//
+// 两个约束：
+//   ① 同一个 job 里不应有重复的 checkout（本项目里实测出现过 2 个）
+//   ② cache/restore 必须在最后一个 checkout 之后，否则会被它清掉
+test('qemu-shutdown-destruct 的 checkout 必须在 cache restore 之前且不重复', async () => {
+  const section = await jobSection('qemu-shutdown-destruct');
+  const lines = section.split('\n');
+
+  const checkouts = [];
+  const restores = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/uses:\s*actions\/checkout@/u.test(lines[i])) checkouts.push(i + 1);
+    if (/uses:\s*actions\/cache\/restore@/u.test(lines[i])) restores.push(i + 1);
+  }
+
+  assert.equal(
+    checkouts.length,
+    1,
+    `qemu-shutdown-destruct 只应有 1 个 checkout（checkout 会清理工作区），实际 ${checkouts.length} 个：L${checkouts.join(', L')}`,
+  );
+  assert.ok(
+    restores.length >= 1,
+    'qemu-shutdown-destruct 必须有 actions/cache/restore（镜像来自 build-guest-image 的 cache）',
+  );
+
+  const lastCheckout = Math.max(...checkouts);
+  const firstRestore = Math.min(...restores);
+  assert.ok(
+    firstRestore > lastCheckout,
+    'cache/restore 必须在 checkout 之后 —— checkout 默认 clean:true 会删掉刚恢复的 guest-cache/。' +
+      `实际 checkout 在 L${checkouts.join(', L')}，restore 在 L${restores.join(', L')}`,
+  );
+});
+
+// 同一族问题：build-guest-image 自己也要保证 checkout 在 cache restore 之前
+test('build-guest-image 的 checkout 也在 cache restore 之前', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\n');
+
+  const co = lines.findIndex((l) => /uses:\s*actions\/checkout@/u.test(l));
+  const cr = lines.findIndex((l) => /uses:\s*actions\/cache\/restore@/u.test(l));
+
+  assert.ok(co >= 0, 'build-guest-image 必须有 checkout');
+  if (cr >= 0) {
+    assert.ok(
+      cr > co,
+      `build-guest-image 的 cache/restore（L${cr + 1}）必须在 checkout（L${co + 1}）之后`,
+    );
+  }
+});

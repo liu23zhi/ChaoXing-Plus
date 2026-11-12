@@ -1127,9 +1127,6 @@ jobs:
             echo "::error title=镜像体积异常::只有 $SIZE 字节"
             exit 1
           fi
-      - name: 检出代码
-        uses: actions/checkout@v4
-
       - name: 环境基线
         run: |
           set -u
