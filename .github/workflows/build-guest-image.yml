@@ -770,8 +770,18 @@ jobs:
           #                这是唯一能把客机内进度传回宿主机的通道。见下方「等待安装完成」。
           mkdir -p "$WORK/data"
           # 8006 只绑 loopback：仅给本 job 抓安装界面截图用，不对外暴露。
+          # ⚠️ 2026-11-12：必须给 NET_ADMIN，否则 dockur 无法创建 bridge/NAT，
+          #   会回退到 user-mode networking (passt)。实测日志：
+          #     RTNETLINK answers: Operation not permitted
+          #     Warning: failed to create bridge. Please add --cap-add NET_ADMIN
+          #     Warning: failed to setup NAT networking, falling back to user-mode
+          #     Guest: 172.17.0.2 (Windows) | Mode: User (passt)
+          #   user-mode 下 `-p 2222:22` 的 docker 端口映射**不生效**，
+          #   必须改用 USER_PORTS；更简单的做法是给 NET_ADMIN 让 NAT 正常工作。
           docker run -d --name cxwin \
             --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
             -e VERSION="$VERSION" \
             -e DISK_FMT=qcow2 \
             -e DISK_SIZE="$DISK_SIZE" \
@@ -1211,8 +1221,18 @@ jobs:
           #   只剩 `-e DISK_SIZE=32G \` 这些孤立残片，导致 shell 报 `-e: command not found`。
           #   与之前「注释插进续行」是同一类错误（续行结构被破坏）。
           docker rm -f cxverify >/dev/null 2>&1 || true
+          # ⚠️ 2026-11-12：必须给 NET_ADMIN，否则 dockur 无法创建 bridge/NAT，
+          #   会回退到 user-mode networking (passt)。实测日志：
+          #     RTNETLINK answers: Operation not permitted
+          #     Warning: failed to create bridge. Please add --cap-add NET_ADMIN
+          #     Warning: failed to setup NAT networking, falling back to user-mode
+          #     Guest: 172.17.0.2 (Windows) | Mode: User (passt)
+          #   user-mode 下 `-p 2222:22` 的 docker 端口映射**不生效**，
+          #   必须改用 USER_PORTS；更简单的做法是给 NET_ADMIN 让 NAT 正常工作。
           docker run -d --name cxverify \
             --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
             -e VERSION=2022 \
             -e DISK_FMT=qcow2 \
             -e DISK_SIZE=32G \
