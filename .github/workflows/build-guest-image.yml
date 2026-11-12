@@ -1206,6 +1206,15 @@ jobs:
             echo "::error title=run-storage 缺少 data.qcow2::后续 dockur 会重新安装" | tee -a "$VERIFY_LOG"
             exit 1
           fi
+
+          # ⚠️ 2026-11-12：这一段必须完整 —— 上一轮我的替换把 `docker run` 头部删掉了，
+          #   只剩 `-e DISK_SIZE=32G \` 这些孤立残片，导致 shell 报 `-e: command not found`。
+          #   与之前「注释插进续行」是同一类错误（续行结构被破坏）。
+          docker rm -f cxverify >/dev/null 2>&1 || true
+          docker run -d --name cxverify \
+            --device=/dev/kvm \
+            -e VERSION=2022 \
+            -e DISK_FMT=qcow2 \
             -e DISK_SIZE=32G \
             -e USERNAME="${GUEST_USER}" \
             -e PASSWORD="Cx-Guest-2026!" \
