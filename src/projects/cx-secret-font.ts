@@ -269,6 +269,72 @@ export function scanSecretFonts(
 }
 
 /**
+ * 还原**前置条件**的判定结果。
+ *
+ * 背景：cx.ts 的 mappingRecognize 有两道「静默跳过」的闸门 ——
+ *   :7244  if (fontFaceEl && Object.keys(typrMapping).length > 0) { ... }
+ * 只要其中任一为假，整个还原块被跳过、**一个日志都不打**，DOM 里仍留着
+ * `.font-cxsecret` 的错位字形，题干照常送进题库搜索，结果是「答案明明对却填错」。
+ * 用户与日志都无从发现。本函数把那两种情形显式区分出来。
+ */
+export type SecretFontUnrestorableReason =
+  /** 页面没有 font-cxsecret @font-face（可能真没加密，也可能字体在外链 CSS 里）。 */
+  | 'no-font-face'
+  /** 有字体但没有映射表（table.json 拉取失败/为空）—— 有字体也解不了。 */
+  | 'no-mapping-table'
+  /** 字体和映射表都在，可以还原。 */
+  | 'restorable';
+
+export interface SecretFontRestorability {
+  reason: SecretFontUnrestorableReason;
+  /** 页面里带 .font-cxsecret 的节点数；0 表示这页没有要还原的东西。 */
+  markedElementCount: number;
+  /** 页内 font-cxsecret @font-face 个数。 */
+  fontFaceCount: number;
+  /** 映射表条目数。 */
+  mappingEntryCount: number;
+}
+
+/**
+ * 判断这次能不能真的还原。**无标记节点时返回 no-font-face**，因为调用方
+ * 只在「有密文」时才需要据此告警 —— 这点与 scanSecretFonts 的
+ * no-marked-element 区分开，避免把「这页没加密」误报成「还原失败」。
+ */
+export function evaluateSecretFontRestorability(
+  evidence: SecretFontEvidence,
+  mapping: Record<string, number> | undefined | null
+): SecretFontRestorability {
+  const mappingEntryCount = mapping ? Object.keys(mapping).length : 0;
+  const fontFaceCount = evidence.fontFaces.length;
+  const markedElementCount = evidence.markedElementCount;
+
+  let reason: SecretFontUnrestorableReason;
+  if (fontFaceCount === 0) reason = 'no-font-face';
+  else if (mappingEntryCount === 0) reason = 'no-mapping-table';
+  else reason = 'restorable';
+
+  return { reason, markedElementCount, fontFaceCount, mappingEntryCount };
+}
+
+/**
+ * 还原失败时给用户的话。返回 undefined 表示无需告警
+ * （没密文、或本来就解得了）。
+ *
+ * 关键：**区分「有字体没映射表」与「连字体都没有」**。前者是我们的映射表
+ * 拉取失败（可重试/该报错），后者可能只是这页没加密（不该打扰用户）。
+ */
+export function describeSecretFontRestorability(
+  result: SecretFontRestorability
+): string | undefined {
+  if (result.markedElementCount === 0) return undefined;
+  if (result.reason === 'restorable') return undefined;
+  if (result.reason === 'no-mapping-table') {
+    return `检测到该页题目使用加密字体，但字体映射表未加载成功（条目数=0），题干无法还原，题库答案的题干/选项比对会失败。请检查网络后刷新页面。`;
+  }
+  return `检测到该页题目使用加密字体，但页面里找不到对应的 @font-face，题干无法还原，题库答案比对可能失败，请人工复核。`;
+}
+
+/**
  * 把扫描结果压成一句给用户看的话。
  *
  * 措辞要求：**说清后果**（答案比对可能失败），而不是只说「检测到加密字体」——

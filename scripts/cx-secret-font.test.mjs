@@ -47,7 +47,9 @@ const {
   hashSecretGlyphs,
   scanSecretFonts,
   describeSecretFontReport,
-  logSecretFontEvidence
+  logSecretFontEvidence,
+  evaluateSecretFontRestorability,
+  describeSecretFontRestorability
 } = await import('../src/projects/cx-secret-font.js');
 
 // ---------------------------------------------------------------------------
@@ -492,4 +494,71 @@ test('logSecretFontEvidence default channel stays silent for a clean page', (t) 
 
   logSecretFontEvidence(report);
   assert.equal(seen.length, 0, '无加密字体时默认通道也必须是静默的');
+});
+
+// ---------------------------------------------------------------------------
+// 还原前置条件的三态判定（evaluateSecretFontRestorability）
+//
+// 为什么单独钉：cx.ts 的 mappingRecognize 在「有密文」时会做两道闸门判断，
+// 以前任一为假就整块静默跳过 —— 页面留着错位字形照常送题库搜索，
+// 表现为「答案明明对却填错」，日志里一个字都没有。本组用例把
+// 「有字体没映射表」与「连字体都没有」钉成两个不同的可判定结果。
+// ---------------------------------------------------------------------------
+test('restorability separates "no mapping table" from "no font face"', () => {
+  // 有密文、有 @font-face，但映射表为空（table.json 拉取失败/被清空）。
+  const withFont = evaluateSecretFontRestorability(
+    { markedElementCount: 3, fontFaces: [{ family: 'font-cxsecret', base64: 'AA==' }] },
+    {}
+  );
+  assert.equal(withFont.reason, 'no-mapping-table');
+  assert.equal(withFont.mappingEntryCount, 0);
+  assert.equal(withFont.fontFaceCount, 1, '必须如实报出字体数量，否则无法区分两种失败');
+
+  // 有密文，但页面里根本没有 font-cxsecret 的 @font-face。
+  const withoutFont = evaluateSecretFontRestorability(
+    { markedElementCount: 3, fontFaces: [] },
+    { abc: 19968 }
+  );
+  assert.equal(withoutFont.reason, 'no-font-face');
+  assert.equal(withoutFont.mappingEntryCount, 1);
+
+  // 两者齐备。
+  const ok = evaluateSecretFontRestorability(
+    { markedElementCount: 3, fontFaces: [{ family: 'font-cxsecret', base64: 'AA==' }] },
+    { abc: 19968 }
+  );
+  assert.equal(ok.reason, 'restorable');
+
+  // null / undefined 映射表按空处理，不得抛错（loadTyprMapping 失败返回 {} 或 undefined）。
+  assert.equal(
+    evaluateSecretFontRestorability({ markedElementCount: 1, fontFaces: [{ family: 'font-cxsecret', base64: 'AA==' }] }, undefined).reason,
+    'no-mapping-table'
+  );
+});
+
+test('restorability warning stays silent when the page needs no restoration', () => {
+  // 这是防误报的关键：页面没有 .font-cxsecret 时，绝不能弹「还原失败」。
+  const clean = evaluateSecretFontRestorability({ markedElementCount: 0, fontFaces: [] }, {});
+  assert.equal(clean.reason, 'no-font-face');
+  assert.equal(describeSecretFontRestorability(clean), undefined,
+    '无密文页面必须静默 —— 否则用户每次开页面都被无关告警打扰');
+
+  // 能还原时也静默。
+  const ok = evaluateSecretFontRestorability(
+    { markedElementCount: 1, fontFaces: [{ family: 'font-cxsecret', base64: 'AA==' }] },
+    { abc: 19968 }
+  );
+  assert.equal(describeSecretFontRestorability(ok), undefined);
+
+  // 两种失败必须给出**不同的**文案，否则用户无法判断该刷新还是该报 bug。
+  const missingTable = evaluateSecretFontRestorability(
+    { markedElementCount: 1, fontFaces: [{ family: 'font-cxsecret', base64: 'AA==' }] },
+    {}
+  );
+  const missingFont = evaluateSecretFontRestorability({ markedElementCount: 1, fontFaces: [] }, { a: 1 });
+  const a = describeSecretFontRestorability(missingTable);
+  const b = describeSecretFontRestorability(missingFont);
+  assert.ok(a && b, '两种失败都必须有文案');
+  assert.notEqual(a, b, '「映射表没加载」与「找不到字体」必须给不同文案');
+  assert.match(a, /映射表/u);
 });
