@@ -1444,6 +1444,8 @@ jobs:
 
           START=$(date +%s)
           READY=no
+          KEY="$RUNNER_TEMP/guest-ssh-key"
+          USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
           while [ $(( $(date +%s) - START )) -lt "$CX_QEMU_BOOT_TIMEOUT_SEC" ]; do
             if ! kill -0 "$QEMU_PID" 2>/dev/null; then
               echo 'QEMU 进程已退出，日志尾部：'
@@ -1452,8 +1454,12 @@ jobs:
             fi
             if (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; then
               exec 3>&- 2>/dev/null || true
-              READY=yes
-              break
+              # 仅端口打开不代表 SSH 已可认证；必须做一次真实握手，避免 banner 超时。
+              if ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes \
+                "$USER_HOST" 'exit' >/dev/null 2>&1; then
+                READY=yes
+                break
+              fi
             fi
             sleep 10
           done
