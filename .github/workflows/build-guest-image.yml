@@ -1157,79 +1157,62 @@ jobs:
 
       # ── 硬验收：SSH 真的能连上 ─────────────────────────────────────────────
       # 不验证就交付 = 给下游一个黑盒。ci.yml 那边会因为「连不上」浪费 45 分钟。
-      - name: 验证 SSH 可连
+      - name: 验证 SSH 可连（docker bridge，与安装时同网络）
         id: verify
-        # 硬性时限：GitHub 的 job 级 timeout 到点会**直接杀进程**，
-        # 连 always() 的后续步骤都不跑（上一轮就是这样丢证据的）。
-        # 这里给步骤自己设 20 分钟上限，让它在 job 被杀之前**主动**收尾并 exit 1。
-        timeout-minutes: 10
+        # ⚠️ 2026-11-12 决定性发现（run 43147209781 诊断）：
+        #   客机内 GuestIP = 172.17.0.2/24，GuestGateway = 172.17.0.1
+        #   —— 这是 Docker 默认网桥地址，被**持久化进镜像**。
+        #   dockur 装 Windows 时用 docker bridge，Windows 就记住了这个配置。
+        #   而我之前用 QEMU slirp（10.0.2.x 网段）启动同一镜像，
+        #   网卡地址与网关不匹配 ⇒ 包发不出去 ⇒ 宿主侧 banner 超时。
+        #   ⇒ 验证必须复用 docker bridge，与安装时一致。
+        timeout-minutes: 15
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
           SNAP="$RUNNER_TEMP/guest-snapshot"
           mkdir -p "$SNAP"
-          # 2026-11-11（t111）：这个步骤的失败诊断**必须**落在 snapshot 目录里。
-          # 上一轮只把 ssh stderr 打进 stdout 与 Step Summary ——
-          # 而 GitHub 会回收 job 日志（实测 gh api .../logs 返回 BlobNotFound），
-          # 于是「失败原因」彻底消失，artifact 也是空的。现在所有证据都写文件。
           VERIFY_LOG="$SNAP/ssh-verify.txt"
           : > "$VERIFY_LOG"
 
-          # ⚠️ 2026-11-12：网卡型号必须与 dockur 装 Windows 时**一致**。
-          #   dockur 的 ADAPTER 默认是 virtio-net-pci（见其 docs/environment.md），
-          #   Windows 里装的是 virtio 网卡驱动。用 e1000 会因无驱动而不通。
-          #   证据：客机内 setup-steps.txt 显示 SshdStatus=Running / Port22Listen=2 /
-          #   SSH_VERDICT=READY，说明 sshd 正常，问题在网卡。
-          #   ⚠️ 注意：这些注释必须放在 qemu 命令**之前**，绝不能插进续行里 ——
-          #   否则 shell 会把 # 当成参数传给 qemu，命令直接失败。
-          qemu-system-x86_64 \
-            -enable-kvm -cpu host -smp 2 -m 4096 \
-            -drive file="$WORK/guest.qcow2",if=virtio,cache=writeback \
-            -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22" \
-            -display none -vga none \
-            -pidfile "$WORK/vqemu.pid" -daemonize
-          echo "VERIFY_QEMU_PID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo unknown)" | tee -a "$VERIFY_LOG"
+          echo "=== 用 docker bridge 启动镜像 ===" | tee -a "$VERIFY_LOG"
+          mkdir -p "$WORK/run-storage"
+          cp "$WORK/guest.qcow2" "$WORK/run-storage/data.qcow2"
+          echo "  data.qcow2 = $(stat -c %s "$WORK/run-storage/data.qcow2") 字节" | tee -a "$VERIFY_LOG"
 
-          # ⚠️ 2026-11-12：-daemonize 会**立即返回**，即使子进程随后崩溃。
-          #   pidfile 里写了 PID 只说明 fork 成功，不代表进程还活着。
-          #   实测（run 43144127992）：VERIFY_QEMU_PID=20207 写进去了，
-          #   但 31 次 SSH 尝试全部 banner 超时 —— 必须验证进程存活。
-          QPID=$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)
-          sleep 3
-          if ! kill -0 "$QPID" 2>/dev/null; then
-            echo "::error title=QEMU 启动后立即退出::pid=$QPID 已不存在" | tee -a "$VERIFY_LOG"
-            echo "--- qemu 启动日志 ---" | tee -a "$VERIFY_LOG"
-            cat "$WORK/qemu-verify.log" 2>/dev/null | tail -30 | tee -a "$VERIFY_LOG" || true
-            exit 1
-          fi
-          echo "QEMU_ALIVE=yes pid=$QPID" | tee -a "$VERIFY_LOG"
-          # 记录 qemu 的完整命令行，便于核对 nic 参数是否真的生效
-          ps -p "$QPID" -o args= 2>/dev/null | tee -a "$VERIFY_LOG" || true
-          # 宿主侧看 2222 是否在听（slirp 应该立刻监听）
-          (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 2222 | tee -a "$VERIFY_LOG" || echo "  2222 未监听" | tee -a "$VERIFY_LOG"
+          docker rm -f cxverify >/dev/null 2>&1 || true
+          docker run -d --name cxverify \
+            --device=/dev/kvm \
+            -e VERSION=2022 \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE=32G \
+            -e USERNAME="${GUEST_USER}" \
+            -e PASSWORD="Cx-Guest-2026!" \
+            -p 127.0.0.1:2222:22 \
+            -v "$WORK/run-storage:/storage" \
+            docker.io/dockurr/windows:latest >> "$VERIFY_LOG" 2>&1
+          echo "docker run rc=$?" | tee -a "$VERIFY_LOG"
 
-          # -vvv 而不是 -v：要看到 kex/banner 协商停在哪一步。
-          # ConnectionAttempts=1：不重试，避免 10s × N 把步骤拖死。
+          sleep 10
+          echo "=== 容器状态 ===" | tee -a "$VERIFY_LOG"
+          docker ps -a --filter name=cxverify | tee -a "$VERIFY_LOG" || true
+          echo "=== 容器日志前 40 行 ===" | tee -a "$VERIFY_LOG"
+          docker logs cxverify 2>&1 | head -40 | tee -a "$VERIFY_LOG" || true
+
           SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
                -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR"
           READY=no
           ATTEMPT=0
-          # 客机启动后网络需要时间就绪，先等 30s 再开始探测
-          echo "等待客机网络就绪..." | tee -a "$VERIFY_LOG"
-          sleep 30
-          DEADLINE=$(( $(date +%s) + 900 ))
+          DEADLINE=$(( $(date +%s) + 600 ))
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             ATTEMPT=$(( ATTEMPT + 1 ))
             if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then
               exec 3>&- 2>/dev/null || true
-              # 每次尝试都留完整协商日志（最后一次会覆盖上一次，失败时分不清是哪次 ——
-              # 所以按 attempt 编号存，保留全部）
-              if $SSH -vvv "$GUEST_USER@127.0.0.1" 'whoami' >/tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
+              if $SSH -vvv "${GUEST_USER}@127.0.0.1" "whoami" > /tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
                 READY=yes; break
               fi
-              # 同时留一份简版 stderr 方便快速看
-              tail -20 "$SNAP/ssh-vvv-$ATTEMPT.txt" > /tmp/ssherr.txt 2>/dev/null || true
+              echo "attempt=$ATTEMPT ssh-failed" >> "$VERIFY_LOG"
             else
               echo "attempt=$ATTEMPT tcp-connect-failed" >> "$VERIFY_LOG"
             fi
@@ -1238,50 +1221,23 @@ jobs:
           echo "SSH_READY=$READY attempts=$ATTEMPT" | tee -a "$VERIFY_LOG"
 
           if [ "$READY" = yes ]; then
-            echo '=== SSH 实测 ===' | tee -a "$VERIFY_LOG"
+            echo "=== SSH 实测成功 ===" | tee -a "$VERIFY_LOG"
             cat /tmp/whoami.txt | tee -a "$VERIFY_LOG"
-            $SSH "$GUEST_USER@127.0.0.1" \
-              'powershell -NoProfile -Command "(Get-Service sshd).Status; (Get-NetTCPConnection -LocalPort 22 -State Listen).Count; Test-Path C:/cx/native/purge-tests.exe"' \
-              >> "$VERIFY_LOG" 2>&1 || true
-            {
-              echo '## SSH 验证：通过'
-              echo ''
-              echo '```'
-              cat /tmp/whoami.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            $SSH "${GUEST_USER}@127.0.0.1" \
+              "powershell -NoProfile -Command \"(Get-Service sshd).Status; Test-Path C:/cx/native/purge-tests.exe\"" \
+              2>&1 | tee -a "$VERIFY_LOG" || true
           else
-            echo '::error title=SSH 连不上::镜像不可用，不要拿去给 ci.yml 用'
-            {
-              echo '--- SSH_READY=no ---'
-              echo "attempts=$ATTEMPT"
-              echo '--- 最后一次 ssh -vvv 尾部 60 行 ---'
-              tail -60 "$SNAP/ssh-vvv-$ATTEMPT.txt" 2>/dev/null || echo '(no vvv log)'
-              echo '--- guest 内 setup-steps.txt（若已回传，这是定位关键）---'
-              cat "$WORK/data/setup-steps.txt" 2>/dev/null || echo '(未回传 setup-steps.txt)'
-              echo '--- guest 内 setup.log 尾部 60 行 ---'
-              tail -60 "$WORK/data/setup.log" 2>/dev/null || echo '(未回传 setup.log)'
-              echo '--- /data 清单 ---'
-              ls -la "$WORK/data" 2>/dev/null || echo '(no /data)'
-            } >> "$VERIFY_LOG"
-            echo '--- 失败诊断已写入 ssh-verify.txt ---'
-            cat "$VERIFY_LOG"
-            {
-              echo '## SSH 验证：失败'
-              echo ''
-              echo '**先看 artifact `guest-image-diagnostics` 里的 `ssh-verify.txt` 与 `data-setup-steps.txt`**'
-              echo ''
-              echo '```'
-              tail -30 "$VERIFY_LOG"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=SSH 连不上::镜像不可用" | tee -a "$VERIFY_LOG"
+            echo "--- 最后一次 ssh -vvv ---" | tee -a "$VERIFY_LOG"
+            tail -40 "$SNAP/ssh-vvv-$ATTEMPT.txt" 2>/dev/null | tee -a "$VERIFY_LOG" || true
+            echo "--- 容器日志尾 80 行 ---" | tee -a "$VERIFY_LOG"
+            docker logs cxverify 2>&1 | tail -80 | tee -a "$VERIFY_LOG" || true
           fi
-          kill -TERM "$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
-          sleep 3
-          kill -KILL "$(cat "$WORK/vqemu.pid" 2>/dev/null || echo 0)" 2>/dev/null || true
-          echo "SSH_READY=$READY" >> "$GITHUB_OUTPUT"
-          [ "$READY" = yes ] || exit 1
 
+          echo "SSH_READY=$READY" >> "$GITHUB_OUTPUT"
+          docker stop cxverify >/dev/null 2>&1 || true
+          docker rm -f cxverify >/dev/null 2>&1 || true
+          [ "$READY" = yes ] || exit 1
       - name: 存入 Actions Cache
         if: steps.verify.outputs.SSH_READY == 'yes'
         run: |
