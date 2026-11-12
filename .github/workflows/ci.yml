@@ -98,6 +98,23 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      # 2026-11-12：build-guest-image 并入后，这些输入从原独立 workflow 带过来。
+      guest_password:
+        description: '客机 runner 账号密码（仅构建镜像时用）'
+        required: false
+        default: 'Cx-Guest-2026!'
+      version:
+        description: 'Windows 版本（2022 = Server 2022）'
+        required: false
+        default: '2022'
+      disk_size:
+        description: '客机磁盘大小（稀疏）'
+        required: false
+        default: '32G'
+      install_timeout_sec:
+        description: '客机安装超时（秒）'
+        required: false
+        default: '3600'
       force:
         description: '强制运行 KVM 巡检（手动触发恒为 true，不受「今天跑过」限制）'
         type: boolean
@@ -1070,7 +1087,7 @@ jobs:
     env:
       # 镜像来源：手动触发可用 github.event.inputs.guest_image 覆盖；
       #   默认用 build-guest-image 作业存入的 Actions Cache（优先读 cache、读不到就构建）。
-      CX_QEMU_GUEST_IMAGE: ${{ github.event.inputs.guest_image || format('{0}/guest-cache/guest.qcow2', runner.temp) }}
+      CX_QEMU_GUEST_IMAGE: ${{ github.event.inputs.guest_image || format('{0}/guest-cache/guest.qcow2', github.workspace) }}
       CX_QEMU_GUEST_PURGE_EXE: ${{ vars.CX_QEMU_GUEST_PURGE_EXE || 'C:/cx/native/purge-tests.exe' }}
       CX_QEMU_HOSTFWD_SSH: '2222'
       CX_QEMU_BOOT_TIMEOUT_SEC: '900'
@@ -1085,14 +1102,14 @@ jobs:
       - name: 从 cache 恢复客机镜像
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/guest-cache
+          path: ${{ github.workspace }}/guest-cache
           key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
           fail-on-cache-miss: true
 
       - name: 确认镜像可用
         run: |
           set -eu
-          IMG="$RUNNER_TEMP/guest-cache/guest.qcow2"
+          IMG="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"
           if [ ! -f "$IMG" ]; then
             echo "::error title=cache 里没有镜像::build-guest-image 应当已经存入"
             exit 1
@@ -1966,7 +1983,7 @@ jobs:
     needs: gate
     if: needs.gate.result == 'success'
     env:
-      CACHE_KEY: ${{ env.GUEST_IMAGE_CACHE_KEY }}
+      CACHE_KEY: cx-win2022-guest-qcow2-v2
       GUEST_USER: runner
     steps:
       - name: 检出代码
@@ -1982,7 +1999,7 @@ jobs:
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/guest-cache
+          path: ${{ github.workspace }}/guest-cache
           key: ${{ env.CACHE_KEY }}
           # 不用 restore-keys：镜像必须精确命中，拿错版本比没有更糟
           fail-on-cache-miss: false
@@ -1991,7 +2008,7 @@ jobs:
         id: havecache
         run: |
           set -u
-          CACHE_DIR="$RUNNER_TEMP/guest-cache"
+          CACHE_DIR="$GITHUB_WORKSPACE/guest-cache"
           IMG="$CACHE_DIR/guest.qcow2"
           OK=no
           if [ -f "$IMG" ]; then
@@ -2871,9 +2888,8 @@ jobs:
       # 这个步骤在任何非成功结局下都会跑（if: always() 由下一步的 artifact 承担
       # 「一定上传」，这里只负责把证据尽可能抓全）。
       - name: 抓取安装现场快照
-        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        if: steps.havecache.outputs.CACHE_HIT != 'yes' && always()
         id: snapshot
-        if: always()
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
@@ -2983,9 +2999,8 @@ jobs:
       # ⚠️ 这不是 SSH 验证的替代品，只是**更快的分类器**：
       #    文件在 ≠ sshd 能连。所以下面失败只警告，不阻断（SSH 才是硬门禁）。
       - name: 离线检查镜像内容（libguestfs）
-        if: steps.havecache.outputs.CACHE_HIT != 'yes'
-        id: offline
         if: always()
+        id: offline
         run: |
           set -u
           WORK="$RUNNER_TEMP/guest"
@@ -2993,8 +3008,15 @@ jobs:
           mkdir -p "$SNAP"
           OUT="$SNAP/offline-check.txt"
           : > "$OUT"
-          IMG="$WORK/guest.qcow2"
-          if [ ! -f "$IMG" ]; then
+          # 镜像可能在两处：本次构建产物，或 cache 恢复出来的
+          if [ -f "$WORK/guest.qcow2" ]; then
+            IMG="$WORK/guest.qcow2"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            IMG="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"
+          else
+            IMG=""
+          fi
+          if [ -z "$IMG" ]; then
             echo "SKIP: 没有 $IMG" | tee -a "$OUT"; exit 0
           fi
 
@@ -3118,12 +3140,12 @@ jobs:
           WORK="$RUNNER_TEMP/guest"
           mkdir -p "$WORK/run-storage"
           # 构建路径：qcow2 已由「压缩」步骤产出到 $WORK/guest.qcow2
-          # cache 路径：镜像在 $RUNNER_TEMP/guest-cache/guest.qcow2
+          # cache 路径：镜像在 $GITHUB_WORKSPACE/guest-cache/guest.qcow2
           SRC=""
           if [ -f "$WORK/guest.qcow2" ]; then
             SRC="$WORK/guest.qcow2"; echo "镜像来源: 本次构建"
-          elif [ -f "$RUNNER_TEMP/guest-cache/guest.qcow2" ]; then
-            SRC="$RUNNER_TEMP/guest-cache/guest.qcow2"; echo "镜像来源: cache"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            SRC="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"; echo "镜像来源: cache"
           fi
           if [ -z "$SRC" ]; then
             echo "::error title=没有可用镜像::既没构建出 guest.qcow2，cache 也没命中"
@@ -3133,8 +3155,8 @@ jobs:
           # ⚠️ 2026-11-12：cache 路径下，windows.* 状态文件也在 guest-cache 里。
           #   dockur 靠它们判断「已安装」，缺了就会静默重装系统。
           #   构建路径的状态文件在 $WORK/storage（由验证步骤自己复制）。
-          if [ -d "$RUNNER_TEMP/guest-cache" ]; then
-            for f in "$RUNNER_TEMP/guest-cache"/windows.*; do
+          if [ -d "$GITHUB_WORKSPACE/guest-cache" ]; then
+            for f in "$GITHUB_WORKSPACE/guest-cache"/windows.*; do
               [ -e "$f" ] || continue
               cp -a "$f" "$WORK/run-storage/"
               echo "  从 cache 恢复状态文件 $(basename "$f")"
@@ -3281,7 +3303,7 @@ jobs:
         run: |
           set -eu
           WORK="$RUNNER_TEMP/guest"
-          CACHE_OUT="$RUNNER_TEMP/guest-cache"
+          CACHE_OUT="$GITHUB_WORKSPACE/guest-cache"
           mkdir -p "$CACHE_OUT"
           # ⚠️ 2026-11-12 关键：不能只存 qcow2。
           #   dockur 靠**一整套 windows.* 状态文件**判断「已安装」
@@ -3390,7 +3412,7 @@ jobs:
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
           KVM_PROBE_RESULT: ${{ needs.kvm-probe.result }}
           WIRING_PROBE_RESULT: ${{ needs.wiring-probe.result }}
-          WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.outcome }}
+          WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
           QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
           GATE_REASON: ${{ needs.gate.outputs.reason }}
