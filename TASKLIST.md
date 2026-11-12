@@ -4,15 +4,22 @@
 
 ## 进行中
 
-| PR | 内容 | 状态 |
-|---|---|---|
-| #9 | 取消一切跳过条件 + 附件名中文化 + 客机镜像 cache 化 | 18/19 通过，客机镜像 SSH 验证失败 |
+（无）
+
+
+## 已合并（本轮）
+
+- **注入可观测性**：#4 ABSENT 态 + 三级断言 + PR 可跑 fixture 判定层；#6 修 bundle 哨兵「只探一次 + 三态退化」
+- **关机自毁 CI**：#3 Linux guest 真实关机自毁 job；#1 `ci-vm.yml` 并入 `ci.yml`；#14 修 `qemu-shutdown-destruct` 三层假绿（引号 / `pipefail` / teardown 配对判据）；#12 #15 `purge-tests.exe` 走 artifact 下载并与上传侧对齐；#11 Windows 客机镜像独立构建
+- **取消各类跳过**：#7 `windows-release` 不再被 `windows-unit` 连锁 skip；#9 取消一切 skip 条件、每个 job 都跑 + 附件中文名
+- **其他**：#2 液态玻璃改干玻璃（关闭模糊）；#16 加密字体还原失败不再静默（区分「缺映射表」与「缺字体」）
+- **回归工具**：#17 三样本注入回归一键脚本（管理员前置检查 90s→0.54s）+ 产物名可读化 + 空 summary 不再假绿 + 两处失效注释（`+43/-1`）
+- **文档**：#5 #10 #13 TASKLIST 三版迭代
+- **已关闭**：#8（`kvm-probe` 取消判重）—— 内容已被 #9 覆盖
 
 ## 已知缺口
 
-- `验证 SSH 可连` 的 ssh 未设 `ServerAliveInterval`，认证阶段可无限挂起，最终撞步骤 15 分钟超时
-- cache 里的 state 文件缺 `windows.system`（构建期由 dockur 内部写入，仓库无任何断言锁定它）
-- 真实客户端注入矩阵由 discovery 作业动态发现，只覆盖仓库里配置的客户端与数据库组合
+- 真实客户端注入矩阵由 discovery 作业（`ci.yml:234`）按 `tests/private-clients/chaoxing-exam-*.exe` 与仓库变量动态生成，**只覆盖「仓库里有样本 + 配了数据库变量」的组合**；新增样本未入库、或未配变量时，该组合不会被测到
 
 ## 约定
 
