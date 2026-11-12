@@ -335,6 +335,7 @@ try {
       $script:captureGuard = [PowerShell]::Create()
       [void]$script:captureGuard.AddScript(@'
 param($root, $clientPid, $port)
+. (Join-Path $root 'windows-client-capture-guard.ps1')
 . (Join-Path $root 'windows-client-entry.ps1')
 . (Join-Path $root 'windows-client-cdp.ps1')
 Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
@@ -498,13 +499,53 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   if ($chainRan -and -not $bundleLanded -and -not [bool]$evidence.bundleSentinelRejected) {
     $injectSummary.strictFailures += 'bundle-not-in-page'
   }
+  # Capture-window (W) distribution.
+  #
+  # Why read the file instead of using Watch-ClientCaptureGuard's return value:
+  #   (a) it runs in a separate runspace, so the main flow cannot see its return value;
+  #   (b) inject-evidence-assertion.test.mjs:162 and inject-report-verdict.test.mjs:77 both
+  #       stub it as `return $null`; carrying data in the return value would break them.
+  # A missing file yields available:false, which distinguishes "no capture happened"
+  # from "it happened but was not recorded".
+  try {
+    if (-not (Get-Command Get-CaptureGuardEventsPath -ErrorAction SilentlyContinue)) {
+      . (Join-Path $PSScriptRoot 'windows-client-capture-guard.ps1')
+    }
+    $guardEventsPath = $null
+    if ($entry.PSObject.Properties['ProcessId'] -and [int]$entry.ProcessId -gt 0) {
+      $guardEventsPath = Get-CaptureGuardEventsPath -ProcessId ([int]$entry.ProcessId)
+    }
+    $guardEvents = Read-CaptureGuardEvents -Path $guardEventsPath
+    if ($guardEvents.Available) {
+      $guardStats = Get-CaptureGuardWindowStats -Events $guardEvents.Lines
+      $captureGuardSummary = [ordered]@{
+        available     = $true
+        eventsPath    = [string]$guardEvents.Path
+        events        = [int]$guardStats.events
+        rawEventCount = [int]$guardStats.rawEventCount
+        unpairedOn    = [int]$guardStats.unpairedOn
+        errorCount    = [int]$guardStats.errorCount
+        wMinMs        = $guardStats.wMinMs
+        wMaxMs        = $guardStats.wMaxMs
+        wP50Ms        = $guardStats.wP50Ms
+        wP95Ms        = $guardStats.wP95Ms
+        # Record the poll interval too: a W P95 is only meaningful next to it.
+        pollMs        = 200
+      }
+    }
+  } catch {
+    $captureGuardSummary = [ordered]@{ available = $false; error = [string]$_.Exception.Message }
+  }
+
   # The report is the artifact CI uploads, so the summary must travel with it on pass and on failure.
   try {
     $report | Add-Member -NotePropertyName 'injectVerifiedSummary' -NotePropertyValue ([pscustomobject]$injectSummary) -Force
+    $report | Add-Member -NotePropertyName 'captureGuard' -NotePropertyValue ([pscustomobject]$captureGuardSummary) -Force
     [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
   } catch {
     Write-Host "[real-client] unable to record injectVerifiedSummary in the report: $($_.Exception.Message)"
   }
+  Write-Host "[real-client] captureGuard available=$($captureGuardSummary.available) events=$($captureGuardSummary.events) wMinMs=$($captureGuardSummary.wMinMs) wMaxMs=$($captureGuardSummary.wMaxMs) wP50Ms=$($captureGuardSummary.wP50Ms) wP95Ms=$($captureGuardSummary.wP95Ms)"
   Write-Host "[real-client] injectEvidence bundleInPage=$($evidence.bundleInPage) verified=$($evidence.verified) sentinelRejected=$($evidence.bundleSentinelRejected) reason=$($evidence.reason) chainRan=$chainRan injectVerifiedSummary verifiedFalse=$verifiedFalse/$($injectSummary.total) strictFailures=$($injectSummary.strictFailures -join ',')"
   if ($verifiedFalse -gt 0) {
     $script:injectVerifiedWarning = "INJECT_BUNDLE_UNVERIFIED case=$CaseName verifiedFalse=$verifiedFalse/$($injectSummary.total) bundleInPage=$($evidence.bundleInPage) bundleSentinelRejected=$($evidence.bundleSentinelRejected) reason=$($evidence.reason): the CDP chain worked but the page never proved the bundle ran"
