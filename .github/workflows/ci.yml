@@ -1127,6 +1127,14 @@ jobs:
             echo "::error title=镜像体积异常::只有 $SIZE 字节"
             exit 1
           fi
+          # 这份镜像来自 dockurr/windows，启动时依赖缓存中的 UEFI 固件文件。
+          # 缺失时 qemu 可能持续运行但客机无法引导，最终表现为 SSH 永远不就绪。
+          for f in "$GITHUB_WORKSPACE/guest-cache/windows.rom" "$GITHUB_WORKSPACE/guest-cache/windows.vars"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=缺少 UEFI 固件文件::$f 不存在（请确认 build-guest-image 已缓存 windows.*）"
+              exit 1
+            fi
+          done
       - name: 环境基线
         run: |
           set -u
@@ -1428,11 +1436,18 @@ jobs:
         run: |
           set -u
           SSH_PORT="${CX_QEMU_HOSTFWD_SSH}"
+          ROM="$GITHUB_WORKSPACE/guest-cache/windows.rom"
+          VARS_SRC="$GITHUB_WORKSPACE/guest-cache/windows.vars"
+          VARS="$RUNNER_TEMP/windows.vars"
+          cp "$VARS_SRC" "$VARS"
+          chmod 600 "$VARS"
           # -enable-kvm 是硬要求：没有它冷启动会远超 45 分钟上限，宁可失败也不静默退 TCG。
           # 绝对不能加 -no-reboot / -no-shutdown：这两个开关会让 QEMU 在客机重启时
           # 直接退出进程，客机永远不会再上电，「登记 → 重启 → 重放」就断在第二步。
           qemu-system-x86_64 \
-            -enable-kvm -cpu host -smp 4 -m 6144 \
+            -enable-kvm -machine q35 -cpu host -smp 4 -m 6144 \
+            -drive if=pflash,format=raw,readonly=on,file="$ROM" \
+            -drive if=pflash,format=raw,file="$VARS" \
             -drive file="$RUNNER_TEMP/guest-overlay.qcow2",if=virtio,cache=writeback \
             -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
             -display none -vga none \
