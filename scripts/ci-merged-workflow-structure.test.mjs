@@ -1147,11 +1147,13 @@ test('SSH 密钥必须随镜像打包进 cache，且消费端不依赖 secret', 
 //   这里加一条通用防护：凡是 download-artifact 引用的名字，必须能在
 //   某个 upload-artifact 的 name 里找到；找不到就是失配。
 test('所有 download-artifact 的 name 都必须有对应的 upload-artifact 提供', async () => {
-  const raw = await readFile(WORKFLOW, 'utf8');
+  // ⚠️ 2026-11-12（run 43213621397 实测）：这里必须先把 CRLF 归一成 LF。
+  //   仓库 core.autocrlf=true，Windows runner 上检出的 ci.yml 是 CRLF，
+  //   而正则 `name: (.+)$` 的 `$` 在 CRLF 下会把 `\r` 留在捕获值末尾，
+  //   导致 uploads/downloads 双双取到 0 个 → 触发「空转」断言误红。
+  const raw = (await readFile(WORKFLOW, 'utf8')).replace(/\r\n/g, '\n');
   const lines = raw.split('\n');
 
-  // 收集每个 artifact 步骤（upload/download）的 with.name。
-  // 用「最近一次 uses 是 upload 还是 download」来标记当前行属于哪个步骤。
   const uploadNames = new Set();
   const downloadNames = [];
   let curKind = null;
@@ -1159,15 +1161,18 @@ test('所有 download-artifact 的 name 都必须有对应的 upload-artifact �
   for (const line of lines) {
     if (line.includes('actions/upload-artifact@')) { curKind = 'upload'; continue; }
     if (line.includes('actions/download-artifact@')) { curKind = 'download'; continue; }
-    // 遇到新步骤起始就重置（- name: / - uses: 缩进两格 + 短横线）
     if (/^ {2}- (name|uses):/u.test(line)) { curKind = null; continue; }
-    // 在 artifact 步骤内，抓 with 块里的 name
-    if (curKind && /^ {10}name: (.+)$/u.test(line)) {
-      const nm = line.trim().replace(/^name: /, '');
+    const m = /^ {10}name: (.+)$/u.exec(line);
+    if (curKind && m) {
+      const nm = m[1].trim();
       if (curKind === 'upload') uploadNames.add(nm);
       else downloadNames.push(nm);
     }
   }
+
+  // 自检：两侧都必须非空，否则解析本身坏了（而不是「没有失配」）
+  assert.ok(uploadNames.size > 0, `应解析出至少一个 upload-artifact 的 name，实际 0（解析逻辑或缩进假设失效）`);
+  assert.ok(downloadNames.length > 0, '应解析出至少一个 download-artifact 的 name，实际 0（解析逻辑或缩进假设失效）');
 
   const missing = downloadNames.filter((nm) => !uploadNames.has(nm));
   assert.deepEqual(
@@ -1176,5 +1181,4 @@ test('所有 download-artifact 的 name 都必须有对应的 upload-artifact �
     '以下 download-artifact 引用的 name 没有任何 upload-artifact 提供（改名时只改了一侧）：\n' +
       missing.map((n) => '  - ' + n).join('\n'),
   );
-  assert.ok(downloadNames.length > 0, '应有至少一个 download-artifact，否则本断言空转');
 });

@@ -1607,40 +1607,47 @@ jobs:
           #     · 即使有，Windows 目标路径 C:/cx/... 在不同 scp 版本上解析不一致；
           #     · scp 失败只回 255，不告诉你是协议、子系统还是路径的问题。
           #   base64 + ssh 写入：只要 ssh 能跑 PowerShell 就能成功，与 sftp 无关。
-          log "=== step2: 传输脚本（base64 → PowerShell 解码）==="
-          # ⚠️ 2026-11-12（run 43207234187）：上一版用 `printf '...\\%s...'` 拼 PowerShell 脚本，
-          #   再 iconv 到 UTF-16LE + base64 走 -EncodedCommand。失败在「写入 C:\\cx\\scripts\\vm」，
-          #   但**无法确定是哪一环**：printf 的 \\ 转义、iconv 无 BOM、还是路径拼接少了一个分隔符。
-          #
-          #   换成更少中间环节的写法：
-          #     · 不用 -EncodedCommand（省掉 iconv + 二次 base64）
-          #     · PowerShell 脚本用 **stdin 传入**（powershell -Command -），避免命令行引号/长度问题
-          #     · 目标路径用正斜杠 C:/cx/...（PowerShell 在 Windows 上接受，且不需要反斜杠转义）
-          #     · 每次写入后立刻用 Test-Path 复核，失败能精确到是哪个文件
+          log "=== step2: 传输脚本（分块追加，绝不走 stdin）==="
+          # ⚠️ 2026-11-12（run 43213621397）：stdin 方案死锁（ReadToEnd 等 EOF，ssh 不关 stdin）。
+          #   改成：base64 分块，每块作为命令行参数用 AppendAllText 追加，最后解码。
+          #   引号策略：PowerShell 命令整体放进 bash 单引号字符串（PSCMD=... 单引号），
+          #   内部需要动态变量时用双引号重新拼接，避免嵌套转义。
           for f in scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1; do
             bn=$(basename "$f")
-            if [ ! -f "$f" ]; then
-              log "::error title=源脚本缺失::$f 不存在（本地就没有，不是传输问题）"
-              exit 1
-            fi
+            [ -f "$f" ] || { log "::error title=源脚本缺失::$f"; exit 1; }
             B64=$(base64 -w0 "$f")
-            log "  $bn 源大小=$(stat -c %s "$f") base64长度=${#B64}"
-            # 脚本经 stdin 进 PowerShell：$input 读全部输入，从中取 base64 并解码写出。
-            # 用正斜杠路径，避免 bash/PowerShell 两层反斜杠转义。
-            if ! printf '%s' "$B64" | $SSH "$USER_HOST" \
-                 "powershell -NoProfile -Command \"\$b64 = [Console]::In.ReadToEnd().Trim(); [IO.File]::WriteAllBytes('C:/cx/scripts/vm/${bn}', [Convert]::FromBase64String(\$b64)); \"" \
-                 >> "$DEPLOY_LOG" 2>&1; then
-              log "::error title=写入客机失败::$bn（见 deploy.txt 的 ssh stderr）"
-              exit 1
-            fi
-            # 立刻复核该文件在客机上存在且大小与源一致
-            REMOTE_SIZE=$($SSH "$USER_HOST" "powershell -NoProfile -Command \"(Get-Item 'C:/cx/scripts/vm/${bn}').Length\"" 2>/dev/null | tr -d "\r\n " )
             LOCAL_SIZE=$(stat -c %s "$f")
-            log "  $bn 客机大小=${REMOTE_SIZE:-?} 本地大小=$LOCAL_SIZE"
-            if [ "${REMOTE_SIZE:-0}" != "$LOCAL_SIZE" ]; then
-              log "::error title=写入大小不符::$bn 客机=${REMOTE_SIZE:-?} 本地=$LOCAL_SIZE"
+            log "  $bn 源大小=$LOCAL_SIZE base64长度=${#B64}"
+
+            TMPB64="C:/cx/scripts/vm/${bn}.b64"
+            FINAL="C:/cx/scripts/vm/${bn}"
+
+            # 清旧临时文件
+            $SSH "$USER_HOST" "powershell -NoProfile -Command Remove-Item -LiteralPath '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1 || true
+
+            # 分块追加
+            CHUNK=512; IDX=0; TOTAL=${#B64}; BLOCKS=0
+            while [ $IDX -lt $TOTAL ]; do
+              PART="${B64:$IDX:$CHUNK}"
+              [ -z "$PART" ] && break
+              # 单条命令：AppendAllText(路径, 块内容)。块内容是 base64 字符，安全。
+              if ! $SSH "$USER_HOST" "powershell -NoProfile -Command [IO.File]::AppendAllText('${TMPB64}','${PART}')" >> "$DEPLOY_LOG" 2>&1; then
+                log "::error title=追加分块失败::$bn offset=$IDX"
+                exit 1
+              fi
+              IDX=$(( IDX + CHUNK )); BLOCKS=$(( BLOCKS + 1 ))
+            done
+            log "  $bn 分块传输完成（$BLOCKS 块）"
+
+            # 解码
+            if ! $SSH "$USER_HOST" "powershell -NoProfile -Command \$b=[IO.File]::ReadAllText('${TMPB64}');[IO.File]::WriteAllBytes('${FINAL}',[Convert]::FromBase64String(\$b));Remove-Item '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1; then
+              log "::error title=解码失败::$bn"
               exit 1
             fi
+
+            REMOTE_SIZE=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Get-Item '${FINAL}').Length" 2>/dev/null | tr -d "\r\n ")
+            log "  $bn 客机大小=${REMOTE_SIZE:-?} 本地=$LOCAL_SIZE"
+            [ "${REMOTE_SIZE:-0}" = "$LOCAL_SIZE" ] || { log "::error title=大小不符::$bn"; exit 1; }
             log "  wrote $bn"
           done
           log "step2-ok"
