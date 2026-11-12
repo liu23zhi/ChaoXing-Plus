@@ -1176,15 +1176,36 @@ jobs:
           : > "$VERIFY_LOG"
 
           echo "=== 用 docker bridge 启动镜像 ===" | tee -a "$VERIFY_LOG"
+          # ⚠️ 2026-11-12 关键修正：dockur 靠**一整套状态文件**判断「已安装」，
+          #   不是只看 qcow2。install.sh 的 getSystemImage 读 `readState "system"`，
+          #   hasCompletedInstall 还要 hasSystemImage || (hasData && hasBootMarker)。
+          #   状态文件是 storage 下的 windows.* 系列：
+          #     windows.base / windows.ver / windows.mac / windows.rom /
+          #     windows.vars / windows.system（记录 img 文件名）
+          #   上一轮我只复制了 data.qcow2 ⇒ dockur 认为「没有现成系统」⇒
+          #   日志里出现 `Requesting Windows Server 2022 ... Downloading ...`（重新下载 ISO 重装）。
+          #   ⇒ 必须把**整套 storage** 复制过去（除了 ISO / setup.img 这些大文件）。
           mkdir -p "$WORK/run-storage"
-          cp "$WORK/guest.qcow2" "$WORK/run-storage/data.qcow2"
-          echo "  data.qcow2 = $(stat -c %s "$WORK/run-storage/data.qcow2") 字节" | tee -a "$VERIFY_LOG"
-
-          docker rm -f cxverify >/dev/null 2>&1 || true
-          docker run -d --name cxverify \
-            --device=/dev/kvm \
-            -e VERSION=2022 \
-            -e DISK_FMT=qcow2 \
+          echo "=== 复制整套 storage 状态（排除 ISO 与 setup.img）===" | tee -a "$VERIFY_LOG"
+          for f in "$WORK/storage"/*; do
+            [ -e "$f" ] || continue
+            bn=$(basename "$f")
+            case "$bn" in
+              *.iso|setup.img) echo "  跳过 $bn（安装介质，验证时不需要）" | tee -a "$VERIFY_LOG" ;;
+              *)
+                cp -a "$f" "$WORK/run-storage/" 2>/dev/null \
+                  && echo "  复制 $bn ($(stat -c %s "$f" 2>/dev/null || echo ?) 字节)" | tee -a "$VERIFY_LOG" \
+                  || echo "  复制失败 $bn" | tee -a "$VERIFY_LOG"
+                ;;
+            esac
+          done
+          echo "=== run-storage 内容 ===" | tee -a "$VERIFY_LOG"
+          ls -la "$WORK/run-storage" | tee -a "$VERIFY_LOG"
+          # 关键断言：windows.system 或 data.qcow2 必须存在，否则 dockur 会重装
+          if [ ! -f "$WORK/run-storage/data.qcow2" ]; then
+            echo "::error title=run-storage 缺少 data.qcow2::后续 dockur 会重新安装" | tee -a "$VERIFY_LOG"
+            exit 1
+          fi
             -e DISK_SIZE=32G \
             -e USERNAME="${GUEST_USER}" \
             -e PASSWORD="Cx-Guest-2026!" \
