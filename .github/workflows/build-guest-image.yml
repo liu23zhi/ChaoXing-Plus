@@ -158,75 +158,94 @@ jobs:
           fi
 
       - name: 安装依赖
-        # 用户 2026-11-11 要求：**优先用 apt 安装**（DNS 已在上一一步修好）。
-        # 保留 docker 降级作为兜底，但不再是主路径。
+        # ⚠️ 2026-11-12 修三个真 bug（上一轮全踩了）：
+        #   ① `--error-on-any-failure` **不能与其他选项组合** ——
+        #      实测报 `E: Command line option --error-on-any-failure is not
+        #      understood in combination with the other options`，
+        #      加了它整条 apt 命令直接失效（连 update 都没跑）。
+        #   ② 管道吞退出码 —— `sudo apt-get update ... | tail -10` 的 `$?`
+        #      是 **tail 的**（恒 0），所以 `APT_OK=yes` 是假的。
+        #   ③ docker 提取的 qemu 跑不了 —— 缺 `liburing.so.2` / `libcapstone.so.5`，
+        #      `docker cp` 只拿二进制不拿依赖库。
+        # ⇒ 现在：apt 是唯一主路径；判据用「索引文件是否真的刷新」+
+        #    「二进制真的能跑」，不看 apt 的退出码。
         timeout-minutes: 12
         run: |
           set -u
-          echo "=== DNS 当前状态 ==="
+          echo "=== DNS 状态 ==="
           cat /etc/resolv.conf 2>/dev/null | head -5 || true
           getent hosts archive.ubuntu.com >/dev/null 2>&1 \
             && echo "  archive.ubuntu.com 可解析" \
-            || echo "  archive.ubuntu.com 解析失败（将走 docker 降级）"
+            || echo "  archive.ubuntu.com 解析失败"
           echo
-          # ── 主路径：apt ──────────────────────────────────────────────────
-          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           apt_ok=no
           for attempt in 1 2 3; do
-            echo "=== apt-get update 第 $attempt 次 ==="
-            # ⚠️ update 在索引全失败时仍返回 0，必须加 --error-on-any-failure
-            if timeout 150 sudo apt-get update -qq --error-on-any-failure $APT_OPTS 2>&1 | tail -10; then
-              echo "update 成功"
-              echo "=== apt-get install ==="
-              if timeout 300 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                   --error-on-any-failure $APT_OPTS \
-                   qemu-utils qemu-system-x86 2>&1 | tail -10; then
+            echo "=== 第 $attempt 轮 ==="
+            # ① 先记下当前索引文件数，update 后要求**变多或变新**，
+            #    这是「真的拿到了索引」的唯一可靠判据。
+            LISTS_BEFORE=$(find /var/lib/apt/lists -name "*_Packages*" 2>/dev/null | wc -l)
+            echo "  update 前索引文件数 = $LISTS_BEFORE"
+
+            # ② 不用管道！输出落盘，退出码才准。
+            sudo apt-get update -qq $APT_OPTS > /tmp/aptup.log 2>&1
+            UP_RC=$?
+            tail -8 /tmp/aptup.log || true
+            echo "  apt-get update rc=$UP_RC"
+
+            LISTS_AFTER=$(find /var/lib/apt/lists -name "*_Packages*" 2>/dev/null | wc -l)
+            echo "  update 后索引文件数 = $LISTS_AFTER"
+
+            # ③ 判据：索引文件数必须 >0 且不比之前少（少说明整体失败）
+            if [ "$LISTS_AFTER" -gt 0 ] && [ "$LISTS_AFTER" -ge "$LISTS_BEFORE" ]; then
+              echo "  索引可用，尝试 install"
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $APT_OPTS \
+                qemu-utils qemu-system-x86 > /tmp/aptinst.log 2>&1
+              INST_RC=$?
+              tail -8 /tmp/aptinst.log || true
+              echo "  apt-get install rc=$INST_RC"
+              if [ "$INST_RC" -eq 0 ]; then
                 apt_ok=yes; break
               fi
+            else
+              echo "  索引没拿到（update 实际失败）"
             fi
-            echo "第 $attempt 次失败，10 秒后重试"
+            echo "  第 $attempt 轮未成功，10 秒后重试"
             sleep 10
           done
           echo "APT_OK=$apt_ok"
           echo
-          # ── 兜底：docker 提取 qemu ────────────────────────────────────────
-          if ! command -v qemu-img >/dev/null 2>&1; then
-            echo "=== apt 未装到 qemu-img，走 docker 提取 ==="
-            docker pull docker.io/dockurr/windows:latest 2>&1 | tail -3 || true
-            CID=$(docker create docker.io/dockurr/windows:latest 2>/dev/null || echo "")
-            if [ -n "$CID" ]; then
-              mkdir -p "$RUNNER_TEMP/qemu-bin"
-              for f in qemu-system-x86_64 qemu-img; do
-                docker cp "$CID:/usr/bin/$f" "$RUNNER_TEMP/qemu-bin/" 2>/dev/null \
-                  && echo "  提取 $f" || true
-              done
-              docker rm -f "$CID" >/dev/null 2>&1 || true
-              chmod +x "$RUNNER_TEMP/qemu-bin/"* 2>/dev/null || true
-            fi
-          fi
-          echo
-          # ── 最终断言 ─────────────────────────────────────────────────────
-          if command -v qemu-img >/dev/null 2>&1; then
+          # ── 唯一判据：二进制真的能跑 ─────────────────────────────────────
+          QEMU_IMG_OK=no
+          QEMU_SYS_OK=no
+          if command -v qemu-img >/dev/null 2>&1 && qemu-img --version >/dev/null 2>&1; then
+            QEMU_IMG_OK=yes
             echo "qemu-img = $(command -v qemu-img)"
             qemu-img --version | head -1
-          elif [ -x "$RUNNER_TEMP/qemu-bin/qemu-img" ]; then
-            echo "qemu-img 来自 docker 提取"
-            echo "$RUNNER_TEMP/qemu-bin" >> "$GITHUB_PATH"
-            export PATH="$RUNNER_TEMP/qemu-bin:$PATH"
-            "$RUNNER_TEMP/qemu-bin/qemu-img" --version | head -1 \
-              || echo "（提取的二进制可能缺共享库）"
-          else
-            echo "::error title=qemu-img 不可用::apt 与 docker 都没成功"
+          fi
+          if command -v qemu-system-x86_64 >/dev/null 2>&1 && qemu-system-x86_64 --version >/dev/null 2>&1; then
+            QEMU_SYS_OK=yes
+            echo "qemu-system-x86_64 = $(command -v qemu-system-x86_64)"
+            qemu-system-x86_64 --version | head -1
+          fi
+          echo "QEMU_IMG_OK=$QEMU_IMG_OK QEMU_SYS_OK=$QEMU_SYS_OK"
+          echo
+          # apt 装成功但二进制跑不了 → 必须红（不能带着坏工具往下走）
+          if [ "$QEMU_IMG_OK" != yes ]; then
+            echo "::error title=qemu-img 不可用::apt 未装成功或二进制跑不起来"
+            echo "--- 诊断 ---"
+            command -v qemu-img || echo "(不在 PATH)"
+            ls -la /usr/bin/qemu-img 2>/dev/null || true
+            qemu-img --version 2>&1 | head -3 || true
             cat /etc/resolv.conf 2>/dev/null || true
-            getent hosts archive.ubuntu.com || echo "(解析失败)"
-            docker --version || echo "(无 docker)"
+            getent hosts archive.ubuntu.com || echo "(archive.ubuntu.com 解析失败)"
             exit 1
           fi
-          command -v qemu-system-x86_64 >/dev/null 2>&1 \
-            && qemu-system-x86_64 --version | head -1 \
-            || echo "注意：qemu-system-x86_64 当前不可用"
-          command -v qemu-system-x86_64 >/dev/null 2>&1 \
-            && { qemu-system-x86_64 -accel help 2>/dev/null | head -3 || true; } || true
+          if [ "$QEMU_SYS_OK" != yes ]; then
+            echo "::error title=qemu-system-x86_64 不可用::「验证 SSH」那步需要它"
+            ls -la /usr/bin/qemu-system-x86_64 2>/dev/null || true
+            exit 1
+          fi
           echo
           df -h /
       - name: 准备 SSH 密钥
