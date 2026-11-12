@@ -463,7 +463,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.ok(realClientScope.includes('windows-real-client:'), '真实客户端段的切分必须包含两个作业');
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
-  assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
+  // 2026-11-12：job name 改为更准确的中文。
+  assert.match(workflow, /name: 源码类型检查与前端扩展构建（Ubuntu）/u);
   // 2026-11-10：ci-vm.yml 已整体并入 ci.yml（用户要求「完整 ci 添加上完整的关机自毁
   // 测试」）。原来 kvm-probe 是 workflow_call 的 callee，现在 gate / kvm-probe /
   // vm-shutdown-destruct / wiring-probe / qemu-shutdown-destruct 全是本文件的 job，
@@ -472,7 +473,22 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   // 顺带守住「summary 必须无条件运行（if: always()）」：它是唯一汇总出口。
   // 2026-11-11：新增 qemu-destruct-linux-guest（Linux guest 关机自毁）。
   // 它同样必须进 needs，否则 Step Summary 里那一行取不到 needs.*.result。
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest\][\s\S]*?if: always\(\)/u, '汇总 job 必须等待所有拆分环境（含 gate / kvm-probe 与三条关机自毁作业）并报告结果');
+  // 2026-11-12：build-guest-image 并入 ci.yml 后，summary 也要等它。
+  // 断言改成「包含全部必需项」而不是「精确等于某个顺序列表」——
+  // 后者每加一个 job 就要改一次，属于把实现细节锁进测试。
+  assert.match(workflow, /name: 持续集成结果汇总[\s\S]*?needs: \[[^\]]*\][\s\S]*?if: always\(\)/u, '汇总 job 必须报告结果');
+  const summaryNeeds = (workflow.match(/name: 持续集成结果汇总[\s\S]*?needs: \[([^\]]*)\]/u) || [])[1] || '';
+  for (const required of [
+    'source', 'windows-build', 'windows-unit', 'windows-pause', 'windows-window',
+    'windows-browser', 'windows-release', 'windows-real-client-discovery',
+    'windows-real-client', 'kvm-probe', 'wiring-probe',
+    'qemu-shutdown-destruct', 'qemu-destruct-linux-guest', 'build-guest-image',
+  ]) {
+    assert.ok(
+      summaryNeeds.split(',').map((s) => s.trim()).includes(required),
+      '汇总 job 的 needs 必须包含 ' + required + '。实际：[' + summaryNeeds + ']',
+    );
+  }
   // 三条关机自毁作业的结果必须真的进 Step Summary，否则「完整 CI 有关机自毁测试」
   // 只体现在 JSON 里，看摘要的人看不到。
   assert.match(workflow, /WIRING_PROBE_RESULT: \$\{\{ needs\.wiring-probe\.result \}\}/u,
@@ -514,7 +530,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver\.exe'/u, 'CI 必须强制检查复用的原生 discovery 驱动');
   assert.match(workflow, /CX_NATIVE_SILENT_EXE = 'silent-tests\.exe'/u, 'CI 必须强制检查静默引擎原生测试产物');
   assert.match(workflow, /CX_NATIVE_EXTENSION_CACHE_EXE/u, 'CI 必须导出扩展缓存原生测试入口');
-  assert.match(workflow, /name: Windows 可见窗口与 Edge\/Chrome 会话回归/u, 'CI 必须执行交互窗口回归');
+  assert.match(workflow, /name: 可见窗口与 Edge\/Chrome 会话回归/u, 'CI 必须执行交互窗口回归');
   assert.match(workflow, /--test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u, '交互窗口回归必须串行执行');
   assert.match(workflow, /CX_TEST_NATIVE_WINDOW: '1'/u, 'CI 必须开启真实窗口回归');
   assert.match(workflow, /scripts\/windows-native-adapter\.test\.mjs/u, 'CI 必须覆盖原生账号窗口回归');
@@ -648,7 +664,9 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   //     整条 QEMU 链路在镜像/密钥缺失时按设计跳过，不会阻塞任何 PR 或主干。
   // 原意是「CI 不得依赖需要人工配置的 secret 才能跑通」，因此改成允许清单 +
   // 明确「允许项必须是可缺省的」，而不是无条件放行所有 secrets.*。
-  const optionalSecrets = new Set(['GITHUB_TOKEN', 'CX_QEMU_GUEST_SSH_KEY']);
+  // 2026-11-12：`CX_QEMU_GUEST_SSH_KEY` 已从 ci.yml 移除（用户要求「不保留 secret」，
+  //   密钥改从 Actions Cache 取，与镜像内公钥天然配对）。白名单只剩 GITHUB_TOKEN。
+  const optionalSecrets = new Set(['GITHUB_TOKEN']);
   const secretRefs = [...workflow.matchAll(/secrets\.([A-Za-z0-9_]+)/gu)].map((m) => m[1]);
   const unexpectedSecrets = [...new Set(secretRefs)].filter((name) => !optionalSecrets.has(name));
   assert.deepEqual(
@@ -656,9 +674,30 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
     [],
     `CI 不得依赖额外的人工 secret（只允许可缺省的 ${[...optionalSecrets].join(' / ')}），发现：${unexpectedSecrets.join(', ')}`,
   );
-  // 允许项也必须真的可缺省：QEMU 缺密钥时必须走 skip 分支而不是 throw。
-  assert.match(ciYml, /缺少 secret CX_QEMU_GUEST_SSH_KEY/u,
-    'QEMU 客机密钥缺失必须走 skip 并说明，不能把作业判红');
+  // 2026-11-12 需求变更：这条断言的方向**反了**，必须改写。
+  //
+  //   旧语义（2026-11-10）：密钥缺失要**走 skip**（当作「可缺省」），不能判红。
+  //   新语义（用户 2026-11-11 明确要求「不要跳过任务」+ 2026-11-12「不保留 secret」）：
+  //     跑不了就**如实判红**，因为 skip 会伪装成「这条链路已验证通过」。
+  //
+  //   历史教训（run 42963390787）：旧代码 `skip(){ exit 0 }` 让整个作业报 success，
+  //   而客机一步都没跑 —— 这是本项目最典型的假绿形态。
+  //
+  // 现在的判据：密钥拿不到时必须**判红**且给出可操作的失败信息。
+  //   注意文案已从「缺少 secret ...」改为「Actions Cache 里没有客机 SSH 私钥」，
+  //   因为密钥来源已从 secret 改为 cache（用户要求不保留 secret）。
+  assert.match(
+    ciYml,
+    /Actions Cache 里没有客机 SSH 私钥/u,
+    'QEMU 客机密钥缺失必须如实判红并给出可操作指引（指向「先跑构建作业」），' +
+      '不得静默 skip —— 那会让「关机自毁从未真正跑过」伪装成通过',
+  );
+  // 反证：不得再出现「缺 secret 就走 skip」的旧形态
+  assert.doesNotMatch(
+    ciYml,
+    /缺少 secret CX_QEMU_GUEST_SSH_KEY[^\n]*\n[^\n]*exit 0/u,
+    '不得保留「缺 secret 就 exit 0」的假绿分支',
+  );
   const nativeExecutables = [
     'CX_NATIVE_HOST_EXE', 'CX_NATIVE_INJECTION_EXE', 'CX_NATIVE_ASSETS_EXE', 'CX_NATIVE_OPTIONS_EXE',
     'CX_NATIVE_SESSION_EXE', 'CX_NATIVE_SELECTION_EXE', 'CX_NATIVE_TRANSPORT_EXE', 'CX_NATIVE_AUDIT_EXE',

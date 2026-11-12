@@ -78,7 +78,8 @@ test('QEMU 自毁作业已取消 event 限制（PR 上也跑）', async () => {
   // 后来发现「跳过却 success」是假绿（t96），最终改成 job 级只判 gate.result。
   assert.doesNotMatch(job, /github\.event_name/u,
     'QEMU 作业不得再按 event_name 限制（PR 上也要跑）');
-  assert.match(job, /needs\.gate\.result/u, 'QEMU 作业必须仍受 gate.result 约束');
+  // 2026-11-12：gate 已删除，QEMU 作业不再受 gate 约束，改为受 build-guest-image 约束。
+  assert.match(job, /needs\.build-guest-image\.result/u, 'QEMU 作业必须受 build-guest-image.result 约束');
   assert.doesNotMatch(workflow, /pull_request_target/u, '不得挂 pull_request_target');
   assert.match(workflow, /^ {2}workflow_dispatch:\s*$/mu, '必须保留手动触发');
   // ci.yml 现在是唯一入口，不再是 callee，不得再声明 workflow_call。
@@ -149,9 +150,20 @@ test('ci.yml#qemu-shutdown-destruct 拿不到 KVM 时必须走 skip 而不是 fa
 test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不得下载 Windows ISO', async () => {
   const workflow = await qemuJobSection();
 
-  // 镜像来源：手动输入优先，其次 repo variable；两者都空 → skip。
+  // 2026-11-12：镜像来源已统一为 build-guest-image 作业存入的 Actions Cache。
+  // 用户要求「优先读 cache，读不到就构建」，cache 键在同一 workflow 内共享。
   assert.match(workflow, /CX_QEMU_GUEST_IMAGE/u, '必须用 CX_QEMU_GUEST_IMAGE 作为镜像占位变量');
-  assert.match(workflow, /vars\.CX_QEMU_GUEST_IMAGE/u, '必须支持仓库变量');
+  assert.match(
+    workflow,
+    /guest-cache\/guest\.qcow2/u,
+    '镜像必须指向 cache 恢复出来的 guest-cache/guest.qcow2',
+  );
+  // 反证：不得再回退到仓库变量（那会绕过 cache，与用户要求冲突）
+  assert.doesNotMatch(
+    workflow,
+    /vars\.CX_QEMU_GUEST_IMAGE/u,
+    '不得再引用 vars.CX_QEMU_GUEST_IMAGE —— 镜像来源已统一为 cache',
+  );
   // ci.yml 是普通 workflow：push 事件下 inputs.* 上下文为 null，
   // 因此必须写 github.event.inputs.*（写成裸 inputs.* 会在非手动触发下取到空值）。
   assert.match(workflow, /github\.event\.inputs\.guest_image/u,
@@ -194,14 +206,26 @@ test('ci.yml#qemu-shutdown-destruct 的客机镜像只走占位变量，且不�
     /^\s+qemu-img create -f qcow2 -b /mu,
     '必须用 qcow2 覆盖层保证母镜像不被写入（断言锚到行首，注释掉会变红）',
   );
-  // 覆盖层必须真的被 -drive 引用，否则建了也没用，客机仍在写母镜像。
+  // 2026-11-12：启动方式改为 dockur 容器（复用「构建客机镜像」那套已验证的
+  //   docker bridge + NAT），本仓库不再自己拼 qemu-system-x86_64 参数。
+  //   所以「-drive 指向覆盖层」这条**实现级**断言不再适用。
+  //
+  //   但它背后的性质必须继续成立：**母镜像不能被写入**。
+  //   docker 方案下的载体是：容器挂的是一份**一次性的 run-storage 副本**，
+  //   其中 data.qcow2 是从 cache/构建产物复制出来的（copy-on-write 语义由副本承担）。
+  //   ⇒ 断言改成两条性质级判据：
+  //     ① 启动前必须把镜像**复制**进 run-storage（而非直接把母文件挂进去）
+  //     ② 挂载点必须是 run-storage 目录
   assert.match(
     workflow,
-    /-drive file="\$RUNNER_TEMP\/guest-overlay\.qcow2"/u,
-    'QEMU 必须从覆盖层启动（-drive 指向 guest-overlay.qcow2）',
+    /cp "\$GITHUB_WORKSPACE\/guest-cache\/guest\.qcow2" "\$RUN_STORAGE\/data\.qcow2"/u,
+    '母镜像必须被复制进一次性的 run-storage，不能直接挂原始文件（否则客机写入会污染缓存镜像）',
   );
-  // 母镜像只读：不得以 rw 方式直接挂母镜像。
-  assert.doesNotMatch(workflow, /-drive file="\$RUNNER_TEMP\/guest-base\.qcow2"/u, '不得直接以读写方式挂母镜像');
+  assert.match(
+    workflow,
+    /-v "\$RUN_STORAGE:\/storage"/u,
+    '容器必须挂载一次性的 run-storage 目录（保证写入不落到缓存镜像上）',
+  );
 });
 
 test('ci.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让重启后客机永远不再上电）', async () => {
@@ -210,8 +234,15 @@ test('ci.yml#qemu-shutdown-destruct 不得加 -no-reboot / -no-shutdown（会让
   // 「登记 → 重启 → 重放」会断在第二步，而 Step Summary 会误报成「重启后未回连」。
   assert.doesNotMatch(workflow, /(?:^|\s)-no-reboot\b/mu, '不得给 qemu 加 -no-reboot');
   assert.doesNotMatch(workflow, /(?:^|\s)-no-shutdown\b/mu, '不得给 qemu 加 -no-shutdown');
-  // QEMU 必须显式启用 KVM：没有它冷启动远超 45 分钟上限。
-  assert.match(workflow, /-enable-kvm/u, 'QEMU 必须显式 -enable-kvm');
+  // 2026-11-12：本作业已不再自己拼 QEMU 参数（改用 dockur 容器），
+  //   所以「-enable-kvm」这条实现级断言也不再适用。
+  //   但「必须用硬件虚拟化加速」这条件质必须成立 —— docker 方案下的载体是
+  //   给容器透传 /dev/kvm。缺了它 dockur 会退到 TCG，冷启动远超 45 分钟。
+  assert.match(
+    workflow,
+    /--device=\/dev\/kvm/u,
+    '容器必须透传 /dev/kvm（否则 dockur 退 TCG，冷启动远超 45 分钟上限）',
+  );
 });
 
 test('ci.yml#qemu-shutdown-destruct 的两阶段语义与 shutdown 作业一致，且不引用不存在的开关', async () => {
@@ -399,4 +430,50 @@ test('ci.yml#qemu-destruct-linux-guest 必须按链路接入 5 个覆盖缺口',
   assert.match(workflow, /boot-before-powercut\.txt/u, '证据必须包含断电前的 boot_id');
   assert.match(workflow, /proof-after-first\.txt/u, '证据必须包含第一次续删的 proof');
   assert.match(workflow, /boot-before-reboot2\.txt/u, '证据必须包含第二次重启前的 boot_id');
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43231941986 实测）：传给客机的 .ps1 必须补 UTF-8 BOM
+//
+// 事故链：
+//   ① 三个脚本是 UTF-8 **无 BOM**（git 里不该存 BOM），含大量中文注释；
+//   ② base64 分块传输的是**字节**，传输本身正确（远端大小与本地逐字节一致）；
+//   ③ 但 **Windows PowerShell 5.1 读无 BOM 的 UTF-8 会按 ANSI/GBK 解码**
+//      ⇒ 中文注释变乱码 ⇒ 语法解析失败：
+//        At qemu-guest-destruct.ps1:48 char:29
+//        + throw "�����`�,~�r�,s�o�: $vmScript"
+//        Unexpected token 's�o�:' in expression or statement.
+//   ④ 更隐蔽：`powershell -File` 在**解析错误时返回 0**，于是
+//      「register exit code = 0」是假的，实际一条命令都没执行。
+//
+// 因此必须同时钉住两件事：
+//   A. 部署时解码后写入 UTF-8 BOM(EF BB BF)
+//   B. 阶段一执行前用 PSParser 做语法预检（把解析错误变成非零退出）
+test('客机侧 .ps1 必须补 UTF-8 BOM，且执行前做语法预检', async () => {
+  const workflow = await readFile(WORKFLOW, 'utf8');
+
+  // A. 解码写入时必须拼接 BOM 三字节
+  assert.match(
+    workflow,
+    /0xEF,0xBB,0xBF/u,
+    '部署客机脚本时必须在解码后写入 UTF-8 BOM（PowerShell 5.1 否则按 ANSI 解码，中文注释变乱码）',
+  );
+  // A2. 必须有 BOM 实际写入结果的校验，不能只写不验
+  assert.match(
+    workflow,
+    /BOM-OK/u,
+    '必须复核 BOM 真的写进去了（只写不验的话，写入静默失败仍会得到乱码脚本）',
+  );
+
+  // B. 语法预检：解析错误必须变成非零退出
+  assert.match(
+    workflow,
+    /\[System\.Management\.Automation\.PSParser\]::Tokenize/u,
+    '执行前必须用 PSParser 做语法预检：powershell -File 在解析错误时返回 0，会把「什么都没跑」伪装成成功',
+  );
+  assert.match(
+    workflow,
+    /SYNTAX-OK/u,
+    '语法预检必须有明确的通过标识，便于日志判断',
+  );
 });

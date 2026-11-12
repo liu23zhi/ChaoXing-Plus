@@ -98,6 +98,23 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      # 2026-11-12：build-guest-image 并入后，这些输入从原独立 workflow 带过来。
+      guest_password:
+        description: '客机 runner 账号密码（仅构建镜像时用）'
+        required: false
+        default: 'Cx-Guest-2026!'
+      version:
+        description: 'Windows 版本（2022 = Server 2022）'
+        required: false
+        default: '2022'
+      disk_size:
+        description: '客机磁盘大小（稀疏）'
+        required: false
+        default: '32G'
+      install_timeout_sec:
+        description: '客机安装超时（秒）'
+        required: false
+        default: '3600'
       force:
         description: '强制运行 KVM 巡检（手动触发恒为 true，不受「今天跑过」限制）'
         type: boolean
@@ -113,15 +130,21 @@ on:
 
 permissions:
   contents: read
-  actions: read          # gate 需要读本仓库 workflow run 列表判断「今天是否已巡检过」
+  actions: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+
+# 客机镜像的 cache key。build-guest-image 用它 save，
+# qemu-shutdown-destruct 用它 restore。改版本号（v1→v2）即作废旧镜像。
+env:
+  GUEST_IMAGE_CACHE_KEY: cx-win2022-guest-qcow2-v4
+
 jobs:
   source:
-    name: Ubuntu 类型检查与扩展构建
+    name: 源码类型检查与前端扩展构建（Ubuntu）
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -158,11 +181,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-tap
+          name: 覆盖率与单元测试报告（TAP）
           path: coverage.tap
           retention-days: 7
   windows-build:
-    name: Windows 构建共享测试产物
+    name: 编译 Windows 原生测试可执行文件（供下游作业复用）
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -200,7 +223,7 @@ jobs:
       - name: 上传共享 Windows 测试产物
         uses: actions/upload-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: |
             dist/
             dist-windows/
@@ -209,7 +232,7 @@ jobs:
           retention-days: 7
 
   windows-real-client-discovery:
-    name: 发现真实客户端注入矩阵
+    name: 探测可用的真实客户端版本组合（决定注入矩阵规模）
     permissions:
       contents: read
     needs: windows-build
@@ -286,7 +309,7 @@ jobs:
           $databaseVars | ForEach-Object { Write-Host "数据库 Base64 变量 $($_.Name) 已发现并掩码" }
 
   windows-unit:
-    name: Windows 单元与原生测试
+    name: Windows 单元测试与原生模块测试
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -306,7 +329,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -354,13 +377,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-unit-tap
+          name: Windows 单元与原生测试报告（TAP）
           path: ${{ runner.temp }}/ci-unit-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-pause:
-    name: Windows 标签页暂停隔离回归
+    name: 标签页级暂停隔离行为回归
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -380,7 +403,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -396,13 +419,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-pause-tap
+          name: 标签页暂停隔离回归报告（TAP）
           path: ${{ runner.temp }}/ci-tab-answer-pause.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-window:
-    name: Windows 可见窗口与 Edge/Chrome 会话回归
+    name: 可见窗口与 Edge/Chrome 会话回归
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -423,7 +446,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -448,13 +471,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-window-tap
+          name: 可见窗口会话回归报告（TAP）
           path: ${{ runner.temp }}/ci-window-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-browser:
-    name: Windows 浏览器回归
+    name: 浏览器端交互回归（独立 runner）
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -474,7 +497,7 @@ jobs:
       - name: 下载共享 Windows 测试产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 准备 Windows 测试环境
         shell: pwsh
@@ -512,13 +535,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-browser-tap
+          name: 浏览器交互回归报告（TAP）
           path: ${{ runner.temp }}/ci-browser-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-release:
-    name: Windows 发布包验证
+    name: 发布包完整性与校验和验证
     needs: [windows-build, windows-unit, windows-pause, windows-window, windows-browser]
     # needs 保留全部五个，但 if 只把 windows-build 当硬门 —— 理由见下。
     #
@@ -564,7 +587,7 @@ jobs:
       - name: 下载共享 Windows 构建产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 构建发布包
         run: npm run release:windows
@@ -607,7 +630,7 @@ jobs:
         id: upload_release
         uses: actions/upload-artifact@v4
         with:
-          name: Windows 发布包
+          name: Windows 发布包与校验和
           path: windows/native-build/release/
           if-no-files-found: error
 
@@ -636,7 +659,7 @@ jobs:
       - name: 下载共享 Windows 构建产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: .
       - name: 校验私有客户端资产
         shell: pwsh
@@ -681,15 +704,36 @@ jobs:
                     $attempts = 2
           for ($attempt = 1; $attempt -le $attempts; $attempt++) {
             Write-Host "::group::真实客户端注入尝试 $attempt/$attempts"
-            ./scripts/windows-real-client-injection.ps1 `
-              -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
-              -InjectMode '${{ matrix.inject_mode }}' `
-              -DatabaseBase64 $compactDb `
-              -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
-              -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
-              -PanelAllPages
-            $code = $LASTEXITCODE
-            Write-Host "::endgroup::"
+            # ⚠️ 2026-11-12（run 43236880067 实测）：注入脚本用 throw 报告失败，
+            #   而 throw 是 terminating error，在 pwsh run 块里会直接中断整个块，
+            #   根本走不到下面 `$code = $LASTEXITCODE` —— 这就是「重试失效」的根因：
+            #   第一次失败后整个 run 块被终止，第二次尝试从未执行。
+            #   ⇒ 用 try/catch 包住调用，把失败统一转成退出码，让重试循环真正跑起来。
+            $code = 0
+            try {
+              & ./scripts/windows-real-client-injection.ps1 `
+                -ClientInstaller (Resolve-Path '${{ matrix.installer }}').Path `
+                -InjectMode '${{ matrix.inject_mode }}' `
+                -DatabaseBase64 $compactDb `
+                -NativeHost (Resolve-Path 'windows/native-build/bin/chaoxing_plus.exe').Path `
+                -CaseName '${{ matrix.client }}-${{ matrix.database }}' `
+                -PanelAllPages `
+                -ErrorAction Stop
+              $code = $LASTEXITCODE
+              if ($null -eq $code) { $code = 0 }
+            } catch {
+              Write-Host "::warning::注入脚本抛出异常：$($_.Exception.Message)"
+              $code = 1
+              # ⚠️ 2026-11-12：脚本 throw 时内部清理函数（Stop-ClientProcess）不会执行，
+              #   客户端进程可能残留，导致第二次尝试因 profile 目录被占用而失败。
+              #   这里兜底清理：按映像名杀 CXExam.exe 与 chaoxing_plus.exe。
+              try {
+                Get-Process -Name 'CXExam','chaoxing_plus' -ErrorAction SilentlyContinue |
+                  Stop-Process -Force -ErrorAction SilentlyContinue
+                Write-Host '::warning::已兜底清理残留的 CXExam.exe / chaoxing_plus.exe 进程'
+              } catch { }
+              Start-Sleep -Seconds 3
+            }
             if ($code -eq 0) { exit 0 }
             Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'cx-real-client-*' -File -ErrorAction SilentlyContinue | ForEach-Object {
               $extension = [IO.Path]::GetExtension($_.Name)
@@ -709,7 +753,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-client-${{ matrix.client }}-${{ matrix.database }}
+          name: 真实客户端注入报告-${{ matrix.client }}-数据库${{ matrix.database }}
           # Store the files as-is: artifact packaging must not run another compression pass over the
           # PNG frames (level 0 keeps the bytes identical to what the runner wrote).
           compression-level: 0
@@ -721,32 +765,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  gate:
-    name: 前置门（已取消一切判重，每次 run 都放行）
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    outputs:
-      # 三个输出保留为常量，仅为不破坏下游引用（kvm-probe / summary）。
-      # 它们**不再表达任何判重结论** —— 判重逻辑已整体删除。
-      skip: "no"
-      reason: "已取消判重：每次 run 都执行（用户 2026-11-11 明确要求）"
-      sha_verified: "no"
-    steps:
-      - name: 放行
-        run: |
-          echo "已取消一切判重，本次 run 直接放行。"
-          echo "SKIP=no"
-          echo "SHA_VERIFIED=no"
-          echo "REASON=已取消判重：每次 run 都执行"
-
   kvm-probe:
-    name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
-    needs: gate
+    name: KVM 硬件虚拟化能力巡检（只读）
     # 2026-11-11 最终口径（用户两次要求）：**取消一切判重，每次 run 都跑**。
     # 旧写法按日历判重，实测 run 42935345965：main 当天第 1 次 push 巡检成功后，
     # 后续不同 commit 的 push 全部 skipped ⇒ main 的最新代码从未被巡检验证过。
     # 代价依据：timeout 是 5 分钟、实测单次 < 40 秒，不是重活。
-    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -755,8 +779,6 @@ jobs:
       # （jobs.gate.outputs.skip|reason）。合并后 workflow_call 层消失，
       # kvm-probe 必须自己转发；否则 summary 的「跳过（原因）」恒为空，
       # 「因日判重而跳过」与「压根没执行」无法区分。
-      skipped: ${{ needs.gate.outputs.skip }}
-      reason: ${{ needs.gate.outputs.reason }}
     steps:
       - name: 设备节点与作业用户
         run: |
@@ -892,14 +914,12 @@ jobs:
   # ---------------------------------------------------------------------------
 
   wiring-probe:
-    name: 自毁续删语义验证（不关机，托管 runner）
-    needs: gate
+    name: 自毁登记与续删语义验证（不真实关机）
     # 完整自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完两阶段。
     # 这是「完整 CI 也跑关机自毁测试」的落地链路，因此 push / PR / 手动都跑。
     # PR 上挂 continue-on-error：它约 40 分钟且受宿主环境影响，不该阻塞代码评审；
     # push 到 main 与手动触发时严格（失败即红），这样真正的回归会被抓住。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁语义验证。
-    if: needs.gate.result == 'success'
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
     # 同上：两阶段必须跑完（shutdown 登记 → resume 重放断言）。
@@ -1014,7 +1034,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-vm-wiring-probe
+          name: 自毁登记续删验证证据
           compression-level: 0
           path: |
             ${{ runner.temp }}/cx-purge-*.log
@@ -1023,13 +1043,13 @@ jobs:
           retention-days: 7
 
   qemu-shutdown-destruct:
-    name: 关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）
+    name: Windows 客机真实关机自毁与开机续删（QEMU + KVM）
     runs-on: ubuntu-24.04
     # 独立 concurrency：45 分钟的客机两阶段不该被新 push 打断。
     concurrency:
       group: cx-qemu-destruct-${{ github.ref }}
       cancel-in-progress: false
-    needs: gate
+    needs: [build-guest-image]
     # ── 触发条件（2026-11-11 合并两方意图）────────────────────────────────
     #
     # 【意图 1：用户要求「不要跳过任务」（captain 侧，优先级高）】
@@ -1054,23 +1074,64 @@ jobs:
     #
     # 需要什么才能让它变绿（详见 job 末尾注释与 summary）：
     #   repo variable `CX_QEMU_GUEST_IMAGE` = 预装好的 Windows qcow2 的
-    #   绝对路径或 https URL；外加 secret `CX_QEMU_GUEST_SSH_KEY`。
-    if: needs.gate.result == 'success'
+    #   绝对路径或 https URL。密钥不需要 secret —— 随镜像一起存于 Actions Cache。
+    if: needs.build-guest-image.result == 'success'
     # 硬上限：45 分钟。构成 = apt 装 qemu（~2 min）+ 客机冷启动（≤15 min）
     # + 两阶段与重启（~10 min）+ 证据收集（~2 min），再留余量。
     timeout-minutes: 45
     # 客机镜像来源：手动输入优先，其次仓库变量。走到这里说明两者至少有一个非空
     # （否则 job 级 `if` 已把它判成 skipped）。
     env:
-      CX_QEMU_GUEST_IMAGE: ${{ github.event.inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE }}
-      CX_QEMU_GUEST_SSH_USER: ${{ vars.CX_QEMU_GUEST_SSH_USER || 'runner' }}
+      # 镜像来源：手动触发可用 github.event.inputs.guest_image 覆盖；
+      #   默认用 build-guest-image 作业存入的 Actions Cache（优先读 cache、读不到就构建）。
+      CX_QEMU_GUEST_IMAGE: ${{ github.event.inputs.guest_image || format('{0}/guest-cache/guest.qcow2', github.workspace) }}
       CX_QEMU_GUEST_PURGE_EXE: ${{ vars.CX_QEMU_GUEST_PURGE_EXE || 'C:/cx/native/purge-tests.exe' }}
       CX_QEMU_HOSTFWD_SSH: '2222'
       CX_QEMU_BOOT_TIMEOUT_SEC: '900'
+      # ⚠️ 2026-11-12 rebase 修复：合并 build-guest-image 的 801a55b 顺手删掉了这行声明，
+      #   但下面 4 处 `USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"` 仍在用。
+      #   未声明时 github actions 会把它替换成空串 ⇒ "ssh  -p 2222 ... @127.0.0.1"
+      #   必然失败，且报错看起来像「客机 SSH 不通」，与真实原因（环境变量缺失）无关。
+      #   镜像里的账号由 build-guest-image 的 GUEST_USER 决定（那里是 runner），
+      #   两者必须一致；保留 vars 覆盖以便自定义镜像。
+      CX_QEMU_GUEST_SSH_USER: ${{ vars.CX_QEMU_GUEST_SSH_USER || 'runner' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # ⚠️ 2026-11-12：镜像来自 build-guest-image 作业存入的 cache，
+      #   不再依赖仓库变量 CX_QEMU_GUEST_IMAGE。
+      #   这正是用户要求的「优先读 cache，读不到就构建」：
+      #   build-guest-image 在 cache 未命中时会在线构建并回写。
+      - name: 从 cache 恢复客机镜像
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/guest-cache
+          key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: 确认镜像可用
+        run: |
+          set -eu
+          IMG="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"
+          if [ ! -f "$IMG" ]; then
+            echo "::error title=cache 里没有镜像::build-guest-image 应当已经存入"
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$IMG")
+          echo "镜像 = $IMG ($SIZE 字节)"
+          if [ "$SIZE" -lt 1000000000 ]; then
+            echo "::error title=镜像体积异常::只有 $SIZE 字节"
+            exit 1
+          fi
+          # 这份镜像来自 dockurr/windows，启动时依赖缓存中的 UEFI 固件文件。
+          # 缺失时 qemu 可能持续运行但客机无法引导，最终表现为 SSH 永远不就绪。
+          for f in "$GITHUB_WORKSPACE/guest-cache/windows.rom" "$GITHUB_WORKSPACE/guest-cache/windows.vars"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=缺少 UEFI 固件文件::$f 不存在（请确认 build-guest-image 已缓存 windows.*）"
+              exit 1
+            fi
+          done
       - name: 环境基线
         run: |
           set -u
@@ -1273,8 +1334,6 @@ jobs:
       - name: 解析客机镜像
         id: image
         if: steps.qemu.outputs.qemu_ok == 'yes'
-        env:
-          SSH_KEY: ${{ secrets.CX_QEMU_GUEST_SSH_KEY }}
         run: |
           set -u
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
@@ -1332,103 +1391,366 @@ jobs:
           qemu-img info --output=json "$RUNNER_TEMP/guest-overlay.qcow2" | tr -d ' \n'
           echo
 
-          if [ -z "${SSH_KEY:-}" ]; then
-            fail '缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道（这是配置缺失，不是镜像问题）'
+          # ── SSH 私钥来源（2026-11-12 修正）──────────────────────────────
+          # 用户要求：**打包镜像时顺便把 SSH 密钥一起打包进 cache**。
+          # 事实链：
+          #   ① build-guest-image 构建镜像时，把当时的公钥写进了客机的
+          #      C:\ProgramData\ssh\administrators_authorized_keys（OEM setup.ps1）；
+          #   ② 同一对密钥（guest-key / guest-key.pub）已被存入 Actions Cache；
+          #   ③ 所以 cache 里的 guest-key 才是与镜像**天然配对**的那把私钥。
+          #
+          # 用户 2026-11-12 明确要求：**不保留 secret**，密钥随镜像一起打包进 cache。
+          # 这不是偏好，是技术必然：
+          #   镜像里的公钥是构建时**随机生成**并写死进 administrators_authorized_keys 的，
+          #   任何人工维护的 secret 私钥**都不可能**与之配对。
+          #   保留 secret 只会误导「配了就能用」，掩盖真正该做的动作。
+          #
+          # 唯一来源：Actions Cache 里的 guest-cache/guest-key
+          #   （由「构建 Windows 客机镜像」与 guest.qcow2 一起存入，见该作业的
+          #    「存入 Actions Cache」步骤：cp "$WORK/id" "$CACHE_OUT/guest-key"）
+          KEY_SRC=''
+          if [ -f "$GITHUB_WORKSPACE/guest-cache/guest-key" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key" "$RUNNER_TEMP/guest-ssh-key"
+            chmod 600 "$RUNNER_TEMP/guest-ssh-key"
+            KEY_SRC='cache'
+          else
+            fail 'Actions Cache 里没有客机 SSH 私钥（guest-cache/guest-key）。请先成功跑一次「构建 Windows 客机镜像」——它会把密钥对随镜像一起存入 cache，本作业才能拿到与镜像内公钥配对的那把私钥。'
           fi
-          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/guest-ssh-key"
-          chmod 600 "$RUNNER_TEMP/guest-ssh-key"
+          echo "SSH_KEY_SOURCE=$KEY_SRC"
+          # 私钥必须能解析，否则后面 SSH 报的是「认证失败」而不是「key 坏了」，很难查。
+          if ! ssh-keygen -l -f "$RUNNER_TEMP/guest-ssh-key" >/dev/null 2>&1; then
+            fail "客机 SSH 私钥不可用（来源=$KEY_SRC）：文件无法被 ssh-keygen 解析"
+          fi
+          echo "私钥指纹: $(ssh-keygen -l -f "$RUNNER_TEMP/guest-ssh-key" | awk '{print $2}')"
 
           out image_ok yes
           out image_reason ''
 
       # ── 启动客机 ─────────────────────────────────────────────────────────
-      - name: 启动 QEMU 客机并等待 SSH 回连
+      - name: 启动客机并等待 SSH 回连（复用 dockur 的 docker bridge，与镜像构建同一套网络）
         id: boot
         if: steps.image.outputs.image_ok == 'yes'
+        # ═══════════════════════════════════════════════════════════════════════
+        # 2026-11-12 用户要求：**参考「构建 Windows 客机镜像」那套能正常 SSH 的经验**。
+        #
+        # 那套为什么稳（已连续多轮 success）：
+        #   docker run dockurr/windows + --cap-add NET_ADMIN
+        #   ⇒ dockur 建**真实 NAT**（日志 Mode: NAT，客机 172.30.0.2）
+        #   ⇒ docker 用 -p 127.0.0.1:2222:22 做端口映射，行为确定。
+        #
+        # 本作业原来直接起 qemu-system-x86_64 + slirp（-nic user,hostfwd=...），
+        # 三个脆弱点：
+        #   ① slirp 先 accept 再转发 ⇒ 端口 LISTEN 不代表客机 sshd 就绪；
+        #   ② 镜像里的网卡配置是 dockur 安装时写死的（172.x 网段），与 slirp 的
+        #      10.0.2.15 不匹配 ⇒ 包发不出去（run 43147209781 已证实过这个坑）；
+        #   ③ 直启冷启动更慢，run 43200528695 在等待循环里卡了 12 分钟。
+        #
+        # ⇒ 改为复用 dockur 容器，与镜像构建完全同源，只保留一个外部接口：
+        #   ssh -i <key> -p 2222 runner@127.0.0.1
+        # ═══════════════════════════════════════════════════════════════════════
         run: |
           set -u
           SSH_PORT="${CX_QEMU_HOSTFWD_SSH}"
-          # -enable-kvm 是硬要求：没有它冷启动会远超 45 分钟上限，宁可失败也不静默退 TCG。
-          # 绝对不能加 -no-reboot / -no-shutdown：这两个开关会让 QEMU 在客机重启时
-          # 直接退出进程，客机永远不会再上电，「登记 → 重启 → 重放」就断在第二步。
-          qemu-system-x86_64 \
-            -enable-kvm -cpu host -smp 4 -m 6144 \
-            -drive file="$RUNNER_TEMP/guest-overlay.qcow2",if=virtio,cache=writeback \
-            -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
-            -display none -vga none \
-            -pidfile "$RUNNER_TEMP/qemu.pid" \
-            > "$RUNNER_TEMP/qemu-stdout.log" 2>&1 &
-          QEMU_PID=$!
-          echo "$QEMU_PID" > "$RUNNER_TEMP/qemu-bg.pid"
-          echo "QEMU_PID=$QEMU_PID"
-
-          START=$(date +%s)
-          READY=no
-          while [ $(( $(date +%s) - START )) -lt "$CX_QEMU_BOOT_TIMEOUT_SEC" ]; do
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo 'QEMU 进程已退出，日志尾部：'
-              tail -40 "$RUNNER_TEMP/qemu-stdout.log" || true
-              break
-            fi
-            if (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; then
-              exec 3>&- 2>/dev/null || true
-              READY=yes
-              break
-            fi
-            sleep 10
-          done
-          echo "GUEST_SSH_READY=$READY"
-          echo "BOOT_ELAPSED_SEC=$(( $(date +%s) - START ))"
-          echo "GUEST_BOOT_TIMEOUT_SEC=$CX_QEMU_BOOT_TIMEOUT_SEC"
-          echo '=== QEMU 启动日志（确认 kvm 加速生效）==='
-          head -20 "$RUNNER_TEMP/qemu-stdout.log" || true
-          # KVM 生效的直接证据：QEMU 会打印 KVM 版本或 accel=kvm。
-          if grep -qiE 'kvm|accel' "$RUNNER_TEMP/qemu-stdout.log"; then
-            echo 'QEMU_KVM_EVIDENCE=yes'
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          DIAG="$SNAP/boot-diag.txt"
+          : > "$DIAG"
+          log() { echo "$@" | tee -a "$DIAG"; }
+          # ── 准备 dockur 的 storage 目录 ─────────────────────────────────────
+          # dockur 靠一整套 windows.* 状态文件判断「已安装」，缺了会重新下载 ISO 重装。
+          # 这里把已备好的镜像 + 状态文件拼成一个 storage 目录。
+          RUN_STORAGE="$RUNNER_TEMP/guest/run-storage"
+          mkdir -p "$RUN_STORAGE"
+          log "=== 准备 dockur storage ==="
+          if [ -f "$RUNNER_TEMP/guest/run-storage/data.qcow2" ]; then
+            log "  data.qcow2 已就位（由「把镜像放到验证用目录」准备）"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" "$RUN_STORAGE/data.qcow2"
+            log "  从 cache 复制 data.qcow2"
           else
-            echo 'QEMU_KVM_EVIDENCE=no（日志无 kvm/accel 字样，需人工核对）'
+            log "::error title=没有可用镜像::既无 run-storage/data.qcow2 也无 cache"
+            exit 1
           fi
-          if [ "$READY" != yes ]; then
-            echo '::error title=客机未在超时内回连::见上传的 qemu-stdout.log'
+          # 状态文件：cache 路径下在 guest-cache/，构建路径下在 guest/storage/
+          for src in "$GITHUB_WORKSPACE/guest-cache" "$RUNNER_TEMP/guest/storage"; do
+            [ -d "$src" ] || continue
+            for f in "$src"/windows.*; do
+              [ -e "$f" ] || continue
+              cp -a "$f" "$RUN_STORAGE/" && log "  状态文件 $(basename "$f")"
+            done
+          done
+          ls -la "$RUN_STORAGE" | tee -a "$DIAG"
+          # 必须至少有一个 windows.* 状态文件，否则 dockur 会判定「未安装」并重装
+          NSTATE=$(ls "$RUN_STORAGE"/windows.* 2>/dev/null | wc -l)
+          log "storage 状态文件数 = $NSTATE"
+          if [ "$NSTATE" -lt 3 ]; then
+            log "::error title=状态文件不足::只有 $NSTATE 个 windows.*，dockur 可能重新装系统"
             exit 1
           fi
 
-      # 把 guest 侧驱动脚本送进客机。scp 走同一条 SSH 通道，不需要额外共享。
-      # 注意引号：这些命令包在 bash 单引号里，反斜杠会原样传给 PowerShell，
-      # 所以路径必须写单反斜杠（写成 `C:\\cx` 会在 Windows 上创建一个名字带
-      # 双反斜杠的目录）。PowerShell 的转义符是反引号，不是反斜杠。
+          # ── 启动 dockur 容器（与镜像构建同一套网络栈）────────────────────
+          log "=== 启动 dockurr/windows 容器（NAT + 端口映射）==="
+          docker rm -f cxdestruct >/dev/null 2>&1 || true
+          docker run -d --name cxdestruct \
+            --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            -e VERSION=2022 \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE=32G \
+            -e USERNAME="${CX_QEMU_GUEST_SSH_USER}" \
+            -e PASSWORD="Cx-Guest-2026!" \
+            -p 127.0.0.1:${SSH_PORT}:22 \
+            -v "$RUN_STORAGE:/storage" \
+            docker.io/dockurr/windows:latest >> "$DIAG" 2>&1
+          log "docker run rc=$?"
+          sleep 5
+          docker ps --filter name=cxdestruct --format "{{.Status}}" | tee -a "$DIAG" || true
+
+          # ── 等待 SSH（每轮打四项诊断）──────────────────────────────────────
+          START=$(date +%s)
+          READY=no
+          KEY="$RUNNER_TEMP/guest-ssh-key"
+          USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
+          ATTEMPT=0
+          PORT_OPENED=no
+          while [ $(( $(date +%s) - START )) -lt "$CX_QEMU_BOOT_TIMEOUT_SEC" ]; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            ELAPSED=$(( $(date +%s) - START ))
+
+            # ① 容器是否还活着
+            if ! docker ps --filter name=cxdestruct --format "{{.Names}}" | grep -q cxdestruct; then
+              log "attempt=$ATTEMPT t=$ELAPSED container-EXITED"
+              log "--- docker logs 尾部 40 行 ---"
+              docker logs cxdestruct 2>&1 | tail -40 | tee -a "$DIAG" || true
+              break
+            fi
+
+            # ② 端口是否打开
+            if (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; then
+              exec 3>&- 2>/dev/null || true
+              [ "$PORT_OPENED" = no ] && log "attempt=$ATTEMPT t=$ELAPSED port-OPENED（首次）"
+              PORT_OPENED=yes
+            else
+              log "attempt=$ATTEMPT t=$ELAPSED port-closed"
+              sleep 10
+              continue
+            fi
+
+            # ③ 真实 SSH 握手（-vv 落盘，失败能看到卡在 banner 还是认证）
+            if ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                 -o ConnectionAttempts=1 -o BatchMode=yes \
+                 -vv "$USER_HOST" 'exit' > /dev/null 2> "$SNAP/ssh-boot-$ATTEMPT.log"; then
+              READY=yes
+              log "attempt=$ATTEMPT t=$ELAPSED SSH-READY"
+              break
+            fi
+            LAST_ERR=$(tail -3 "$SNAP/ssh-boot-$ATTEMPT.log" 2>/dev/null | tr '\n' ' ' | cut -c1-200)
+            log "attempt=$ATTEMPT t=$ELAPSED ssh-FAILED: $LAST_ERR"
+
+            # ④ 每 3 轮打一次容器日志进展
+            if [ $(( ATTEMPT % 3 )) -eq 0 ]; then
+              CLINES=$(docker logs cxdestruct 2>&1 | wc -l)
+              CTAIL=$(docker logs cxdestruct 2>&1 | tail -1 | cut -c1-120)
+              log "  [docker] lines=$CLINES last=$CTAIL"
+            fi
+            sleep 10
+          done
+          log "GUEST_SSH_READY=$READY"
+          log "BOOT_ELAPSED_SEC=$(( $(date +%s) - START ))"
+          log "BOOT_ATTEMPTS=$ATTEMPT  PORT_EVER_OPENED=$PORT_OPENED"
+          log "GUEST_BOOT_TIMEOUT_SEC=$CX_QEMU_BOOT_TIMEOUT_SEC"
+          # 保留容器日志作为完整证据
+          docker logs cxdestruct > "$SNAP/docker-destruct.log" 2>&1 || true
+          if [ "$READY" != yes ]; then
+            log "::error title=客机未在超时内回连::port_ever_opened=$PORT_OPENED attempts=$ATTEMPT 详见 boot-diag.txt / ssh-boot-*.log / docker-destruct.log"
+            exit 1
+          fi
       - name: 部署客机侧驱动脚本
         id: deploy
         if: steps.image.outputs.image_ok == 'yes'
         run: |
-          set -eu
+          set -u
+          # ⚠️ 2026-11-12（run 43197280267 实测）：本步骤原先用 scp 传三个 .ps1 到客机，
+          #   结果 exit code 255。255 是 SSH 客户端族的**通用**错误码，ssh 与 scp 都可能是它，
+          #   而 job 日志已被 GitHub 回收（gh api .../logs 返回 1 字节），无法区分是
+          #   L「ssh mkdir」失败还是 L「scp」失败 —— 所以这一版做两件事：
+          #    ① 换掉 scp：它有三个独立失败面（协议版本 / Subsystem sftp 未启用 /
+          #       Windows 目标路径写法），而 ssh + base64 写文件只有一个失败面；
+          #    ② 每一步单独打点，失败时立刻能定位是哪一步。
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          DEPLOY_LOG="$SNAP/deploy.txt"
+          : > "$DEPLOY_LOG"
+          log() { echo "$@" | tee -a "$DEPLOY_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
-          $SSH "$USER_HOST" 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\cx\scripts\vm, C:\cx\evidence, C:\cx\work | Out-Null; Test-Path C:\cx\scripts\vm"'
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1 \
-            "$USER_HOST:C:/cx/scripts/vm/"
-          # 复核：客机里三个脚本都在，缺一个就说明 scp 没走通，后面必然假失败。
-          $SSH "$USER_HOST" 'powershell -NoProfile -Command "Get-ChildItem C:\cx\scripts\vm -Name | Sort-Object"'
-          echo '客机侧脚本已部署：C:\cx\scripts\vm\'
 
-      # ── 客机内两阶段：登记 ────────────────────────────────────────────────
-      # 注意：这里的 env: 是**宿主**进程的环境变量，不会自动进入客机。
-      # 所以 purge 产物路径必须显式作为参数穿过 SSH 边界（-PurgeExe），
-      # 客机侧脚本再把它写进 $env:CX_NATIVE_PURGE_EXE 交给 run-shutdown-destruct.ps1。
+          # ── 步骤 1：连通性 + 建目录（单独打点）──────────────────────────────
+          log "=== step1: ssh 连通性与建目录 ==="
+          if ! $SSH "$USER_HOST" 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\cx\scripts\vm, C:\cx\evidence, C:\cx\work | Out-Null; Test-Path C:\cx\scripts\vm"' >> "$DEPLOY_LOG" 2>&1; then
+            log "::error title=客机 SSH 连通失败::ssh 到 ${USER_HOST} 失败，见 deploy.txt"
+            exit 1
+          fi
+          log "step1-ok"
+
+          # ── 步骤 2：用 base64 传文件（替代 scp，只有一个失败面）──────────────
+          #   为什么不用 scp：
+          #     · OpenSSH 9.0+ 的 scp 默认走 SFTP，需要客机 sshd 启用 `Subsystem sftp`；
+          #       Windows Server 2022 的默认 sshd_config 并不保证有这一行；
+          #     · 即使有，Windows 目标路径 C:/cx/... 在不同 scp 版本上解析不一致；
+          #     · scp 失败只回 255，不告诉你是协议、子系统还是路径的问题。
+          #   base64 + ssh 写入：只要 ssh 能跑 PowerShell 就能成功，与 sftp 无关。
+          log "=== step2: 传输脚本（分块追加，绝不走 stdin）==="
+          # ⚠️ 2026-11-12（run 43213621397）：stdin 方案死锁（ReadToEnd 等 EOF，ssh 不关 stdin）。
+          #   改成：base64 分块，每块作为命令行参数用 AppendAllText 追加，最后解码。
+          #   引号策略：PowerShell 命令整体放进 bash 单引号字符串（PSCMD=... 单引号），
+          #   内部需要动态变量时用双引号重新拼接，避免嵌套转义。
+          for f in scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1; do
+            bn=$(basename "$f")
+            [ -f "$f" ] || { log "::error title=源脚本缺失::$f"; exit 1; }
+            B64=$(base64 -w0 "$f")
+            LOCAL_SIZE=$(stat -c %s "$f")
+            log "  $bn 源大小=$LOCAL_SIZE base64长度=${#B64}"
+
+            TMPB64="C:/cx/scripts/vm/${bn}.b64"
+            FINAL="C:/cx/scripts/vm/${bn}"
+
+            # 清旧临时文件
+            $SSH "$USER_HOST" "powershell -NoProfile -Command Remove-Item -LiteralPath '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1 || true
+
+            # 分块追加
+            CHUNK=512; IDX=0; TOTAL=${#B64}; BLOCKS=0
+            while [ $IDX -lt $TOTAL ]; do
+              PART="${B64:$IDX:$CHUNK}"
+              [ -z "$PART" ] && break
+              # 单条命令：AppendAllText(路径, 块内容)。块内容是 base64 字符，安全。
+              if ! $SSH "$USER_HOST" "powershell -NoProfile -Command [IO.File]::AppendAllText('${TMPB64}','${PART}')" >> "$DEPLOY_LOG" 2>&1; then
+                log "::error title=追加分块失败::$bn offset=$IDX"
+                exit 1
+              fi
+              IDX=$(( IDX + CHUNK )); BLOCKS=$(( BLOCKS + 1 ))
+            done
+            log "  $bn 分块传输完成（$BLOCKS 块）"
+
+            # 解码
+            # ⚠️ 2026-11-12（run 43231941986 实测）：**必须补 UTF-8 BOM**。
+            #   源脚本是 UTF-8 无 BOM（git 里不应存 BOM），含大量中文注释。
+            #   base64 传的是字节，传输本身正确（大小一致），但
+            #   **Windows PowerShell 5.1 读无 BOM 的 UTF-8 文件会按 ANSI/GBK 解码**
+            #   ⇒ 中文注释变乱码 ⇒ 语法解析失败：
+            #     At qemu-guest-destruct.ps1:48 char:29
+            #     + throw "�����`�,~�r�,s�o�: $vmScript"
+            #     Unexpected token 's�o�:' in expression or statement.
+            #   所以解码后立刻在文件头写 3 字节 BOM(EF BB BF)，5.1 才会按 UTF-8 读。
+            if ! $SSH "$USER_HOST" "powershell -NoProfile -Command \$b=[IO.File]::ReadAllText('${TMPB64}');\$bytes=[Convert]::FromBase64String(\$b);\$bom=[byte[]](0xEF,0xBB,0xBF);[IO.File]::WriteAllBytes('${FINAL}', \$bom + \$bytes);Remove-Item '${TMPB64}' -ErrorAction SilentlyContinue" >> "$DEPLOY_LOG" 2>&1; then
+              log "::error title=解码失败::$bn"
+              exit 1
+            fi
+            # 复核 BOM 真的写进去了（前 3 字节 EF BB BF）
+            BOMCHK=$($SSH "$USER_HOST" "powershell -NoProfile -Command \$h=[IO.File]::ReadAllBytes('${FINAL}')[0..2]; if (\$h[0] -eq 239 -and \$h[1] -eq 187 -and \$h[2] -eq 191) { 'BOM-OK' } else { 'BOM-MISSING:' + (\$h -join ',') }" 2>/dev/null | tr -d "\r\n ")
+            log "  $bn BOM 检查 = ${BOMCHK:-?}"
+            if [ "${BOMCHK:-}" != "BOM-OK" ]; then
+              log "::error title=BOM 写入失败::$bn 实际 ${BOMCHK:-?}（PowerShell 5.1 会把中文读成乱码）"
+              exit 1
+            fi
+
+            # ⚠️ 2026-11-12（run 43236880067 实测）：加了 UTF-8 BOM 后，远端文件
+            #   比本地源文件**多 3 字节**（BOM = EF BB BF）。所以大小校验必须
+            #   用「本地 + 3」对比，否则每轮都误判「大小不符」。
+            REMOTE_SIZE=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Get-Item '${FINAL}').Length" 2>/dev/null | tr -d "\r\n ")
+            EXPECT_SIZE=$(( LOCAL_SIZE + 3 ))
+            log "  $bn 客机大小=${REMOTE_SIZE:-?} 期望=$EXPECT_SIZE（本地 $LOCAL_SIZE + BOM 3）"
+            [ "${REMOTE_SIZE:-0}" = "$EXPECT_SIZE" ] || { log "::error title=大小不符::$bn 客机=${REMOTE_SIZE:-?} 期望=$EXPECT_SIZE"; exit 1; }
+            log "  wrote $bn"
+          done
+          log "step2-ok"
+
+          # ── 步骤 3：复核三个文件都在且大小非零 ─────────────────────────────
+          log "=== step3: 客机内复核 ==="
+          $SSH "$USER_HOST" 'powershell -NoProfile -Command "Get-ChildItem C:\cx\scripts\vm | ForEach-Object { \"$($_.Name)=$($_.Length)\" }"' >> "$DEPLOY_LOG" 2>&1 || true
+          COUNT=$($SSH "$USER_HOST" 'powershell -NoProfile -Command "(Get-ChildItem C:\cx\scripts\vm -Filter *.ps1).Count"' 2>/dev/null | tr -d "\r")
+          log "客机内 .ps1 数量 = ${COUNT:-unknown}"
+          if [ "${COUNT:-0}" != "3" ]; then
+            log "::error title=客机侧脚本数量不对::期望 3 个 .ps1，实际 ${COUNT:-unknown}（见 deploy.txt）"
+            exit 1
+          fi
+          log "客机侧脚本已部署：C:\\cx\\scripts\\vm\\（3 个 .ps1）"
       - name: 阶段一：客机内登记续删（不触发关机）
         id: register
         if: steps.image.outputs.image_ok == 'yes'
+        # ⚠️ 2026-11-12（run 43227040550）：本步骤原先是**一行无诊断的 ssh**，失败后
+        #   既看不到客机侧输出、也取不回客机里的证据文件（证据随容器一起销毁）。
+        #   annotation 只有「Process completed with exit code 1」，无从定位。
+        #
+        #   失败的真实候选（都必须在日志里可判）：
+        #     ① 镜像里没有 purge-tests.exe（build-guest-image 的 offline-check
+        #        因 libguestfs 装不上而 SKIP，从未验证过它在不在）；
+        #     ② 客机内 RunOnce 登记失败；
+        #     ③ 待删目标文件没被创建。
+        #   脚本 qemu-guest-destruct.ps1 已把这三项写进 C:/cx/evidence/，
+        #   所以这一版：前置体检 → 执行 → **无论成败都取回证据**。
         run: |
-          set -eu
+          set -u
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          REG_LOG="$SNAP/register-stage.txt"
+          : > "$REG_LOG"
+          log() { echo "$@" | tee -a "$REG_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
-          # 客机镜像里必须已预置 purge-tests.exe（由 build-windows.ps1 -BuildTests 产出）。
-          # 本作业不构建原生宿主：那需要整个 Windows 工具链，超出 45 分钟预算。
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'"
 
+          # ── 前置体检：先确认那些会静默导致阶段一失败的配置 ──────────────────
+          log "=== 前置体检 ==="
+          PREEXE=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Test-Path -LiteralPath '${CX_QEMU_GUEST_PURGE_EXE}').ToString()" 2>/dev/null | tr -d "\r\n ")
+          log "purge-tests.exe 存在 = ${PREEXE:-?}（路径 ${CX_QEMU_GUEST_PURGE_EXE}）"
+          PREVM=$($SSH "$USER_HOST" "powershell -NoProfile -Command (Test-Path -LiteralPath 'C:/cx/scripts/vm/run-shutdown-destruct.ps1').ToString()" 2>/dev/null | tr -d "\r\n ")
+          log "两阶段脚本存在 = ${PREVM:-?}"
+          log "--- 客机内 /cx/native 目录 ---"
+          $SSH "$USER_HOST" "powershell -NoProfile -Command if (Test-Path 'C:/cx/native') { Get-ChildItem 'C:/cx/native' | ForEach-Object { \$_.Name + '=' + \$_.Length } } else { 'MISSING C:/cx/native' }" 2>&1 | tee -a "$REG_LOG" || true
+
+          # 缺 purge-tests.exe 是**镜像配置问题**，不是被测逻辑缺陷：
+          # 明确判红并给出可操作指引，不进入阶段一冒充「跑过了」。
+          if [ "${PREEXE:-False}" != "True" ]; then
+            log "::error title=客机缺少 purge 测试产物::${CX_QEMU_GUEST_PURGE_EXE} 不存在。镜像需预置 build-windows.ps1 -BuildTests 的 purge-tests.exe（见 build-guest-image 的 OEM setup）"
+            exit 1
+          fi
+
+          # ── 执行登记阶段（保留退出码，不用 set -e 直接中断）──────────────────
+          log "=== 执行 -Phase register ==="
+          # ⚠️ 2026-11-12（run 43231941986 实测）：**powershell -File 在解析错误时返回 0**。
+          #   那一轮脚本因中文乱码解析失败（Unexpected token），但 RC 仍是 0，
+          #   于是「登记阶段成功」是假的 —— 什么都没执行。
+          #   ⇒ 先用 PSParser 做语法预检，把解析错误变成明确的非零退出。
+          log "=== 语法预检（PSParser）==="
+          SYNTAX_PS='$errs=@(); $null=[System.Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText("C:/cx/scripts/vm/qemu-guest-destruct.ps1"), [ref]$errs); if ($errs.Count -gt 0) { Write-Output ("SYNTAX-ERR count=" + $errs.Count); $errs | Select-Object -First 5 | ForEach-Object { Write-Output ("  line " + $_.Token.StartLine + ": " + $_.Message) }; exit 3 } else { Write-Output "SYNTAX-OK" }'
+          SYNTAX_ENC=$(printf '%s' "$SYNTAX_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          SYNTAX_OUT=$($SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $SYNTAX_ENC" 2>&1 | tr -d "\r")
+          log "$SYNTAX_OUT"
+          case "$SYNTAX_OUT" in
+            *SYNTAX-OK*) log "语法预检通过" ;;
+            *) log "::error title=客机侧脚本语法错误::$(echo "$SYNTAX_OUT" | head -6 | tr '\n' ' ')"; exit 1 ;;
+          esac
+
+          RC=0
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase register -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REG_LOG" || RC=$?
+          log "register exit code = $RC"
+
+          # ── 无论成败都取回客机证据（关键：失败时证据最有用）─────────────────
+          log "=== 取回客机证据 C:/cx/evidence ==="
+          EVID_PS='if (Test-Path "C:/cx/evidence") { Get-ChildItem "C:/cx/evidence" | ForEach-Object { Write-Output ("--- " + $_.Name + " (" + $_.Length + " B) ---"); Get-Content $_.FullName } } else { Write-Output "MISSING C:/cx/evidence" }'
+          EVID_ENC=$(printf '%s' "$EVID_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REG_LOG" 2>&1 || log "（取证据失败，客机可能已不可达）"
+          if [ "$RC" -ne 0 ]; then
+            log "::error title=登记阶段失败::exit=$RC，详见 register-stage.txt（含客机内 cx-evidence 输出）"
+            exit 1
+          fi
+          log "register-stage-ok"
       # ── 重启客机（由宿主触发，等价于真关机的后半程）──────────────────────
       - name: 阶段二前半：重启客机并等待回连
         id: reboot
@@ -1477,52 +1799,87 @@ jobs:
       - name: 阶段二后半：客机内重放并断言痕迹已删
         id: replay
         if: steps.image.outputs.image_ok == 'yes'
+        # ⚠️ 2026-11-12：对齐阶段一的详细输出改造。
+        #   原缺陷：
+        #     ① `set -eu` + `REPLAY_RC=0` 但 ssh 失败会被 set -e 直接中断，走不到赋值；
+        #     ② 用 scp 取证（此前实测 scp 在 Windows sshd 上 exit 255 不可靠）；
+        #     ③ 无 tee，主日志看不到客机侧输出，只能事后翻 artifact。
         run: |
-          set -eu
+          set -u
           KEY="$RUNNER_TEMP/guest-ssh-key"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          REPLAY_LOG="$SNAP/replay-stage.txt"
+          : > "$REPLAY_LOG"
+          log() { echo "$@" | tee -a "$REPLAY_LOG"; }
+
           SSH="ssh -i $KEY -p ${CX_QEMU_HOSTFWD_SSH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes"
           USER_HOST="${CX_QEMU_GUEST_SSH_USER}@127.0.0.1"
 
-          # 先取回证据：重放断言可能失败，失败时更需要证据落盘，所以取证在断言之前。
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "$USER_HOST:C:/cx/evidence/*" "$RUNNER_TEMP/" 2>/dev/null || echo '（重放阶段开始前暂无证据文件）'
+          log "=== 阶段二后半：重放 + 断言 ==="
 
+          # ① 语法预检（对齐阶段一：解析错误必须变成非零，不能被 -File 的 0 吞掉）
+          log "--- 重放脚本语法预检 ---"
+          SYNTAX_PS='$errs=@(); $null=[System.Management.Automation.PSParser]::Tokenize([IO.File]::ReadAllText("C:/cx/scripts/vm/qemu-guest-destruct.ps1"), [ref]$errs); if ($errs.Count -gt 0) { Write-Output ("SYNTAX-ERR count=" + $errs.Count); exit 3 } else { Write-Output "SYNTAX-OK" }'
+          SYNTAX_ENC=$(printf '%s' "$SYNTAX_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          SYNTAX_OUT=$($SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $SYNTAX_ENC" 2>&1 | tr -d "\r")
+          log "$SYNTAX_OUT"
+          case "$SYNTAX_OUT" in
+            *SYNTAX-OK*) log "语法预检通过" ;;
+            *) log "::error title=重放脚本语法错误::$(echo "$SYNTAX_OUT" | head -6 | tr '\n' ' ')"; exit 1 ;;
+          esac
+
+          # ② 取证（用 base64 读回，不用 scp —— 对齐部署步骤的可靠方案）
+          log "--- 取回重放前证据 ---"
+          EVID_PS='if (Test-Path "C:/cx/evidence") { Get-ChildItem "C:/cx/evidence" | ForEach-Object { Write-Output ("--- " + $_.Name + " (" + $_.Length + " B) ---"); Get-Content $_.FullName } } else { Write-Output "MISSING C:/cx/evidence" }'
+          EVID_ENC=$(printf '%s' "$EVID_PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REPLAY_LOG" 2>&1 || log "（取重放前证据失败）"
+
+          # ③ 执行重放（保留退出码）
+          log "--- 执行 -Phase replay ---"
           REPLAY_RC=0
-          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" || REPLAY_RC=$?
-          echo "REPLAY_EXIT_CODE=$REPLAY_RC"
+          $SSH "$USER_HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/qemu-guest-destruct.ps1 -Phase replay -PurgeExe '${CX_QEMU_GUEST_PURGE_EXE}'" 2>&1 | tee -a "$REPLAY_LOG" || REPLAY_RC=$?
+          log "REPLAY_EXIT_CODE=$REPLAY_RC"
 
-          # 收尾自毁断言：与 vm-shutdown-destruct 的 teardown 同口径 —— 只读检查，不替自毁擦屁股；
-          # 而且**必须真的判红**（这里不能 `|| true`，否则「自毁没清干净」会被静默吞掉，
-          # 那正是这条作业存在的意义）。
+          # ④ 收尾断言（teardown：只读检查，不替自毁擦屁股，必须真判红）
+          log "--- 执行 teardown 断言 ---"
           CLEAN_RC=0
-          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' || CLEAN_RC=$?
-          echo "TEARDOWN_ASSERT_EXIT_CODE=$CLEAN_RC"
+          $SSH "$USER_HOST" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/cx/scripts/vm/assert-clean.ps1 -Stage teardown' 2>&1 | tee -a "$REPLAY_LOG" || CLEAN_RC=$?
+          log "TEARDOWN_ASSERT_EXIT_CODE=$CLEAN_RC"
 
-          scp -i "$KEY" -P "${CX_QEMU_HOSTFWD_SSH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "$USER_HOST:C:/cx/evidence/*" "$RUNNER_TEMP/" 2>/dev/null || echo '（重放阶段暂无证据文件）'
+          # ⑤ 取回重放后证据
+          log "--- 取回重放后证据 ---"
+          $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $EVID_ENC" >> "$REPLAY_LOG" 2>&1 || log "（取重放后证据失败）"
 
-          # 两个退出码都要保留：先报断言失败，再报重放失败（若都失败，重放更接近根因）。
+          # ⑥ 两个退出码都保留：先报断言失败，再报重放失败
           if [ "$CLEAN_RC" -ne 0 ]; then
-            echo "::error title=自毁残留::teardown 断言发现残留（exit=$CLEAN_RC），见上传的证据文件"
+            log "::error title=自毁残留::teardown 断言发现残留（exit=$CLEAN_RC），见 replay-stage.txt 与上传证据"
           fi
           if [ "$REPLAY_RC" -ne 0 ]; then
-            echo "::error title=重放失败::qemu-guest-destruct.ps1 -Phase replay 退出码 $REPLAY_RC"
+            log "::error title=重放失败::qemu-guest-destruct.ps1 -Phase replay 退出码 $REPLAY_RC，见 replay-stage.txt"
           fi
           if [ "$CLEAN_RC" -ne 0 ] || [ "$REPLAY_RC" -ne 0 ]; then
             exit 1
           fi
+          log "replay-stage-ok"
 
       - name: 上传证据
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-qemu-destruct-evidence
+          name: Windows 客机自毁测试证据
           compression-level: 0
+          # ⚠️ 2026-11-12（run 43207234187）：原 path 只匹配 qemu-stdout.log 与 cx-* 系列，
+          #   但启动步骤把诊断写到了 guest-snapshot/{boot-diag.txt,ssh-boot-N.log}，
+          #   部署步骤写到 guest-snapshot/deploy.txt —— **全部没被收走**。
+          #   结果 annotation 只有「No files were found」，失败原因无从追查。
+          #   ⇒ 补上整个 guest-snapshot 目录（里面是全部诊断产物）。
           path: |
             ${{ runner.temp }}/qemu-stdout.log
             ${{ runner.temp }}/cx-*.log
             ${{ runner.temp }}/cx-*.txt
             ${{ runner.temp }}/cx-*.out
+            ${{ runner.temp }}/guest-snapshot/
           if-no-files-found: warn
           retention-days: 14
 
@@ -1530,19 +1887,24 @@ jobs:
         if: always()
         run: |
           set -u
-          # 覆盖层是一次性的，直接杀进程即可；母镜像全程未被写入。
+          # 2026-11-12：启动方式已改为 dockur 容器（复用镜像构建那套 docker bridge + NAT），
+          # 所以关停也要走 docker：杀容器即终止其内部 QEMU。
+          # 仍保留对旧 qemu-bg.pid 的兼容处理（若某轮回退到直启 QEMU）。
+          if docker ps -a --filter name=cxdestruct --format "{{.Names}}" | grep -q cxdestruct; then
+            echo "=== 关停 dockur 容器 cxdestruct ==="
+            docker stop -t 10 cxdestruct >/dev/null 2>&1 || true
+            docker rm -f cxdestruct >/dev/null 2>&1 || true
+            echo "容器已删除"
+          fi
           if [ -f "$RUNNER_TEMP/qemu-bg.pid" ]; then
             PID=$(cat "$RUNNER_TEMP/qemu-bg.pid")
             kill -TERM "$PID" 2>/dev/null || true
             sleep 3
             kill -KILL "$PID" 2>/dev/null || true
-            echo "已结束 QEMU 进程 $PID"
+            echo "已结束 QEMU 进程 $PID（兼容旧路径）"
           fi
           rm -f "$RUNNER_TEMP/guest-ssh-key"
           echo '已删除临时私钥'
-
-      # ── 结论 ─────────────────────────────────────────────────────────────
-      # 必须写清：KVM 是否可用、客机镜像是否配置、跳过原因、实际执行到了哪一步。
       - name: 结论写入 Step Summary
         if: always()
         env:
@@ -1673,7 +2035,7 @@ jobs:
             echo '| 项 | 要求 |'
             echo '| --- | --- |'
             echo '| repo variable `CX_QEMU_GUEST_IMAGE` | 预装好的 **Windows qcow2** 的绝对路径或 https URL。**当前未配置** |'
-            echo '| secret `CX_QEMU_GUEST_SSH_KEY` | 客机内运行两阶段所需的 SSH 私钥 |'
+            echo '| Actions Cache | 客机 SSH 私钥（随镜像一起打包，无需任何 secret） |'
             echo '| 镜像内容 | 已安装 OpenSSH Server，并预置 `purge-tests.exe`（`build-windows.sh -BuildTests` 产物） |'
             echo '| 体积预算 | 5.6 GiB 量级，下载 + 冷启动约 10 分钟，故本作业只手动/定时触发 |'
             echo '| 为什么不支持 ISO | 体积、许可与冷启动时间都不合适；ISO 路径会在「解析客机镜像」里被显式拒绝 |'
@@ -1743,11 +2105,9 @@ jobs:
   # ---------------------------------------------------------------------------
 
   qemu-destruct-linux-guest:
-    name: 关机销毁与开机续删（托管 Ubuntu + QEMU + Linux 客机，真实重启）
-    needs: gate
+    name: Linux 客机强制断电自毁与开机续删（真实重启）
     # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
-    if: needs.gate.result == 'success'
     runs-on: ubuntu-24.04
     # 硬上限：50 分钟。构成 = apt 装 qemu（~2 min）+ 下 260 MB 镜像（~30 s）
     # + 客机冷启动（≤7 min）× 3 轮（首次 / 断电后冷启动 / 第二次重启）
@@ -1891,7 +2251,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-qemu-linux-guest-evidence
+          name: Linux 客机断电自毁测试证据
           compression-level: 0
           path: |
             ${{ runner.temp }}/cx-linux-guest/user-data
@@ -1911,10 +2271,1493 @@ jobs:
         if: always()
         run: bash scripts/ci/qemu-guest-destruct-linux.sh --phase teardown
 
-  summary:
-    name: 持续集成汇总
+  # ═══════════════════════════════════════════════════════════════════════
+  # 2026-11-12 合并：本作业原为独立的 build-guest-image.yml。
+  # 合并理由：用户要求「优先读 cache，读不到就在线构建」，而这两件事
+  #   必须与 qemu-shutdown-destruct 在同一 workflow 内才能共享 cache 键。
+  #   原独立 workflow 无法被 ci.yml 的作业 wait 到。
+  #
+  # 产物：Actions Cache key = env.GUEST_IMAGE_CACHE_KEY（约 4.5 GB）
+  #   下游 qemu-shutdown-destruct 用 actions/cache/restore 取用。
+  # ═══════════════════════════════════════════════════════════════════════
+  build-guest-image:
+    name: 构建 Windows 客机镜像并缓存（安装 SSH 与自毁测试工具）
     runs-on: ubuntu-24.04
-    needs: [source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
+    timeout-minutes: 120
+    # cache 未命中时才需要 30-40 分钟构建；命中时只需几分钟验证。
+    concurrency:
+      group: cx-guest-image-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      GUEST_USER: runner
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ══════════════════════════════════════════════════════════════════
+      # 用户 2026-11-12 要求：**优先读 cache，读不到才在线构建**。
+      #   Actions Cache 有 7 天未访问即清理的限制，所以不能假设它一定在。
+      #   这里做「尽力恢复」：命中就跳过后续全部构建步骤（省 30-40 分钟），
+      #   未命中就照常走完整构建流程，构建成功后回写 cache。
+      # ══════════════════════════════════════════════════════════════════
+      - name: 尝试从 cache 恢复客机镜像
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/guest-cache
+          key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
+          # 不用 restore-keys：镜像必须精确命中，拿错版本比没有更糟
+          fail-on-cache-miss: false
+
+      - name: 判定 cache 是否可用
+        id: havecache
+        run: |
+          set -u
+          CACHE_DIR="$GITHUB_WORKSPACE/guest-cache"
+          IMG="$CACHE_DIR/guest.qcow2"
+          OK=no
+          if [ -f "$IMG" ]; then
+            SIZE=$(stat -c %s "$IMG")
+            echo "cache 里找到 guest.qcow2 = $SIZE 字节"
+            # 体积断言：真实镜像 ~4.5 GB；过小说明是损坏/占位
+            if [ "$SIZE" -gt 1000000000 ]; then
+              # sha256 校验（cache 里同时存了 .sha256）
+              if [ -f "$IMG.sha256" ]; then
+                EXPECT=$(awk '{print $1}' "$IMG.sha256")
+                ACTUAL=$(sha256sum "$IMG" | awk '{print $1}')
+                echo "sha256 期望=$EXPECT"
+                echo "sha256 实际=$ACTUAL"
+                if [ "$EXPECT" = "$ACTUAL" ]; then OK=yes; else echo "sha256 不匹配，丢弃"; fi
+              else
+                echo "无 .sha256，跳过校验（仅体积通过）"
+                OK=yes
+              fi
+            else
+              echo "体积过小（<1GB），判定为损坏"
+            fi
+          else
+            echo "cache 未命中（guest.qcow2 不存在）"
+          fi
+          echo "CACHE_HIT=$OK"
+          echo "CACHE_HIT=$OK" >> "$GITHUB_OUTPUT"
+          if [ "$OK" = yes ]; then
+            echo "::notice title=cache 命中::跳过镜像构建，直接用 cache 里的镜像"
+          else
+            echo "::notice title=cache 未命中::将在线构建镜像（约 30-40 分钟）"
+          fi
+
+      # ── 以下全部步骤只在 cache 未命中时执行 ────────────────────────────
+
+      - name: 环境基线
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        run: |
+          set -u
+          uname -a
+          echo "NPROC=$(nproc)"
+          free -h
+          df -h /
+          echo
+          echo '=== KVM 设备 ==='
+          ls -l /dev/kvm || echo '（无 /dev/kvm）'
+          echo
+          echo '=== /dev/net/tun（dockur 用于 macvlan，bridge 模式下非必需）==='
+          ls -l /dev/net/tun || echo '（无 /dev/net/tun）'
+          echo
+          echo '=== docker ==='
+          docker --version || echo '（无 docker）'
+          docker info --format '{{.ServerVersion}} {{.Driver}}' 2>/dev/null || true
+          echo "RUNNER_GROUPS=$(id -Gn | tr ' ' ',')"
+
+      - name: KVM 提权并断言
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: kvm
+        run: |
+          set -eu
+          accessible() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+          if [ ! -e /dev/kvm ]; then
+            echo '::error title=无 /dev/kvm::托管 runner 未提供 KVM，Windows 安装会超时'
+            exit 1
+          fi
+          if ! accessible; then
+            sudo chmod 666 /dev/kvm
+            sleep 1
+          fi
+          accessible || { echo '::error title=KVM 不可读写::提权失败'; exit 1; }
+          echo 'KVM_ACCESSIBLE=yes'
+
+      - name: 修复 DNS（runner 解析不了 ubuntu.com 系列）
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        # ⚠️ 2026-11-11 实测：托管 runner 的默认 DNS 解析不了
+        #    azure.archive.ubuntu.com / archive.ubuntu.com / ports.ubuntu.com，
+        #    而 github.com 返回 200 —— 是 DNS 局部故障，不是网络全断。
+        #    直接改用公共 DNS（8.8.8.8 / 1.1.1.1），让 apt 恢复正常。
+        #    sudo 已确认可用（KVM 提权那步就是 sudo）。
+        timeout-minutes: 3
+        run: |
+          set -u
+          echo "=== 当前 DNS 配置 ==="
+          cat /etc/resolv.conf 2>/dev/null || true
+          echo
+          echo "=== 改前解析测试 ==="
+          getent hosts archive.ubuntu.com || echo "  archive.ubuntu.com 解析失败"
+          getent hosts github.com >/dev/null && echo "  github.com 可解析"
+          echo
+          # Ubuntu 24.04 用 systemd-resolved；直接改 /etc/resolv.conf 可能被覆盖，
+          # 所以两条都做：先改 resolved 的配置，再直接覆盖 resolv.conf。
+          echo "=== 设置公共 DNS ==="
+          sudo mkdir -p /etc/systemd/resolved.conf.d
+          printf '[Resolve]\nDNS=8.8.8.8 1.1.1.1 8.8.4.4\nFallbackDNS=1.0.0.1\n' | \
+            sudo tee /etc/systemd/resolved.conf.d/cx-dns.conf >/dev/null
+          # 直接覆盖（resolved 不生效时的兜底；CI runner 可以这么做）
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n' | \
+            sudo tee /etc/resolv.conf >/dev/null
+          sudo systemctl restart systemd-resolved 2>/dev/null || true
+          sleep 2
+          echo
+          echo "=== 改后 DNS 配置 ==="
+          cat /etc/resolv.conf 2>/dev/null || true
+          echo
+          echo "=== 改后解析测试 ==="
+          OK=no
+          for h in archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com; do
+            if getent hosts "$h" >/dev/null 2>&1; then
+              echo "  $h 解析成功 -> $(getent hosts $h | head -1 | awk '{print $1}')"
+              OK=yes
+            else
+              echo "  $h 仍解析失败"
+            fi
+          done
+          echo "DNS_FIXED=$OK"
+          echo "DNS_FIXED=$OK" >> "$GITHUB_ENV"
+          # 不在这里 exit 1 —— 后面「安装依赖」有 docker 降级路径，
+          # DNS 修不好也不会硬卡住。但要留下明确记录。
+          if [ "$OK" != yes ]; then
+            echo "::warning title=公共 DNS 也没修好::后续依赖 docker 降级路径"
+          fi
+
+
+          # ── apt 镜像源重写（用户 2026-11-12 要求）──────────────────────
+          # runner 默认走 `azure.archive.ubuntu.com`，而该域名在本环境解析失败
+          # （实测 `Temporary failure resolving`）。即便 DNS 已改成 8.8.8.8，
+          # 也可能遇到该镜像站本身不可达。所以直接重写 sources 到公共镜像。
+          # 保留原文件备份，便于出问题时对照。
+          echo
+          echo "=== 重写 apt 镜像源 ==="
+          CODENAME=$(lsb_release -cs 2>/dev/null || echo noble)
+          echo "  发行代号 = $CODENAME"
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ] && [ ! -f /etc/apt/sources.list.d/ubuntu.sources.orig ]; then
+            sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.orig || true
+          fi
+          if [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.orig ]; then
+            sudo cp /etc/apt/sources.list /etc/apt/sources.list.orig || true
+          fi
+          # Ubuntu 24.04 用 deb822 格式（ubuntu.sources），22.04 用 sources.list，两套都写
+          sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<MIRROREOF
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: $CODENAME $CODENAME-updates $CODENAME-backports $CODENAME-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          MIRROREOF
+          # 传统格式也写一份（某些工具会读）
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s main restricted universe multiverse\n' "$CODENAME" | sudo tee /etc/apt/sources.list >/dev/null
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s-updates main restricted universe multiverse\n' "$CODENAME" | sudo tee -a /etc/apt/sources.list >/dev/null
+          printf 'deb http://archive.ubuntu.com/ubuntu/ %s-security main restricted universe multiverse\n' "$CODENAME" | sudo tee -a /etc/apt/sources.list >/dev/null
+          echo "  已重写到 archive.ubuntu.com"
+          # 移除可能失效的第三方源（它们会拖慢 update）
+          sudo find /etc/apt/sources.list.d -name "*.list" -o -name "*.sources" 2>/dev/null | \
+            grep -v "ubuntu.sources" | grep -v ".orig" | while read -r f; do
+              echo "  禁用第三方源: $f"
+              sudo mv "$f" "$f.disabled" 2>/dev/null || true
+            done
+          echo
+          echo "=== 重写后的源 ==="
+          grep -h "^deb\|^URIs" /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null | head -8 || true
+          echo
+          # 验证新源可达
+          echo "=== 新源可达性 ==="
+          if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            echo "  archive.ubuntu.com 可解析"
+            curl -sS --max-time 15 -o /dev/null -w "  HTTP %{http_code}\n" \
+              "http://archive.ubuntu.com/ubuntu/dists/$CODENAME/Release" || echo "  HTTP 请求失败"
+          else
+            echo "  archive.ubuntu.com 解析失败"
+          fi
+      - name: 安装依赖
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        # ⚠️ 2026-11-12 修三个真 bug（上一轮全踩了）：
+        #   ① `--error-on-any-failure` **不能与其他选项组合** ——
+        #      实测报 `E: Command line option --error-on-any-failure is not
+        #      understood in combination with the other options`，
+        #      加了它整条 apt 命令直接失效（连 update 都没跑）。
+        #   ② 管道吞退出码 —— `sudo apt-get update ... | tail -10` 的 `$?`
+        #      是 **tail 的**（恒 0），所以 `APT_OK=yes` 是假的。
+        #   ③ docker 提取的 qemu 跑不了 —— 缺 `liburing.so.2` / `libcapstone.so.5`，
+        #      `docker cp` 只拿二进制不拿依赖库。
+        # ⇒ 现在：apt 是唯一主路径；判据用「索引文件是否真的刷新」+
+        #    「二进制真的能跑」，不看 apt 的退出码。
+        timeout-minutes: 12
+        run: |
+          set -u
+          echo "=== DNS 状态 ==="
+          cat /etc/resolv.conf 2>/dev/null | head -5 || true
+          getent hosts archive.ubuntu.com >/dev/null 2>&1 \
+            && echo "  archive.ubuntu.com 可解析" \
+            || echo "  archive.ubuntu.com 解析失败"
+          echo
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          apt_ok=no
+          for attempt in 1 2 3; do
+            echo "=== 第 $attempt 轮 ==="
+            # ① 先记下当前索引文件数，update 后要求**变多或变新**，
+            #    这是「真的拿到了索引」的唯一可靠判据。
+            LISTS_BEFORE=$(find /var/lib/apt/lists -name "*_Packages*" 2>/dev/null | wc -l)
+            echo "  update 前索引文件数 = $LISTS_BEFORE"
+
+            # ② 不用管道！输出落盘，退出码才准。
+            sudo apt-get update -qq $APT_OPTS > /tmp/aptup.log 2>&1
+            UP_RC=$?
+            tail -8 /tmp/aptup.log || true
+            echo "  apt-get update rc=$UP_RC"
+
+            LISTS_AFTER=$(find /var/lib/apt/lists -name "*_Packages*" 2>/dev/null | wc -l)
+            echo "  update 后索引文件数 = $LISTS_AFTER"
+
+            # ③ 判据：索引文件数必须 >0 且不比之前少（少说明整体失败）
+            if [ "$LISTS_AFTER" -gt 0 ] && [ "$LISTS_AFTER" -ge "$LISTS_BEFORE" ]; then
+              echo "  索引可用，尝试 install"
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $APT_OPTS \
+                qemu-utils qemu-system-x86 > /tmp/aptinst.log 2>&1
+              INST_RC=$?
+              tail -8 /tmp/aptinst.log || true
+              echo "  apt-get install rc=$INST_RC"
+              if [ "$INST_RC" -eq 0 ]; then
+                apt_ok=yes; break
+              fi
+            else
+              echo "  索引没拿到（update 实际失败）"
+            fi
+            echo "  第 $attempt 轮未成功，10 秒后重试"
+            sleep 10
+          done
+          echo "APT_OK=$apt_ok"
+          echo
+          # ── 唯一判据：二进制真的能跑 ─────────────────────────────────────
+          QEMU_IMG_OK=no
+          QEMU_SYS_OK=no
+          if command -v qemu-img >/dev/null 2>&1 && qemu-img --version >/dev/null 2>&1; then
+            QEMU_IMG_OK=yes
+            echo "qemu-img = $(command -v qemu-img)"
+            qemu-img --version | head -1
+          fi
+          if command -v qemu-system-x86_64 >/dev/null 2>&1 && qemu-system-x86_64 --version >/dev/null 2>&1; then
+            QEMU_SYS_OK=yes
+            echo "qemu-system-x86_64 = $(command -v qemu-system-x86_64)"
+            qemu-system-x86_64 --version | head -1
+          fi
+          echo "QEMU_IMG_OK=$QEMU_IMG_OK QEMU_SYS_OK=$QEMU_SYS_OK"
+          echo
+          # apt 装成功但二进制跑不了 → 必须红（不能带着坏工具往下走）
+          if [ "$QEMU_IMG_OK" != yes ]; then
+            echo "::error title=qemu-img 不可用::apt 未装成功或二进制跑不起来"
+            echo "--- 诊断 ---"
+            command -v qemu-img || echo "(不在 PATH)"
+            ls -la /usr/bin/qemu-img 2>/dev/null || true
+            qemu-img --version 2>&1 | head -3 || true
+            cat /etc/resolv.conf 2>/dev/null || true
+            getent hosts archive.ubuntu.com || echo "(archive.ubuntu.com 解析失败)"
+            exit 1
+          fi
+          if [ "$QEMU_SYS_OK" != yes ]; then
+            echo "::error title=qemu-system-x86_64 不可用::「验证 SSH」那步需要它"
+            ls -la /usr/bin/qemu-system-x86_64 2>/dev/null || true
+            exit 1
+          fi
+          echo
+          df -h /
+      - name: 生成 SSH 密钥（每次随机，不落盘、不入库）
+        # ⚠️ 2026-11-12（run 43187143353 实测）：此处**不能**加 `if: CACHE_HIT != 'yes'`。
+        #   cache 命中时若跳过本步骤，$WORK/id 就不存在，而「验证 SSH 可连」硬编码用
+        #   `ssh -i $WORK/id` ⇒ ssh 找不到该 key ⇒ 回落到 ~/.ssh/id_rsa 等默认路径
+        #   ⇒ 日志里全是 "Trying private key: /home/runner/.ssh/id_rsa" +
+        #   "Permission denied (publickey)"，看起来像客机 sshd 问题，实际是本地缺 key。
+        #   密钥生成与镜像构建无关，任何路径都必须执行。
+        id: keys
+        # 用户 2026-11-12 要求：**每次都随机生成**，不再用 workflow_dispatch 输入、
+        # 也不依赖 repo secret。理由：
+        #   ① 镜像里的公钥必须与验证用的私钥配对，随机生成天然配对；
+        #   ② 私钥只存在于本次 job 的 RUNNER_TEMP，job 结束即消失；
+        #   ③ 不需要人工维护 CX_QEMU_GUEST_SSH_KEY 这个 secret。
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          mkdir -p "$WORK/oem" "$WORK/storage" "$WORK/data"
+          # ed25519：比 RSA 短、生成快、OpenSSH 全版本支持
+          ssh-keygen -t ed25519 -N "" -C "cx-ci-$(date +%s)" -f "$WORK/id" >/dev/null
+          chmod 600 "$WORK/id"
+          echo "私钥: $(stat -c %s "$WORK/id") 字节"
+          echo "公钥: $(cat "$WORK/id.pub")" | head -c 120; echo
+          # 断言密钥可用（防止 ssh-keygen 静默失败）
+          if ! ssh-keygen -l -f "$WORK/id.pub" >/dev/null 2>&1; then
+            echo "::error title=SSH 密钥生成失败::ssh-keygen 产物不可用"
+            exit 1
+          fi
+          echo "KEY_FINGERPRINT=$(ssh-keygen -l -f "$WORK/id.pub" | awk '{print $2}')"
+
+          # ⚠️ 2026-11-12（run 43190313294 实测）：cache 命中时**必须换成缓存里的密钥对**。
+          #
+          #   矛盾：镜像在构建时就把当时的公钥写进了
+          #   C:\ProgramData\ssh\administrators_authorized_keys（OEM setup.ps1）。
+          #   cache 命中不重建镜像 ⇒ 客机里永远是**构建那次**的公钥。
+          #   而上面刚 ssh-keygen 出的是**新**密钥对 ⇒ 公私钥不配对
+          #   ⇒ sshd 回 packet type 51（拒绝）⇒ Permission denied (publickey)。
+          #
+          #   实测证据（ssh-vvv-1.txt）：
+          #     Offering public key: /home/runner/work/_temp/guest/id ED25519 SHA256:XjsCPahr…
+          #     we sent a publickey packet, wait for reply
+          #     receive packet: type 51          ← 服务端明确拒绝这个 key
+          #
+          #   修法：cache 里存了构建时的密钥对（见「存入 Actions Cache」），
+          #   这里用它们覆盖刚生成的那对。cache 未命中时保留新生成的。
+          if [ -f "$GITHUB_WORKSPACE/guest-cache/guest-key" ]; then
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key"     "$WORK/id"
+            cp "$GITHUB_WORKSPACE/guest-cache/guest-key.pub" "$WORK/id.pub"
+            chmod 600 "$WORK/id"
+            echo "SSH_KEY_SOURCE=cache"
+            echo "  已换成 cache 里的密钥对"
+            echo "  指纹: $(ssh-keygen -l -f "$WORK/id.pub" | awk '{print $2}')"
+            if ! ssh-keygen -l -f "$WORK/id.pub" >/dev/null 2>&1; then
+              echo "::error title=cache 里的密钥不可用::guest-key.pub 无法解析"
+              exit 1
+            fi
+          else
+            echo "SSH_KEY_SOURCE=fresh"
+          fi
+      - name: 下载 purge-tests.exe（来自 windows-build artifact）
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: getexe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          mkdir -p "$WORK/oem"
+
+          # 优先用本仓库最近一次成功 ci.yml run 的 artifact（同一次 push 不一定跑了 windows-build，
+          # 因为这个 workflow 是独立的 workflow_dispatch）。
+          SHA="$GITHUB_SHA"
+          ART="windows-ci-build-$SHA"
+
+          echo "尝试下载 artifact: $ART"
+          set +e
+          # ⚠️ 不能把 gh 的输出用管道接 sed：那样 RC=$? 取到的是 **sed 的退出码**（恒 0），
+          #    gh 失败会被静默吞掉，后面 find 找不到文件才报错 —— 诊断信息会错位。
+          #    改为先落盘再打印，保住 gh 的退出码。
+          gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art" > "$WORK/art.log" 2>&1
+          RC=$?
+          echo "--- gh run download 输出（前 20 行）---"
+          head -20 "$WORK/art.log" 2>/dev/null || true
+          set -e
+
+          if [ $RC -ne 0 ]; then
+            echo "同 sha 没有 artifact，回退到最近一次成功的 ci.yml run"
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+                       --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            if [ -z "${RUN_ID:-}" ]; then
+              echo '::error title=找不到 windows-build 产物::需要先有一次成功的 ci.yml run（它会产生 purge-tests.exe）'
+              exit 1
+            fi
+            echo "使用 run $RUN_ID"
+            ART=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+                    --jq '.artifacts[] | select(.name | startswith("windows-ci-build-")) | .name' | head -n1)
+            if [ -z "${ART:-}" ]; then
+              echo '::error title=该 run 没有 windows-ci-build artifact'
+              exit 1
+            fi
+            echo "下载 artifact: $ART"
+            gh run download --repo "$GITHUB_REPOSITORY" -n "$ART" -D "$WORK/art"
+          fi
+
+          # artifact 解包后路径为 <art>/windows/native-build/bin/purge-tests.exe
+          EXE=$(find "$WORK/art" -type f -name 'purge-tests.exe' | head -n1)
+          if [ -z "${EXE:-}" ]; then
+            echo '::error title=artifact 里没有 purge-tests.exe::列出内容'
+            find "$WORK/art" -type f | head -50
+            exit 1
+          fi
+          SIZE=$(stat -c %s "$EXE")
+          echo "purge-tests.exe = $SIZE 字节（来自 $EXE）"
+          if [ "$SIZE" -lt 1000 ]; then
+            echo '::error title=purge-tests.exe 体积异常::小于 1000 字节，可能是占位文件'
+            exit 1
+          fi
+          cp "$EXE" "$WORK/oem/purge-tests.exe"
+          echo "已拷贝到 $WORK/oem/purge-tests.exe"
+          echo "exe_size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "exe_source=$ART" >> "$GITHUB_OUTPUT"
+
+      # ── OEM：dockur 会把 /oem 下所有文件放进 ISO 的 $OEM$，并把 install.bat
+      #    在**安装最后一步**自动执行；同目录其余文件被拷到 C:\OEM。
+      #    这是本方案「配置镜像」的唯一注入点，不需要自己找时机。
+      - name: 生成 OEM install.bat
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        env:
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password || 'Cx-Guest-2026!' }}
+          GUEST_USER: ${{ env.GUEST_USER }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          PUBKEY=$(cat "$WORK/id.pub")
+
+          # ── OpenSSH 离线包（关键，2026-11-11）────────────────────────────
+          # 为什么不靠 Windows Update：系统自带的「按需功能安装」对 OpenSSH.Server
+          # 是从 WU 拉包，dockur 容器内 Windows 走 NAT，能否出网无保证。
+          # 装不上的后果是 sshd 根本不存在，而宿主侧只看到「banner exchange 超时」
+          # —— QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时。
+          # 这里把微软官方 Win32-OpenSSH zip（约 4.9 MB）下到 OEM，随 $OEM$ 进镜像。
+          OSSH_URL="https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
+          if ! curl -fL --retry 3 --retry-delay 2 --max-time 180 \
+               -o "$WORK/oem/OpenSSH-Win64.zip" "$OSSH_URL"; then
+            echo "::error title=下载 OpenSSH 离线包失败::$OSSH_URL"
+            exit 1
+          fi
+          OSSH_SIZE=$(stat -c %s "$WORK/oem/OpenSSH-Win64.zip")
+          echo "OpenSSH-Win64.zip = $OSSH_SIZE 字节"
+          if [ "$OSSH_SIZE" -lt 1000000 ]; then
+            echo "::error title=OpenSSH 包体积异常::只有 $OSSH_SIZE 字节（预期约 4.9 MB）"
+            exit 1
+          fi
+          # zip 魔数必须是 PK\x03\x04，防止拿到 HTML 错误页
+          OSSH_MAGIC=$(head -c 4 "$WORK/oem/OpenSSH-Win64.zip" | od -An -tx1 | tr -d ' \n')
+          echo "zip magic = $OSSH_MAGIC"
+          case "$OSSH_MAGIC" in
+            504b0304*) echo 'zip 魔数正确' ;;
+            *) echo "::error title=OpenSSH 包不是 zip::magic=$OSSH_MAGIC"; exit 1 ;;
+          esac
+
+          # 密码里若有 % 会让 bat 的 %VAR% 展开出问题；这里限制字符集并校验。
+          case "$GUEST_PASSWORD" in
+            *%*|*\'*|*\"*) echo '::error title=密码含特殊字符::bat 里会导致展开异常，请改用字母数字与 -_.!'; exit 1 ;;
+          esac
+
+          # 注意：bat 里 % 是变量前缀，PowerShell 的 $ 在 bat 中无特殊含义，可直接用。
+          # 所有 PowerShell 都用 -EncodedCommand 会更好，但可读性差、排障困难；
+          # 这里用 -Command 并把脚本写成单独 .ps1 文件由 bat 调用，兼顾可读与安全。
+          cat > "$WORK/oem/setup.ps1" <<PSSETUP
+          \$ErrorActionPreference = 'Continue'
+          \$log = 'C:\OEM\setup.log'
+          function Say(\$m) { "\$([datetime]::UtcNow.ToString('o')) \$m" | Tee-Object -FilePath \$log -Append }
+
+          # ── 2026-11-11（t111）：把每一步的结果**实时**回传到宿主侧 ──
+          #
+          # 为什么必须有：上一轮 SSH 连不上，而宿主机唯一能看到的证据（setup.log）
+          # 要等 install.bat 跑完才回传；一旦中途出问题或回传失败，宿主机就完全瞎了。
+          # 这个函数在**每一步执行完立刻**追加一行到 \\host.lan\Data\setup-steps.txt，
+          # 于是即使 SSH 完全不通、即使 install.bat 后面崩了，
+          # 宿主侧 /data 里也已经留下了「做到了哪一步、每步结果是什么」。
+          #
+          # 用 AppendAllText 而不是 Set-Content：每次只追加一行，不重写整个文件，
+          # 这样即使中途断电也不会把已写的内容丢光。
+          \$stepsFile = '\\\\host.lan\\Data\\setup-steps.txt'
+          \$stepsLocal = 'C:\OEM\setup-steps.txt'
+          function StepReport(\$name, \$value) {
+            \$line = "{0} {1} = {2}" -f [datetime]::UtcNow.ToString('HH:mm:ss'), \$name, \$value
+            # 本地一份（客机内可查）
+            try { Add-Content -LiteralPath \$stepsLocal -Value \$line -Encoding ascii -ErrorAction SilentlyContinue } catch { }
+            # 共享一份（宿主 /data 可查）—— 这是关键通道
+            try { Add-Content -LiteralPath \$stepsFile -Value \$line -Encoding ascii -ErrorAction SilentlyContinue } catch { }
+            Say "STEP \$line"
+          }
+          # 立刻写一行「活着」，这样哪怕后面立刻崩了，宿主侧也能知道 setup.ps1 起过
+          StepReport 'SetupStart' 'begin'
+
+          try {
+            Say 'setup start'
+
+            # 1) 装 OpenSSH Server。Server 2022 评估版默认没有它。
+            #
+            # ⚠️ 2026-11-11（t111）：这一段原先用「系统按需功能安装 ... | Out-Null」，
+            #    把**成败静默掉了**。而它在无人值守环境里最常见的失败原因是拿不到
+            #    Windows Update 源（dockur 的 NAT 能否出网未验证）。
+            #    失败后 Set-Service/Start-Service 会连环报错，但 \$ErrorActionPreference='Continue'
+            #    让它继续往下走，最后只留一行模糊的 status。
+            #    ⇒ 改成：抓返回码、显式记录 State、失败立刻回传 StepReport。
+            # ⭐ 2026-11-11 关键：**优先用离线 zip**，完全不依赖 Windows Update。
+            #    系统自带的功能安装对 OpenSSH.Server 这种「按需功能」是从 WU 拉包，
+            #    dockur 容器内 Windows 走 NAT，能否走到 WU 不保证。装不上的后果是
+            #    sshd 根本不存在，而宿主侧只看到「banner exchange 超时」——
+            #    因为 QEMU slirp 会先 accept 再转发，没有 sshd 时同样表现为超时而非 refused。
+            #    zip 是微软官方 PowerShell/Win32-OpenSSH 发行包，随 OEM 进镜像，
+            #    解压 + install-sshd.ps1 即可，确定性最高。
+            \$osshZip = 'C:\OEM\OpenSSH-Win64.zip'
+            \$osshDir = 'C:\Program Files\OpenSSH-Win64'
+            \$osshMode = 'capability'
+            if (Test-Path \$osshZip) {
+              Say 'OpenSSH install mode=offline-zip'
+              try {
+                if (-not (Test-Path \$osshDir)) {
+                  Expand-Archive -LiteralPath \$osshZip -DestinationPath 'C:\Program Files' -Force -ErrorAction Stop
+                }
+                \$sshdExe = Join-Path \$osshDir 'sshd.exe'
+                Say "offline: sshd.exe exists=\$(Test-Path \$sshdExe)"
+                # host key 首次必须生成，否则 sshd 起不来
+                & (Join-Path \$osshDir 'ssh-keygen.exe') -A 2>&1 | ForEach-Object { Say "keygen: \$_" }
+                # 注册服务 + 自启 + 防火墙规则
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path \$osshDir 'install-sshd.ps1') 2>&1 | ForEach-Object { Say "install-sshd: \$_" }
+                # sshd 需要能找到自身 dll
+                \$env:Path = "\$osshDir;\$env:Path"
+                [Environment]::SetEnvironmentVariable('Path', "\$osshDir;" + [Environment]::GetEnvironmentVariable('Path','Machine'), 'Machine')
+                \$osshMode = 'offline-zip-ok'
+              } catch {
+                Say "ERROR offline zip install failed: \$_"
+                \$osshMode = 'offline-zip-failed'
+              }
+              StepReport 'OpenSSHInstallMode' \$osshMode
+            } else {
+              Say 'WARN OpenSSH zip 不在 OEM，回退到 Windows Update（可能失败）'
+              StepReport 'OpenSSHInstallMode' 'fallback-capability-no-zip'
+            }
+
+            # 下面这段是 WU 路径：只有在没有 zip 时才真正执行。
+            # 有 zip 成功时 \$osshMode=offline-zip-ok，跳过 WU 避免无谓联网等待。
+            if (\$osshMode -notlike 'offline-zip-ok') {
+            # 1) 装 OpenSSH Server（回退路径）
+            \$capErr = ''
+            \$capAdded = 'not-attempted'
+            try {
+              \$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+              if (-not \$cap) {
+                \$capErr = 'capability-not-offered'
+                Say "ERROR OpenSSH.Server capability 不存在（此 SKU 未提供？）"
+              } elseif (\$cap.State -eq 'Installed') {
+                \$capAdded = 'already-installed'
+                Say 'OpenSSH.Server already installed'
+              } else {
+                Say "installing OpenSSH.Server (was \$(\$cap.State))"
+                # 不加 Out-Null：要能拿到异常与返回码
+                \$r = Add-WindowsCapability -Online -Name \$cap.Name -ErrorAction Stop
+                \$capAdded = "ok(rc=\$(\$r.RestartNeeded))"
+                Say "Add-WindowsCapability 完成 RestartNeeded=\$(\$r.RestartNeeded)"
+              }
+            } catch {
+              \$capAdded = 'failed'
+              \$capErr = \$_.Exception.Message
+              Say "ERROR Add-WindowsCapability 失败: \$capErr"
+              Say '  → 常见原因：dockur NAT 出不了网，拉不到 Windows Update 源'
+            }
+            StepReport 'AddWindowsCapability' \$capAdded
+            if (\$capErr) { StepReport 'AddWindowsCapabilityError' \$capErr }
+
+            # 装完必须复核一次 State —— 返回码 ok 不等于真的变成 Installed
+            try {
+              \$capAfter = (Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1).State
+            } catch { \$capAfter = 'query-failed' }
+            Say "OpenSSH.Server state-after=\$capAfter"
+            StepReport 'OpenSSHServerStateAfter' "\$capAfter"
+
+            }  # end of WU fallback branch (offline-zip 成功时跳过)
+            # sshd 服务是否存在（装不上时这里就是 False，一目了然）
+            \$svcExists = \$null -ne (Get-Service -Name sshd -ErrorAction SilentlyContinue)
+            Say "sshd service exists=\$svcExists"
+            StepReport 'SshdServiceExists' "\$svcExists"
+
+            if (\$svcExists) {
+              try {
+                Set-Service -Name sshd -StartupType Automatic
+                StepReport 'SetServiceStartup' 'ok'
+              } catch {
+                StepReport 'SetServiceStartup' "failed: \$(\$_.Exception.Message)"
+              }
+              try {
+                Start-Service sshd
+                StepReport 'StartService' 'ok'
+              } catch {
+                StepReport 'StartService' "failed: \$(\$_.Exception.Message)"
+              }
+              \$sshdStatus = (Get-Service sshd).Status
+              \$sshdStartType = (Get-Service sshd).StartType
+              Say "sshd status=\$sshdStatus startup=\$sshdStartType"
+              StepReport 'SshdStatus' "\$sshdStatus"
+              StepReport 'SshdStartType' "\$sshdStartType"
+            } else {
+              Say 'ERROR sshd 服务不存在 —— OpenSSH Server 没装上，SSH 必然连不通'
+              StepReport 'SshdStatus' 'service-missing'
+            }
+
+            # sshd 进程在不在（比服务状态更硬：服务 Running 也可能进程早退了）
+            \$sshProc = @(Get-Process -Name sshd -ErrorAction SilentlyContinue).Count
+            Say "sshd processes=\$sshProc"
+            StepReport 'SshdProcessCount' "\$sshProc"
+
+            # 22 端口监听状态。这是「宿主侧连不通」时最直接的证据：
+            # 没有 LISTENING 就说明 sshd 没在听，而不是防火墙或密钥问题。
+            try {
+              \$listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
+            } catch { \$listen = 'query-failed' }
+            Say "port22 listening-entries=\$listen"
+            StepReport 'Port22Listen' "\$listen"
+
+            # 2) 防火墙放行 22。漏这条的现象是「端口拒绝」，极易误判成 sshd 没起。
+            if (-not (Get-NetFirewallRule -Name 'CX-SSHD-22' -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule -Name 'CX-SSHD-22' -DisplayName 'CX SSHD 22' \`
+                -Protocol TCP -LocalPort 22 -Action Allow -Direction Inbound | Out-Null
+              Say 'firewall rule added'
+            } else { Say 'firewall rule exists' }
+
+            # 3) 公钥 + **ACL**。
+            #    Windows sshd 对 administrators_authorized_keys 的权限极挑剔：
+            #    Users / Authenticated Users 只要有读权限，sshd 就直接拒绝认证，
+            #    日志里只写 Permission denied，完全看不出是 ACL 问题。
+            #    正确做法：关继承，只留 Administrators + SYSTEM。
+            \$sshDir = 'C:\ProgramData\ssh'
+            New-Item -ItemType Directory -Force -Path \$sshDir | Out-Null
+            \$ak = Join-Path \$sshDir 'administrators_authorized_keys'
+            Set-Content -LiteralPath \$ak -Value (Get-Content 'C:\OEM\id.pub' -Raw).Trim() -Encoding ascii
+            icacls \$ak /inheritance:r | Out-Null
+            icacls \$ak /grant 'Administrators:F' | Out-Null
+            icacls \$ak /grant 'SYSTEM:F' | Out-Null
+            Say "acl=\$((icacls \$ak) -join ' | ')"
+
+            # 4) 钉住 PubkeyAuthentication，然后重启 sshd 让配置生效。
+            \$cfg = Join-Path \$sshDir 'sshd_config'
+            if (Test-Path \$cfg) {
+              \$c = Get-Content \$cfg -Raw
+              if (\$c -notmatch '(?m)^\s*PubkeyAuthentication\s+yes') {
+                Add-Content \$cfg "\`nPubkeyAuthentication yes"
+                Say 'sshd_config: appended PubkeyAuthentication yes'
+              }
+              Restart-Service sshd
+              Say "sshd restarted, status=\$((Get-Service sshd).Status)"
+            }
+
+            # 5) purge-tests.exe 到约定路径
+            New-Item -ItemType Directory -Force -Path 'C:\cx\native' | Out-Null
+            if (Test-Path 'C:\OEM\purge-tests.exe') {
+              Copy-Item 'C:\OEM\purge-tests.exe' 'C:\cx\native\purge-tests.exe' -Force
+              Say 'purge-tests.exe deployed'
+            } else { Say 'ERROR purge-tests.exe missing from OEM' }
+
+            # 6) 自检：把关键结论写进日志，之后可以从镜像外核对
+            Say "verify whoami=\$(whoami)"
+            Say "verify exe=\$(Test-Path 'C:\cx\native\purge-tests.exe')"
+            Say "verify keys=\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            # ⚠️ 2026-11-12：宿主侧 SSH 连不上（banner exchange 超时），
+            #   而客机内 sshd 显示 Running。必须记录**客机的网络实况**：
+            #   IP 地址、网关、sshd 实际监听在哪些地址（0.0.0.0 还是具体 IP）。
+            #   只记「监听条数」无法判断 slirp 能不能转发到。
+            try {
+              \$ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.IPAddress -notlike '127.*' } |
+                ForEach-Object { "\$(\$_.InterfaceAlias)=\$(\$_.IPAddress)/\$(\$_.PrefixLength)" }
+              Say "guest-ip: \$(\$ips -join ', ')"
+              StepReport 'GuestIP' (\$ips -join ';')
+              \$gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Select-Object -First 1).NextHop
+              Say "guest-gateway: \$gw"
+              StepReport 'GuestGateway' "\$gw"
+              # sshd 实际监听地址（netstat 的 LocalAddress 列）
+              \$ls = netstat -ano | Select-String ':22\s' | ForEach-Object { (\$_ -split '\s+')[1] }
+              Say "sshd-listen-addrs: \$(\$ls -join ', ')"
+              StepReport 'SshdListenAddrs' (\$ls -join ';')
+              # 关键：sshd 是否监听在 0.0.0.0（否则 slirp 转发不进来）
+              \$any = \$ls | Where-Object { \$_ -like '0.0.0.0:22' -or \$_ -like '[::]:22' }
+              if (\$any) { StepReport 'SshdBoundAny' 'yes' } else { StepReport 'SshdBoundAny' 'NO' }
+            } catch { Say "network-diag failed: \$_" }
+            StepReport 'VerifyExe' "\$(Test-Path 'C:\cx\native\purge-tests.exe')"
+            StepReport 'VerifyKeys' "\$(Test-Path 'C:\ProgramData\ssh\administrators_authorized_keys')"
+            # 最终结论行：宿主侧只读这一行就能判断「镜像是好是坏」
+            \$sshOk = \$false
+            try {
+              \$svc = Get-Service sshd -ErrorAction SilentlyContinue
+              \$listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
+              if (\$svc -and \$svc.Status -eq 'Running' -and \$listen -gt 0) { \$sshOk = \$true }
+            } catch { }
+            StepReport 'SSH_VERDICT' \$(if (\$sshOk) { 'READY' } else { 'NOT-READY' })
+            Say 'setup done'
+          } catch {
+            Say "FATAL \$(\$_.Exception.Message)"
+            StepReport 'FATAL' \$_.Exception.Message
+            StepReport 'SSH_VERDICT' 'SETUP-CRASHED'
+          }
+          PSSETUP
+
+          printf '%s\n' "$PUBKEY" > "$WORK/oem/id.pub"
+
+          # install.bat：dockur 在安装最后一步执行它。
+          #
+          # ⚠️ 关键（2026-11-11 修正）：宿主机的 /oem 是**只读输入**，客机往 C:\OEM 写东西
+          # 不会回到宿主机。/oem 里那个 install.done 永远等不到 —— 上一版就死在这里。
+          # 唯一能把信号送回宿主机的通道是 Samba 共享 \\host.lan\Data（宿主 /data）。
+          # 所以下面**两条都要做**：客机内留一份（本地可查），再 copy 一份到共享。
+          cat > "$WORK/oem/install.bat" <<'BATEOF'
+          @echo off
+          setlocal
+          echo === CX OEM install begin ===
+          del /Q C:\OEM\install.done 2>nul
+
+          REM 执行 setup.ps1（放单独文件而不是内联，避免 bat 的转义地狱）
+          powershell -NoProfile -ExecutionPolicy Bypass -File C:\OEM\setup.ps1
+          set SETUP_RC=%ERRORLEVEL%
+          echo setup.ps1 exit=%SETUP_RC%
+
+          REM 把 setup.log 一并留在 OEM 目录（客机内可查）
+          if exist C:\OEM\setup.log type C:\OEM\setup.log
+
+          echo === CX OEM install end ===
+          REM 本地标记
+          type nul > C:\OEM\install.done
+
+          REM ── 回传到宿主机 /data（唯一有效通道）──
+          REM \\host.lan\Data 是 dockur 的 Samba "Data" 共享，对应 docker 的 -v ...:/data。
+          REM 先写 .tmp 再 move，避免宿主机读到半截文件（与 dockur 自己 sync-log.bat 同手法）。
+          REM ⚠️ bat 的 `if (...) else (...)` 块里用 `&&` 会因解析规则出错，
+          REM    所以每个命令单独一行、各自判 errorlevel。
+          if exist C:\OEM\setup.log (
+            copy /Y C:\OEM\setup.log \\host.lan\Data\setup.tmp >nul 2>&1
+            move /Y \\host.lan\Data\setup.tmp \\host.lan\Data\setup.log >nul 2>&1
+          )
+
+          copy /Y C:\OEM\install.done \\host.lan\Data\install.tmp >nul 2>&1
+          if errorlevel 1 (
+            echo WARN could-not-copy-done-to-samba
+          ) else (
+            move /Y \\host.lan\Data\install.tmp \\host.lan\Data\install.done >nul 2>&1
+            echo done-marker-synced
+          )
+
+          REM install.log 由 dockur 的 LOG=Y 写入；存在才回传，不硬失败。
+          if exist C:\OEM\install.log (
+            copy /Y C:\OEM\install.log \\host.lan\Data\install.tmp >nul 2>&1
+            move /Y \\host.lan\Data\install.tmp \\host.lan\Data\install.log >nul 2>&1
+          )
+          BATEOF
+
+          # 去掉 heredoc 的公共前导空格（bat 对行首空格敏感）
+          sed -i 's/^          //' "$WORK/oem/install.bat"
+          sed -i 's/^          //' "$WORK/oem/setup.ps1"
+
+          echo '=== install.bat 前 12 行 ==='
+          head -12 "$WORK/oem/install.bat"
+          echo "INSTALL_BAT_BYTES=$(stat -c %s "$WORK/oem/install.bat")"
+          echo "SETUP_PS1_BYTES=$(stat -c %s "$WORK/oem/setup.ps1")"
+          ls -l "$WORK/oem"
+
+      - name: 启动 dockurr/windows 安装
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: install
+        env:
+          GUEST_PASSWORD: ${{ github.event.inputs.guest_password || 'Cx-Guest-2026!' }}
+          GUEST_USER: ${{ env.GUEST_USER }}
+          VERSION: ${{ github.event.inputs.version || '2022' }}
+          DISK_SIZE: ${{ github.event.inputs.disk_size || '32G' }}
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          START=$(date +%s)
+          echo "INSTALL_START_EPOCH=$START" >> "$GITHUB_OUTPUT"
+
+          # 三个挂载点，各有明确用途（少一个就有一类信息永远看不到）：
+          #   /storage  —— 磁盘与 ISO（dockur 的主工作区）
+          #   /oem      —— **只读输入**：install.bat + 同目录附件，被 dockur 打进 ISO 的 $OEM$
+          #                客机写的东西**不会**回到这里，别拿它当回传通道
+          #   /data     —— **双向共享**：对应客机里的 \\host.lan\Data（Samba 的 Data 共享）。
+          #                这是唯一能把客机内进度传回宿主机的通道。见下方「等待安装完成」。
+          mkdir -p "$WORK/data"
+          # 8006 只绑 loopback：仅给本 job 抓安装界面截图用，不对外暴露。
+          # ⚠️ 2026-11-12：必须给 NET_ADMIN，否则 dockur 无法创建 bridge/NAT，
+          #   会回退到 user-mode networking (passt)。实测日志：
+          #     RTNETLINK answers: Operation not permitted
+          #     Warning: failed to create bridge. Please add --cap-add NET_ADMIN
+          #     Warning: failed to setup NAT networking, falling back to user-mode
+          #     Guest: 172.17.0.2 (Windows) | Mode: User (passt)
+          #   user-mode 下 `-p 2222:22` 的 docker 端口映射**不生效**，
+          #   必须改用 USER_PORTS；更简单的做法是给 NET_ADMIN 让 NAT 正常工作。
+          docker run -d --name cxwin \
+            --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            -e VERSION="$VERSION" \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE="$DISK_SIZE" \
+            -e USERNAME="$GUEST_USER" \
+            -e PASSWORD="$GUEST_PASSWORD" \
+            -e LANGUAGE=English \
+            -e REGION=en-US \
+            -e KEYBOARD=en-US \
+            -e LOG=Y \
+            -p 127.0.0.1:8006:8006 \
+            -v "$WORK/storage:/storage" \
+            -v "$WORK/oem:/oem" \
+            -v "$WORK/data:/data" \
+            docker.io/dockurr/windows:latest
+          echo "CONTAINER_ID=$(docker ps -q --filter name=cxwin)"
+          echo '=== 镜像版本 ==='
+          docker inspect --format '{{.Config.Image}} {{.Image}}' cxwin || true
+          echo '=== 挂载确认（/data 必须在，否则进度与完成信号都看不到）==='
+          docker inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' cxwin || true
+
+      - name: 等待安装完成
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: wait
+        env:
+          INSTALL_TIMEOUT: ${{ github.event.inputs.install_timeout_sec || '3600' }}
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          DATA="$WORK/data"
+          START=$(date +%s)
+          DEADLINE=$(( START + INSTALL_TIMEOUT ))
+          RESULT=timeout
+
+          # ── 完成判据（2026-11-11 修正：上一版查错了地方，必然死等）──
+          # 旧代码查 `$WORK/oem/install.done` —— 那是宿主机上的 /oem **只读输入**挂载源。
+          # 客机写 C:\OEM\install.done 只发生在客机内，永远不会出现在宿主机 /oem 里。
+          # 正确的回传通道是 Samba 共享 \\host.lan\Data → 宿主机 /data（见 docker run 的 -v）。
+          # 所以这里查 $DATA 下的标记；install.bat 会显式 copy 一份过去。
+          DONE_MARKER="$DATA/install.done"
+          # 兜底判据：即使 install.done 因故没回传，只要回传的 install.log 里
+          # 出现我们的收尾标记，也算完成 —— 一个信号失败不代表流程失败。
+          LOG_MARKER_TEXT='CX OEM install end'
+
+          # ── 进度信号：不再用「磁盘总量」──
+          # 旧版打 `du -sh storage`，它从 14G 涨到 15G 后就再也不动，完全无法区分
+          # 「装完了在等判据」与「卡在某个 Setup 界面」。改为盯**变化**：
+          #   · data/install.log 的大小与 mtime（dockur 的 LOG=Y 会持续写）
+          #   · docker logs 的行数（dockur 会打安装阶段）
+          #   · storage 下 qcow2 的 mtime + 大小
+          # 任一项在变 = 在推进；全都不变 = 卡住。
+          last_fp=''
+          last_change_ts=$START
+          stall_reported=no
+          stall_threshold=900      # 连续 15 分钟无任何信号变化 ⇒ 判疑似卡死
+          tick=0
+
+          fingerprint() {
+            # 把三个信号压成一个字符串，用于比较「这次和上次是否一样」。
+            local log_size=0 log_mtime=0 qcow_size=0 qcow_mtime=0 dlog_lines=0
+            [ -f "$DATA/install.log" ] && {
+              log_size=$(stat -c %s "$DATA/install.log" 2>/dev/null || echo 0)
+              log_mtime=$(stat -c %Y "$DATA/install.log" 2>/dev/null || echo 0)
+            }
+            local q
+            for q in "$WORK/storage/data.qcow2" "$WORK/storage/windows.qcow2"; do
+              if [ -f "$q" ]; then
+                qcow_size=$(stat -c %s "$q" 2>/dev/null || echo 0)
+                qcow_mtime=$(stat -c %Y "$q" 2>/dev/null || echo 0)
+                break
+              fi
+            done
+            dlog_lines=$(docker logs cxwin 2>&1 | wc -l || echo 0)
+            echo "log:${log_size}@${log_mtime} qcow:${qcow_size}@${qcow_mtime} dlog:${dlog_lines}"
+          }
+
+          report_progress() {
+            local fp="$1" now idle
+            now=$(date +%s)
+            idle=$(( now - last_change_ts ))
+            echo "[$(date -u +%T)] tick=${tick} idle=${idle}s  ${fp}"
+            # 判据三态：有变化 = 推进；无变化但短于阈值 = 观望；超过阈值 = 疑似卡死
+            if [ "$idle" -ge "$stall_threshold" ] && [ "$stall_reported" = no ]; then
+              echo "::warning title=疑似卡死::已连续 ${idle}s 无任何进度信号变化"
+              echo '--- docker ps ---'
+              docker ps -a --filter name=cxwin || true
+              echo '--- docker logs 尾部 80 行 ---'
+              docker logs cxwin 2>&1 | tail -80 || true
+              echo '--- /data 内容 ---'
+              ls -la "$DATA" 2>/dev/null || echo '(空或不存在)'
+              echo '--- /storage 内容 ---'
+              ls -la "$WORK/storage" 2>/dev/null || echo '(空或不存在)'
+              stall_reported=yes
+            fi
+          }
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            tick=$(( tick + 1 ))
+
+            # 完成判据 ①：install.done 已回传到 /data
+            if [ -f "$DONE_MARKER" ]; then RESULT=done; break; fi
+            # 完成判据 ②：回传的 install.log 里有收尾标记
+            if [ -f "$DATA/install.log" ] && grep -q "$LOG_MARKER_TEXT" "$DATA/install.log" 2>/dev/null; then
+              RESULT=done-by-log; break
+            fi
+            # 容器退出 = 安装失败（除非上面已判 done）
+            if ! docker ps -q --filter name=cxwin | grep -q .; then
+              RESULT=container-exited; break
+            fi
+
+            CUR=$(fingerprint)
+            if [ "$CUR" != "$last_fp" ]; then
+              last_fp="$CUR"
+              last_change_ts=$(date +%s)
+              stall_reported=no
+            fi
+            # 每 2 分钟一行（tick % 6，因为 sleep 20）
+            if [ $(( tick % 6 )) -eq 1 ]; then
+              report_progress "$CUR"
+            fi
+            sleep 20
+          done
+          ELAPSED=$(( $(date +%s) - START ))
+          echo "INSTALL_RESULT=$RESULT"
+          echo "INSTALL_ELAPSED_SEC=$ELAPSED"
+          echo "INSTALL_RESULT=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "INSTALL_ELAPSED_SEC=$ELAPSED" >> "$GITHUB_OUTPUT"
+
+          echo '=== 完成判据现场 ==='
+          echo "DONE_MARKER_EXISTS=$([ -f "$DONE_MARKER" ] && echo yes || echo no)"
+          echo "DATA_DIR_LISTING:"
+          ls -la "$DATA" 2>/dev/null || echo '(no /data)'
+          echo '=== 回传的 install.log 尾部 80 行 ==='
+          tail -80 "$DATA/install.log" 2>/dev/null || echo '(no /data/install.log)'
+          echo '=== docker logs 尾部 120 行 ==='
+          docker logs cxwin 2>&1 | tail -120 || true
+
+          if [ "$RESULT" = timeout ]; then
+            echo "::error title=安装超时::${ELAPSED}s 内既没拿到 install.done 也没看到收尾标记"
+          elif [ "$RESULT" = container-exited ] && [ ! -f "$DONE_MARKER" ]; then
+            echo "::error title=安装容器退出::未见完成标记，见上方 docker logs"
+          fi
+          case "$RESULT" in
+            done|done-by-log) : ;;
+            *) exit 1 ;;
+          esac
+
+      # ── 失败/超时的完整现场快照 ────────────────────────────────────────────
+      # 上一版最大的问题之一：卡住时什么证据都没留下，只能靠猜。
+      # 这个步骤在任何非成功结局下都会跑（if: always() 由下一步的 artifact 承担
+      # 「一定上传」，这里只负责把证据尽可能抓全）。
+      - name: 抓取安装现场快照
+        if: steps.havecache.outputs.CACHE_HIT != 'yes' && always()
+        id: snapshot
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+
+          echo '=== 收集诊断到'"$SNAP"' ==='
+          # 1) 容器状态与日志（最关键：能看出 Setup 走到哪一步、有没有重启循环）
+          docker ps -a > "$SNAP/docker-ps-a.txt" 2>&1 || true
+          docker inspect cxwin > "$SNAP/docker-inspect.json" 2>&1 || true
+          docker logs cxwin > "$SNAP/docker-logs-full.txt" 2>&1 || true
+          docker logs cxwin 2>&1 | tail -300 > "$SNAP/docker-logs-tail300.txt" || true
+
+          # 2) 两个挂载点的完整清单（/data 是回传通道，/oem 是输入，对照着看就知道
+          #    客机到底有没有写出任何东西）
+          ls -laR "$WORK/data" > "$SNAP/data-listing.txt" 2>&1 || true
+          ls -laR "$WORK/oem" > "$SNAP/oem-listing.txt" 2>&1 || true
+          ls -la "$WORK/storage" > "$SNAP/storage-listing.txt" 2>&1 || true
+          du -sh "$WORK/storage" > "$SNAP/storage-size.txt" 2>&1 || true
+
+          # 3) 客机回传的日志（有就全文留档）
+          for f in install.log setup.log; do
+            if [ -f "$WORK/data/$f" ]; then
+              cp "$WORK/data/$f" "$SNAP/data-$f" || true
+            fi
+          done
+
+          # 4) VNC 截图：dockur 在 8006 暴露 Web Viewer，/snapshot 返回当前画面。
+          #    这是唯一能「看见」Windows Setup 卡在哪个界面的手段。
+          curl -s --max-time 20 -o "$SNAP/vnc-snapshot.png" \
+            "http://127.0.0.1:8006/snapshot" 2>/dev/null || echo 'vnc snapshot failed'
+          if [ -f "$SNAP/vnc-snapshot.png" ]; then
+            echo "VNC_SNAPSHOT_BYTES=$(stat -c %s "$SNAP/vnc-snapshot.png")"
+          else
+            echo 'VNC_SNAPSHOT=missing'
+          fi
+
+          echo '=== 快照内容 ==='
+          ls -la "$SNAP" || true
+          echo "SNAP_DIR=$SNAP" >> "$GITHUB_ENV"
+
+      - name: 取出 qcow2 并核对 setup 结果
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: extract
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          SETUP_RC_LINE=$(grep -oE 'setup\.ps1 exit=[0-9]+' "$WORK/data/install.log" 2>/dev/null | tail -1 || true)
+          echo "setup.ps1 退出码行：${SETUP_RC_LINE:-（未找到）}"
+          echo '=== storage 目录 ==='
+          ls -lh "$WORK/storage" || true
+          echo '=== /oem（只读输入：install.bat + 附件）==='
+          ls -lh "$WORK/oem" || true
+          echo '=== /data（客机回传：install.done / install.log / setup.log）==='
+          ls -lh "$WORK/data" 2>/dev/null || true
+          echo '=== setup.log 全文（从 /data 回传的那份）==='
+          cat "$WORK/data/setup.log" 2>/dev/null || echo '(没有回传 setup.log —— install.bat 可能没执行，或 Samba 不可写)'
+
+          # dockur 在 DISK_FMT=qcow2 时落盘 storage/data.qcow2（旧版本是 windows.qcow2）
+          SRC=""
+          for c in "$WORK/storage/data.qcow2" "$WORK/storage/windows.qcow2"; do
+            if [ -f "$c" ]; then SRC="$c"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            echo '::error title=找不到 qcow2::DISK_FMT=qcow2 可能未生效；storage 里只有：'
+            ls -la "$WORK/storage" || true
+            exit 1
+          fi
+          echo "QCOW2_SRC=$SRC"
+          echo "QCOW2_RAW_BYTES=$(stat -c %s "$SRC")"
+          qemu-img info "$SRC" | head -12
+          echo "QCOW2_SRC=$SRC" >> "$GITHUB_OUTPUT"
+
+          # 停容器：它还在占用这个 qcow2
+          docker stop cxwin --time 30 2>/dev/null || true
+          docker rm -f cxwin 2>/dev/null || true
+
+      - name: 压缩
+        if: steps.havecache.outputs.CACHE_HIT != 'yes'
+        id: compress
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          SRC="${{ steps.extract.outputs.QCOW2_SRC }}"
+          START=$(date +%s)
+          qemu-img convert -p -O qcow2 -c "$SRC" "$WORK/guest.qcow2"
+          ELAPSED=$(( $(date +%s) - START ))
+          SIZE=$(stat -c %s "$WORK/guest.qcow2")
+          echo "FINAL_BYTES=$SIZE"
+          echo "FINAL_GIB=$(awk -v b="$SIZE" 'BEGIN{printf "%.2f", b/1073741824}')"
+          echo "COMPRESS_ELAPSED_SEC=$ELAPSED"
+          echo "FINAL_GIB=$(awk -v b="$SIZE" 'BEGIN{printf "%.2f", b/1073741824}')" >> "$GITHUB_OUTPUT"
+          echo "FINAL_BYTES=$SIZE" >> "$GITHUB_OUTPUT"
+          sha256sum "$WORK/guest.qcow2" | tee "$WORK/guest.qcow2.sha256"
+          df -h /
+
+      # ── 离线检查：不启动 Windows 就能判断镜像配好没 ────────────────────────
+      #
+      # 为什么值得加：SSH 验证要冷启动 Windows（3-7 分钟一轮），
+      # 而失败时我们既不知道是「文件没写对」还是「sshd 没起来」。
+      # 用 libguestfs 直接读 qcow2 里的 NTFS，能秒级回答：
+      #   administrators_authorized_keys 在不在？内容是不是我们的公钥？
+      #   purge-tests.exe 在不在？
+      #   sshd_config 有没有被改坏？
+      # 这样即使 SSH 那一步失败，也能立刻区分「镜像内容错」与「服务没起」。
+      #
+      # ⚠️ 这不是 SSH 验证的替代品，只是**更快的分类器**：
+      #    文件在 ≠ sshd 能连。所以下面失败只警告，不阻断（SSH 才是硬门禁）。
+      - name: 离线检查镜像内容（libguestfs）
+        if: always()
+        id: offline
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          OUT="$SNAP/offline-check.txt"
+          : > "$OUT"
+          # 镜像可能在两处：本次构建产物，或 cache 恢复出来的
+          if [ -f "$WORK/guest.qcow2" ]; then
+            IMG="$WORK/guest.qcow2"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            IMG="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"
+          else
+            IMG=""
+          fi
+          if [ -z "$IMG" ]; then
+            echo "SKIP: 没有 $IMG" | tee -a "$OUT"; exit 0
+          fi
+
+          # libguestfs 依赖一个可引导的 appliance；失败就如实记录，不硬做。
+          if ! command -v virt-filesystems >/dev/null 2>&1; then
+            echo '安装 libguestfs-tools...' | tee -a "$OUT"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              libguestfs-tools linux-image-generic >/dev/null 2>&1 || true
+          fi
+          if ! command -v virt-filesystems >/dev/null 2>&1; then
+            echo 'SKIP: libguestfs-tools 装不上' | tee -a "$OUT"; exit 0
+          fi
+          export LIBGUESTFS_BACKEND=direct
+          export LIBGUESTFS_MEMSIZE=2048
+
+          echo '=== 分区布局 ===' | tee -a "$OUT"
+          # Server 2022 是 GPT：通常 /dev/sda1 = EFI(MSR), /dev/sda2 = MSR,
+          # /dev/sda3 = Windows C:。所以不能硬编码 sda2，必须列出来探测。
+          virt-filesystems -a "$IMG" --all --long 2>&1 | tee -a "$OUT" || {
+            echo 'ERROR virt-filesystems 失败（appliance 起不来？）' | tee -a "$OUT"; exit 0; }
+
+          # 在列出的文件系统里找 Windows 分区：认 /Windows/System32 存在即为 C:
+          WINPART=""
+          for fs in $(virt-filesystems -a "$IMG" --filesystems 2>/dev/null); do
+            if virt-ls -a "$IMG" -m "$fs" /Windows/System32 >/dev/null 2>&1; then
+              WINPART="$fs"; break
+            fi
+          done
+          if [ -z "$WINPART" ]; then
+            echo 'ERROR 找不到 Windows 分区（NTFS 可能挂不上）' | tee -a "$OUT"; exit 0
+          fi
+          echo "WINDOWS_PARTITION=$WINPART" | tee -a "$OUT"
+
+          # 逐项核对镜像里该有的东西
+          echo '=== /ProgramData/ssh ===' | tee -a "$OUT"
+          virt-ls -a "$IMG" -m "$WINPART" /ProgramData/ssh 2>&1 | tee -a "$OUT" || true
+
+          AK_EXISTS=no
+          if virt-ls -a "$IMG" -m "$WINPART" /ProgramData/ssh 2>/dev/null | grep -qx 'administrators_authorized_keys'; then
+            AK_EXISTS=yes
+            echo '=== administrators_authorized_keys 内容 ===' | tee -a "$OUT"
+            virt-cat -a "$IMG" -m "$WINPART" /ProgramData/ssh/administrators_authorized_keys 2>&1 | tee -a "$OUT" || true
+            # 与本次使用的公钥比对（去掉注释差异后比较 base64 主体）
+            V_PUB=$(virt-cat -a "$IMG" -m "$WINPART" /ProgramData/ssh/administrators_authorized_keys 2>/dev/null \
+                    | awk '{print $2}' | head -1)
+            L_PUB=$(awk '{print $2}' "$WORK/id.pub" 2>/dev/null | head -1)
+            if [ -n "$V_PUB" ] && [ "$V_PUB" = "$L_PUB" ]; then
+              echo 'PUBKEY_MATCH=yes' | tee -a "$OUT"
+            else
+              echo "PUBKEY_MATCH=no (image=${V_PUB:-none} local=${L_PUB:-none})" | tee -a "$OUT"
+            fi
+          fi
+          echo "AUTHORIZED_KEYS_EXISTS=$AK_EXISTS" | tee -a "$OUT"
+
+          EXE=no
+          if virt-ls -a "$IMG" -m "$WINPART" /cx/native 2>/dev/null | grep -qx 'purge-tests.exe'; then
+            EXE=yes
+          fi
+          echo "PURGE_TESTS_EXISTS=$EXE" | tee -a "$OUT"
+
+          # OpenSSH 是否真的装进了 System32\OpenSSH（这是 Add-WindowsCapability 的落地证据）
+          SSH_BIN=no
+          if virt-ls -a "$IMG" -m "$WINPART" /Windows/System32/OpenSSH >/dev/null 2>&1; then
+            SSH_BIN=yes
+            echo '=== /Windows/System32/OpenSSH ===' | tee -a "$OUT"
+            virt-ls -a "$IMG" -m "$WINPART" /Windows/System32/OpenSSH 2>&1 | tee -a "$OUT" || true
+          fi
+          echo "OPENSSH_BINARIES_EXISTS=$SSH_BIN" | tee -a "$OUT"
+
+          echo '=== 汇总 ===' | tee -a "$OUT"
+          {
+            echo "OFFLINE_AUTHORIZED_KEYS=$AK_EXISTS"
+            echo "OFFLINE_PURGE_TESTS=$EXE"
+            echo "OFFLINE_OPENSSH_BINARIES=$SSH_BIN"
+          } >> "$GITHUB_OUTPUT"
+
+          # 明确区分「装好了」与「装了一半」—— 这是本步骤的核心价值
+          if [ "$AK_EXISTS" = yes ] && [ "$EXE" = yes ] && [ "$SSH_BIN" = yes ]; then
+            echo 'OFFLINE_VERDICT=image-configured-correctly' | tee -a "$OUT"
+          else
+            echo "OFFLINE_VERDICT=image-incomplete (keys=$AK_EXISTS exe=$EXE sshbin=$SSH_BIN)" | tee -a "$OUT"
+            echo "::warning title=镜像离线检查不完整::keys=$AK_EXISTS exe=$EXE openssh=$SSH_BIN —— 若 SSH 也失败，优先查 Add-WindowsCapability 是否拉不到 Windows Update"
+          fi
+          # 只看文件不阻断：文件在也不代表 sshd 能连，SSH 那步才是硬门禁。
+
+      # ── 关键：在“验证 SSH”**之前**先传一次证据 ────────────────────────────
+      #
+      # 2026-11-11（t111）用 API 查出来：上一轮 run 43018341765 里
+      #   step 14「验证 SSH 可连」 status=in_progress conclusion=NULL
+      #   step 15..18（含 if: always() 的上传）status=pending conclusion=NULL
+      # 也就是说 **job 在 SSH 步骤运行期间被强制终止**，后面的 always() 步骤
+      # 根本没轮到执行 —— 所以 artifact total_count=0，不是路径写错，也不是
+      # if-no-files-found 把它吞了，是**那些步骤从未被调度**。
+      #
+      # 所以必须在上传步骤**位置上也往前挪**：SSH 之前先传一次“装完后的现场”。
+      # 这样即使 SSH 步骤把 job 挂死/被 timeout 杀掉，前面这段证据也已经落地。
+      # 名字带 -early 后缀，避免与最后那次全量快照互相覆盖。
+      - name: 先传一次证据（SSH 验证之前）
+        id: snap-early
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 客机镜像构建诊断（SSH 验证前的早期快照）
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/guest-snapshot/
+            ${{ runner.temp }}/guest/data/
+            ${{ runner.temp }}/guest/oem/install.bat
+            ${{ runner.temp }}/guest/oem/setup.ps1
+            ${{ runner.temp }}/guest/guest.qcow2.sha256
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ── 硬验收：SSH 真的能连上 ─────────────────────────────────────────────
+      # 不验证就交付 = 给下游一个黑盒。ci.yml 那边会因为「连不上」浪费 45 分钟。
+      # ── 把镜像就位（cache 命中 与 构建完成 两条路都要走到同一个路径）──
+      - name: 把镜像放到验证用目录
+        id: placeimg
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          mkdir -p "$WORK/run-storage"
+          # 构建路径：qcow2 已由「压缩」步骤产出到 $WORK/guest.qcow2
+          # cache 路径：镜像在 $GITHUB_WORKSPACE/guest-cache/guest.qcow2
+          SRC=""
+          if [ -f "$WORK/guest.qcow2" ]; then
+            SRC="$WORK/guest.qcow2"; echo "镜像来源: 本次构建"
+          elif [ -f "$GITHUB_WORKSPACE/guest-cache/guest.qcow2" ]; then
+            SRC="$GITHUB_WORKSPACE/guest-cache/guest.qcow2"; echo "镜像来源: cache"
+          fi
+          if [ -z "$SRC" ]; then
+            echo "::error title=没有可用镜像::既没构建出 guest.qcow2，cache 也没命中"
+            exit 1
+          fi
+          cp "$SRC" "$WORK/run-storage/data.qcow2"
+          # ⚠️ 2026-11-12：cache 路径下，windows.* 状态文件也在 guest-cache 里。
+          #   dockur 靠它们判断「已安装」，缺了就会静默重装系统。
+          #   构建路径的状态文件在 $WORK/storage（由验证步骤自己复制）。
+          if [ -d "$GITHUB_WORKSPACE/guest-cache" ]; then
+            for f in "$GITHUB_WORKSPACE/guest-cache"/windows.*; do
+              [ -e "$f" ] || continue
+              cp -a "$f" "$WORK/run-storage/"
+              echo "  从 cache 恢复状态文件 $(basename "$f")"
+            done
+          fi
+          SIZE=$(stat -c %s "$WORK/run-storage/data.qcow2")
+          echo "run-storage/data.qcow2 = $SIZE 字节"
+          if [ "$SIZE" -lt 1000000000 ]; then
+            echo "::error title=镜像体积异常::只有 $SIZE 字节"
+            exit 1
+          fi
+          echo "IMG_SRC=$SRC" >> "$GITHUB_ENV"
+
+      - name: 验证 SSH 可连（docker bridge，与安装时同网络）
+        id: verify
+        # ⚠️ 2026-11-12 决定性发现（run 43147209781 诊断）：
+        #   客机内 GuestIP = 172.17.0.2/24，GuestGateway = 172.17.0.1
+        #   —— 这是 Docker 默认网桥地址，被**持久化进镜像**。
+        #   dockur 装 Windows 时用 docker bridge，Windows 就记住了这个配置。
+        #   而我之前用 QEMU slirp（10.0.2.x 网段）启动同一镜像，
+        #   网卡地址与网关不匹配 ⇒ 包发不出去 ⇒ 宿主侧 banner 超时。
+        #   ⇒ 验证必须复用 docker bridge，与安装时一致。
+        timeout-minutes: 15
+        run: |
+          set -u
+          WORK="$RUNNER_TEMP/guest"
+          SNAP="$RUNNER_TEMP/guest-snapshot"
+          mkdir -p "$SNAP"
+          VERIFY_LOG="$SNAP/ssh-verify.txt"
+          : > "$VERIFY_LOG"
+
+          echo "=== 用 docker bridge 启动镜像 ===" | tee -a "$VERIFY_LOG"
+          # ⚠️ 2026-11-12 关键修正：dockur 靠**一整套状态文件**判断「已安装」，
+          #   不是只看 qcow2。install.sh 的 getSystemImage 读 `readState "system"`，
+          #   hasCompletedInstall 还要 hasSystemImage || (hasData && hasBootMarker)。
+          #   状态文件是 storage 下的 windows.* 系列：
+          #     windows.base / windows.ver / windows.mac / windows.rom /
+          #     windows.vars / windows.system（记录 img 文件名）
+          #   上一轮我只复制了 data.qcow2 ⇒ dockur 认为「没有现成系统」⇒
+          #   日志里出现 `Requesting Windows Server 2022 ... Downloading ...`（重新下载 ISO 重装）。
+          #   ⇒ 必须把**整套 storage** 复制过去（除了 ISO / setup.img 这些大文件）。
+          mkdir -p "$WORK/run-storage"
+          # ⚠️ 2026-11-12：只有**本次构建**才有 $WORK/storage 目录。
+          #   cache 路径下镜像已由「把镜像放到验证用目录」就位，这里跳过。
+          if [ -d "$WORK/storage" ]; then
+            echo "=== 复制整套 storage 状态（排除 ISO 与 setup.img）===" | tee -a "$VERIFY_LOG"
+            for f in "$WORK/storage"/*; do
+              [ -e "$f" ] || continue
+              bn=$(basename "$f")
+              case "$bn" in
+                *.iso|setup.img) echo "  跳过 $bn（安装介质，验证时不需要）" | tee -a "$VERIFY_LOG" ;;
+                data.qcow2)      echo "  跳过 $bn（已由 placeimg 就位）" | tee -a "$VERIFY_LOG" ;;
+                *)
+                  cp -a "$f" "$WORK/run-storage/" 2>/dev/null \
+                    && echo "  复制 $bn ($(stat -c %s "$f" 2>/dev/null || echo ?) 字节)" | tee -a "$VERIFY_LOG" \
+                    || echo "  复制失败 $bn" | tee -a "$VERIFY_LOG"
+                  ;;
+              esac
+            done
+          else
+            echo "无 $WORK/storage（cache 路径），跳过状态文件复制" | tee -a "$VERIFY_LOG"
+          fi
+          echo "=== run-storage 内容 ===" | tee -a "$VERIFY_LOG"
+          ls -la "$WORK/run-storage" | tee -a "$VERIFY_LOG"
+          # 关键断言：windows.system 或 data.qcow2 必须存在，否则 dockur 会重装
+          if [ ! -f "$WORK/run-storage/data.qcow2" ]; then
+            echo "::error title=run-storage 缺少 data.qcow2::后续 dockur 会重新安装" | tee -a "$VERIFY_LOG"
+            exit 1
+          fi
+
+          # ⚠️ 2026-11-12：这一段必须完整 —— 上一轮我的替换把 `docker run` 头部删掉了，
+          #   只剩 `-e DISK_SIZE=32G \` 这些孤立残片，导致 shell 报 `-e: command not found`。
+          #   与之前「注释插进续行」是同一类错误（续行结构被破坏）。
+          docker rm -f cxverify >/dev/null 2>&1 || true
+          # ⚠️ 2026-11-12：必须给 NET_ADMIN，否则 dockur 无法创建 bridge/NAT，
+          #   会回退到 user-mode networking (passt)。实测日志：
+          #     RTNETLINK answers: Operation not permitted
+          #     Warning: failed to create bridge. Please add --cap-add NET_ADMIN
+          #     Warning: failed to setup NAT networking, falling back to user-mode
+          #     Guest: 172.17.0.2 (Windows) | Mode: User (passt)
+          #   user-mode 下 `-p 2222:22` 的 docker 端口映射**不生效**，
+          #   必须改用 USER_PORTS；更简单的做法是给 NET_ADMIN 让 NAT 正常工作。
+          docker run -d --name cxverify \
+            --device=/dev/kvm \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            -e VERSION=2022 \
+            -e DISK_FMT=qcow2 \
+            -e DISK_SIZE=32G \
+            -e USERNAME="${GUEST_USER}" \
+            -e PASSWORD="Cx-Guest-2026!" \
+            -p 127.0.0.1:2222:22 \
+            -v "$WORK/run-storage:/storage" \
+            docker.io/dockurr/windows:latest >> "$VERIFY_LOG" 2>&1
+          echo "docker run rc=$?" | tee -a "$VERIFY_LOG"
+
+          sleep 10
+          echo "=== 容器状态 ===" | tee -a "$VERIFY_LOG"
+          docker ps -a --filter name=cxverify | tee -a "$VERIFY_LOG" || true
+          echo "=== 容器日志前 40 行 ===" | tee -a "$VERIFY_LOG"
+          docker logs cxverify 2>&1 | head -40 | tee -a "$VERIFY_LOG" || true
+
+          SSH="ssh -i $WORK/id -p 2222 -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+               -o ConnectionAttempts=1 -o BatchMode=yes -o LogLevel=ERROR \
+               -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+          READY=no
+          ATTEMPT=0
+          DEADLINE=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then
+              exec 3>&- 2>/dev/null || true
+              # ⚠️ 2026-11-12（run 43249609736 实测）：**必须用 timeout 包住 ssh**。
+              #   ConnectTimeout 只控制 TCP 连接与密钥交换，**不控制认证阶段**。
+              #   实测：ssh-vvv-2.txt 里 `Authenticating to ... as 'runner'` 之后就没了，
+              #   整个 ssh 进程挂住 ⇒ while 循环的 sleep 15 永远不执行 ⇒
+              #   verify.txt 只有 attempt=1 就一直到 job 级 15 分钟超时被杀。
+              #   修法：外层 `timeout 25` 强杀，保证每轮最多 25 秒必然返回。
+              if timeout 25 $SSH -vvv "${GUEST_USER}@127.0.0.1" "whoami" > /tmp/whoami.txt 2>"$SNAP/ssh-vvv-$ATTEMPT.txt"; then
+                READY=yes; break
+              fi
+              echo "attempt=$ATTEMPT ssh-failed" >> "$VERIFY_LOG"
+            else
+              echo "attempt=$ATTEMPT tcp-connect-failed" >> "$VERIFY_LOG"
+            fi
+            sleep 15
+          done
+          echo "SSH_READY=$READY attempts=$ATTEMPT" | tee -a "$VERIFY_LOG"
+
+          if [ "$READY" = yes ]; then
+            echo "=== SSH 实测成功 ===" | tee -a "$VERIFY_LOG"
+            cat /tmp/whoami.txt | tee -a "$VERIFY_LOG"
+            $SSH "${GUEST_USER}@127.0.0.1" \
+              "powershell -NoProfile -Command \"(Get-Service sshd).Status; Test-Path C:/cx/native/purge-tests.exe\"" \
+              2>&1 | tee -a "$VERIFY_LOG" || true
+          else
+            echo "::error title=SSH 连不上::镜像不可用" | tee -a "$VERIFY_LOG"
+            echo "--- 最后一次 ssh -vvv ---" | tee -a "$VERIFY_LOG"
+            tail -40 "$SNAP/ssh-vvv-$ATTEMPT.txt" 2>/dev/null | tee -a "$VERIFY_LOG" || true
+            echo "--- 容器日志尾 80 行 ---" | tee -a "$VERIFY_LOG"
+            docker logs cxverify 2>&1 | tail -80 | tee -a "$VERIFY_LOG" || true
+          fi
+
+          echo "SSH_READY=$READY" >> "$GITHUB_OUTPUT"
+          docker stop cxverify >/dev/null 2>&1 || true
+          docker rm -f cxverify >/dev/null 2>&1 || true
+          [ "$READY" = yes ] || exit 1
+      - name: 存入 Actions Cache
+        if: steps.verify.outputs.SSH_READY == 'yes' && steps.havecache.outputs.CACHE_HIT != 'yes'
+        run: |
+          set -eu
+          WORK="$RUNNER_TEMP/guest"
+          CACHE_OUT="$GITHUB_WORKSPACE/guest-cache"
+          mkdir -p "$CACHE_OUT"
+          # ⚠️ 2026-11-12 关键：不能只存 qcow2。
+          #   dockur 靠**一整套 windows.* 状态文件**判断「已安装」
+          #   （getSystemImage 读 readState "system"；hasCompletedInstall 要
+          #   hasSystemImage || (hasData && hasBootMarker)）。
+          #   只存 qcow2 会让恢复后的验证静默重新下载 ISO 重装（实测过）。
+          cp "$WORK/guest.qcow2" "$CACHE_OUT/"
+          cp "$WORK/guest.qcow2.sha256" "$CACHE_OUT/"
+          # 状态文件：体积小（windows.rom 3.6MB 最大），必须一起存
+          for f in "$WORK/storage"/windows.*; do
+            [ -e "$f" ] || continue
+            bn=$(basename "$f")
+            cp -a "$f" "$CACHE_OUT/"
+            echo "  缓存状态文件 $bn ($(stat -c %s "$f") 字节)"
+          done
+          # ⚠️ 2026-11-12（run 43190313294 实测）：**必须把密钥对一起存**。
+          #   镜像里的 C:\ProgramData\ssh\administrators_authorized_keys 是
+          #   **构建那一刻**写进去的公钥（见 OEM setup.ps1 的 Set-Content）。
+          #   cache 命中时不重建镜像 ⇒ 客机里仍是旧公钥。
+          #   而「生成 SSH 密钥」每次运行都生成**新的**密钥对
+          #   ⇒ 新私钥对旧公钥 ⇒ sshd 回 type 51（拒绝）⇒ Permission denied。
+          #   正确做法：把这次构建用的密钥对一起缓存，restore 时用它替换掉
+          #   「生成 SSH 密钥」刚生成的那对（见「从 cache 恢复客机镜像」后的处理）。
+          #   私钥落在 Actions Cache 里是可接受的：cache 仅本仓库可读，且镜像本身
+          #   已含对应公钥，泄露私钥等价于泄露这个一次性测试客机的访问权。
+          cp "$WORK/id"     "$CACHE_OUT/guest-key"
+          cp "$WORK/id.pub" "$CACHE_OUT/guest-key.pub"
+          chmod 600 "$CACHE_OUT/guest-key"
+          echo "  缓存密钥对 guest-key / guest-key.pub"
+          echo "  公钥指纹: $(ssh-keygen -l -f "$CACHE_OUT/guest-key.pub" | awk '{print $2}')"
+          echo "=== cache 内容 ==="
+          ls -lh "$CACHE_OUT"
+          # 断言：至少要有 qcow2 + 一个状态文件
+          NSTATE=$(ls "$CACHE_OUT"/windows.* 2>/dev/null | wc -l)
+          echo "状态文件数 = $NSTATE"
+          if [ "$NSTATE" -lt 3 ]; then
+            echo "::warning title=状态文件偏少::只有 $NSTATE 个，恢复后可能触发重装"
+          fi
+          echo "CACHE_DIR=$CACHE_OUT" >> "$GITHUB_ENV"
+
+
+      - name: 保存到 cache
+        if: steps.verify.outputs.SSH_READY == 'yes' && steps.havecache.outputs.CACHE_HIT != 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CACHE_DIR }}
+          key: ${{ env.GUEST_IMAGE_CACHE_KEY }}
+
+      - name: 结论写入 Step Summary
+        if: always()
+        env:
+          INSTALL_ELAPSED: ${{ steps.wait.outputs.INSTALL_ELAPSED_SEC }}
+          INSTALL_RESULT: ${{ steps.wait.outputs.INSTALL_RESULT }}
+          FINAL_GIB: ${{ steps.compress.outputs.FINAL_GIB }}
+          SSH_READY: ${{ steps.verify.outputs.SSH_READY }}
+        run: |
+          set -u
+          {
+            echo '## Windows 客机镜像打包结果'
+            echo ''
+            echo '| 项 | 值 |'
+            echo '| --- | --- |'
+            echo "| 安装结果 | ${INSTALL_RESULT:-未执行} |"
+            echo "| 安装耗时 | ${INSTALL_ELAPSED:-?} s |"
+            echo "| 压缩后体积 | ${FINAL_GIB:-?} GiB |"
+            echo "| SSH 验证 | ${SSH_READY:-未执行} |"
+            echo "| cache key | \`$GUEST_IMAGE_CACHE_KEY\` |"
+            echo ''
+            if [ "${SSH_READY:-}" = yes ]; then
+              echo '### ✅ 镜像可用，已存入 cache'
+              echo ''
+              echo '接下来在仓库设置：'
+              echo ''
+              echo '- 无需任何 secret：SSH 密钥对随镜像一起存入 Actions Cache'
+              echo '- ci.yml 侧用 `actions/cache/restore@v4` 取回，'
+              echo "  key = \`$GUEST_IMAGE_CACHE_KEY\`"
+              echo ''
+              echo '> cache 7 天未访问会被清理；ci.yml 每次 push 都 restore 就会续期。'
+            else
+              echo '### ❌ 未产出可用镜像'
+              echo ''
+              echo '不要把它配给 ci.yml —— 那边会因 SSH 连不上而红。'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 无论成败都上传现场快照 —— 上一版卡了 45 分钟却什么都没留下，只能靠猜。
+      # 判据：只要有快照目录就传（`if: always()` 保证失败时也跑）。
+      - name: 上传安装现场快照
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 客机镜像构建诊断（完整现场）
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/guest-snapshot/
+            ${{ runner.temp }}/guest/oem/install.bat
+            ${{ runner.temp }}/guest/oem/setup.ps1
+            ${{ runner.temp }}/guest/oem/install.done
+          if-no-files-found: warn
+          retention-days: 7
+
+
+
+  summary:
+    name: 持续集成结果汇总
+    runs-on: ubuntu-24.04
+    needs: [build-guest-image, source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()
     steps:
       - name: 输出各环境结果与发布产物
@@ -1931,12 +3774,9 @@ jobs:
           WINDOWS_REAL_CLIENT_RESULT: ${{ needs.windows-real-client.result }}
           KVM_PROBE_RESULT: ${{ needs.kvm-probe.result }}
           WIRING_PROBE_RESULT: ${{ needs.wiring-probe.result }}
-          WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.outcome }}
+          WIRING_PROBE_OUTCOME: ${{ needs.wiring-probe.result }}
           QEMU_DESTRUCT_RESULT: ${{ needs.qemu-shutdown-destruct.result }}
           QEMU_LINUX_DESTRUCT_RESULT: ${{ needs.qemu-destruct-linux-guest.result }}
-          GATE_REASON: ${{ needs.gate.outputs.reason }}
-          KVM_PROBE_SKIPPED: ${{ needs.kvm-probe.outputs.skipped }}
-          KVM_PROBE_REASON: ${{ needs.kvm-probe.outputs.reason }}
           RELEASE_ARTIFACT_URL: ${{ needs.windows-release.outputs.release-artifact-url }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1964,17 +3804,10 @@ jobs:
             printf '| Windows 发布包验证 | %s |\n' "$(result_label "$WINDOWS_RELEASE_RESULT")"
             printf '| 真实客户端矩阵发现 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_DISCOVERY_RESULT")"
             printf '| 真实客户端自动发现注入矩阵 | %s |\n' "$(result_label "$WINDOWS_REAL_CLIENT_RESULT")"
-            if [[ "$KVM_PROBE_SKIPPED" == "yes" ]]; then
-              printf '| KVM 能力巡检（只读，非关机自毁） | 跳过（%s） |\n' "$KVM_PROBE_REASON"
-            else
-              printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
-            fi
+            printf '| KVM 能力巡检（只读，非关机自毁） | %s |\n' "$(result_label "$KVM_PROBE_RESULT")"
             printf '| 自毁续删语义验证（托管 runner，两阶段） | %s |\n' "$(result_label "$WIRING_PROBE_RESULT")"
             printf '| 关机自毁（托管 Ubuntu + QEMU + KVM） | %s |\n' "$(result_label "$QEMU_DESTRUCT_RESULT")"
             printf '| 关机销毁/开机续删（QEMU + Linux 客机，真实重启） | %s |\n' "$(result_label "$QEMU_LINUX_DESTRUCT_RESULT")"
-            if [[ -n "$GATE_REASON" ]]; then
-              printf '| 判重闸说明 | %s |\n' "$GATE_REASON"
-            fi
             echo
             if [[ -n "$RELEASE_ARTIFACT_URL" ]]; then
               printf '[下载 Windows 发布包](%s)\n' "$RELEASE_ARTIFACT_URL"

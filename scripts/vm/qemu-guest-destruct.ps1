@@ -85,9 +85,9 @@ function Get-PurgeRunOnceValues {
     $item = Get-ItemProperty -LiteralPath $runOnceKey -ErrorAction SilentlyContinue
     if ($null -eq $item) { return @() }
     return @(
-        $item.PSObject.Properties
-        | Where-Object { $_.Name -like 'cxplus-purge-*' }
-        | ForEach-Object { $_.Name }
+        $item.PSObject.Properties |
+        Where-Object { $_.Name -like 'cxplus-purge-*' } |
+        ForEach-Object { $_.Name }
     )
 }
 
@@ -153,9 +153,9 @@ switch ($Phase) {
             Add-Line 'registrationEvidence:'
             foreach ($line in @(Get-Content -LiteralPath $registrationFile -Encoding utf8)) { Add-Line "  $line" }
             $recordedTarget = @(
-                Get-Content -LiteralPath $registrationFile -Encoding utf8
-                | Where-Object { $_ -like 'target=*' }
-                | ForEach-Object { $_.Substring(7).Trim() }
+                Get-Content -LiteralPath $registrationFile -Encoding utf8 |
+                Where-Object { $_ -like 'target=*' } |
+                ForEach-Object { $_.Substring(7).Trim() }
             )
             if ($recordedTarget.Count -gt 0 -and $recordedTarget[0] -ne $target) {
                 $problems.Add("登记阶段的目标路径 ($($recordedTarget[0])) 与重放阶段 ($target) 不一致")

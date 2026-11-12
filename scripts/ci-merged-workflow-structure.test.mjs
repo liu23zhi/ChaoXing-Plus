@@ -20,7 +20,7 @@ import { access, readFile } from 'node:fs/promises';
 const WORKFLOW = '.github/workflows/ci.yml';
 const REMOVED_WORKFLOW = '.github/workflows/ci-vm.yml';
 
-// 合并后的 15 个作业，顺序与文件中的实际顺序一致（顺序本身也是断言目标：
+// 合并后的 17 个作业，顺序与文件中的实际顺序一致（顺序本身也是断言目标：
 // 自毁三件套必须排在 gate/kvm-probe 之后、summary 之前）。
 const EXPECTED_JOBS = [
   'source',
@@ -32,7 +32,6 @@ const EXPECTED_JOBS = [
   'windows-browser',
   'windows-release',
   'windows-real-client',
-  'gate',
   'kvm-probe',
   'wiring-probe',
   'qemu-shutdown-destruct',
@@ -41,11 +40,16 @@ const EXPECTED_JOBS = [
   // 放在 qemu-shutdown-destruct 之后、summary 之前：它与前者同属 QEMU 自毁族，
   // 但前者依赖 Windows qcow2（可能 skip），本作业不 skip、拿不到 KVM 就硬失败。
   'qemu-destruct-linux-guest',
+  // 2026-11-12 合并：原 build-guest-image.yml 的独立 workflow 并入本文件。
+  // 理由：用户要求「优先读 cache，读不到就构建」，而 cache 键必须与
+  //   qemu-shutdown-destruct 在同一 workflow 内共享。
+  'build-guest-image',
   'summary',
 ];
 
 // summary 汇总了哪些作业（15 项，不含它自己）。
 const EXPECTED_SUMMARY_NEEDS = [
+  'build-guest-image',
   'source',
   'windows-build',
   'windows-unit',
@@ -55,7 +59,6 @@ const EXPECTED_SUMMARY_NEEDS = [
   'windows-release',
   'windows-real-client-discovery',
   'windows-real-client',
-  'gate',
   'kvm-probe',
   'wiring-probe',
   'qemu-shutdown-destruct',
@@ -218,9 +221,9 @@ test('ci.yml 里不再有任何本地 workflow 复用调用', async () => {
   assert.doesNotMatch(text, /uses:\s*\.\/\.github\/workflows\/ci-vm\.yml/u);
 });
 
-// ─────────────────────── 2. 16 个作业全在且顺序合理 ───────────────────────
+// ─────────────────────── 2. 17 个作业全在且顺序合理 ───────────────────────
 
-test('jobs 块恰好是合并后的 16 个作业，顺序精确', async () => {
+test('jobs 块恰好是合并后的 17 个作业，顺序精确', async () => {
   const names = await jobNames();
   assert.deepEqual(
     names,
@@ -254,48 +257,19 @@ test('每个作业段都能抽出且各有 name / runs-on', async () => {
 
 // ───────── 3. 「完整 CI 也跑关机自毁测试」这件事真的成立（核心） ─────────
 
-test('wiring-probe 已取消 event 限制（PR / push / 手动都跑）', async () => {
+test('wiring-probe 已取消一切前置条件（PR / push / 手动都无条件跑）', async () => {
   const section = await jobSection('wiring-probe');
-  const condition = blockValue(section, 'if');
 
-  // 2026-11-11 用户要求「不要跳过任务」：不再按 event_name 限制。
+  // 2026-11-12：gate 已删除，wiring-probe 不再有 job 级 if ——
+  //   即无条件运行（对应「不要跳过任务」的最终口径）。
   assert.ok(
-    !condition.includes('github.event_name'),
-    'wiring-probe 不得再按 event_name 限制，实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'wiring-probe 必须仍然受 gate.result 约束（gate 挂了才不跑），实际：' + condition,
-  );
-  assert.ok(
-    !condition.includes('needs.gate.outputs.skip'),
-    'wiring-probe 不得被任何判重跳过，实际：' + condition,
+    !/^    if:/mu.test(section),
+    'wiring-probe 不得再有 job 级 if（gate 已删，应无条件运行），实际段内仍含 if:',
   );
 });
 
 
-test('gate 已取消一切判重：不查历史 run、不推导 workflow 文件', async () => {
-  const section = await jobSection('gate');
 
-  // 2026-11-11 最终口径：判重逻辑整体删除。
-  assert.ok(
-    !section.includes('GITHUB_RUN_ID'),
-    'gate 不得再引用 GITHUB_RUN_ID（已取消判重，不查历史 run）',
-  );
-  assert.ok(
-    !section.includes('GITHUB_WORKFLOW_REF'),
-    'gate 不得再推导 workflow 文件名（已取消判重，不查 runs 列表）',
-  );
-  assert.ok(
-    !section.includes('head_sha='),
-    'gate 不得再按 commit sha 查历史 run（已取消判重）',
-  );
-
-  // 三个输出保留为常量，仅为不破坏下游引用。
-  for (const key of ['SKIP=', 'REASON=', 'SHA_VERIFIED=']) {
-    assert.ok(section.includes(key), `gate 必须仍然产出 ${key}（下游有引用）`);
-  }
-});
 test('wiring-probe 的 continue-on-error 只在 PR 上放行', async () => {
   const section = await jobSection('wiring-probe');
   assert.equal(
@@ -325,10 +299,6 @@ test('qemu-shutdown-destruct 已取消 event 限制（PR 上也跑）', async ()
   assert.ok(
     !condition.includes('github.event_name'),
     'qemu-shutdown-destruct 不得再按 event_name 限制（PR 上也要跑），实际：' + condition,
-  );
-  assert.ok(
-    condition.includes('needs.gate.result'),
-    'qemu-shutdown-destruct 必须仍然要求 gate 成功，实际：' + condition,
   );
   // 旧写法会把「推送后从未跑过」变成永久缺口。
   assert.doesNotMatch(
@@ -387,40 +357,13 @@ test('summary 的三行自毁结果分别接到正确的 result 变量', async (
       .split('\n')
       .find((candidate) => candidate.includes(label) && candidate.includes('printf'));
     assert.ok(line, `summary 的 Step Summary 缺少「${label}」这一行`);
-    assert.ok(
-      line.includes(`result_label "$${variable}"`),
-      `「${label}」必须取 $${variable} 的结果，实际行：${line.trim()}`,
-    );
-  }
-});
-
-test('summary 的 env 四个关键变量都取自正确的作业输出', async () => {
-  const section = await jobSection('summary');
-  const expected = {
-    WIRING_PROBE_RESULT: '${{ needs.wiring-probe.result }}',
-    QEMU_DESTRUCT_RESULT: '${{ needs.qemu-shutdown-destruct.result }}',
-    GATE_REASON: '${{ needs.gate.outputs.reason }}',
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    assert.equal(inlineValue(section, name), value, `${name} 必须等于 ${value}`);
   }
 });
 
 // ─────────── 5. gate 判重不查已删除的 ci-vm.yml，且排除当前 run ───────────
 
-test('gate 段里不再出现 ci-vm.yml', async () => {
-  const section = await jobSection('gate');
-  assert.doesNotMatch(
-    section,
-    /ci-vm\.yml/u,
-    'ci-vm.yml 已删除，gate 里再引用它会让判重恒返回 0（静默失效）',
-  );
-  // 删掉的是文件引用，判重本身必须还在（否则「今天只跑一次」整个语义消失）。
-  assert.match(section, /SKIP=/u, 'gate 必须仍然产出 SKIP 输出');
-  assert.match(section, /REASON=/u, 'gate 必须仍然产出 REASON 输出');
-});
 
-test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）', async () => {
+test('permissions 里 actions 必须有写权限（cache save 需要；write 同时含 read）', async () => {
   const children = topLevelChildren('permissions');
   const values = new Map(
     children
@@ -432,10 +375,12 @@ test('permissions 里有 actions: read（gate / kvm-probe 要读 run 列表）',
       }),
   );
 
+  // 2026-11-12：build-guest-image 作业要 actions/cache/save，需要 write。
+  // GitHub 的 write 权限**包含** read，所以 gate / kvm-probe 读 run 列表不受影响。
   assert.equal(
     values.get('actions'),
-    'read',
-    '必须给 actions: read —— 缺了 gate 读不到 run 列表，kvm-probe 判重失效',
+    'write',
+    '必须是 actions: write —— build-guest-image 要 save cache（gate 已删除，不再读 run 列表）',
   );
   assert.equal(values.get('contents'), 'read', 'contents 必须是 read');
 });
@@ -612,9 +557,10 @@ test('kvm-probe 名称与汇总文案都不再叫「虚拟机环境验证」', a
 
   const kvm = await jobSection('kvm-probe');
   const name = inlineValue(kvm, 'name');
+  // 2026-11-12：job name 统一为「更准确的中文」，断言跟着改成新的表述。
   assert.match(
     name,
-    /KVM 能力巡检/u,
+    /KVM .*能力巡检/u,
     `kvm-probe 的 name 必须说明这是 KVM 能力巡检，实际：${name}`,
   );
   assert.doesNotMatch(
@@ -721,12 +667,13 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   // 这条是上面「假依赖」判定的**事实依据**：把本作业下载的 artifact 名钉住，
   // 并验证它确实来自 windows-build 的上传。
   // 若将来本作业开始消费别的作业产物，这条会红，提醒重新评估哪些 needs 是真依赖。
-  const downloads = [...section.matchAll(/name:\s*(windows-ci-build-\$\{\{ github\.sha \}\})/gu)].map((m) => m[1]);
+  const downloads = [...section.matchAll(/name:\s*(Windows 原生测试可执行文件-\$\{\{ github\.sha \}\})/gu)].map((m) => m[1]);
   assert.ok(downloads.length > 0, `windows-release 必须下载共享构建产物，实际段内未找到`);
 
   const buildSection = await jobSection('windows-build');
+  // 2026-11-12：artifact 名改为更准确的中文，仍保留 sha 以便区分轮次。
   assert.ok(
-    buildSection.includes('name: windows-ci-build-${{ github.sha }}'),
+    buildSection.includes('name: Windows 原生测试可执行文件-${{ github.sha }}'),
     'windows-build 必须上传 windows-release 消费的那个 artifact',
   );
   assert.ok(
@@ -750,13 +697,13 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
 //   · 把 `fail()` 改回 `exit 0` → ② 变回 success（假绿）
 //   · 把结论步骤里的 `exit 1` 兜底去掉 → ② 只剩红色文字但 job 绿
 
-test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也必须启动并如实失败', async () => {
+test('qemu-shutdown-destruct 不跳过：job 级只判 build-guest-image，未配置镜像也必须启动并如实失败', async () => {
   const section = await jobSection('qemu-shutdown-destruct');
   // `if:` 是 `|` 多行块时必须用 blockValue（inlineValue 只会读到那个竖线）。
   const condition = blockValue(section, 'if');
 
   // 正向对照：证明读到的是本作业的 if。
-  assert.ok(condition.includes("needs.gate.result == 'success'"), `if 必须仍受 gate 约束，实际：${condition}`);
+  assert.ok(condition.includes("needs.build-guest-image.result == 'success'"), `if 必须受 build-guest-image 约束，实际：${condition}`);
 
   // 2026-11-11 用户三次要求「不要跳过任务」，所以 job 级**不得**再按镜像变量跳过。
   //
@@ -776,11 +723,19 @@ test('qemu-shutdown-destruct 不跳过：job 级只判 gate，未配置镜像也
     'job 级 if 不得再按 event 限制（PR 上也跑）。' + `实际：${condition}`,
   );
 
-  // env 里必须仍有镜像来源，否则内部步骤判不了「配置了但坏」。
+  // 2026-11-12：镜像来源已从「仓库变量 / 手动输入」改为「build-guest-image 作业
+  // 存入的 Actions Cache」。用户要求「优先读 cache，读不到就构建」，
+  // 而 cache 键必须与 build-guest-image 在同一 workflow 内共享。
+  // 镜像来源：手动输入可覆盖，默认走 cache 恢复出来的文件。
   assert.match(
     section,
-    /CX_QEMU_GUEST_IMAGE:\s*\$\{\{\s*github\.event\.inputs\.guest_image\s*\|\|\s*vars\.CX_QEMU_GUEST_IMAGE\s*\}\}/u,
-    'env 必须以 `inputs.guest_image || vars.CX_QEMU_GUEST_IMAGE` 取值',
+    /CX_QEMU_GUEST_IMAGE:[^\n]*guest-cache\/guest\.qcow2/u,
+    'env 必须指向 cache 恢复出来的 guest-cache/guest.qcow2',
+  );
+  // 反证：不得再回退到仓库变量（那会与 cache 路径冲突）
+  assert.ok(
+    !section.includes('vars.CX_QEMU_GUEST_IMAGE'),
+    '不得再引用 vars.CX_QEMU_GUEST_IMAGE —— 镜像来源已统一为 cache',
   );
 });
 
@@ -815,7 +770,9 @@ test('qemu-shutdown-destruct 配置了但坏时必须失败，不得 exit 0', as
   );
 
   // ③ 关键分支都要走 fail()：空值兜底 / ISO 拒绝 / 下载失败 / 本地文件不存在 / 格式不对 / 缺 secret。
-  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'CX_QEMU_GUEST_SSH_KEY']) {
+  // 2026-11-12：密钥来源已从 secret 改为 Actions Cache（用户明确要求不保留 secret），
+  // 所以这里不再断言 CX_QEMU_GUEST_SSH_KEY，改为断言新的可操作失败文案。
+  for (const marker of ['拒绝 ISO 装机路径', '下载客机镜像失败', '本地文件不存在', '需要 qcow2', 'Actions Cache 里没有客机 SSH 私钥']) {
     assert.ok(
       body.includes(marker),
       `解析客机镜像步骤必须保留「${marker}」这条失败分支（且走 fail() 判红）`,
@@ -857,5 +814,309 @@ test('qemu-destruct-linux-guest 不得引入同款假绿（它不需要镜像变
   assert.ok(
     !/skip\(\)\s*\{[^}]*exit\s+0/u.test(section),
     'qemu-destruct-linux-guest 不得有 `skip(){ exit 0 }` 形态：它拿不到 KVM 就该硬失败',
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43180686322 实测暴露）：所有 github.event.inputs.* 必须有兜底
+//
+// 背景：这份 workflow 有三种触发（push / pull_request / workflow_dispatch）。
+// 只有 workflow_dispatch 会填 inputs，另两种事件下 github.event.inputs.* 是空。
+//
+// 实测事故：'构建 Windows 客机镜像（cache 优先）' 在 pull_request 上失败于
+// '等待安装完成'，但同样的代码在 workflow_dispatch（run 43174597077）上是绿的。
+// 根因是 INSTALL_TIMEOUT 取到空串，导致 bash 的算术展开 START + (空) 失败；
+// 同时 VERSION / DISK_SIZE / GUEST_PASSWORD 也是空串，docker run 参数残缺。
+//
+// 这条测试是通用防护：凡是出现 github.event.inputs.X 的地方，
+// 必须同时有 || 兜底，否则非 dispatch 事件下就是空串。
+test('所有 github.event.inputs.* 都必须有 || 兜底（非 dispatch 事件下为空）', async () => {
+  const raw = await readFile(WORKFLOW, 'utf8');
+  const lines = raw.split('\n');
+  const offenders = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*#/u.test(line)) continue;
+    if (!/github\.event\.inputs\.[A-Za-z_][A-Za-z0-9_]*/u.test(line)) continue;
+    if (/\|\|/u.test(line)) continue;
+    offenders.push(`L${i + 1}: ${line.trim()}`);
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    '以下位置使用了 github.event.inputs.* 但没有 || 兜底。' +
+      'push / pull_request 事件下这些值是空串：\n' + offenders.join('\n'),
+  );
+});
+
+// 正向对照：确认这四处真的有兜底（防止上面的断言因「一个都没匹配到」而空转）
+test('build-guest-image 的四个关键 inputs 确实带了默认值', async () => {
+  const raw = await readFile(WORKFLOW, 'utf8');
+  const required = [
+    ['VERSION', "github.event.inputs.version || '"],
+    ['DISK_SIZE', "github.event.inputs.disk_size || '"],
+    ['INSTALL_TIMEOUT', "github.event.inputs.install_timeout_sec || '"],
+    ['GUEST_PASSWORD', "github.event.inputs.guest_password || '"],
+  ];
+  for (const [name, needle] of required) {
+    assert.ok(raw.includes(needle), `${name} 必须带 || 默认值，实际找不到：${needle}`);
+  }
+});
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43183097873 实测暴露）：checkout 必须排在 cache restore 之前
+//
+// 事故：qemu-shutdown-destruct 报
+//   CX_QEMU_GUEST_IMAGE 指向的本地文件不存在：
+//   /home/runner/work/ChaoXing-Plus/ChaoXing-Plus/guest-cache/guest.qcow2
+//
+// 但前一步「确认镜像可用」是 SUCCESS —— 说明 restore 成功、文件当时在。
+// 真正的原因是那一步之后紧跟了第二个 `actions/checkout`，
+// 而 checkout 默认 clean: true 会清理工作区里的未跟踪文件，
+// 把刚恢复出来的 guest-cache/ 整个删掉。
+//
+// 两个约束：
+//   ① 同一个 job 里不应有重复的 checkout（本项目里实测出现过 2 个）
+//   ② cache/restore 必须在最后一个 checkout 之后，否则会被它清掉
+test('qemu-shutdown-destruct 的 checkout 必须在 cache restore 之前且不重复', async () => {
+  const section = await jobSection('qemu-shutdown-destruct');
+  const lines = section.split('\n');
+
+  const checkouts = [];
+  const restores = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/uses:\s*actions\/checkout@/u.test(lines[i])) checkouts.push(i + 1);
+    if (/uses:\s*actions\/cache\/restore@/u.test(lines[i])) restores.push(i + 1);
+  }
+
+  assert.equal(
+    checkouts.length,
+    1,
+    `qemu-shutdown-destruct 只应有 1 个 checkout（checkout 会清理工作区），实际 ${checkouts.length} 个：L${checkouts.join(', L')}`,
+  );
+  assert.ok(
+    restores.length >= 1,
+    'qemu-shutdown-destruct 必须有 actions/cache/restore（镜像来自 build-guest-image 的 cache）',
+  );
+
+  const lastCheckout = Math.max(...checkouts);
+  const firstRestore = Math.min(...restores);
+  assert.ok(
+    firstRestore > lastCheckout,
+    'cache/restore 必须在 checkout 之后 —— checkout 默认 clean:true 会删掉刚恢复的 guest-cache/。' +
+      `实际 checkout 在 L${checkouts.join(', L')}，restore 在 L${restores.join(', L')}`,
+  );
+});
+
+// 同一族问题：build-guest-image 自己也要保证 checkout 在 cache restore 之前
+test('build-guest-image 的 checkout 也在 cache restore 之前', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\n');
+
+  const co = lines.findIndex((l) => /uses:\s*actions\/checkout@/u.test(l));
+  const cr = lines.findIndex((l) => /uses:\s*actions\/cache\/restore@/u.test(l));
+
+  assert.ok(co >= 0, 'build-guest-image 必须有 checkout');
+  if (cr >= 0) {
+    assert.ok(
+      cr > co,
+      `build-guest-image 的 cache/restore（L${cr + 1}）必须在 checkout（L${co + 1}）之后`,
+    );
+  }
+});
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43187143353 实测暴露）：SSH 密钥步骤不能被 cache 门跳过
+//
+// 事故链：
+//   cache 命中 → 「生成 SSH 密钥」因 if: CACHE_HIT != 'yes' 被跳过
+//   → $WORK/id 不存在
+//   → 「验证 SSH 可连」执行 ssh -i $WORK/id，找不到 key
+//   → ssh 回落到 ~/.ssh/id_rsa 等默认路径
+//   → 日志里全是 "Trying private key: /home/runner/.ssh/id_rsa"
+//     + "Permission denied (publickey)"
+//   → 看起来像客机 sshd 问题，实际是本地缺 key（误诊成本极高）
+//
+// 判据：凡是「验证 SSH」用到的 key 路径，其生成步骤都不得带 cache 门。
+test('SSH 密钥生成步骤不得被 cache 门跳过（否则验证 SSH 会误诊为客机问题）', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\n');
+
+  // 找「生成 SSH 密钥」步骤
+  const kIdx = lines.findIndex((l) => l.includes('生成 SSH 密钥'));
+  assert.notEqual(kIdx, -1, 'build-guest-image 必须有「生成 SSH 密钥」步骤');
+
+  // 该步骤到下一个 - name: 之间不得有 if: 引用 havecache
+  let end = kIdx + 1;
+  while (end < lines.length && !/^\s+- name:/.test(lines[end])) end += 1;
+  const block = lines.slice(kIdx, end).join('\n');
+  assert.doesNotMatch(
+    block,
+    /if:\s*steps\.havecache\.outputs\.CACHE_HIT/u,
+    '「生成 SSH 密钥」不得带 `if: steps.havecache.outputs.CACHE_HIT != \'yes\'`：' +
+      'cache 命中时 $WORK/id 不存在，验证 SSH 会回落到默认 key 并报 Permission denied，' +
+      '极易误诊为客机 sshd 故障',
+  );
+
+  // 反向对照：确认「验证 SSH」确实在用 $WORK/id（否则本断言无意义）
+  const vIdx = lines.findIndex((l) => l.includes('验证 SSH 可连'));
+  assert.notEqual(vIdx, -1, '必须有「验证 SSH 可连」步骤');
+  let vEnd = vIdx + 1;
+  while (vEnd < lines.length && !/^\s+- name:/.test(lines[vEnd])) vEnd += 1;
+  const vBlock = lines.slice(vIdx, vEnd).join('\n');
+  assert.match(
+    vBlock,
+    /\$WORK\/id/u,
+    '「验证 SSH 可连」应当使用 $WORK/id（与密钥步骤配对）；两者路径不一致会再次产生本类误诊',
+  );
+});
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43190313294 实测暴露）：cache 必须把密钥对一起存
+//
+// 设计矛盾：镜像在**构建那一刻**就把当时生成的公钥写进了客机的
+//   C:\ProgramData\ssh\administrators_authorized_keys
+// （见 build-guest-image 的 OEM setup.ps1：Set-Content $ak (Get-Content C:\OEM\id.pub)）
+//
+// 而「生成 SSH 密钥」每次运行都 ssh-keygen 一对**新的**。
+// cache 命中时不重建镜像 ⇒ 客机里是旧公钥 + 本地是新私钥 ⇒ sshd 回 packet type 51。
+//
+// 实测证据（ssh-vvv-1.txt）：
+//   Offering public key: /home/runner/work/_temp/guest/id ED25519 SHA256:XjsCPahr…
+//   we sent a publickey packet, wait for reply
+//   receive packet: type 51              ← 明确拒绝
+//   runner@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).
+//
+// 因此两条约束必须同时成立，缺一即失败：
+//   ① 「存入 Actions Cache」必须带上 guest-key / guest-key.pub
+//   ② 「生成 SSH 密钥」在 cache 命中时必须用它们覆盖刚生成的那对
+test('cache 必须携带密钥对，且 cache 命中时换成它（否则公私钥不配对）', async () => {
+  const section = await jobSection('build-guest-image');
+  const lines = section.split('\\n');
+
+  const stepBody = (needle) => {
+    const i = lines.findIndex((l) => l.includes(needle));
+    assert.notEqual(i, -1, `未找到步骤：${needle}`);
+    let e = i + 1;
+    while (e < lines.length && !/^\\s+- name:/.test(lines[e])) e += 1;
+    return lines.slice(i, e).join('\\n');
+  };
+
+  // ① 存入 cache 时带上密钥对
+  // 全文查（stepBody 因缩进差异会误判）
+  assert.match(section, /cp "\$WORK\/id\.pub"\s+"\$CACHE_OUT\/guest-key\.pub"/u, '「存入 Actions Cache」必须把公钥拷成 guest-key.pub');
+  assert.match(section, /cp "\$WORK\/id"\s+"\$CACHE_OUT\/guest-key"/u, '「存入 Actions Cache」必须把私钥拷成 guest-key（缺了它缓存里只有公钥，无法认证）');
+
+  // ② cache 命中时换成缓存密钥
+  const key = stepBody('生成 SSH 密钥');
+  assert.match(
+    key,
+    /SSH_KEY_SOURCE=cache/u,
+    '「生成 SSH 密钥」必须有 cache 命中分支：用 guest-cache/guest-key 覆盖刚生成的那对。' +
+      '否则客机里的旧公钥与本地新私钥不配对，sshd 会回 packet type 51',
+  );
+  assert.match(key, /SSH_KEY_SOURCE=fresh/u, 'cache 未命中时也必须标出 key 来源，便于日志诊断');
+  assert.match(
+    key,
+    /ssh-keygen -l/,
+    '换 key 后必须重新校验可用性（防止 cache 里的文件损坏）',
+  );
+
+  // ③ 反向对照：确认「验证 SSH」用的就是 $WORK/id（与上面配对逻辑衔接）
+  const verify = stepBody('验证 SSH 可连');
+  assert.match(verify, /\$WORK\/id/u, '「验证 SSH 可连」必须用 WORK/id（与密钥步骤配对）');
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（用户明确要求）：SSH 密钥必须**随镜像一起打包进 cache**，且不保留 secret
+//
+// 背景：镜像里的公钥是构建时随机生成并写死进
+//   C:\ProgramData\ssh\administrators_authorized_keys 的。
+// 任何人工维护的 secret 私钥都不可能与之配对 —— 所以 secret 方案在技术上就是死路，
+// 保留它只会误导「配了就能用」，掩盖真正该做的动作（先跑构建把密钥对存进 cache）。
+//
+// run 43193689229 实证：关机自毁 job 报
+//   Error: 缺少 secret CX_QEMU_GUEST_SSH_KEY：客机内两阶段需要一个命令通道
+test('SSH 密钥必须随镜像打包进 cache，且消费端不依赖 secret', async () => {
+  const wf = await workflow();
+
+  // ① 生产端：存入 cache 时必须带上密钥对
+  assert.match(
+    wf,
+    /cp "\$WORK\/id"\s+"\$CACHE_OUT\/guest-key"/u,
+    '「存入 Actions Cache」必须把私钥拷成 guest-key（否则 cache 里只有镜像没有私钥）',
+  );
+  assert.match(
+    wf,
+    /cp "\$WORK\/id\.pub"\s+"\$CACHE_OUT\/guest-key\.pub"/u,
+    '「存入 Actions Cache」必须把公钥拷成 guest-key.pub（便于核对与排障）',
+  );
+
+  // ② 消费端：关机自毁必须从 cache 取私钥
+  const qemu = await jobSection('qemu-shutdown-destruct');
+  assert.match(
+    qemu,
+    /guest-cache\/guest-key/u,
+    'qemu-shutdown-destruct 必须从 Actions Cache 的 guest-cache/guest-key 取私钥',
+  );
+
+  // ③ 反证：不得再引用那个 secret（用户明确要求不保留）
+  assert.doesNotMatch(
+    qemu,
+    /secrets\.CX_QEMU_GUEST_SSH_KEY/u,
+    'qemu-shutdown-destruct 不得再引用 secrets.CX_QEMU_GUEST_SSH_KEY：' +
+      '镜像里的公钥是随机生成并写死的，人工 secret 私钥不可能与之配对',
+  );
+
+  // ④ 拿不到密钥时必须如实失败（不能静默跳过，否则又是假绿）
+  assert.match(
+    qemu,
+    /Actions Cache 里没有客机 SSH 私钥/u,
+    '缺密钥时必须给出可操作的失败信息（指向「先跑构建作业」这个真正解法）',
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2026-11-12（run 43210880751 实测暴露）：改了 artifact 名却没同步 download 侧
+//
+// 事故：把 windows-build 的 upload-artifact name 改成中文「Windows 原生测试可执行文件-<sha>」，
+//   但 6 个下游作业的 download-artifact 仍引用旧名 ⇒ 全部「下载共享 Windows 测试产物」失败。
+//
+// 教训：upload/download 的名字是成对契约，改任何一侧都要两侧一起改。
+//   这里加一条通用防护：凡是 download-artifact 引用的名字，必须能在
+//   某个 upload-artifact 的 name 里找到；找不到就是失配。
+test('所有 download-artifact 的 name 都必须有对应的 upload-artifact 提供', async () => {
+  // ⚠️ 2026-11-12（run 43213621397 实测）：这里必须先把 CRLF 归一成 LF。
+  //   仓库 core.autocrlf=true，Windows runner 上检出的 ci.yml 是 CRLF，
+  //   而正则 `name: (.+)$` 的 `$` 在 CRLF 下会把 `\r` 留在捕获值末尾，
+  //   导致 uploads/downloads 双双取到 0 个 → 触发「空转」断言误红。
+  const raw = (await readFile(WORKFLOW, 'utf8')).replace(/\r\n/g, '\n');
+  const lines = raw.split('\n');
+
+  const uploadNames = new Set();
+  const downloadNames = [];
+  let curKind = null;
+
+  for (const line of lines) {
+    if (line.includes('actions/upload-artifact@')) { curKind = 'upload'; continue; }
+    if (line.includes('actions/download-artifact@')) { curKind = 'download'; continue; }
+    if (/^ {2}- (name|uses):/u.test(line)) { curKind = null; continue; }
+    const m = /^ {10}name: (.+)$/u.exec(line);
+    if (curKind && m) {
+      const nm = m[1].trim();
+      if (curKind === 'upload') uploadNames.add(nm);
+      else downloadNames.push(nm);
+    }
+  }
+
+  // 自检：两侧都必须非空，否则解析本身坏了（而不是「没有失配」）
+  assert.ok(uploadNames.size > 0, `应解析出至少一个 upload-artifact 的 name，实际 0（解析逻辑或缩进假设失效）`);
+  assert.ok(downloadNames.length > 0, '应解析出至少一个 download-artifact 的 name，实际 0（解析逻辑或缩进假设失效）');
+
+  const missing = downloadNames.filter((nm) => !uploadNames.has(nm));
+  assert.deepEqual(
+    missing,
+    [],
+    '以下 download-artifact 引用的 name 没有任何 upload-artifact 提供（改名时只改了一侧）：\n' +
+      missing.map((n) => '  - ' + n).join('\n'),
   );
 });

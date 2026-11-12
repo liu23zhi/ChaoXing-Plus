@@ -66,9 +66,9 @@ function Get-PurgeRunOnceValues {
     $item = Get-ItemProperty -LiteralPath $runOnceKey -ErrorAction SilentlyContinue
     if ($null -eq $item) { return @() }
     return @(
-        $item.PSObject.Properties
-        | Where-Object { $_.Name -like "$valuePrefix*" }
-        | ForEach-Object { $_.Name }
+        $item.PSObject.Properties |
+        Where-Object { $_.Name -like "$valuePrefix*" } |
+        ForEach-Object { $_.Name }
     )
 }
 
