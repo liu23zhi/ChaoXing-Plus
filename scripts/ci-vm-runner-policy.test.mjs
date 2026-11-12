@@ -100,7 +100,8 @@ test('ci.yml 的 runner 标签与必要检查名保持不变', async () => {
   // 托管 runner 上的语义验证作业必须保留，否则「RunOnce 命令串是否可执行」
   // 会退回到「从未验证」。
   assert.match(workflow, /^ {2}wiring-probe:$/mu, 'wiring-probe 作业必须保留');
-  assert.match(workflow, /name: 自毁续删语义验证（不关机，托管 runner）/u, '作业名需说明它验证的是语义而非接线');
+  // 2026-11-12：job name 改为更准确的中文：「自毁登记与续删语义验证（不真实关机）」
+  assert.match(workflow, /name: 自毁登记与续删语义验证（不真实关机）/u, '作业名需说明它验证的是语义而非接线');
 });
 
 test('wiring-probe 必须真跑两阶段语义验证，不能只验证接线', async () => {

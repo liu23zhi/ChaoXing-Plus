@@ -463,7 +463,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.ok(realClientScope.includes('windows-real-client:'), '真实客户端段的切分必须包含两个作业');
   assert.match(workflow, /^name: 持续集成$/mu);
   assert.match(workflow, /^  source:[\s\S]*?runs-on: ubuntu-24\.04/mu, 'CI 必须在 Ubuntu job 执行跨平台源码检查');
-  assert.match(workflow, /name: Ubuntu 类型检查与扩展构建/u);
+  // 2026-11-12：job name 改为更准确的中文。
+  assert.match(workflow, /name: 源码类型检查与前端扩展构建（Ubuntu）/u);
   // 2026-11-10：ci-vm.yml 已整体并入 ci.yml（用户要求「完整 ci 添加上完整的关机自毁
   // 测试」）。原来 kvm-probe 是 workflow_call 的 callee，现在 gate / kvm-probe /
   // vm-shutdown-destruct / wiring-probe / qemu-shutdown-destruct 全是本文件的 job，
@@ -475,8 +476,8 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   // 2026-11-12：build-guest-image 并入 ci.yml 后，summary 也要等它。
   // 断言改成「包含全部必需项」而不是「精确等于某个顺序列表」——
   // 后者每加一个 job 就要改一次，属于把实现细节锁进测试。
-  assert.match(workflow, /name: 持续集成汇总[\s\S]*?needs: \[[^\]]*\][\s\S]*?if: always\(\)/u, '汇总 job 必须报告结果');
-  const summaryNeeds = (workflow.match(/name: 持续集成汇总[\s\S]*?needs: \[([^\]]*)\]/u) || [])[1] || '';
+  assert.match(workflow, /name: 持续集成结果汇总[\s\S]*?needs: \[[^\]]*\][\s\S]*?if: always\(\)/u, '汇总 job 必须报告结果');
+  const summaryNeeds = (workflow.match(/name: 持续集成结果汇总[\s\S]*?needs: \[([^\]]*)\]/u) || [])[1] || '';
   for (const required of [
     'source', 'windows-build', 'windows-unit', 'windows-pause', 'windows-window',
     'windows-browser', 'windows-release', 'windows-real-client-discovery',
@@ -529,7 +530,7 @@ test('CI 工作流与发布脚本入口已接入仓库', async () => {
   assert.match(workflow, /CX_DISCOVERY_TEST_DRIVER = 'discovery-cache-driver\.exe'/u, 'CI 必须强制检查复用的原生 discovery 驱动');
   assert.match(workflow, /CX_NATIVE_SILENT_EXE = 'silent-tests\.exe'/u, 'CI 必须强制检查静默引擎原生测试产物');
   assert.match(workflow, /CX_NATIVE_EXTENSION_CACHE_EXE/u, 'CI 必须导出扩展缓存原生测试入口');
-  assert.match(workflow, /name: Windows 可见窗口与 Edge\/Chrome 会话回归/u, 'CI 必须执行交互窗口回归');
+  assert.match(workflow, /name: 可见窗口与 Edge\/Chrome 会话回归/u, 'CI 必须执行交互窗口回归');
   assert.match(workflow, /--test-reporter=tap --test-concurrency=1 --test-timeout=600000 @files/u, '交互窗口回归必须串行执行');
   assert.match(workflow, /CX_TEST_NATIVE_WINDOW: '1'/u, 'CI 必须开启真实窗口回归');
   assert.match(workflow, /scripts\/windows-native-adapter\.test\.mjs/u, 'CI 必须覆盖原生账号窗口回归');

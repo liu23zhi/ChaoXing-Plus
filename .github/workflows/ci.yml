@@ -144,7 +144,7 @@ env:
 
 jobs:
   source:
-    name: Ubuntu 类型检查与扩展构建
+    name: 源码类型检查与前端扩展构建（Ubuntu）
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -181,11 +181,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-tap
+          name: 覆盖率与单元测试报告（TAP）
           path: coverage.tap
           retention-days: 7
   windows-build:
-    name: Windows 构建共享测试产物
+    name: 编译 Windows 原生测试可执行文件（供下游作业复用）
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -223,7 +223,7 @@ jobs:
       - name: 上传共享 Windows 测试产物
         uses: actions/upload-artifact@v4
         with:
-          name: windows-ci-build-${{ github.sha }}
+          name: Windows 原生测试可执行文件-${{ github.sha }}
           path: |
             dist/
             dist-windows/
@@ -232,7 +232,7 @@ jobs:
           retention-days: 7
 
   windows-real-client-discovery:
-    name: 发现真实客户端注入矩阵
+    name: 探测可用的真实客户端版本组合（决定注入矩阵规模）
     permissions:
       contents: read
     needs: windows-build
@@ -309,7 +309,7 @@ jobs:
           $databaseVars | ForEach-Object { Write-Host "数据库 Base64 变量 $($_.Name) 已发现并掩码" }
 
   windows-unit:
-    name: Windows 单元与原生测试
+    name: Windows 单元测试与原生模块测试
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -377,13 +377,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-unit-tap
+          name: Windows 单元与原生测试报告（TAP）
           path: ${{ runner.temp }}/ci-unit-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-pause:
-    name: Windows 标签页暂停隔离回归
+    name: 标签页级暂停隔离行为回归
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -419,13 +419,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-pause-tap
+          name: 标签页暂停隔离回归报告（TAP）
           path: ${{ runner.temp }}/ci-tab-answer-pause.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-window:
-    name: Windows 可见窗口与 Edge/Chrome 会话回归
+    name: 可见窗口与 Edge/Chrome 会话回归
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -471,13 +471,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-window-tap
+          name: 可见窗口会话回归报告（TAP）
           path: ${{ runner.temp }}/ci-window-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-browser:
-    name: Windows 浏览器回归
+    name: 浏览器端交互回归（独立 runner）
     needs: windows-build
     if: ${{ needs.windows-build.result == 'success' }}
     runs-on: windows-latest
@@ -535,13 +535,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-browser-tap
+          name: 浏览器交互回归报告（TAP）
           path: ${{ runner.temp }}/ci-browser-tests.tap
           if-no-files-found: warn
           retention-days: 7
 
   windows-release:
-    name: Windows 发布包验证
+    name: 发布包完整性与校验和验证
     needs: [windows-build, windows-unit, windows-pause, windows-window, windows-browser]
     # needs 保留全部五个，但 if 只把 windows-build 当硬门 —— 理由见下。
     #
@@ -630,7 +630,7 @@ jobs:
         id: upload_release
         uses: actions/upload-artifact@v4
         with:
-          name: Windows 发布包
+          name: Windows 发布包与校验和
           path: windows/native-build/release/
           if-no-files-found: error
 
@@ -732,7 +732,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-client-${{ matrix.client }}-${{ matrix.database }}
+          name: 真实客户端注入报告-${{ matrix.client }}-数据库${{ matrix.database }}
           # Store the files as-is: artifact packaging must not run another compression pass over the
           # PNG frames (level 0 keeps the bytes identical to what the runner wrote).
           compression-level: 0
@@ -745,7 +745,7 @@ jobs:
           retention-days: 7
 
   gate:
-    name: 前置门（已取消一切判重，每次 run 都放行）
+    name: 前置校验（每次运行都放行，不做历史判重）
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
@@ -763,7 +763,7 @@ jobs:
           echo "REASON=已取消判重：每次 run 都执行"
 
   kvm-probe:
-    name: KVM 能力巡检（托管 runner，只读）/ 由 CI 调用
+    name: KVM 硬件虚拟化能力巡检（只读）
     needs: gate
     # 2026-11-11 最终口径（用户两次要求）：**取消一切判重，每次 run 都跑**。
     # 旧写法按日历判重，实测 run 42935345965：main 当天第 1 次 push 巡检成功后，
@@ -915,7 +915,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   wiring-probe:
-    name: 自毁续删语义验证（不关机，托管 runner）
+    name: 自毁登记与续删语义验证（不真实关机）
     needs: gate
     # 完整自毁续删语义验证：不关机、不用 VM，在托管 windows-latest 上跑完两阶段。
     # 这是「完整 CI 也跑关机自毁测试」的落地链路，因此 push / PR / 手动都跑。
@@ -1037,7 +1037,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-vm-wiring-probe
+          name: 自毁登记续删验证证据
           compression-level: 0
           path: |
             ${{ runner.temp }}/cx-purge-*.log
@@ -1046,7 +1046,7 @@ jobs:
           retention-days: 7
 
   qemu-shutdown-destruct:
-    name: 关机自毁与开机续删（托管 Ubuntu + QEMU + KVM）
+    name: Windows 客机真实关机自毁与开机续删（QEMU + KVM）
     runs-on: ubuntu-24.04
     # 独立 concurrency：45 分钟的客机两阶段不该被新 push 打断。
     concurrency:
@@ -1607,7 +1607,16 @@ jobs:
           #     · 即使有，Windows 目标路径 C:/cx/... 在不同 scp 版本上解析不一致；
           #     · scp 失败只回 255，不告诉你是协议、子系统还是路径的问题。
           #   base64 + ssh 写入：只要 ssh 能跑 PowerShell 就能成功，与 sftp 无关。
-          log "=== step2: base64 传输脚本 ==="
+          log "=== step2: 传输脚本（base64 → PowerShell 解码）==="
+          # ⚠️ 2026-11-12（run 43207234187）：上一版用 `printf '...\\%s...'` 拼 PowerShell 脚本，
+          #   再 iconv 到 UTF-16LE + base64 走 -EncodedCommand。失败在「写入 C:\\cx\\scripts\\vm」，
+          #   但**无法确定是哪一环**：printf 的 \\ 转义、iconv 无 BOM、还是路径拼接少了一个分隔符。
+          #
+          #   换成更少中间环节的写法：
+          #     · 不用 -EncodedCommand（省掉 iconv + 二次 base64）
+          #     · PowerShell 脚本用 **stdin 传入**（powershell -Command -），避免命令行引号/长度问题
+          #     · 目标路径用正斜杠 C:/cx/...（PowerShell 在 Windows 上接受，且不需要反斜杠转义）
+          #     · 每次写入后立刻用 Test-Path 复核，失败能精确到是哪个文件
           for f in scripts/vm/qemu-guest-destruct.ps1 scripts/vm/run-shutdown-destruct.ps1 scripts/vm/assert-clean.ps1; do
             bn=$(basename "$f")
             if [ ! -f "$f" ]; then
@@ -1615,11 +1624,21 @@ jobs:
               exit 1
             fi
             B64=$(base64 -w0 "$f")
-            # 用 PowerShell 解码写入；-EncodedCommand 避免引号与换行被 shell 吃掉
-            PS=$(printf '[IO.File]::WriteAllBytes("C:\\cx\\scripts\\vm\\%s", [Convert]::FromBase64String("%s"))' "$bn" "$B64")
-            ENC=$(printf '%s' "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
-            if ! $SSH "$USER_HOST" "powershell -NoProfile -EncodedCommand $ENC" >> "$DEPLOY_LOG" 2>&1; then
-              log "::error title=写入客机失败::$bn 写入 C:\\cx\\scripts\\vm 失败"
+            log "  $bn 源大小=$(stat -c %s "$f") base64长度=${#B64}"
+            # 脚本经 stdin 进 PowerShell：$input 读全部输入，从中取 base64 并解码写出。
+            # 用正斜杠路径，避免 bash/PowerShell 两层反斜杠转义。
+            if ! printf '%s' "$B64" | $SSH "$USER_HOST" \
+                 "powershell -NoProfile -Command \"\$b64 = [Console]::In.ReadToEnd().Trim(); [IO.File]::WriteAllBytes('C:/cx/scripts/vm/${bn}', [Convert]::FromBase64String(\$b64)); \"" \
+                 >> "$DEPLOY_LOG" 2>&1; then
+              log "::error title=写入客机失败::$bn（见 deploy.txt 的 ssh stderr）"
+              exit 1
+            fi
+            # 立刻复核该文件在客机上存在且大小与源一致
+            REMOTE_SIZE=$($SSH "$USER_HOST" "powershell -NoProfile -Command \"(Get-Item 'C:/cx/scripts/vm/${bn}').Length\"" 2>/dev/null | tr -d "\r\n " )
+            LOCAL_SIZE=$(stat -c %s "$f")
+            log "  $bn 客机大小=${REMOTE_SIZE:-?} 本地大小=$LOCAL_SIZE"
+            if [ "${REMOTE_SIZE:-0}" != "$LOCAL_SIZE" ]; then
+              log "::error title=写入大小不符::$bn 客机=${REMOTE_SIZE:-?} 本地=$LOCAL_SIZE"
               exit 1
             fi
             log "  wrote $bn"
@@ -1735,13 +1754,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-qemu-destruct-evidence
+          name: Windows 客机自毁测试证据
           compression-level: 0
+          # ⚠️ 2026-11-12（run 43207234187）：原 path 只匹配 qemu-stdout.log 与 cx-* 系列，
+          #   但启动步骤把诊断写到了 guest-snapshot/{boot-diag.txt,ssh-boot-N.log}，
+          #   部署步骤写到 guest-snapshot/deploy.txt —— **全部没被收走**。
+          #   结果 annotation 只有「No files were found」，失败原因无从追查。
+          #   ⇒ 补上整个 guest-snapshot 目录（里面是全部诊断产物）。
           path: |
             ${{ runner.temp }}/qemu-stdout.log
             ${{ runner.temp }}/cx-*.log
             ${{ runner.temp }}/cx-*.txt
             ${{ runner.temp }}/cx-*.out
+            ${{ runner.temp }}/guest-snapshot/
           if-no-files-found: warn
           retention-days: 14
 
@@ -1967,7 +1992,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   qemu-destruct-linux-guest:
-    name: 关机销毁与开机续删（托管 Ubuntu + QEMU + Linux 客机，真实重启）
+    name: Linux 客机强制断电自毁与开机续删（真实重启）
     needs: gate
     # 2026-11-11: PR 上也要跑（用户要求「不要跳过任务」）。
     # 刻意不看 gate.outputs.skip：日判重只省巡检成本，不约束自毁验证。
@@ -2115,7 +2140,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cx-qemu-linux-guest-evidence
+          name: Linux 客机断电自毁测试证据
           compression-level: 0
           path: |
             ${{ runner.temp }}/cx-linux-guest/user-data
@@ -2145,7 +2170,7 @@ jobs:
   #   下游 qemu-shutdown-destruct 用 actions/cache/restore 取用。
   # ═══════════════════════════════════════════════════════════════════════
   build-guest-image:
-    name: 构建 Windows 客机镜像（cache 优先）
+    name: 构建 Windows 客机镜像并缓存（安装 SSH 与自毁测试工具）
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     # cache 未命中时才需要 30-40 分钟构建；命中时只需几分钟验证。
@@ -3326,7 +3351,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: guest-image-diagnostics-early
+          name: 客机镜像构建诊断（SSH 验证前的早期快照）
           compression-level: 0
           path: |
             ${{ runner.temp }}/guest-snapshot/
@@ -3602,7 +3627,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: guest-image-diagnostics
+          name: 客机镜像构建诊断（完整现场）
           compression-level: 0
           path: |
             ${{ runner.temp }}/guest-snapshot/
@@ -3615,7 +3640,7 @@ jobs:
 
 
   summary:
-    name: 持续集成汇总
+    name: 持续集成结果汇总
     runs-on: ubuntu-24.04
     needs: [build-guest-image, source, windows-build, windows-unit, windows-pause, windows-window, windows-browser, windows-release, windows-real-client-discovery, windows-real-client, gate, kvm-probe, wiring-probe, qemu-shutdown-destruct, qemu-destruct-linux-guest]
     if: always()

@@ -619,9 +619,10 @@ test('kvm-probe 名称与汇总文案都不再叫「虚拟机环境验证」', a
 
   const kvm = await jobSection('kvm-probe');
   const name = inlineValue(kvm, 'name');
+  // 2026-11-12：job name 统一为「更准确的中文」，断言跟着改成新的表述。
   assert.match(
     name,
-    /KVM 能力巡检/u,
+    /KVM .*能力巡检/u,
     `kvm-probe 的 name 必须说明这是 KVM 能力巡检，实际：${name}`,
   );
   assert.doesNotMatch(
@@ -732,8 +733,9 @@ test('windows-release 消费的 artifact 只能由 windows-build 提供', async 
   assert.ok(downloads.length > 0, `windows-release 必须下载共享构建产物，实际段内未找到`);
 
   const buildSection = await jobSection('windows-build');
+  // 2026-11-12：artifact 名改为更准确的中文，仍保留 sha 以便区分轮次。
   assert.ok(
-    buildSection.includes('name: windows-ci-build-${{ github.sha }}'),
+    buildSection.includes('name: Windows 原生测试可执行文件-${{ github.sha }}'),
     'windows-build 必须上传 windows-release 消费的那个 artifact',
   );
   assert.ok(
