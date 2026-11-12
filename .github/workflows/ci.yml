@@ -550,7 +550,7 @@ jobs:
     #
     # 为什么 if 只要求 windows-build：
     #   本作业的**唯一输入**是 windows-build 上传的 artifact
-    #   `windows-ci-build-${{ github.sha }}`（下面的 download 步骤）。单元测试 /
+    #   `Windows 原生测试可执行文件-${{ github.sha }}`（下面的 download 步骤）。单元测试 /
     #   暂停回归 / 可见窗口 / 浏览器回归**都不产出本作业消费的任何东西**，
     #   把它们写进 if 是「假依赖」—— 它们一红，发布包验证就被连带 skip，
     #   于是「发布包能不能打出来」这个**与单测无关**的验证完全没跑。
@@ -2647,7 +2647,7 @@ jobs:
           # 优先用本仓库最近一次成功 ci.yml run 的 artifact（同一次 push 不一定跑了 windows-build，
           # 因为这个 workflow 是独立的 workflow_dispatch）。
           SHA="$GITHUB_SHA"
-          ART="windows-ci-build-$SHA"
+          ART="Windows 原生测试可执行文件-$SHA"
 
           echo "尝试下载 artifact: $ART"
           set +e
@@ -2670,9 +2670,9 @@ jobs:
             fi
             echo "使用 run $RUN_ID"
             ART=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
-                    --jq '.artifacts[] | select(.name | startswith("windows-ci-build-")) | .name' | head -n1)
+                    --jq '.artifacts[] | select(.name | startswith("Windows 原生测试可执行文件-")) | .name' | head -n1)
             if [ -z "${ART:-}" ]; then
-              echo '::error title=该 run 没有 windows-ci-build artifact'
+              echo '::error title=该 run 没有 Windows 原生测试可执行文件 artifact'
               exit 1
             fi
             echo "下载 artifact: $ART"
