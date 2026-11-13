@@ -544,7 +544,9 @@ function Watch-ClientCaptureGuard {
     )
     # Persist events to disk: this function runs in a separate runspace, so its Write-Host
     # output never reaches the host process stdout and CI logs show no capture guard events.
-    # A JSONL file is the only way to carry the capture-window duration out of the runspace;
+    # A JSONL file is the only way to carry the capture-window duration out of the runspace.
+    # The file is created lazily on the first transition, so its absence means "no transition
+    # happened", not "the guard did not run" -- see the guardStarted flag in the caller.
 
     try {
         if (-not (Get-Command Get-CaptureGuardEventsPath -ErrorAction SilentlyContinue)) {

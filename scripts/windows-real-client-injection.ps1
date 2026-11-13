@@ -327,6 +327,13 @@ try {
   # WDA_MONITOR, so an open panel would land in that upload. The watcher runs as an in-process runspace
   # (no extra process to be enumerated) and hides the panel through DevTools until the window is
   # protected again. Best effort, never fatal.
+  #
+  # captureGuardStarted is recorded because "no events file" alone cannot tell us whether the guard
+  # ever ran: the events file is only created on the first transition
+  # (windows-client-capture-guard.ps1 Write-CaptureGuardEvent -> Add-Content). A guard that ran for the
+  # full duration without a single transition leaves no file at all. Reporting that as
+  # "the hook never ran" would be exactly the ambiguity the reason field is meant to remove.
+  $script:captureGuardStarted = $false
   if ($script:cdpPort -gt 0 -and $entry.PSObject.Properties['ProcessId'] -and [int]$entry.ProcessId -gt 0) {
     $guardProject = $PSScriptRoot
     $guardPid = [int]$entry.ProcessId
@@ -341,6 +348,7 @@ param($root, $clientPid, $port)
 Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
 '@).AddArgument($guardProject).AddArgument($guardPid).AddArgument($guardPort)
       $script:captureGuardHandle = $script:captureGuard.BeginInvoke()
+      $script:captureGuardStarted = $true
       Write-Host "[real-client] capture guard watching pid=$guardPid port=$guardPort"
     } catch {
       Write-Host "[real-client] capture guard unavailable: $($_.Exception.Message)"
@@ -506,22 +514,30 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   #   (b) inject-evidence-assertion.test.mjs:162 and inject-report-verdict.test.mjs:77 both
   #       stub it as `return $null`; carrying data in the return value would break them.
   #
-  # `reason` is what makes the three outcomes distinguishable. Without it a missing file and a
-  # file with zero events both look like "no data", which is exactly the ambiguity this field
-  # exists to remove:
-  #   no-events-file        -> the hook never ran (proxy not installed, or the run used cdp-port)
-  #   no-capture-triggered  -> the hook ran but the client never photographed the desktop
+  # `reason` exists to make the outcomes distinguishable, so every value must name a CAUSE, not a
+  # symptom. The file is only created on the first transition, therefore "file missing" says nothing
+  # about whether the guard ran -- that is what guardStarted is for:
+  #   guard-not-started     -> the launch condition failed or the runspace threw; no data is expected
+  #   no-capture-triggered  -> the guard ran for the whole duration and never saw a 1->0 transition,
+  #                            or the events file exists but holds no paired events. Either way the
+  #                            client did not photograph the desktop.
   #   ok                    -> paired events exist, W is meaningful
+  #   error                 -> reading the events file threw
+  #
+  # There is deliberately no `no-events-file` value any more: it named a symptom and could not be
+  # told apart from "the guard harness never came up", which is the distinction this field exists
+  # for. `eventsPath` still reports the file path when one is known.
   #
   # The default MUST be assigned before the try. If it were left $null, a missing file would
   # skip the if-branch below, the catch would not fire (nothing threw), and
-  # `[pscustomobject]$null` serialises to a bare JSON `null` -- the key is present but carries
-  # no information at all. That is the bug PR#18 shipped: six CI reports all read `null`.
+  # `[pscustomobject]$null` serialises to a bare JSON `null`.
+  $captureGuardStartedFlag = [bool]$script:captureGuardStarted
   $captureGuardSummary = [ordered]@{
-    available  = $false
-    eventsPath = $null
-    reason     = 'no-events-file'
-    pollMs     = 200
+    available    = $false
+    guardStarted = $captureGuardStartedFlag
+    eventsPath   = $null
+    reason       = $(if ($captureGuardStartedFlag) { 'no-capture-triggered' } else { 'guard-not-started' })
+    pollMs       = 200
   }
   try {
     if (-not (Get-Command Get-CaptureGuardEventsPath -ErrorAction SilentlyContinue)) {
@@ -536,9 +552,10 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
       $guardStats = Get-CaptureGuardWindowStats -Events $guardEvents.Lines
       $captureGuardSummary = [ordered]@{
         available     = $true
+        guardStarted  = $captureGuardStartedFlag
         eventsPath    = [string]$guardEvents.Path
-        # ok vs no-capture-triggered: zero paired events with the file present means the hook
-        # ran and the client simply never dropped its WDA_MONITOR.
+        # ok vs no-capture-triggered: zero paired events with the file present means the guard ran
+        # and the client simply never dropped its WDA_MONITOR.
         reason        = $(if ([int]$guardStats.events -gt 0) { 'ok' } else { 'no-capture-triggered' })
         events        = [int]$guardStats.events
         rawEventCount = [int]$guardStats.rawEventCount
@@ -554,11 +571,12 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
     }
   } catch {
     $captureGuardSummary = [ordered]@{
-      available  = $false
-      eventsPath = $null
-      reason     = 'error'
-      error      = [string]$_.Exception.Message
-      pollMs     = 200
+      available    = $false
+      guardStarted = $captureGuardStartedFlag
+      eventsPath   = $null
+      reason       = 'error'
+      error        = [string]$_.Exception.Message
+      pollMs       = 200
     }
   }
 
