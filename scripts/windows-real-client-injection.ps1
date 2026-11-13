@@ -505,8 +505,24 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
   #   (a) it runs in a separate runspace, so the main flow cannot see its return value;
   #   (b) inject-evidence-assertion.test.mjs:162 and inject-report-verdict.test.mjs:77 both
   #       stub it as `return $null`; carrying data in the return value would break them.
-  # A missing file yields available:false, which distinguishes "no capture happened"
-  # from "it happened but was not recorded".
+  #
+  # `reason` is what makes the three outcomes distinguishable. Without it a missing file and a
+  # file with zero events both look like "no data", which is exactly the ambiguity this field
+  # exists to remove:
+  #   no-events-file        -> the hook never ran (proxy not installed, or the run used cdp-port)
+  #   no-capture-triggered  -> the hook ran but the client never photographed the desktop
+  #   ok                    -> paired events exist, W is meaningful
+  #
+  # The default MUST be assigned before the try. If it were left $null, a missing file would
+  # skip the if-branch below, the catch would not fire (nothing threw), and
+  # `[pscustomobject]$null` serialises to a bare JSON `null` -- the key is present but carries
+  # no information at all. That is the bug PR#18 shipped: six CI reports all read `null`.
+  $captureGuardSummary = [ordered]@{
+    available  = $false
+    eventsPath = $null
+    reason     = 'no-events-file'
+    pollMs     = 200
+  }
   try {
     if (-not (Get-Command Get-CaptureGuardEventsPath -ErrorAction SilentlyContinue)) {
       . (Join-Path $PSScriptRoot 'windows-client-capture-guard.ps1')
@@ -521,6 +537,9 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
       $captureGuardSummary = [ordered]@{
         available     = $true
         eventsPath    = [string]$guardEvents.Path
+        # ok vs no-capture-triggered: zero paired events with the file present means the hook
+        # ran and the client simply never dropped its WDA_MONITOR.
+        reason        = $(if ([int]$guardStats.events -gt 0) { 'ok' } else { 'no-capture-triggered' })
         events        = [int]$guardStats.events
         rawEventCount = [int]$guardStats.rawEventCount
         unpairedOn    = [int]$guardStats.unpairedOn
@@ -534,7 +553,13 @@ Watch-ClientCaptureGuard -ProcessId $clientPid -Port $port -TimeoutSeconds 290
       }
     }
   } catch {
-    $captureGuardSummary = [ordered]@{ available = $false; error = [string]$_.Exception.Message }
+    $captureGuardSummary = [ordered]@{
+      available  = $false
+      eventsPath = $null
+      reason     = 'error'
+      error      = [string]$_.Exception.Message
+      pollMs     = 200
+    }
   }
 
   # The report is the artifact CI uploads, so the summary must travel with it on pass and on failure.
