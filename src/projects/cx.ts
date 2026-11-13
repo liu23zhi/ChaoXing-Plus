@@ -49,6 +49,7 @@ import {
 import {
   CommonProject,
   getStoredTikuAdapterConfig,
+  maybeShowIncidentAnnouncements,
   type CommonWorkOptions
 } from './common.js';
 import { resolveStudyAutomationFlags } from './study-panel-state.js';
@@ -2476,12 +2477,20 @@ function logTikuAdapterWarnings(warnings: string[], source: string) {
  *
  * 这里刻意保持「只记录日志」：返回值原样透传，绝不修改答案、错误或结果条数，
  * 因此普通用户拿到的内容与改动前完全一致。
+ *
+ * 除日志外还顺手处理搜题响应里的故障公告（`announcements`，仅 `kind=incident`）。
+ *
+ * ⚠️ `maybeShowIncidentAnnouncements` **必须是同步函数**（内部用 `void $modal.alert`
+ * 把弹窗挂到后台）。这里的 `await` 只多一个 microtask；它存在的意义是把「被改成
+ * 阻塞弹窗」变成可测的：一旦实现里把 `void` 换成 `await`，函数就返回 pending
+ * promise，这里的 await 会立刻卡住，搜题结果再也填不出去。
  */
 async function withTikuAdapterAdminWarnings(
   searchInfos: SearchInformation[] | Promise<SearchInformation[]>
 ): Promise<SearchInformation[]> {
   const resolvedInfos = await searchInfos;
   logTikuAdapterWarnings(collectTikuAdapterWarnings(resolvedInfos), 'search');
+  await maybeShowIncidentAnnouncements(resolvedInfos);
   return resolvedInfos;
 }
 

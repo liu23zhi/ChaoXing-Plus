@@ -3445,6 +3445,88 @@ try {
   // ignore shared config observer failures
 }
 
+/** tikuAdapter 搜题响应里下发的故障公告（`kind=incident`）。 */
+export interface IncidentAnnouncement {
+  id: number;
+  title: string;
+  content: string;
+  severity?: string;
+}
+
+/**
+ * 本页面生命周期内已经弹过的公告 ID。
+ *
+ * 用模块级 `Set` 而不是布尔标记，两个理由（task_doc/113 §3.2 方案 C、§3.3）：
+ * ① 模块变量随页面刷新重置，正好等于「本页面」的边界，不需要额外监听路由；
+ * ② 用户考试中途管理员新发公告时，新 ID 仍能弹出；布尔标记会让用户漏看新公告。
+ */
+const shownIncidentIds = new Set<number>();
+
+function resolveIncidentIcon(severity: string | undefined): 'error' | 'warning' | 'info' {
+  const normalized = String(severity ?? '').trim().toLowerCase();
+  if (normalized === 'critical') return 'error';
+  if (normalized === 'warning') return 'warning';
+  return 'info';
+}
+
+/**
+ * 只挑 `kind=incident` 的公告。
+ *
+ * 服务端本来只下发 incident（113 §8.1），这里仍然按 `kind` 过滤一遍：
+ * 「没过滤」的表现是常规公告（发版通知、活动预告）也弹窗打扰用户，
+ * 而这类公告在响应里的形状与故障公告完全一样，只能靠 `kind` 区分。
+ */
+function normalizeIncidentAnnouncements(value: unknown): IncidentAnnouncement[] {
+  if (!Array.isArray(value)) return [];
+  const announcements: IncidentAnnouncement[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (String(record.kind ?? '').trim().toLowerCase() !== 'incident') continue;
+    const id = Number(record.id);
+    if (!Number.isFinite(id)) continue;
+    announcements.push({
+      id,
+      title: String(record.title ?? '').trim(),
+      content: String(record.content ?? '').trim(),
+      severity: record.severity === undefined ? undefined : String(record.severity)
+    });
+  }
+  return announcements;
+}
+
+/**
+ * 搜题响应里带故障公告时，弹一次 `swal` 告示。
+ *
+ * 三条不可协商的约束（task_doc/113 §1.1、§4.2）：
+ * ① **绝不 await 弹窗** —— 用户不点「知道了」，搜题结果也必须照常填答案 / 显示失败；
+ * ② 本页面内同一公告 ID 只弹一次，不是每次搜题都弹；
+ * ③ 弹的是 `$modal.alert`（完整公告正文），不是页面顶部横幅，也不截断内容。
+ *
+ * 一次响应里只弹一条（113 §3.2 的 `break`），避免多条公告连环弹窗。
+ * 因为函数本身同步返回，调用方拿到的就是「已经登记完、弹窗挂在后台」的状态。
+ */
+export function maybeShowIncidentAnnouncements(searchInfos: unknown): void {
+  const infos = Array.isArray(searchInfos) ? searchInfos : [searchInfos];
+  for (const info of infos) {
+    const response = info && typeof info === 'object' ? (info as { response?: unknown }).response : undefined;
+    const announcements = normalizeIncidentAnnouncements(
+      response && typeof response === 'object' ? (response as { announcements?: unknown }).announcements : undefined
+    );
+    for (const announcement of announcements) {
+      if (shownIncidentIds.has(announcement.id)) continue;
+      // 先登记再弹：同一 tick 内的第二次搜题不会再弹（判据①）。
+      shownIncidentIds.add(announcement.id);
+      // `void` 而不是 `await` —— 弹窗与「填答案 / 显示失败」并行（判据③）。
+      void $modal.alert({
+        content: `【${announcement.title}】\n${announcement.content}`,
+        icon: resolveIncidentIcon(announcement.severity)
+      });
+      return;
+    }
+  }
+}
+
 export const CommonProject = Project.create({
   name: '通用',
   domains: [],
