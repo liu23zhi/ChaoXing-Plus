@@ -30,8 +30,13 @@ import { getTabAnswerPauseController } from './tab-answer-pause.js';
 import {
   createStatusPanelSection,
   readCachedServiceStatusSnapshot,
-  refreshServiceStatusSnapshot
+  refreshServiceStatusSnapshot,
+  setServiceStatusFetcher
 } from './status-panel.js';
+import {
+  createServiceStatusHttpFetcher,
+  fetchServiceStatusRequester
+} from './status-panel-http.js';
 import {
   DEFAULT_TIKU_BASE_URL,
   TIKU_ADAPTER_BASEURL_KEY,
@@ -784,6 +789,36 @@ export function getStoredTikuAdapterConfig() {
     key: typeof key === 'string' ? key : '',
     scriptIdentity: typeof scriptIdentity === 'string' ? scriptIdentity : ''
   };
+}
+
+/**
+ * 把状态页的取数换成真实 HTTP（替换掉 status-panel.ts 的 fixture 默认值）。
+ *
+ * 为什么放在这里而不是 start.ts：
+ * `TIKU_ADAPTER_BASEURL_KEY` 的读取与 `DEFAULT_TIKU_BASE_URL` 的解析都在本文件
+ * （见 `getStoredTikuAdapterConfig`），从 start.ts 接会为了拿一个 baseurl 去重复实现
+ * 一遍配置解析，两处漂移后请求会静默打到错地址。
+ *
+ * 幂等：重复调用只是覆盖同一个 fetcher，不会累积定时器或监听器。
+ *
+ * ⚠️ 失败与 403 都**不弹全局错误**：状态页是旁路展示，取数失败不能干扰答题。
+ * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
+ */
+function mountServiceStatusHttpFetcher() {
+  const config = getStoredTikuAdapterConfig();
+  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL);
+  // endpoint 显式传入，不依赖 status-panel 的默认常量：baseurl 规则将来变化时，
+  // 依赖默认值会让请求静默打到别处而不是暴露出来。
+  //
+  // 走**摘要**端点（AuthOrAccessToken）：PLUS 只有 adapter key，没有管理员 JWT。
+  // 管理员端点带逐分钟 points，属运维可见信息，不能给每个持 key 的用户。
+  setServiceStatusFetcher(createServiceStatusHttpFetcher({
+    baseurl,
+    endpoint: '/adapter-service/service-status/summary',
+    requester: fetchServiceStatusRequester,
+    // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
+    accessKey: config.key
+  }));
 }
 
 function getWorkOptions(): CommonWorkOptions {
@@ -3676,6 +3711,14 @@ export const CommonProject = Project.create({
       onrender({ panel }) {
         state.panels.workResults = panel;
         applyPanelVisual(panel, 'workResults');
+        // 面板首次渲染前接线，保证「状态」页第一次打开就是真实数据。
+        // 放在 try 里：接线失败（例如配置未就绪）只应让状态页保持「暂无数据」，
+        // 不能把整个面板渲染带塌 —— 面板是答题主界面，状态页只是旁路。
+        try {
+          mountServiceStatusHttpFetcher();
+        } catch {
+          // ignore: 状态页降级为「暂无采样数据」，不影响答题。
+        }
         renderWorkResultsPanel();
       }
     },

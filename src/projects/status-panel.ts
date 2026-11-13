@@ -269,8 +269,78 @@ export type ServiceStatusBreakdown = {
   quota: number;
 };
 
+/**
+ * 快照的三种**互斥**语义。这是本文件最重要的一条约定。
+ *
+ * 为什么不能只用一个 snapshot + 空数组表达：
+ * - 「还没采到数据」（后端刚重启，`points: []`）与「所有分钟都没请求」在数据层
+ *   长得一样，但用户看到的必须是两件完全不同的事（「暂无采样数据」vs 一条灰带）。
+ * - 「无权限」（403）连数据都没有，塞进 snapshot 就会渲染出「全部失败」的假象。
+ *
+ * 所以用 `kind` 区分，渲染层据它决定画什么。**不要**把 403 或空 points
+ * 归一化成「一个全 0 的快照」——那正是任务书点名的那个最容易做错的坑。
+ */
+/**
+ * 快照语义。五态互斥，**不能合并**——每种对应完全不同的用户动作。
+ *
+ * - `ok`：有数据（含「全失败」，那也走 ok）
+ * - `empty`：窗口内没有请求（正常夜间）
+ * - `no-token`：**前端就知道**没配访问令牌，压根没发请求 → 引导去填令牌
+ * - `rejected`：发了请求但被拒（401/403）→ 显示服务端原因（key 失效/被禁用/是脚本令牌）
+ * - `forbidden`：**当前无任何产出点**，见下方说明
+ *
+ * 为什么 `no-token` 与 `rejected` 必须分开：前者是「你还没填」，
+ * 后者是「你填了但服务端不接受」——后者可能是 key 失效、被禁用、或绑定了 ScriptID
+ * 的脚本令牌（服务端会明说「脚本请求必须使用绑定身份码的运行会话」）。
+ * 合并成一个「无权限」会让用户完全无从下手。
+ *
+ * ## ⚠️ `forbidden` 是死分支（2026-11-14 端到端实测确认）
+ *
+ * 当前**没有任何代码产出 `kind='forbidden'`**：`status-panel-http.ts` 只产出
+ * `no-token` 与 `rejected` 两种「看不了」。检索 `kind: 'forbidden'` 零命中，
+ * 只有消费点（渲染层）。
+ *
+ * 为什么留着而不是删掉：将来接管理员视图时，需要表达「有 key 但角色不足」这一态。
+ * 但**它没有被任何用例覆盖到**，改动相关代码时不要假定它已测过。
+ *
+ * 实测背景（captain 起真实 TIKU 实例打的）：
+ * - `GET /adapter-service/service-status/summary` 无凭据 → **401**「请重新登录」
+ * - 同上 + 非法 Bearer → **401**
+ * - 同上 + 真实 access token → **200**（这条路才是 PLUS 实际走的）
+ * - `GET /adapter-service/admin/service-status` + **有效普通 token** → **401**（不是 403！）
+ *
+ * 最后一条是关键：`controller.Auth`（`user.go:213-232`）在 `ParseJwtWithClaims` 失败时
+ * 直接 401 返回；access token 不是 JWT，所以在 `RequireAdmin` 之前就被 401 拦掉了。
+ * ⇒ **不要基于「403 表示权限不足」这种常规假设写分支**，这个服务里 403 在这条链路上
+ * 根本到不了。`RequireAdmin` 的 403 只对「合法 JWT 但 role != admin」生效，
+ * 而 PLUS 没有登录态，永远拿不到 JWT。
+ */
+export type ServiceStatusSnapshotKind = 'ok' | 'empty' | 'no-token' | 'rejected' | 'forbidden';
+
+/** `rejected` 的子因由。渲染文案据此分流。 */
+export type ServiceStatusAuthProblem = 'unauthorized' | 'forbidden';
+
 export type ServiceStatusSnapshot = {
-  /** `healthy` | `degraded` | `down`，未知值按「无数据」渲染。 */
+  /** 该快照代表哪种语义。见 {@link ServiceStatusSnapshotKind}。 */
+  kind: ServiceStatusSnapshotKind;
+  /**
+   * 服务端权威开关：窗口内是否有可用于计算成功率的请求。
+   *
+   * `true` + `successRate === 0` = **全失败**（必须显示最差档，不是「暂无数据」）；
+   * `false` = 窗口内没有请求（正常夜间）；
+   * `null` = 后端没给这个字段（admin 端点 / 旧响应），此时靠 `retained` 回退判断。
+   */
+  successRateAvailable: boolean | null;
+  /** 仅 `kind === 'rejected'` 时有意义：区分 401（配令牌）与 403（找管理员）。 */
+  authProblem?: ServiceStatusAuthProblem;
+  /**
+   * 仅 `kind === 'rejected'` 时有意义：**服务端返回的原始 message**。
+   *
+   * 必须原样显示给用户 —— 像「脚本请求必须使用绑定身份码的运行会话」这种原因
+   * 只有服务端知道，前端统一成「无权限」就把真正的指引丢了。
+   */
+  serverMessage?: string;
+  /** `healthy` | `degraded` | `down` | `unknown`，未知值按「无数据」渲染。 */
   status: string;
   /** 最近 5 分钟成功率（0..1）。 */
   successRate: number | null;
@@ -278,10 +348,27 @@ export type ServiceStatusSnapshot = {
   totalRequests: number;
   failedRequests: number;
   breakdown: ServiceStatusBreakdown;
-  /** 24 小时逐 5 分钟样本。 */
+  /**
+   * 24 小时逐 5 分钟**原始样本**（后端给的是逐分钟点，这里是未聚合的 minute 点）。
+   * 聚合到 288 格由 {@link buildServiceStatusBuckets} 负责。
+   *
+   * `kind === 'empty'` 时**必须**是空数组，绝不能填 288/1440 个 0。
+   */
   buckets: ServiceStatusSample[];
   /** 最近 60 分钟逐分钟样本（用于「最近每分钟」列表，最新在前由渲染层排序）。 */
   minuteSamples: ServiceStatusSample[];
+  /**
+   * 后端已采到的点数（`retained`）。**判断「有没有数据」用这个字段，不要用
+   * `buckets.length` 反推** —— 接口明确给出了语义字段，反推是脆弱的重复推导。
+   */
+  retained: number;
+  /** 缓冲容量（`capacity`，当前 1440）。 */
+  capacity: number;
+  /**
+   * 采样起点（ms）。后端给的是 ISO 字符串 `restartedAt`，这里已 parse 成毫秒。
+   * 用于显示「数据自 <时间> 起」。无法 parse 时为 `null`（不显示，而不是显示 1970）。
+   */
+  restartedAtMs: number | null;
   updatedAt: number;
 };
 
@@ -290,8 +377,28 @@ export type ServiceStatusFetchOptions = { now: number };
 /** 一次拉取。失败请抛错——调用方会保留旧快照并降级显示，不会清空。 */
 export type ServiceStatusFetcher = (options: ServiceStatusFetchOptions) => Promise<ServiceStatusSnapshot | null>;
 
-/** T-18 的后端端点（尚未合并，先按约定写死在这里，接上后只需换 fetcher）。 */
-export const SERVICE_STATUS_ENDPOINT = '/adapter-service/admin/service-status';
+/**
+ * 普通用户可用的**摘要**端点（`controller.AuthOrAccessToken`）。
+ *
+ * 为什么不用 `/admin/service-status`：那条是 `RequireAdmin` + 带逐分钟 `points`，
+ * 定位是「运维可见信息」——「什么时段多少请求、成功多少、平均延迟」是运营情报，
+ * 不该开给每个持 key 的用户。摘要端点只给聚合数字。
+ */
+export const SERVICE_STATUS_ENDPOINT = '/adapter-service/service-status/summary';
+
+/**
+ * 管理员端点（`RequireAdmin` + 逐分钟 points）。
+ *
+ * 当前**不接**——PLUS 没有管理员登录态。保留常量是为了将来做管理员视图时不用再找
+ * 一次路径；也用来在注释里说明「为什么不能拿它给普通用户用」。
+ */
+export const SERVICE_STATUS_ADMIN_ENDPOINT = '/adapter-service/admin/service-status';
+
+/**
+ * `points[].minute` 是「Unix 时间戳 / 60」（`internal/service/service_status.go:37`）。
+ * 换算成毫秒要 ×60（得到秒）×1000。
+ */
+const SERVICE_STATUS_MINUTE_UNIT_MS = 60 * 1000;
 
 function toFiniteNumber(value: unknown): number | null {
   const parsed = Number(value);
@@ -304,6 +411,14 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * 后端 `points[]`（逐分钟点）→ 内部样本。
+ *
+ * 后端字段是 `minute`（Unix 秒 / 60）、`totalRequests`、`successRequests`
+ * （`internal/service/service_status.go:35-51`），必须按它换算，否则整条色带错位。
+ * 同时保留旧字段名兼容（`startMs`/`requests`/`succeeded`），
+ * 因为测试与 fixture 走的是内部命名。
+ */
 function normalizeSamples(value: unknown): ServiceStatusSample[] {
   if (!Array.isArray(value)) {
     return [];
@@ -314,20 +429,56 @@ function normalizeSamples(value: unknown): ServiceStatusSample[] {
     if (!record) {
       continue;
     }
-    const startMs = toFiniteNumber(record.startMs ?? record.start_ms ?? record.ts);
-    const requests = toFiniteNumber(record.requests ?? record.total);
+    // `minute` 是「Unix 秒 / 60」，×60000 才是毫秒。
+    const minute = toFiniteNumber(record.minute);
+    const startMs = minute !== null
+      ? minute * SERVICE_STATUS_MINUTE_UNIT_MS
+      : toFiniteNumber(record.startMs ?? record.start_ms ?? record.ts);
+    const requests = toFiniteNumber(record.totalRequests ?? record.requests ?? record.total);
     if (startMs === null || requests === null) {
       continue;
     }
-    const succeeded = toFiniteNumber(record.succeeded ?? record.success);
+    const succeeded = toFiniteNumber(record.successRequests ?? record.succeeded ?? record.success);
     samples.push({ startMs, requests, succeeded: succeeded ?? 0 });
   }
+  // 后端 `Points()` 已按时间升序，但保险起见排一遍：色带位置必须单调。
+  samples.sort((left, right) => left.startMs - right.startMs);
   return samples;
 }
 
+/** ISO 字符串 → 毫秒。解析失败返回 null（渲染层据此不显示「自 1970 起」）。 */
+function parseIsoToMs(value: unknown): number | null {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /**
- * 后端响应 → 内部快照。字段名同时接受 camelCase 与 snake_case，
- * 因为 T-18 的响应结构尚未定稿；未知/缺失字段一律降级为 0 / null，不抛错。
+ * 后端响应 → 内部快照。
+ *
+ * 响应结构（`internal/controller/service_status.go:17-26`）：
+ * ```
+ * { schemaVersion, status, windowMinutes, points[], summary{}, capacity, retained, restartedAt }
+ * ```
+ * 现在有两个数据源，**语义判定优先用服务端权威字段**：
+ *
+ * 1. **摘要端点**（`/adapter-service/service-status/summary`，普通用户可用）：
+ *    `{ schemaVersion, status, successRate, successRateAvailable, totalRequests,
+ *       successRequests, failedRequests, avgLatencyMs, windowMinutes, retained,
+ *       capacity, restartedAt }` —— **没有 points**。
+ * 2. **admin 端点**（`/adapter-service/admin/service-status`，仅管理员）：带 `points[]`。
+ *
+ * 判定顺序（缺一不可）：
+ * - `successRateAvailable === false` → `kind='empty'`（窗口内没有请求）
+ * - `successRateAvailable === true`  → `kind='ok'`，**哪怕 successRate 是 0**
+ * - 没有该字段时（admin 端点 / 旧响应）回退到 `retained === 0` 与点数
+ * - 401/403 → 由 {@link createHttpServiceStatusFetcher} 产出 `kind='forbidden'`
+ *
+ * ⚠️ 为什么必须有 `successRateAvailable`：只给 `successRate: 0` 时前端无法区分
+ * 「全失败」（要报警）与「没请求」（正常夜间）。这两个都必须能正确表达。
  */
 export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnapshot | null {
   const record = asRecord(raw);
@@ -335,32 +486,165 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
     return null;
   }
   const payload = asRecord(record.data) ?? record;
-  const breakdownRecord = asRecord(payload.breakdown) ?? {};
-  const successRate = toFiniteNumber(payload.successRate ?? payload.success_rate);
+  const summary = asRecord(payload.summary) ?? {};
+  const breakdownRecord = asRecord(summary.breakdown) ?? asRecord(payload.breakdown) ?? {};
+
+  const successRate = toFiniteNumber(summary.successRate ?? payload.successRate ?? payload.success_rate);
+  const samples = normalizeSamples(payload.points ?? payload.buckets ?? payload.history);
+  const retainedRaw = toFiniteNumber(payload.retained);
+  // `retained` 是接口给出的语义字段；缺失时（旧/裁剪过的响应）才回退到点数。
+  const retained = retainedRaw === null ? samples.length : Math.max(0, Math.round(retainedRaw));
+
+  // 服务端权威开关。三态取值：true / false / undefined（字段不存在）。
+  const availableRaw = payload.successRateAvailable ?? payload.success_rate_available;
+  const successRateAvailable = typeof availableRaw === 'boolean'
+    ? availableRaw
+    // 兼容：字符串 "true"/"false" 也算（防御后端 JSON 化差异）。
+    : typeof availableRaw === 'string' && /^(true|false)$/i.test(availableRaw.trim())
+      ? availableRaw.trim().toLowerCase() === 'true'
+      : undefined;
+
+  // ⚠️ 这里是本任务最容易做错的一处：`points: []` 表示「还没采到数据」，
+  // **不是**「所有分钟都没请求」。绝不能把它补成 1440/288 个 0 ——
+  // 那会让整条色带渲染成深灰「全部失败」，用户会以为服务挂了。
+  //
+  // 有 `successRateAvailable` 时**以它为准**：`true` 且 successRate=0 是「全失败」，
+  // 必须落 ok（走最差档配色并报警感），不能因为 0 就当成「没数据」。
+  const isEmpty = successRateAvailable !== undefined
+    ? successRateAvailable === false
+    : retained === 0 || samples.length === 0;
+
   return {
-    status: String(payload.status ?? '').trim(),
+    kind: isEmpty ? 'empty' : 'ok',
+    successRateAvailable: successRateAvailable ?? null,
+    status: String(summary.status ?? payload.status ?? '').trim(),
     successRate: successRate === null ? null : Math.min(1, Math.max(0, successRate)),
-    avgLatencyMs: toFiniteNumber(payload.avgLatencyMs ?? payload.avg_latency_ms),
-    totalRequests: toFiniteNumber(payload.totalRequests ?? payload.total_requests) ?? 0,
-    failedRequests: toFiniteNumber(payload.failedRequests ?? payload.failed_requests) ?? 0,
+    avgLatencyMs: toFiniteNumber(summary.avgLatencyMs ?? summary.avg_latency_ms ?? payload.avgLatencyMs ?? payload.avg_latency_ms),
+    totalRequests: toFiniteNumber(summary.totalRequests ?? summary.total_requests ?? payload.totalRequests ?? payload.total_requests) ?? 0,
+    failedRequests: toFiniteNumber(summary.failedRequests ?? summary.failed_requests ?? payload.failedRequests ?? payload.failed_requests) ?? 0,
     breakdown: {
       upstream: toFiniteNumber(breakdownRecord.upstream) ?? 0,
       timeout: toFiniteNumber(breakdownRecord.timeout) ?? 0,
       auth: toFiniteNumber(breakdownRecord.auth) ?? 0,
       quota: toFiniteNumber(breakdownRecord.quota) ?? 0
     },
-    buckets: normalizeSamples(payload.buckets ?? payload.history),
-    minuteSamples: normalizeSamples(payload.minuteSamples ?? payload.minute_samples ?? payload.minutes),
-    updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? 0
+    // 空快照必须是空数组，不是 288/1440 个 0。
+    buckets: isEmpty ? [] : samples,
+    minuteSamples: isEmpty ? [] : samples,
+    retained,
+    capacity: toFiniteNumber(payload.capacity) ?? 0,
+    restartedAtMs: parseIsoToMs(payload.restartedAt ?? payload.restarted_at),
+    updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? Date.now()
   };
 }
 
-/** 用注入的请求函数构造 fetcher：T-18 合并后只需 `setServiceStatusFetcher(createHttpServiceStatusFetcher(...))`。 */
+/**
+ * 「发了请求但被拒」快照（401/403）。
+ *
+ * 落 `kind='rejected'`（渲染层不画任何图表），并**原样带上服务端 message**。
+ *
+ * 为什么必须带 message：服务端会说「脚本请求必须使用绑定身份码的运行会话」
+ * 这类**只有服务端才知道**的原因（用户配的 adapter key 若绑定 ScriptID 就会被拒，
+ * 见 `search_account_config.go:272-273`）。前端猜不出 key 类型，也不该猜 ——
+ * 把原话透出来，用户才知道该换哪种令牌。没有 message 时才回退到按状态码的通用文案。
+ */
+export function createRejectedServiceStatusSnapshot(
+  authProblem: ServiceStatusAuthProblem = 'unauthorized',
+  serverMessage: string = ''
+): ServiceStatusSnapshot {
+  return {
+    kind: 'rejected',
+    authProblem,
+    serverMessage: String(serverMessage ?? '').trim(),
+    successRateAvailable: null,
+    status: 'unknown',
+    successRate: null,
+    avgLatencyMs: null,
+    totalRequests: 0,
+    failedRequests: 0,
+    breakdown: { upstream: 0, timeout: 0, auth: 0, quota: 0 },
+    buckets: [],
+    minuteSamples: [],
+    retained: 0,
+    capacity: 0,
+    restartedAtMs: null,
+    updatedAt: Date.now()
+  };
+}
+
+/**
+ * 「压根没配令牌」快照：**前端就知道**，不需要发请求。
+ *
+ * 与 `rejected` 分开是因为用户动作完全不同：
+ * - no-token → 「去题库配置填令牌」
+ * - rejected → 「你填了但服务端不接受，原因见服务端 message」
+ *
+ * 合并会让没填令牌的用户去研究服务端配置，反之亦然。
+ */
+export function createNoTokenServiceStatusSnapshot(): ServiceStatusSnapshot {
+  return {
+    kind: 'no-token',
+    successRateAvailable: null,
+    status: 'unknown',
+    successRate: null,
+    avgLatencyMs: null,
+    totalRequests: 0,
+    failedRequests: 0,
+    breakdown: { upstream: 0, timeout: 0, auth: 0, quota: 0 },
+    buckets: [],
+    minuteSamples: [],
+    retained: 0,
+    capacity: 0,
+    restartedAtMs: null,
+    updatedAt: Date.now()
+  };
+}
+
+/**
+ * 兼容旧名：等价于「被拒且原因是 403」。
+ * @deprecated 用 {@link createRejectedServiceStatusSnapshot}。
+ */
+export function createForbiddenServiceStatusSnapshot(
+  authProblem: ServiceStatusAuthProblem = 'forbidden'
+): ServiceStatusSnapshot {
+  return createRejectedServiceStatusSnapshot(authProblem);
+}
+
+/** 请求结果：区分「拿到数据」与「无权限」。非 403 的错误仍然抛，走「保留旧快照」路径。 */
+export type ServiceStatusHttpResult =
+  | { ok: true; body: unknown }
+  | { ok: false; forbidden: true; status: number };
+
+/**
+ * 用注入的请求函数构造 fetcher。
+ *
+ * `request` 由调用方提供（宿主侧既有封装），本模块不直接碰 `fetch`，
+ * 这样 Windows/CEF75 与扩展端可以各用自己的通道。
+ *
+ * 403 → `kind='forbidden'`（**不是**空图、**不是**「全部失败」）；
+ * 其它失败 → 抛错，由 {@link refreshServiceStatusSnapshot} 保留旧快照。
+ */
 export function createHttpServiceStatusFetcher(
   request: (endpoint: string) => Promise<unknown>,
   endpoint: string = SERVICE_STATUS_ENDPOINT
 ): ServiceStatusFetcher {
-  return async () => normalizeServiceStatusSnapshot(await request(endpoint));
+  return async () => {
+    let raw: unknown;
+    try {
+      raw = await request(endpoint);
+    } catch (error) {
+      const status = Number((error as { status?: unknown } | undefined)?.status);
+      if (status === 403) {
+        return createForbiddenServiceStatusSnapshot();
+      }
+      throw error;
+    }
+    const result = raw as Partial<ServiceStatusHttpResult> | undefined;
+    if (result && result.ok === false && result.forbidden === true) {
+      return createForbiddenServiceStatusSnapshot();
+    }
+    return normalizeServiceStatusSnapshot(result && result.ok === true ? result.body : raw);
+  };
 }
 
 /**
@@ -408,6 +692,8 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
   }
 
   return {
+    kind: 'ok',
+    successRateAvailable: true,
     status: 'healthy',
     successRate: 0.992,
     avgLatencyMs: 234,
@@ -416,6 +702,9 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
     breakdown: { upstream: 8, timeout: 2, auth: 0, quota: 0 },
     buckets,
     minuteSamples,
+    retained: STATUS_BUCKET_COUNT,
+    capacity: 1440,
+    restartedAtMs: windowStart,
     updatedAt: nowMs
   };
 }
@@ -540,7 +829,46 @@ function createHintLine(theme: ServiceStatusPanelTheme, text: string) {
 
 type StatusTone = { color: string; text: string };
 
+/**
+ * 底部那行「数据自 X 起」。
+ *
+ * 三种 kind 各说各的，**不能**统一成「数据自 <updatedAt> 起」——
+ * `updatedAt` 只说明「什么时候拉的」，而 `restartedAtMs` 才是「曲线真正的起点」。
+ * 后端重启后 points 为空，此时用户最需要知道的是「采样从这个时刻开始」，
+ * 所以优先用 `restartedAtMs`。
+ */
+function serviceStatusSourceText(snapshot: ServiceStatusSnapshot | null): string {
+  if (!snapshot) {
+    return '尚未取到服务状态数据。';
+  }
+  // 注意：`kind === 'forbidden'` 当前**没有任何产出点**（见类型定义处的说明），
+  // 这里是防御性分支，不要以为它被测过。
+  if (snapshot.kind === 'forbidden') {
+    return '服务状态不可用（该身份无法读取）。';
+  }
+  const since = snapshot.restartedAtMs !== null ? formatServiceStatusClock(snapshot.restartedAtMs) : '';
+  if (snapshot.kind === 'empty') {
+    return since ? `暂无采样数据（服务自 ${since} 起）` : '暂无采样数据（服务刚重启）';
+  }
+  return since ? `数据自 ${since} 起` : `数据更新于 ${formatServiceStatusClock(snapshot.updatedAt)}`;
+}
+
 function resolveStatusTone(snapshot: ServiceStatusSnapshot | null, theme: ServiceStatusPanelTheme): StatusTone {
+  // 「看不了」优先于一切：它既不是异常也不是无数据，必须有自己的文案，
+  // 否则用户会把权限问题读成「服务挂了」。
+  if (snapshot?.kind === 'no-token') {
+    return { color: theme.muted, text: '未配置访问令牌' };
+  }
+  if (snapshot?.kind === 'rejected') {
+    return {
+      color: theme.muted,
+      text: snapshot.authProblem === 'forbidden' ? '无权查看' : '令牌未通过验证'
+    };
+  }
+  // 防御性分支：`kind === 'forbidden'` 当前无产出点，保留给将来的管理员视图。
+  if (snapshot?.kind === 'forbidden') {
+    return { color: theme.muted, text: '无权查看' };
+  }
   const status = String(snapshot?.status ?? '').trim().toLowerCase();
   if (status === 'healthy') return { color: theme.successFg, text: '正常' };
   if (status === 'degraded') return { color: theme.warningFg, text: '降级' };
@@ -613,9 +941,7 @@ function createSummaryCard(
 
   const updated = createHintLine(
     theme,
-    snapshot && snapshot.updatedAt > 0
-      ? `数据自 ${formatServiceStatusClock(snapshot.updatedAt)} 起`
-      : '数据来源：固定样例（后端接口未接入）'
+    serviceStatusSourceText(snapshot)
   );
   footer.append(updated);
 
@@ -859,7 +1185,23 @@ function createDayBand(
 }
 
 /**
- * 状态页主体：三个区块纵向排列（当前状态 / 24 小时预览 / 最近每分钟）。
+ * 状态页主体。**按 `kind` 分三种形态**，这是本任务的核心：
+ * - `forbidden`：只渲染「看不了」说明，**不建色带、不建列表**（`cells === 0`）。
+ *   文案按 `authProblem` 分流：401 →「请先配置访问令牌」，403 →「令牌无权查看」。
+ *   让权限问题渲染成「全部失败」是最容易犯的错。
+ * - `empty`：只渲染「暂无采样数据」+ 自某时刻起，同样**不建色带**（`cells === 0`）。
+ *   绝不把空数组补成 288/1440 个 0 桶。
+ * - `ok`：摘要数字 +（有 points 时）逐分钟曲线。
+ *
+ * ## 关于曲线（队长裁决方案 1 的后果）
+ *
+ * 普通用户走 `/adapter-service/service-status/summary`，该端点**不返回 points**，
+ * 所以非管理员看到的是**纯摘要**：状态、成功率、请求总数、失败数、延迟、
+ * 采样起点、采样点数/容量。**没有逐分钟曲线，也没有 288 格色带。**
+ *
+ * 只有响应里**确实带了 points**（即 admin 端点）时才画曲线 —— 这样同一套渲染
+ * 既能服务普通用户，也能在将来给管理员复用，且不会伪造出「有曲线」的假象。
+ * 界面用 `[data-cx-status-mode]` 标明是 `summary` 还是 `detail`，不靠用户猜。
  *
  * 返回的元素不依赖任何 common.ts 符号，可以被单独抽取执行。
  */
@@ -867,24 +1209,173 @@ export function createStatusPanelSection(options: ServiceStatusPanelOptions): HT
   const theme = options.theme;
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const snapshot = options.snapshot ?? null;
-  const buckets = buildServiceStatusBuckets(snapshot?.buckets ?? [], now);
 
   const container = el('div');
   container.dataset.cxStatusPanel = 'true';
+  container.dataset.cxStatusKind = snapshot ? snapshot.kind : 'none';
   container.style.display = 'grid';
   container.style.gap = '12px';
   container.style.minWidth = '0';
   container.style.maxWidth = '100%';
   container.style.boxSizing = 'border-box';
 
+  const summaryCard = createSummaryCard(snapshot, theme, options.onRequestRefresh);
+
+  // 压根没配令牌：引导去配置，没有任何图表。
+  if (snapshot?.kind === 'no-token') {
+    container.append(summaryCard, createStatusNoticeCard(
+      theme,
+      '未配置访问令牌',
+      '状态数据需要通过访问令牌读取。请在面板「题库配置」里填写 tikuAdapter 访问令牌后点「立即刷新」。',
+      'no-token'
+    ));
+    return container;
+  }
+
+  // 发了请求但被拒：**优先显示服务端原话**，只有拿不到时才回退通用文案。
+  if (snapshot?.kind === 'rejected' || snapshot?.kind === 'forbidden') {
+    const serverMessage = String(snapshot.serverMessage ?? '').trim();
+    const forbidden = snapshot.authProblem === 'forbidden';
+    container.append(summaryCard, createStatusNoticeCard(
+      theme,
+      forbidden ? '无权查看' : '令牌未通过验证',
+      serverMessage
+        // 服务端给了原因就直接用它 —— 前端猜不出「这是脚本令牌」之类的原因。
+        ? serverMessage
+        : forbidden
+          ? '当前访问令牌有效，但服务端拒绝提供状态数据。请联系管理员确认该令牌的权限。'
+          : '访问令牌未通过服务端验证。请到面板「题库配置」检查令牌是否正确、是否已被停用。',
+      forbidden ? 'forbidden' : 'rejected'
+    ));
+    return container;
+  }
+
+  // 尚无采样：说明 + 「自某时刻起」，同样不画格子。
+  if (snapshot?.kind === 'empty') {
+    const since = snapshot.restartedAtMs !== null ? formatServiceStatusClock(snapshot.restartedAtMs) : '';
+    container.append(summaryCard, createStatusNoticeCard(
+      theme,
+      '暂无采样数据',
+      since
+        ? `服务自 ${since} 起开始采样，窗口内还没有产生请求。稍后刷新即可看到数据。`
+        : '服务刚开始采样，窗口内还没有产生请求。稍后刷新即可看到数据。',
+      'empty'
+    ));
+    return container;
+  }
+
+  // 有数据：先看有没有逐分钟点。有才画曲线，没有就只给摘要卡片。
+  const hasSeries = (snapshot?.buckets.length ?? 0) > 0;
+  container.dataset.cxStatusMode = hasSeries ? 'detail' : 'summary';
+  if (!hasSeries) {
+    container.append(summaryCard, createStatusMetricsCard(snapshot, theme));
+    return container;
+  }
+
+  const buckets = buildServiceStatusBuckets(snapshot?.buckets ?? [], now);
   // 先建列表，色带点击要引用它的滚动函数；再按「状态 → 色带 → 列表」的视觉顺序挂载。
   const minuteList = createMinuteList(snapshot, theme);
   container.append(
-    createSummaryCard(snapshot, theme, options.onRequestRefresh),
+    summaryCard,
     createDayBand(buckets, theme, minuteList.scrollTo),
     minuteList.element
   );
   return container;
+}
+
+/** 非「有数据」形态的说明卡片。刻意不含任何 `[data-cx-status-cell]`。 */
+function createStatusNoticeCard(
+  theme: ServiceStatusPanelTheme,
+  title: string,
+  detail: string,
+  kind: 'empty' | 'no-token' | 'rejected' | 'forbidden'
+): HTMLElement {
+  const card = createSectionCard(theme);
+  card.dataset.cxStatusNotice = kind;
+  card.append(createSectionTitle(theme, title), createHintLine(theme, detail));
+  return card;
+}
+
+/**
+ * 摘要卡片：**纯数字，没有曲线**。
+ *
+ * 这是普通用户看到的形态（summary 端点不给 points）。四项聚合指标 + 采样说明。
+ * 用 2 列网格而不是表格：360px 宽下 2 列刚好，4 列会挤成不可读。
+ * 每个数字都带单位与口径说明，避免用户把「窗口内请求数」读成「累计」。
+ */
+function createStatusMetricsCard(
+  snapshot: ServiceStatusSnapshot | null,
+  theme: ServiceStatusPanelTheme
+): HTMLElement {
+  const card = createSectionCard(theme);
+  card.dataset.cxStatusMetrics = 'true';
+  card.append(createSectionTitle(theme, '当前窗口摘要'));
+
+  const successText = snapshot && snapshot.successRateAvailable === false
+    ? '窗口内无请求'
+    : formatServiceStatusPercent(snapshot?.successRate ?? null);
+
+  const avgLatencyText = snapshot?.avgLatencyMs === null || snapshot?.avgLatencyMs === undefined
+    ? '未知'
+    : `${Math.round(snapshot.avgLatencyMs)}ms`;
+
+  const metrics: Array<[string, string]> = [
+    ['成功率', successText],
+    ['平均延迟', avgLatencyText],
+    ['请求总数', snapshot ? String(snapshot.totalRequests) : '—'],
+    ['失败请求', snapshot ? String(snapshot.failedRequests) : '—']
+  ];
+
+  const grid = el('div');
+  grid.style.display = 'grid';
+  grid.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
+  grid.style.gap = '8px';
+  grid.style.minWidth = '0';
+
+  for (const [label, value] of metrics) {
+    const item = el('div');
+    item.style.display = 'grid';
+    item.style.gap = '2px';
+    item.style.padding = '8px 10px';
+    item.style.borderRadius = '10px';
+    item.style.background = theme.surface;
+    item.style.border = `1px solid ${theme.border}`;
+    item.style.minWidth = '0';
+    item.dataset.cxStatusMetric = label;
+
+    const labelNode = el('div');
+    labelNode.textContent = label;
+    labelNode.style.fontSize = '11px';
+    labelNode.style.color = theme.subtle;
+    labelNode.style.whiteSpace = 'nowrap';
+
+    const valueNode = el('div');
+    valueNode.textContent = value;
+    valueNode.style.fontSize = '15px';
+    valueNode.style.fontWeight = '800';
+    valueNode.style.color = theme.text;
+    valueNode.style.minWidth = '0';
+    valueNode.style.overflow = 'hidden';
+    valueNode.style.textOverflow = 'ellipsis';
+    valueNode.style.whiteSpace = 'nowrap';
+
+    item.append(labelNode, valueNode);
+    grid.append(item);
+  }
+  card.append(grid);
+
+  // 采样口径：告诉用户这是「最近 5 分钟窗口」的数字，不是累计值。
+  const retainedText = snapshot && snapshot.capacity > 0
+    ? `已采样 ${snapshot.retained}/${snapshot.capacity} 个分钟点`
+    : snapshot ? `已采样 ${snapshot.retained} 个分钟点` : '';
+  card.append(createHintLine(
+    theme,
+    retainedText
+      ? `成功率与请求数来自最近 5 分钟窗口；${retainedText}。`
+      : '成功率与请求数来自最近 5 分钟窗口。'
+  ));
+  card.append(createHintLine(theme, '这是摘要视图，不含逐分钟曲线（普通账号不返回分钟明细）。'));
+  return card;
 }
 
 /** 状态页在被裁掉的端（或数据源异常）时的占位说明。 */
