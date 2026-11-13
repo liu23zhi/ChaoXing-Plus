@@ -28,6 +28,11 @@ import {
 import { shouldCacheSearchInfos } from './cx-retry-cache.js';
 import { getTabAnswerPauseController } from './tab-answer-pause.js';
 import {
+  createStatusPanelSection,
+  readCachedServiceStatusSnapshot,
+  refreshServiceStatusSnapshot
+} from './status-panel.js';
+import {
   DEFAULT_TIKU_BASE_URL,
   TIKU_ADAPTER_BASEURL_KEY,
   TIKU_ADAPTER_KEY_KEY,
@@ -3086,10 +3091,12 @@ function createWorkResultsPanel() {
 
   // Windows 端是考试专用：cache（本地题库缓存）与 study（学习设置）两个页签都必须去掉，
   // 否则会渲染出空页签——对应的板块在那端根本没有被创建。
+  // status（服务器状态）**要保留**：Windows 端是最需要看服务状态的一侧（客户端里的
+  // 答题全靠它），砍掉它等于把唯一的自诊断入口关在门外。
   // 顺序即页签顺序。这里用本地字面量而不是 import 的 WORK_RESULTS_PANEL_TABS：
   // 部分测试从 common.ts 抽取函数重新拼装最小运行时，模块级常量不会跟着过去，
   // 引用它会抛 ReferenceError，进而让整块面板渲染失败。
-  const allTabs: WorkResultsPanelTab[] = ['overview', 'tiku', 'cache', 'study'];
+  const allTabs: WorkResultsPanelTab[] = ['overview', 'tiku', 'status', 'cache', 'study'];
   const availableTabs: WorkResultsPanelTab[] = windowsExamOnly
     ? allTabs.filter((tab) => tab !== 'study' && tab !== 'cache')
     : allTabs.slice();
@@ -3108,6 +3115,7 @@ function createWorkResultsPanel() {
   const tabLabels: Record<WorkResultsPanelTab, string> = {
     overview: '结果',
     tiku: '题库配置',
+    status: '状态',
     cache: '缓存',
     study: '学习设置'
   };
@@ -3124,6 +3132,37 @@ function createWorkResultsPanel() {
   const tikuPanel = createPanelTabPanel('tiku', activeTab);
   tikuPanel.append(createTikuAdapterConfigSection());
 
+  // 状态页签两端都有（Windows 端更需要）。内容由 status-panel.ts 渲染。
+  //
+  // ⚠️ 这里必须 try/catch：status-panel 的符号在部分「抽取函数重拼最小运行时」的
+  // 回归里不存在（与下面 allTabs 用字面量同一个原因），裸调用会 ReferenceError
+  // 让整块面板渲染失败。失败时退化成一句文字说明，不能让状态页签变成空白。
+  const statusPanel = createPanelTabPanel('status', activeTab);
+  try {
+    statusPanel.append(createStatusPanelSection({
+      theme: panelPinkTheme,
+      snapshot: readCachedServiceStatusSnapshot(),
+      now: Date.now(),
+      onRequestRefresh: () => {
+        try {
+          void refreshServiceStatusSnapshot().then(() => renderWorkResultsPanel());
+        } catch {
+          // 刷新链路不可用时按钮仍可点，只是不会改变数据。
+        }
+      }
+    }));
+  } catch {
+    const unavailable = createElement('div', { text: '服务状态不可用：状态页模块未加载。' });
+    unavailable.style.fontSize = '12px';
+    unavailable.style.lineHeight = '1.6';
+    unavailable.style.padding = '12px';
+    unavailable.style.borderRadius = '12px';
+    unavailable.style.background = panelPinkTheme.surfaceStrong;
+    unavailable.style.border = `1px dashed ${panelPinkTheme.borderStrong}`;
+    unavailable.style.color = panelPinkTheme.subtle;
+    statusPanel.append(unavailable);
+  }
+
   container.append(
     hero,
     createPanelTabBar(
@@ -3136,10 +3175,18 @@ function createWorkResultsPanel() {
         // 所以先标记「这是一次切页签」，让 renderWorkResultsPanel 放弃恢复滚动位置。
         state.workResults.ui.pendingTabScrollReset = true;
         renderWorkResultsPanel();
+        // 进入状态页时异步拉一次：先渲染缓存/样例，拉到后重渲染，不阻塞首屏。
+        // 失败不清缓存（见 status-panel.ts 的 refreshServiceStatusSnapshot）。
+        if (tab === 'status') {
+          void refreshServiceStatusSnapshot().then(() => {
+            if (state.workResults.ui.activeTab === 'status') renderWorkResultsPanel();
+          });
+        }
       }
     ),
     resultsPanel,
-    tikuPanel
+    tikuPanel,
+    statusPanel
   );
 
   // 缓存与学习设置只在扩展端存在（Windows 考试专用，这两块已被裁掉）。
@@ -3172,6 +3219,19 @@ function renderWorkResultsPanel() {
   const rootScrollTop = resetScroll ? 0 : panel.root.scrollTop;
   const bodyScrollTop = resetScroll ? 0 : panel.body.scrollTop;
   const workResultsListScrollTop = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]')?.scrollTop ?? 0;
+  // ⚠️ `display:none` 的容器没有布局，浏览器会把 `scrollTop` 夹成 0（读出来也是 0）。
+  // 所以切走页签的那一次渲染读到的是 0，把这个 0 写回去就把用户真实的位置抹掉了 ——
+  // 表现出来就是「切走再切回，列表跳回顶部」。
+  //
+  // 修法：只在列表**真的可见**（有 client rects）时才相信 `workResultsListScrollTop`，
+  // 并把它记到 `panel.body.dataset` 上跨渲染保留。用 dataset 而不是新字段，是因为
+  // body 本身不会被 replaceChildren 替换；也不引入新符号，抽取式回归仍能单独执行本函数。
+  const currentWorkResultsList = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]');
+  const workResultsListVisible = Boolean(currentWorkResultsList && currentWorkResultsList.getClientRects().length > 0);
+  if (workResultsListVisible) {
+    panel.body.dataset.workResultsListScrollTop = String(workResultsListScrollTop);
+  }
+  const savedWorkResultsListScrollTop = Number(panel.body.dataset.workResultsListScrollTop ?? '') || 0;
   const hostLogs = mountWindowsHostLogPanel(panel.root, isWindowsHostRuntime() && canShowFloatingPanel());
   const hostLogList = hostLogs?.querySelector<HTMLElement>('[data-windows-host-log-entries]');
   const hostLogScrollTop = hostLogList?.scrollTop ?? 0;
@@ -3206,9 +3266,22 @@ function renderWorkResultsPanel() {
   panel.root.scrollTop = rootScrollTop;
   panel.body.scrollTop = bodyScrollTop;
 
+  // 用「可见时记下的」位置恢复，而不是刚读到的那个（切页签时它已被夹成 0）。
+  // 切页签那一次（resetScroll）刻意恢复 0：新页签是一屏新内容，停在旧位置会看到半截。
   const nextWorkResultsList = panel.body.querySelector<HTMLElement>('[data-work-results-list="true"]');
   if (nextWorkResultsList) {
     nextWorkResultsList.scrollTop = workResultsListScrollTop;
+    // 上面那次读取来自**旧 DOM**：如果该页签当时是 `display:none`，浏览器会把
+    // scrollTop 强行读成 0，于是这里写回 0 —— 用户真实位置就丢了。
+    // 这就是「切走再切回，结果列表跳回顶部」的根因（实测 scrollTop 120 → 0）。
+    // 旧列表不可见时，改用 dataset 里记下的真实位置覆盖。
+    if (!workResultsListVisible && savedWorkResultsListScrollTop > 0) {
+      nextWorkResultsList.scrollTop = savedWorkResultsListScrollTop;
+    }
+    // 写回后立刻把真实值记下来：下一轮若列表不可见，dataset 仍保有正确位置。
+    if (nextWorkResultsList.getClientRects().length > 0) {
+      panel.body.dataset.workResultsListScrollTop = String(nextWorkResultsList.scrollTop);
+    }
   }
 }
 

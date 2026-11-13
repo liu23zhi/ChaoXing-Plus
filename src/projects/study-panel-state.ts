@@ -8,11 +8,15 @@ export type StudyAutomationFlags = {
 //
 // - overview：状态 + 主操作 + 指标 + 答题结果（首屏必须能操作，所以不放进设置页）
 // - tiku：题库适配器配置
+// - status：服务器状态（24 小时成功率色带 + 逐分钟明细，见 status-panel.ts）
 // - cache：本地题库缓存
 // - study：学习设置（仅扩展端；Windows 端是考试专用，没有这个页签）
-export type WorkResultsPanelTab = 'overview' | 'tiku' | 'cache' | 'study';
+//
+// status 放在 cache/study 之前、tiku 之后：它属于「看数据」而不是「改设置」，
+// 且 Windows 端会裁掉 cache/study，此时页签收成「结果 / 题库配置 / 状态」仍连续。
+export type WorkResultsPanelTab = 'overview' | 'tiku' | 'status' | 'cache' | 'study';
 
-export const WORK_RESULTS_PANEL_TABS: WorkResultsPanelTab[] = ['overview', 'tiku', 'cache', 'study'];
+export const WORK_RESULTS_PANEL_TABS: WorkResultsPanelTab[] = ['overview', 'tiku', 'status', 'cache', 'study'];
 
 export type WorkResultsPanelUiState = {
   collapsed: boolean;
