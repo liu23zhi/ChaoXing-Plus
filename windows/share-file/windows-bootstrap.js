@@ -521,8 +521,227 @@ function isExamRelatedUrl(url) {
         // ignore style failures
       }
     }
+    // W 徽标跟着面板一起藏：抓屏那一瞬界面上任何悬浮物都会被拍进证据。
+    renderCaptureGuardStats();
   }
   win.__CX_WIN_APPLY_CAPTURE_GUARD__ = applyCaptureGuard;
+
+  // ---- 拍照守护的 W 值呈现（T-21）----
+  // 宿主把 windows-real-client-injection.ps1 报告里的 captureGuard 汇总通过 CDP 写进
+  // __CX_WIN_CAPTURE_GUARD_STATS__；本文件只负责**呈现**，不参与任何判定，
+  // 也绝不向客户端窗口/亲和力发号施令（见 applyCaptureGuard 的注释：两向放行、只观察）。
+  //
+  // ⚠️ reason 四态必须各自独立，不能压成一个布尔。四态的名字描述的是**原因**，不是症状：
+  //   guard-not-started    -> 守护根本没起来（启动条件不满足 / runspace 抛异常）
+  //   no-capture-triggered -> 守护跑满了但客户端没跳变，即「本次未触发」，**不是 W=0**
+  //   ok                   -> 有配对事件，P50/P95 才有意义
+  //   error                -> 读事件文件抛异常
+  // 把「守护没起来」和「跑了没跳变」显示成同一句话是这轮明确要避免的错误：
+  // 前者要查配置，后者是行为正常，下一步动作完全相反。
+  var CAPTURE_STATS_KEY = '__CX_WIN_CAPTURE_GUARD_STATS__';
+  var CAPTURE_STATS_BADGE_ID = 'cx-win-capture-stats';
+  var CAPTURE_STATS_ATTR = 'data-cx-win-capture-stats';
+
+  function captureStatsNumber(value) {
+    var number = typeof value === 'number' ? value : Number(value);
+    if (!isFinite(number) || number < 0) {
+      return null;
+    }
+    return number;
+  }
+
+  function captureStatsSamples(value) {
+    var number = captureStatsNumber(value);
+    return number === null ? 0 : Math.floor(number);
+  }
+
+  function formatCaptureMs(value) {
+    return String(Math.round(value * 10) / 10);
+  }
+
+  // 归一化 captureGuard 汇总 -> { state, samples, p50Ms, p95Ms }。
+  // state: absent | guard-not-started | no-capture-triggered | ok | error
+  function normalizeCaptureGuardStats(raw) {
+    var result = { state: 'absent', samples: 0, p50Ms: null, p95Ms: null };
+    if (!raw || typeof raw !== 'object') {
+      return result;
+    }
+    var reason = typeof raw.reason === 'string' ? raw.reason : '';
+    var available = raw.available === true;
+    var guardStarted = raw.guardStarted === true;
+    var samples = captureStatsSamples(raw.events);
+
+    if (reason === 'error') {
+      result.state = 'error';
+      return result;
+    }
+    if (reason === 'guard-not-started') {
+      result.state = 'guard-not-started';
+      return result;
+    }
+    if (reason === 'no-capture-triggered') {
+      result.state = 'no-capture-triggered';
+      return result;
+    }
+    if (reason === 'ok') {
+      // 「ok 但 0 个配对样本」不是 W=0（W=0 是 1 个样本且时长为 0），是没触发。
+      if (samples <= 0) {
+        result.state = 'no-capture-triggered';
+        return result;
+      }
+      var p50 = captureStatsNumber(raw.wP50Ms);
+      var p95 = captureStatsNumber(raw.wP95Ms);
+      if (p50 === null || p95 === null) {
+        result.state = 'error';
+        return result;
+      }
+      result.state = 'ok';
+      result.samples = samples;
+      result.p50Ms = p50;
+      result.p95Ms = p95;
+      return result;
+    }
+
+    // 没有 reason（旧宿主 / 手写对象）：用 available + guardStarted 兜底，仍然不退化成一个布尔。
+    if (!available) {
+      result.state = guardStarted ? 'no-capture-triggered' : 'guard-not-started';
+      return result;
+    }
+    if (samples <= 0) {
+      result.state = 'no-capture-triggered';
+      return result;
+    }
+    var fallbackP50 = captureStatsNumber(raw.wP50Ms);
+    var fallbackP95 = captureStatsNumber(raw.wP95Ms);
+    if (fallbackP50 === null || fallbackP95 === null) {
+      result.state = 'error';
+      return result;
+    }
+    result.state = 'ok';
+    result.samples = samples;
+    result.p50Ms = fallbackP50;
+    result.p95Ms = fallbackP95;
+    return result;
+  }
+
+  function describeCaptureGuardStats(stats) {
+    if (stats.state === 'ok') {
+      return '抓屏 W：P50 ' + formatCaptureMs(stats.p50Ms) + ' ms · P95 '
+        + formatCaptureMs(stats.p95Ms) + ' ms · 样本 ' + stats.samples;
+    }
+    if (stats.state === 'no-capture-triggered') {
+      return '抓屏 W：本次未触发';
+    }
+    if (stats.state === 'guard-not-started') {
+      return '抓屏守护未启动';
+    }
+    if (stats.state === 'error') {
+      return '抓屏统计读取失败';
+    }
+    return '';
+  }
+
+  function findCaptureStatsBadge() {
+    try {
+      return doc.getElementById ? doc.getElementById(CAPTURE_STATS_BADGE_ID) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function removeCaptureStatsBadge() {
+    var badge = findCaptureStatsBadge();
+    if (!badge) {
+      return;
+    }
+    // 不能靠 badge.parentNode：宿主文档可能是只提供 appendChild/getElementById 的最小实现。
+    var parents = [doc.body, doc.documentElement];
+    var index;
+    for (index = 0; index < parents.length; index += 1) {
+      var parent = parents[index];
+      if (parent && typeof parent.removeChild === 'function') {
+        try {
+          parent.removeChild(badge);
+          return;
+        } catch (error) {
+          // 不在这个父节点下就继续找下一个。
+        }
+      }
+    }
+  }
+
+  function createCaptureStatsBadge() {
+    var badge = doc.createElement('div');
+    badge.id = CAPTURE_STATS_BADGE_ID;
+    badge.setAttribute('data-cx-win-capture-stats-layer', '1');
+    badge.style.position = 'fixed';
+    badge.style.right = '16px';
+    badge.style.bottom = '16px';
+    // 低于面板壳（2147483645）与弹窗（2147483647），只做一个不挡鼠标的读数角标。
+    badge.style.zIndex = '2147483643';
+    badge.style.pointerEvents = 'none';
+    badge.style.fontFamily = '"Microsoft YaHei", "PingFang SC", -apple-system, sans-serif';
+    badge.style.fontSize = '11px';
+    badge.style.lineHeight = '1.6';
+    badge.style.padding = '3px 8px';
+    badge.style.borderRadius = '999px';
+    badge.style.background = 'rgba(255, 250, 253, 0.92)';
+    badge.style.border = '1px solid rgba(190, 24, 93, 0.22)';
+    badge.style.color = '#7a1039';
+    badge.style.whiteSpace = 'nowrap';
+    var parent = doc.body || doc.documentElement;
+    if (!parent) {
+      return null;
+    }
+    parent.appendChild(badge);
+    return badge;
+  }
+
+  // 把当前汇总渲染成面板旁的读数角标；返回归一化后的状态，便于宿主/测试读取。
+  function renderCaptureGuardStats() {
+    var stats;
+    try {
+      stats = normalizeCaptureGuardStats(win[CAPTURE_STATS_KEY]);
+    } catch (error) {
+      stats = { state: 'error', samples: 0, p50Ms: null, p95Ms: null };
+    }
+    var text = describeCaptureGuardStats(stats);
+    var badge = findCaptureStatsBadge();
+    // 读数角标从属于面板：面板没挂（非考试页 / --windows-panel-enabled=false）就不往页面里加东西。
+    // 正在抓屏时不显示任何悬浮物；没有汇总时也不留一个空角标。
+    if (!findPanelById(PANEL_SHELL_ID) || !text || win.__CX_WIN_CAPTURE_GUARD__ === true) {
+      removeCaptureStatsBadge();
+      return stats;
+    }
+    if (!badge) {
+      try {
+        badge = createCaptureStatsBadge();
+      } catch (error) {
+        return stats;
+      }
+    }
+    if (!badge) {
+      return stats;
+    }
+    try {
+      badge.textContent = text;
+      badge.setAttribute(CAPTURE_STATS_ATTR, stats.state);
+    } catch (error) {
+      // ignore badge text failures
+    }
+    return stats;
+  }
+
+  win.__CX_WIN_APPLY_CAPTURE_GUARD_STATS__ = renderCaptureGuardStats;
+  // 宿主（或调试面板）推送一份新汇总；字符串按 JSON 解析，解析失败退化为 error 而不是抛异常。
+  win.__CX_WIN_SET_CAPTURE_GUARD_STATS__ = function setCaptureGuardStats(payload) {
+    try {
+      win[CAPTURE_STATS_KEY] = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    } catch (error) {
+      win[CAPTURE_STATS_KEY] = null;
+    }
+    return renderCaptureGuardStats();
+  };
 
   function createShellHeader() {
     var header = doc.createElement('div');

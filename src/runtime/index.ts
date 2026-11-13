@@ -9,3 +9,4 @@ export * from './dom.js';
 export * from './panel.js';
 export * from './cors.js';
 export * from './gm.js';
+export * from './motion.js';
