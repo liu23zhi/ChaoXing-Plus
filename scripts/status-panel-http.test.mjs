@@ -132,7 +132,11 @@ test('判据③ 渲染层：empty 不建任何格子，显示「暂无采样数�
     assert.equal(section.querySelectorAll('[data-cx-status-minutes]').length, 0, 'empty 不建逐分钟列表');
     assert.ok(section.querySelector('[data-cx-status-notice="empty"]'), '必须有 empty 说明卡片');
     assert.match(section.textContentAll, /暂无采样数据/);
-    assert.match(section.textContentAll, /01:00/, '必须显示「自某时刻起」的时间');
+    // 不能断言具体时刻：fixture 用 2026-11-14T01:00:00+08:00，渲染成本地时刻后
+    // 在 UTC+8 是 01:00、在 UTC 是前一天 17:00 —— 硬编码 /01:00/ 会让这条用例
+    // 「本地绿 CI 红」（CI run 43582035077 实测：actual 里是「服务自 17:00 起」）。
+    // 断言「有时间」这件事本身，而不是某个具体时刻。
+    assert.match(section.textContentAll, /\d{1,2}:\d{2}/, '必须显示「自某时刻起」的时间');
   });
 });
 
