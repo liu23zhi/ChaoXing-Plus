@@ -16,7 +16,7 @@ import {
   TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE,
   TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
 } from '../core/utils/tiku-adapter-error.js';
-import { tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
+import { isDeviceIdConflict, regenerateDeviceId, tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
@@ -749,6 +749,8 @@ async function requestTikuAdapterJSON<T>(
   let lastError: unknown;
   const maxAttempts = Math.max(1, options.retryAttempts);
   const requestBody = options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined;
+  // 141 §4.2 / S7：设备冲突只重试一次。放在循环外，跨 attempt 保持。
+  let deviceConflictRetried = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // A transport retry replays the same server idempotency key/body, never a replacement operation.
     const sameOperationRetry = attempt > 1 && Boolean(options.extraHeaders?.['Idempotency-Key']?.trim());
@@ -788,6 +790,32 @@ async function requestTikuAdapterJSON<T>(
             markTikuAdapterBalanceBlocked(identity.baseurl, identity.key);
           }
           throw requestError;
+        }
+        // 141 §4.2 / S7：这台 device_id 与别的实例撞了（同 ID 不同 instance）。
+        // 换一个新 ID 后**重试一次**，第二次仍冲突就照常抛 —— 无限重试会不停换 ID、
+        // 把设备槽位耗尽。
+        //
+        // ⚠️ 这条重试必须在这里做，不能只靠 core/utils/request.ts（2026-11-15 补）。
+        // 那是**自定义题库**的通用调用器；内置题库走的是本函数
+        // （common.ts:917 createTikuAdapterAnswererWrapper → requestTikuAdapterSearchTask
+        // → 这里），两者是**不同链路**。原先只修了 request.ts，于是内置题库
+        // （＝默认路径）遇到冲突直接失败，只有自定义题库能自动恢复。
+        //
+        // 命中的端点确实挂了 DeviceLimit：/api/search/tasks（router.go:186/209）。
+        if (!deviceConflictRetried && isDeviceIdConflict(response.status, responseBody)) {
+          deviceConflictRetried = true;
+          regenerateDeviceId();
+          // ⚠️ 这里**不能**用 `attempt--; continue;`（2026-11-15 实测踩到）。
+          //
+          // request.ts 里那样写是安全的：它的 maxAttempts 对 POST 恒为 1，
+          // attempt-- 后 continue 恰好再跑一次就结束。
+          // 但本函数的 maxAttempts = TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS = 3，
+          // attempt-- 会让这一轮完全不消耗预算 —— 实测「连续 409」用例里循环次数
+          // 超出 maxAttempts（8 次），把重试预算整个架空。
+          //
+          // 正确做法：普通 `continue`，让这次冲突重试**占用**一个 attempt。
+          // 「冲突换 ID 后重试一次」本来就该计入预算；免费的重试会被后续预算逻辑放大。
+          continue;
         }
         if (response.status === 404) {
           throw createHTTPError(404, 'Not found');
