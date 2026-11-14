@@ -18,6 +18,7 @@ import {
   type ServiceStatusFetcher,
   type ServiceStatusSnapshot
 } from './status-panel.js';
+import { tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
 
 /**
  * 请求通道签名：给一个绝对 URL，返回已解析的 JSON。
@@ -236,7 +237,17 @@ export function readServerMessage(error: unknown): string {
  * 用户真正需要的指引丢掉。
  */
 export const fetchServiceStatusRequester: ServiceStatusRequester = async (url, init) => {
-  const response = await fetch(url, init);
+  // 141 §7：状态页是 5 处请求入口之一。漏了它，账号在限设备时会出现
+  // 「搜题能用但状态页 403」这种最难排查的形态。
+  // 设备头放在调用方 headers **之前**：调用方若显式给了同名字段，仍以调用方为准。
+  const requestInit = {
+    ...init,
+    headers: {
+      ...tikuAdapterDeviceHeaders(),
+      ...(init?.headers as Record<string, string> | undefined)
+    }
+  };
+  const response = await fetch(url, requestInit);
   if (!response.ok) {
     const error = new Error(`service-status HTTP ${response.status}`) as Error & {
       status?: number;

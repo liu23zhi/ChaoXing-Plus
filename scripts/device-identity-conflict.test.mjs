@@ -1,0 +1,169 @@
+// 141 §4.2 / §6.3：`DEVICE_ID_CONFLICT` 冲突后重新生成并**只重试一次**。
+//
+// 重试上限是这条链路上最危险的参数：
+//   - 重试 0 次：一次镜像复制就让后到的那份永久不可用（要用户手动清 storage）
+//   - 重试 N 次：每次冲突都换一个新 device_id，服务端逐个登记
+//     ⇒ **该账号的设备槽位被一个个耗尽**，而用户看到的是「设备数量已达上限」
+//
+// 所以这里既断言「会重试」（否则功能没生效），也断言「只重试一次」
+// （否则第二次冲突会被吞掉、或陷入换 ID 循环）。
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+
+register('./scripts/ci/ts-source-hooks.mjs', new URL('../', import.meta.url));
+
+const { request } = await import('../src/core/utils/request.js');
+const { DEVICE_ID_HEADER, DEVICE_INSTANCE_HEADER, DEVICE_ID_CONFLICT_CODE, regenerateDeviceId } =
+  await import('../src/runtime/device-identity.js');
+
+const ADAPTER_URL = 'https://conflict.adapter.test/api/search';
+const AUTH = { Authorization: 'Bearer tk-conflict-test' };
+
+async function withFetch(handler, body) {
+  const original = globalThis.fetch;
+  globalThis.fetch = handler;
+  try {
+    return await body();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+/** 造一个 409 + DEVICE_ID_CONFLICT 响应。 */
+function conflictResponse() {
+  return Response.json(
+    { code: DEVICE_ID_CONFLICT_CODE, message: '设备标识冲突' },
+    { status: 409 }
+  );
+}
+
+test('★ 409 冲突 → 换 device_id 后重试一次并成功', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return conflictResponse();
+    return Response.json({ answer: { answerText: 'A' } });
+  }, async () => {
+    const result = await request(ADAPTER_URL, { headers: AUTH, timeoutMs: 5000 });
+    assert.deepEqual(result, { answer: { answerText: 'A' } });
+  });
+
+  assert.equal(calls.length, 2, '冲突后必须重试恰好一次');
+  const firstId = calls[0].init.headers[DEVICE_ID_HEADER];
+  const secondId = calls[1].init.headers[DEVICE_ID_HEADER];
+  assert.notEqual(secondId, firstId, '重试必须带**新的** device_id，否则再撞同一个冲突');
+  assert.equal(calls[1].init.headers[DEVICE_INSTANCE_HEADER], calls[0].init.headers[DEVICE_INSTANCE_HEADER],
+    'instance 表示「这次运行」，换 device_id 不该动它');
+});
+
+test('★★ 第二次仍 409 → 只重试一次，然后把错误抛出来（不吞、不循环）', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    return conflictResponse();
+  }, async () => {
+    await assert.rejects(
+      request(ADAPTER_URL, { headers: AUTH, timeoutMs: 5000 }),
+      (error) => {
+        // 第二次冲突按普通错误抛出，不能返回「成功」也不能返回 undefined。
+        assert.ok(error, '必须抛错');
+        assert.equal(error.status, 409, '应保留 409 状态码');
+        return true;
+      }
+    );
+  });
+
+  assert.equal(calls.length, 2, `必须恰好 2 次请求（初次 + 一次重试），实际 ${calls.length} 次 —— 多一次就会耗尽设备槽位`);
+  assert.notEqual(
+    calls[1].init.headers[DEVICE_ID_HEADER],
+    calls[0].init.headers[DEVICE_ID_HEADER],
+    '重试必须换 ID'
+  );
+});
+
+test('★ 409 但错误码不是 DEVICE_ID_CONFLICT → 不换 ID、不重试', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    return Response.json({ code: 'SOME_OTHER_CONFLICT', message: '同一题目正在被处理' }, { status: 409 });
+  }, async () => {
+    await assert.rejects(request(ADAPTER_URL, { headers: AUTH, timeoutMs: 5000 }));
+  });
+
+  assert.equal(calls.length, 1, '非设备冲突的 409 不该触发换 ID 重试');
+});
+
+test('★ 200 响应体里带 DEVICE_ID_CONFLICT → 不触发换 ID（只认 409）', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    return Response.json({ code: DEVICE_ID_CONFLICT_CODE, answer: { answerText: 'A' } });
+  }, async () => {
+    const result = await request(ADAPTER_URL, { headers: AUTH, timeoutMs: 5000 });
+    assert.deepEqual(result, { code: DEVICE_ID_CONFLICT_CODE, answer: { answerText: 'A' } });
+  });
+
+  assert.equal(calls.length, 1, '200 不是冲突响应，不该重试');
+});
+
+test('冲突重试对 POST 也生效（业务上不会重放的请求也必须换一次 ID）', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return conflictResponse();
+    return Response.json({ answer: { answerText: 'A' } });
+  }, async () => {
+    await request(ADAPTER_URL, { method: 'post', headers: AUTH, data: { q: 'x' }, timeoutMs: 5000 });
+  });
+
+  assert.equal(calls.length, 2, 'POST 的 maxAttempts 恒为 1，但设备冲突重试必须独立于它');
+  assert.notEqual(calls[1].init.headers[DEVICE_ID_HEADER], calls[0].init.headers[DEVICE_ID_HEADER]);
+  // body 必须原样重发（这是同一次业务操作，只是身份换了）。
+  assert.equal(calls[1].init.body, calls[0].init.body);
+});
+
+test('冲突重试不消耗既有重试预算：GET 的 maxAttempts 仍然是原来的语义', async () => {
+  const calls = [];
+  await withFetch(async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return conflictResponse();
+    if (calls.length === 2) throw new TypeError('Failed to fetch');
+    return Response.json({ answer: { answerText: 'A' } });
+  }, async () => {
+    const result = await request(ADAPTER_URL, {
+      headers: AUTH,
+      retry: { maxAttempts: 3, delayMs: 0 },
+      timeoutMs: 5000
+    });
+    assert.deepEqual(result, { answer: { answerText: 'A' } });
+  });
+
+  // 冲突重试（第 2 次）之后，网络错误仍应能走既有重试逻辑（第 3 次）。
+  assert.equal(calls.length, 3, '冲突重试不该吃掉一次网络重试预算');
+});
+
+test('regenerateDeviceId 的落点一致：冲突后用过的 ID 不会在后续请求里复活', async () => {
+  const ids = [];
+  await withFetch(async (url, init) => {
+    ids.push(init.headers[DEVICE_ID_HEADER]);
+    if (ids.length === 1) return conflictResponse();
+    if (ids.length === 2) return conflictResponse();
+    return Response.json({ answer: { answerText: 'A' } });
+  }, async () => {
+    await assert.rejects(request(ADAPTER_URL, { headers: AUTH, timeoutMs: 5000 }));
+  });
+
+  // 初次 + 一次重试 = 2 个不同 ID；第三次请求不存在（不循环）。
+  assert.equal(ids.length, 2, '只应有 2 次请求');
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(new Set(ids).size, 2, '两次请求必须用两个不同的 ID');
+});
+
+test('直接调 regenerateDeviceId 是幂等可用：连续调用得到不同 ID', () => {
+  const a = regenerateDeviceId();
+  const b = regenerateDeviceId();
+  assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.match(b, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.notEqual(a, b);
+});

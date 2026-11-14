@@ -1,4 +1,5 @@
 import { promises as fs, watchFile, unwatchFile } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 export const SHARED_STORE_PREFIXES = [
@@ -11,6 +12,13 @@ export const SHARED_STORE_PREFIXES = [
 export const SHARED_STORE_EXCLUDED_KEYS = new Set(['common.work-results.results']);
 export const SHARED_STORE_EXACT_KEYS = new Set(['common.apps.question-caches']);
 export const ENABLED_KEY = 'common.settings.extension-enabled';
+
+// 设备标识的存储键。**必须与扩展侧（src/runtime/device-identity.ts）和原生侧
+// （windows/native-source/device-quota.h 的 CX_DEVICE_ID_KEY）逐字一致** ——
+// 这三处任何一处改名，注入到 chrome.storage 的键扩展就读不到。
+// scripts/device-quota.test.mjs 对三处做交叉断言。
+export const DEVICE_ID_KEY = 'common.settings.device-id';
+export const DEVICE_INSTANCE_KEY = 'common.settings.device-instance';
 
 const DEFAULT_CONFIG = {
   clientPath: '',
@@ -44,6 +52,16 @@ export function pickSharedValues(values) {
     if (isSharedStoreKey(key)) result[key] = value;
   }
   return result;
+}
+
+/**
+ * 从共享设置里取宿主 device_id；没有/不合法时返回空串。
+ * device_id 表示「这个 exe 宿主的浏览器 profile」，要跨重启复用（141 §5.1），
+ * 所以它是持久值；client_instance 相反，每个会话新生成、绝不持久化（141 §4.3）。
+ */
+export function hostDeviceId(settings) {
+  const value = settings && typeof settings === 'object' ? settings[DEVICE_ID_KEY] : undefined;
+  return typeof value === 'string' && value.length > 0 && value.length <= 64 ? value : '';
 }
 
 export function normalizeConfig(raw) {
@@ -126,7 +144,27 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
         throw new Error(`配置文件无法读取或不是合法 JSON：${filePath}：${error.message}`);
       }
     }
+    ensureDeviceId();
     return config;
+  }
+
+  /**
+   * 宿主 device_id：有就复用，没有就生成 UUIDv4 写进 settings。
+   *
+   * 写盘**只经过 schedulePersist**（即 persist()），不另开写盘逻辑：
+   *   - persistEnabled = !noDiskWrite，所以 --no-disk-write 下 schedulePersist 是 no-op，
+   *     不会绕过「不写盘」约定；
+   *   - 仍是原有的临时文件 + rename 原子写，不会与页面下发的配置互相截断。
+   * 返回本次生效的 deviceId（即使不落盘也返回，供本次运行使用）。
+   */
+  function ensureDeviceId() {
+    const existing = hostDeviceId(config.settings);
+    if (existing) return existing;
+    const generated = randomUUID();
+    config.settings[DEVICE_ID_KEY] = generated;
+    revision += 1;
+    schedulePersist();
+    return generated;
   }
 
   async function persist() {
@@ -174,6 +212,12 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
     isEnabled() {
       return config.settings[ENABLED_KEY] !== false;
     },
+    /** 当前生效的 device_id（不生成，可能为空）。 */
+    deviceId() {
+      return hostDeviceId(config.settings);
+    },
+    /** 需要时生成并（在允许写盘时）持久化 device_id；返回本次生效值。 */
+    ensureDeviceId,
     updateFromPage(changes) {
       const shared = pickSharedValues(changes);
       if (Object.keys(shared).length === 0) return false;

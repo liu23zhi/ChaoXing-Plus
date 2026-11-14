@@ -5,6 +5,7 @@
 #include "../browser-extension.h"
 #include "../adapter-account.h"
 #include "../account-window.h"
+#include "../device-quota.h"
 
 #define SETTINGS_PANEL_ENABLED 1510
 #define SETTINGS_PANEL_COLLAPSED 1511
@@ -30,6 +31,10 @@
 #define SETTINGS_LOCAL_CACHE 1531
 
 static DWORD failures, browserStarts, networkCalls, closedSessions, destroyedSessions;
+/* cx_browser_poll 的替身用：非 0 表示「只有这个会话还在跑」。 */
+static DWORD runningSession;
+/* 上报失败注入（断言「失败不阻断本地」）。 */
+static BOOL reportFails;
 static HANDLE fetchEntered, fetchRelease;
 static BOOL blockFetch, showWindows;
 static BOOL edgeInstalled = TRUE, chromeInstalled = TRUE, mockCachePackage, rejectFirstVerify;
@@ -81,13 +86,24 @@ static BOOL test_browser_close(CX_BROWSER_SESSION *session, WCHAR *error, DWORD 
 }
 static void test_browser_destroy(CX_BROWSER_SESSION *session) { (void)session; ++destroyedSessions; }
 static BOOL test_browser_poll(CX_BROWSER_SESSION *session, BOOL *running, WCHAR *error, DWORD cap) {
-    (void)session; (void)error; (void)cap; *running = TRUE; return TRUE;
+    (void)error; (void)cap;
+    /* runningSession 非 0 时，只有该 id 的会话「还在跑」，其余视为已退出 ——
+       用来驱动「进程自己退出 → 会话数 -1 后上报」这条时机。 */
+    *running = runningSession ? ((UINT_PTR)session == (UINT_PTR)runningSession) : TRUE;
+    return TRUE;
 }
 static DWORD test_browser_pid(const CX_BROWSER_SESSION *session) { (void)session; return 123; }
 static const WCHAR *test_browser_id(const CX_BROWSER_SESSION *session) {
     (void)session; return L"lcmeenlnjihhjcjoakekikoaldigonac";
 }
 static BOOL test_account_window(HWND parent, CX_HOME_CONFIG *config) { (void)parent; (void)config; return FALSE; }
+
+/* 设备槽位的替身先声明、后定义（定义放在 #include "../home.c" 之后，
+   这样可以复用 device-quota.h 的类型而不依赖 home.c 内部的静态辅助函数）。 */
+static BOOL test_device_quota_fetch(const WCHAR *baseUrl, const WCHAR *apiKey,
+    DWORD timeoutMs, CX_DEVICE_QUOTA *quota);
+static BOOL test_device_sessions_report(const WCHAR *baseUrl, const WCHAR *apiKey,
+    const WCHAR *deviceId, int count, DWORD timeoutMs, WCHAR *error, DWORD errorCap);
 static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id, WCHAR *error, DWORD cap) {
     (void)data; (void)size; (void)id; ++verifyCalls;
     if (rejectFirstVerify && verifyCalls == 1) {
@@ -108,8 +124,54 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 #define cx_browser_extension_id test_browser_id
 #define cx_account_window test_account_window
 #define cx_browser_extension_verify test_extension_verify
+/* 设备槽位：网络一律不真的发出去，只记录「该发的都发了」。 */
+#define cx_device_quota_fetch test_device_quota_fetch
+#define cx_device_sessions_report test_device_sessions_report
 #include "../home.c"
 #undef ShowWindow
+
+/* ---- 设备槽位替身实现 ---------------------------------------------------- */
+
+/* 最近一次上报的 (deviceId, count)：用于断言「device_id 是宿主的、
+   count 是当前会话数」。 */
+static WCHAR lastReportDeviceId[CX_DEVICE_ID_CAP];
+static int lastReportCount = -1;
+static DWORD reportCalls, quotaCalls;
+/* 配额查询结果由用例指定。 */
+static BOOL quotaFetchResult = FALSE;
+static int quotaLimit, quotaUsed, quotaAvailable;
+static WCHAR quotaLimitSource[32];
+
+static BOOL test_device_quota_fetch(const WCHAR *baseUrl, const WCHAR *apiKey,
+    DWORD timeoutMs, CX_DEVICE_QUOTA *quota) {
+    (void)baseUrl; (void)apiKey; (void)timeoutMs;
+    ++quotaCalls;
+    if (!quota) return FALSE;
+    ZeroMemory(quota, sizeof(*quota));
+    if (!quotaFetchResult) {
+        lstrcpynW(quota->error, L"mock quota unavailable", 256);
+        return FALSE;
+    }
+    quota->known = TRUE;
+    quota->limit = quotaLimit;
+    quota->used = quotaUsed;
+    quota->available = quotaAvailable;
+    home_copy(quota->limitSource, CX_DEVICE_LIMIT_SOURCE_CAP, quotaLimitSource);
+    return TRUE;
+}
+static BOOL test_device_sessions_report(const WCHAR *baseUrl, const WCHAR *apiKey,
+    const WCHAR *deviceId, int count, DWORD timeoutMs, WCHAR *error, DWORD errorCap) {
+    (void)baseUrl; (void)apiKey; (void)timeoutMs;
+    ++reportCalls;
+    home_copy(lastReportDeviceId, CX_DEVICE_ID_CAP, deviceId);
+    lastReportCount = count;
+    if (reportFails) {
+        if (error && errorCap) lstrcpynW(error, L"mock report failure", (int)errorCap);
+        return FALSE;
+    }
+    if (error && errorCap) error[0] = 0;
+    return TRUE;
+}
 
 static CX_OPTIONS options;
 static CX_HOME_CONFIG shared, separate;
@@ -422,8 +484,368 @@ static void worker_tests(void) {
     free_home(state);
 }
 
-static BOOL test_exam(CX_OPTIONS *received, WCHAR *error, DWORD errorCap) {
-    char *effective; DWORD length = 0; BOOL merged;
+/* ============================================================================
+   设备槽位用例（C4-3 / C4-4 / C5-1 / C5-2，对应 141 §5/§8）
+   ========================================================================== */
+
+/* device_id / client_instance 的字面量必须与 device-quota.h 一致。
+   此处**故意写字面量**而不是引用宏：宏改名时这条要变红。 */
+static void device_key_tests(void) {
+    check(!lstrcmpA(CX_DEVICE_ID_KEY, "common.settings.device-id"),
+        "device storage key literal is common.settings.device-id");
+    check(!lstrcmpA(CX_DEVICE_INSTANCE_KEY, "common.settings.device-instance"),
+        "client instance storage key literal is common.settings.device-instance");
+}
+
+/* 链接是 /NODEFAULTLIB（无 CRT），wcsstr 不可用；这里手写一个窄宽的宽字串查找。 */
+static BOOL wide_contains(const WCHAR *text, const WCHAR *needle) {
+    DWORD i, k;
+    if (!text || !needle || !needle[0]) return FALSE;
+    for (i = 0; text[i]; ++i) {
+        for (k = 0; needle[k] && text[i + k] == needle[k]; ++k) { }
+        if (!needle[k]) return TRUE;
+    }
+    return FALSE;
+}
+
+/* C4-1 的位置判据（141 §5.1 要求 windows/data/config.json）。 */
+static void device_config_path_tests(void) {
+    static const WCHAR tail[] = L"\\windows\\data\\config.json";
+    WCHAR path[CX_HOME_EXTENSION_PATH_CAP];
+    DWORD length;
+
+    /* --config 显式路径最高优先。 */
+    check(cx_device_config_path(L"D:\\custom\\my.json", L".data", path, CX_HOME_EXTENSION_PATH_CAP)
+        && !lstrcmpW(path, L"D:\\custom\\my.json"),
+        "an explicit --config path wins for the device id location");
+
+    /* 没有 --config 时，标准仓库布局 windows\data\config.json 必须优先于 dataDir(.data) ——
+       device_id 是 141 §5.1 指定的配置文件内容，不是宿主的 .data 数据目录。 */
+    path[0] = 0;
+    check(cx_device_config_path(NULL, L".data", path, CX_HOME_EXTENSION_PATH_CAP),
+        "a config path is always derivable without --config");
+    length = (DWORD)lstrlenW(path);
+    check(length >= 27 && !lstrcmpiW(path + length - (lstrlenW(tail)), tail),
+        "device id defaults to <cwd>\\windows\\data\\config.json, not the .data data directory");
+    check(!wide_contains(path, L"\\.data\\") && !wide_contains(path, L"/.data/"),
+        "the .data data directory never receives the device id file");
+}
+
+
+static BOOL read_text_file(const WCHAR *path, char **text, DWORD *length) {
+    HANDLE file;
+    DWORD size, got;
+    char *buffer;
+    *text = NULL; length[0] = 0;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    size = GetFileSize(file, NULL);
+    buffer = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size + 1);
+    if (!buffer) { CloseHandle(file); return FALSE; }
+    if (!ReadFile(file, buffer, size, &got, NULL)) { HeapFree(GetProcessHeap(), 0, buffer); CloseHandle(file); return FALSE; }
+    CloseHandle(file);
+    buffer[got] = 0;
+    *text = buffer; length[0] = got;
+    return TRUE;
+}
+static void device_id_tests(void) {
+    WCHAR directory[MAX_PATH], file[MAX_PATH], id[CX_DEVICE_ID_CAP], error[256];
+    WCHAR second[CX_DEVICE_ID_CAP], third[CX_DEVICE_ID_CAP];
+    char *text = NULL;
+    DWORD length = 0;
+    HANDLE handle;
+
+    GetTempPathW(MAX_PATH, directory);
+    lstrcatW(directory, L"cxdevice-");
+    {
+        WCHAR unique[32];
+        wsprintfW(unique, L"%lu", (unsigned long)GetCurrentProcessId());
+        lstrcatW(directory, unique);
+    }
+    CreateDirectoryW(directory, NULL);
+    file[0] = 0;
+    lstrcpynW(file, directory, MAX_PATH);
+    lstrcatW(file, L"\\config.json");
+    DeleteFileW(file);
+
+    /* 文件不存在 → 生成 UUIDv4 并写回。 */
+    id[0] = 0; error[0] = 0;
+    check(cx_device_id_ensure(file, FALSE, id, CX_DEVICE_ID_CAP, error, 256) && lstrlenW(id) == 36,
+        "a missing config file gets a freshly generated device id");
+    handle = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    check(handle != INVALID_HANDLE_VALUE,
+        "the generated device id is written back to the configuration file (C4-1)");
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+
+    /* 第二次读：必须复用同一个值（R5 要求宿主槽位跨重启稳定）。 */
+    second[0] = 0;
+    check(cx_device_id_ensure(file, FALSE, second, CX_DEVICE_ID_CAP, NULL, 0)
+        && !lstrcmpW(second, id),
+        "a second start reuses the persisted device id instead of regenerating it");
+
+    /* --no-disk-write：文件不存在时不得创建（不绕过「不写盘」约定）。 */
+    DeleteFileW(file);
+    second[0] = 0;
+    check(cx_device_id_ensure(file, TRUE, second, CX_DEVICE_ID_CAP, NULL, 0) && lstrlenW(second) == 36
+        && GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES,
+        "--no-disk-write keeps the device id in memory and never creates the config file");
+
+    /* 已有文件但 settings 里没有该键 → 补写，且保留文件里其它内容。 */
+    {
+        static const char seed[] = "{\"port\":7777,\"settings\":{\"common.settings.keep\":true}}";
+        DWORD written = 0;
+        handle = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (handle != INVALID_HANDLE_VALUE) {
+            WriteFile(handle, seed, (DWORD)sizeof(seed) - 1, &written, NULL);
+            CloseHandle(handle);
+        }
+        third[0] = 0;
+        check(cx_device_id_ensure(file, FALSE, third, CX_DEVICE_ID_CAP, NULL, 0) && lstrlenW(third) == 36,
+            "an existing config without a device id gets one injected");
+        text = NULL; length = 0;
+        if (read_text_file(file, &text, &length)) {
+            check(contains(text, "\"common.settings.device-id\"") && contains(text, "7777")
+                && contains(text, "common.settings.keep"),
+                "injecting the device id preserves every other key in the config file");
+            HeapFree(GetProcessHeap(), 0, text);
+        } else check(FALSE, "injected config file is readable");
+        /* 再读一次必须拿到同一个值（不是每次生成新的）。 */
+        DeleteFileW(file);
+    }
+
+    DeleteFileW(file);
+    RemoveDirectoryW(directory);
+}
+
+
+static void device_injection_tests(void) {
+    HOME_STATE *state = make_home();
+    DWORD length = 0;
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"11111111-2222-4333-8444-555555555555");
+
+    /* 1) 没置注入上下文（= 考试模式 / 设置对话框预览）时不得出现设备键。 */
+    state->injectDeviceKeys = FALSE;
+    check(home_build_settings(state, &shared, settingsOutput, sizeof(settingsOutput), &length, errorText, 512)
+        && !contains(settingsOutput, "common.settings.device-id")
+        && !contains(settingsOutput, "common.settings.device-instance"),
+        "device keys are absent while no browser session is being built");
+
+    /* 2) 置上之后必须出现，且 device_id 是宿主的。 */
+    state->injectDeviceKeys = TRUE;
+    home_copy(state->injectInstance, CX_DEVICE_INSTANCE_CAP, L"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    check(home_build_settings(state, &shared, settingsOutput, sizeof(settingsOutput), &length, errorText, 512)
+        && contains(settingsOutput, "\"common.settings.device-id\":\"11111111-2222-4333-8444-555555555555\"")
+        && contains(settingsOutput, "\"common.settings.device-instance\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\""),
+        "browser session settings carry the host device id and this session instance");
+
+    /* 3) 两个会话的 instance 必须不同 —— 必须**执行源码那段原文**
+       （home_device_begin_injection），不能在测试里手搓 cx_device_instance_new：
+       后者绕过了 home_work 的真实注入路径，把实现改成固定值时用例仍会绿（假钉子）。 */
+    {
+        WCHAR first[CX_DEVICE_INSTANCE_CAP], second[CX_DEVICE_INSTANCE_CAP];
+        BOOL made = home_device_begin_injection(state);
+        home_copy(first, CX_DEVICE_INSTANCE_CAP, state->injectInstance);
+        home_device_end_injection(state);
+        made = home_device_begin_injection(state) && made;
+        home_copy(second, CX_DEVICE_INSTANCE_CAP, state->injectInstance);
+        home_device_end_injection(state);
+        check(made && first[0] && second[0] && lstrcmpW(first, second) != 0,
+            "each browser session gets its own client instance");
+        /* 同时验证它确实是 UUIDv4 形态（36 字符、版本位 4、variant 8/9/a/b）。 */
+        check(lstrlenW(first) == 36 && first[14] == L'4'
+            && (first[19] == L'8' || first[19] == L'9' || first[19] == L'a' || first[19] == L'b'),
+            "session client instance is a well formed uuid v4");
+        /* 结束注入必须真把上下文清干净（否则设置对话框预览会带出设备键）。 */
+        check(!state->injectDeviceKeys && !state->injectInstance[0],
+            "ending the injection context clears both flags");
+    }
+
+    /* 4) 注入上下文是「每次调用一次性」的：下一次构造（例如考试模式）不得带上设备键。
+       注意不能在 home_build_settings 之后就地断言 false —— 真正的清除点在 home_work
+       的 done 标签与 cx_home_run 的启动段，这里只验证「没置就绝不出现」这条语义。 */
+    state->injectDeviceKeys = FALSE;
+    check(home_build_settings(state, &shared, settingsOutput, sizeof(settingsOutput), &length, errorText, 512)
+        && !contains(settingsOutput, "common.settings.device-instance"),
+        "turning the injection context off removes the device keys again");
+    free_home(state);
+}
+
+/* C4-4：四个时机各上报一次，且 count 是当前会话数；退出时同步上报 0。 */
+/* 等设备线程把结果经 HOME_DEVICE_DONE 交回 UI 线程。
+   上报/查询都在独立线程里跑，所以「发起了」和「报到了」是两件事 ——
+   用例必须等 settle 之后才看 reportCalls，否则断言的是竞态不是语义。 */
+static void drain_device(HOME_STATE *state) {
+    DWORD start = GetTickCount();
+    while (state->deviceWorker && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    clear_messages();
+}
+
+static void device_report_tests(void) {
+    HOME_STATE *state;
+    DWORD start;
+
+    reportCalls = 0; lastReportCount = -1; lastReportDeviceId[0] = 0;
+    closedSessions = 0; destroyedSessions = 0;
+    state = make_home();
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+
+    /* 时机 1：会话启动成功（HOME_OPERATION_DONE 里 pendingSession 落位）。 */
+    state->sessions[0].session = NULL;
+    state->pendingSession = (CX_BROWSER_SESSION *)(UINT_PTR)7;
+    state->pendingSlot = 0;
+    state->operation = HOME_EDGE;
+    state->operationOK = TRUE;
+    home_copy(state->pendingBrowser, 16, L"edge");
+    SendMessageW(state->window, HOME_OPERATION_DONE, 0, 0);
+    drain_device(state);
+    check(reportCalls == 1 && lastReportCount == 1
+        && !lstrcmpW(lastReportDeviceId, L"host-device-id"),
+        "starting a session reports count=1 with the host device id");
+
+    /* 时机 3：主动关闭一个会话后 count 回到 0。 */
+    state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)7;
+    home_refresh_list(state);
+    SendMessageW(state->window, WM_COMMAND, MAKEWPARAM(HOME_CLOSE_SESSION, BN_CLICKED), 0);
+    start = GetTickCount();
+    while (state->worker && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    drain_device(state);
+    check(reportCalls == 2 && lastReportCount == 0,
+        "closing the last session reports count=0");
+    drain_device(state);
+    free_home(state);
+
+    /* 时机 2：进程自己退出（cx_browser_poll 报 not running）。 */
+    reportCalls = 0; lastReportCount = -1;
+    state = make_home();
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)8;
+    state->sessions[1].session = (CX_BROWSER_SESSION *)(UINT_PTR)9;
+    runningSession = 8; /* 第 8 号会话「已退出」，第 9 号仍在跑 */
+    state->heartbeatAt = GetTickCount(); /* 抑制本轮的 60 秒心跳，只看退出上报 */
+    home_poll_sessions(state);
+    drain_device(state);
+    check(reportCalls == 1 && lastReportCount == 1,
+        "a session exiting on its own reports the remaining session count");
+    free_home(state);
+
+    /* 时机 4：HOME_EXIT → 同步上报 0（R7 回落）。 */
+    reportCalls = 0; lastReportCount = -1;
+    closedSessions = 0; destroyedSessions = 0;
+    state = make_home();
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)10;
+    state->sessions[1].session = (CX_BROWSER_SESSION *)(UINT_PTR)11;
+    state->sessions[2].session = (CX_BROWSER_SESSION *)(UINT_PTR)12;
+    SendMessageW(state->window, WM_CLOSE, 0, 0);
+    start = GetTickCount();
+    while (IsWindow(state->window) && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    check(reportCalls >= 1 && lastReportCount == 0,
+        "exiting with three open sessions reports count=0 (falls back to the host slot)");
+    free_home(state);
+    runningSession = 0;
+
+    /* 红线 3：上报失败不阻断本地关闭 —— 关掉浏览器是用户的硬需求。 */
+    reportCalls = 0; lastReportCount = -1;
+    closedSessions = 0; destroyedSessions = 0;
+    state = make_home();
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)13;
+    home_refresh_list(state);
+    reportFails = TRUE;
+    SendMessageW(state->window, WM_COMMAND, MAKEWPARAM(HOME_CLOSE_SESSION, BN_CLICKED), 0);
+    start = GetTickCount();
+    while (state->worker && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    drain_device(state);
+    check(!state->sessions[0].session && closedSessions == 1 && destroyedSessions == 1,
+        "a failed session-count report never blocks closing the browser");
+    check(reportCalls == 1, "the failed report was actually attempted");
+    reportFails = FALSE;
+    free_home(state);
+}
+
+/* C5-1：状态栏文案（limit=0 显示「不限」，Z = max(1, 会话数)）。 */
+static void device_status_tests(void) {
+    CX_DEVICE_QUOTA quota;
+    WCHAR text[512];
+
+    ZeroMemory(&quota, sizeof(quota));
+    quota.known = TRUE; quota.limit = 3; quota.used = 2; quota.available = 1;
+    check(cx_device_status_text(&quota, 0, text, 512)
+        && !lstrcmpW(text, L"可用设备：1 / 3　本 exe 占用：1 个（0 个浏览器会话）"),
+        "status shows available/limit and the host occupies one slot when no session is open");
+    check(cx_device_status_text(&quota, 3, text, 512)
+        && !lstrcmpW(text, L"可用设备：1 / 3　本 exe 占用：3 个（3 个浏览器会话）"),
+        "status shows three occupied slots for three browser sessions");
+
+    quota.limit = 0; quota.used = 0; quota.available = -1;
+    check(cx_device_status_text(&quota, 0, text, 512)
+        && !lstrcmpW(text, L"可用设备：不限 / 不限　本 exe 占用：1 个（0 个浏览器会话）"),
+        "status renders 不限 instead of numbers when the limit is unlimited");
+
+    ZeroMemory(&quota, sizeof(quota));
+    check(cx_device_status_text(&quota, 0, text, 512)
+        && !lstrcmpW(text, L"可用设备：无法获取设备配额　本 exe 占用：1 个（0 个浏览器会话）"),
+        "status reports 无法获取设备配额 when the quota was never fetched");
+}
+
+/* C5-2：超限只提醒不拦截（R8）+ 提醒只在「已取到配额、上限有限、已用满」时出现。 */
+static void device_over_limit_tests(void) {
+    CX_DEVICE_QUOTA quota;
+    HOME_STATE *state;
+
+    ZeroMemory(&quota, sizeof(quota));
+    check(!cx_device_over_limit(&quota), "unknown quota never counts as over limit");
+
+    quota.known = TRUE; quota.limit = 0; quota.used = 99;
+    check(!cx_device_over_limit(&quota), "unlimited accounts are never over limit even when used>0");
+
+    quota.limit = 3; quota.used = 2;
+    check(!cx_device_over_limit(&quota), "under the limit is not over limit");
+
+    quota.used = 3;
+    check(cx_device_over_limit(&quota), "used==limit is over limit");
+    quota.used = 4;
+    check(cx_device_over_limit(&quota), "used>limit is over limit");
+
+    /*
+       R8 的核心断言：即使超限，点击「新会话」也必须真的启动浏览器。
+       这里不驱动对话框（那要人工点按钮），而是进程内驱动同一条路径：
+       home_begin 在超限且用户点了「仍然新建」时不得返回、必须置 worker。
+       对话框的默认焦点/文案由 device_prompt_tests 单独覆盖。
+    */
+    state = make_home();
+    ZeroMemory(&state->quota, sizeof(state->quota));
+    state->quota.known = TRUE; state->quota.limit = 1; state->quota.used = 1;
+    check(cx_device_over_limit(&state->quota), "precondition: this home state is over limit");
+    {
+        home_device_prompt_auto_proceed = TRUE; /* 等价于用户点「仍然新建」 */
+        blockFetch = TRUE; ResetEvent(fetchEntered); ResetEvent(fetchRelease);
+        home_begin(state, HOME_EDGE, L"edge", &shared);
+        check(state->worker != NULL,
+            "over-limit still starts a browser session on New Session (R8: remind, never block)");
+        check(home_device_prompt_count == 1,
+            "the over-limit reminder is shown exactly once per click");
+        SetEvent(fetchRelease);
+        {
+            DWORD start = GetTickCount();
+            while (state->worker && GetTickCount() - start < 5000) {
+                clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+            }
+        }
+        clear_messages(); blockFetch = FALSE; home_device_prompt_auto_proceed = FALSE;
+    }
+    free_home(state);
+}
+
+static BOOL test_exam(CX_OPTIONS *received, WCHAR *error, DWORD errorCap) {    char *effective; DWORD length = 0; BOOL merged;
     (void)error; (void)errorCap; examCalled = TRUE;
     check(received != &options && contains(received->sharedSettingsJson, "common.settings.tiku-adapter.key"),
         "exam page receives a private options copy with the current shared settings");
@@ -477,10 +899,19 @@ void HomeTestMain(void) {
     fetchEntered = CreateEventW(NULL, TRUE, FALSE, NULL); fetchRelease = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!fetchEntered || !fetchRelease) ExitProcess(2);
     cx_options_init(&options); cx_home_config_init(&shared);
+    /* 测试跑在仓库里，绝不能让 cx_home_run 的启动登记段真的写出
+       windows/data/config.json —— 那会在 git status 里留下未跟踪文件。
+       noDiskWrite 同时保持了「设备 id 只在内存里」的语义，正好也是要验的一条。
+       注意：worker_tests() 内部会把 options.noDiskWrite 复位成 FALSE（它要验
+       「缓存遵守磁盘写开关」的正反两态），所以这里必须在 cx_home_run 之前再置一次。 */
     home_instance = GetModuleHandleW(NULL); home_default_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     if (!home_register_class()) ExitProcess(4);
     settings_tests(); dialog_tests(); browser_selection_tests(); worker_tests();
+    device_key_tests(); device_injection_tests(); device_report_tests();
+    device_status_tests(); device_over_limit_tests(); device_config_path_tests(); device_id_tests();
     if (!SetTimer(NULL, 0, 20, home_tick)) ExitProcess(5);
+    options.noDiskWrite = TRUE;
+    options.noDiskWriteSet = TRUE;
     ok = cx_home_run(&options, &shared, test_exam, errorText, 512);
     check(ok && homeInspections == 1, "the complete home page exits after asynchronous cleanup");
     CloseHandle(fetchEntered); CloseHandle(fetchRelease);

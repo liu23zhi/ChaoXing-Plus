@@ -7,6 +7,11 @@ import {
   resolveTikuAdapterRequestIdentity,
   TikuAdapterRequestError
 } from './tiku-adapter-error.js';
+import {
+  isDeviceIdConflict,
+  regenerateDeviceId,
+  tikuAdapterDeviceHeaders
+} from '../../runtime/device-identity.js';
 
 export async function request<T extends 'json' | 'text'>(
   url: string,
@@ -41,6 +46,20 @@ export async function request<T extends 'json' | 'text'>(
   const deadlineAt = Date.now() + (opts?.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 60000);
   let lastError: unknown;
 
+  // 141 §6.3 / §4.2：device_id 冲突时换一个 ID 并**只重试一次**。
+  // 用独立的一次性开关，不走 attempt 预算：冲突重试对 POST 也要生效，
+  // 而 POST 的 maxAttempts 恒为 1（没有幂等键就不该重放业务请求）。
+  // ⚠️ 绝不能放开成循环 —— 每次冲突都换 ID 会把该账号的设备槽位一个个耗尽。
+  //
+  // ⚠️ 位置是有意的：必须声明在**余额封锁之前**。esbuild 会把
+  // `if (c) { throw ...; }` 压成 `if(c)throw ...;`，而
+  // scripts/build-output-request-logic.test.mjs 靠
+  // `throw new X(`INSUFFICIENT_BALANCE`);for(let` 这段**相邻性**来证明
+  // 进产物的是 request.ts 而不是 src/core 下的影子 .js。
+  // 把这个 let 塞到「余额封锁」与「for 循环」之间会把那对语句隔开，
+  // 该回归防线会假红（实测踩到）。要动这里先读那条测试。
+  let deviceConflictRetried = false;
+
   const isTikuAdapterRequest = isTikuAdapterRequestUrl(url);
   const tikuIdentity = isTikuAdapterRequest ? resolveTikuAdapterRequestIdentity(url, headers) : undefined;
   if (tikuIdentity && isTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key)) {
@@ -63,10 +82,16 @@ export async function request<T extends 'json' | 'text'>(
       controller.abort();
     }, attemptTimeoutMs);
 
+    // 每轮重新合一次 header：冲突后 device_id 变了，重试必须带**新的**那个。
+    // 只对适配器请求注入 —— 把设备标识带给任意第三方站点是没必要的泄漏。
+    const attemptHeaders = isTikuAdapterRequest
+      ? { ...tikuAdapterDeviceHeaders(), ...headers }
+      : headers;
+
     try {
       const response = await fetch(url, {
         method: upperMethod,
-        headers: Object.keys(headers).length ? headers : undefined,
+        headers: Object.keys(attemptHeaders).length ? attemptHeaders : undefined,
         body,
         signal: controller.signal
       });
@@ -76,6 +101,14 @@ export async function request<T extends 'json' | 'text'>(
         if (isTikuAdapterRequest) {
           let payload: unknown = text;
           try { payload = JSON.parse(text); } catch { /* legacy servers may return plain text */ }
+          // 设备冲突优先于普通错误分类：它不是业务失败，而是「这个 ID 用不了」。
+          if (!deviceConflictRetried && isDeviceIdConflict(response.status, payload)) {
+            deviceConflictRetried = true;
+            regenerateDeviceId();
+            // attempt-- 配合 continue：这一轮不消耗重试预算，下一次仍用同一个 attempt 号。
+            attempt--;
+            continue;
+          }
           const error = createTikuAdapterRequestError(payload, response.status) as TikuAdapterRequestError & { retryAfterMs?: number };
           error.retryAfterMs = readRetryAfterMs(response.headers.get('Retry-After'));
           if (error.code === 'INSUFFICIENT_BALANCE' && tikuIdentity) {

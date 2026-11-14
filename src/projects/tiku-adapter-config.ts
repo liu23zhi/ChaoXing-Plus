@@ -16,6 +16,7 @@ import {
   TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE,
   TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
 } from '../core/utils/tiku-adapter-error.js';
+import { tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
@@ -182,6 +183,8 @@ export async function requestTikuAdapterAnswerEvidence(
     const response = await fetch(createTikuAdapterEvidenceUrl(baseurl), {
       method: 'POST',
       headers: {
+        // 141 §7 入口 3：上传答题证据。设备头放在最前，业务头覆盖它。
+        ...tikuAdapterDeviceHeaders(),
         Authorization: createTikuAdapterAuthorizationHeader(key),
         ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {}),
         'Content-Type': 'application/json',
@@ -760,6 +763,9 @@ async function requestTikuAdapterJSON<T>(
       const response = await fetch(url, {
         method: options.method,
         headers: {
+          // 141 §7 入口 4：配置探测 / 搜索任务 / 轮询共用的 JSON 通道。
+          // 设备头放最前，Authorization 等业务头随后覆盖同名键。
+          ...tikuAdapterDeviceHeaders(),
           Authorization: createTikuAdapterAuthorizationHeader(key),
           ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {}),
           ...options.extraHeaders,

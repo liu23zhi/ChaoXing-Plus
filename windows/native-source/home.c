@@ -6,11 +6,13 @@
 #include "adapter-account.h"
 #include "account-window.h"
 #include "config-store.h"
+#include "device-quota.h"
 #include "json.h"
 #include "resource.h"
 
 #define HOME_CLASS L"CXPlusNativeHome"
 #define SETTINGS_CLASS L"CXPlusNativeHomeSettings"
+#define HOME_DEVICE_PROMPT_CLASS L"CXPlusNativeHomeDevicePrompt"
 #define HOME_MAX_SESSIONS 8
 #define HOME_TIMER 1401
 
@@ -25,7 +27,16 @@
 #define HOME_STATUS 1411
 #define HOME_ACCOUNT 1412
 #define HOME_UPDATE 1413
+#define HOME_DEVICE 1414
 #define HOME_OPERATION_DONE (WM_APP + 24)
+/* 设备线程完成一次配额查询/会话上报后回到 UI 线程的唯一通道：
+   所有 state->quota 的读取都发生在 UI 线程，与设备线程之间只经这条消息交接。 */
+#define HOME_DEVICE_DONE (WM_APP + 25)
+#define HOME_PROMPT_PROCEED 1601
+#define HOME_PROMPT_CANCEL 1602
+/* 141 §5.4：每分钟心跳一次，服务端 3 分钟未收到即把 session_count 归 0。
+   poll 循环本身是 500ms 一次，这里只是复用它做 60 秒分频，不新开 timer。 */
+#define HOME_HEARTBEAT_MS 60000
 
 #define SETTINGS_BASE_URL 1502
 #define SETTINGS_API_KEY 1503
@@ -60,6 +71,9 @@ typedef struct HOME_SESSION_SLOT {
     CX_BROWSER_SESSION *session;
     WCHAR browser[16];
     WCHAR version[64];
+    /* 该会话独有的 client_instance（141 §4.3：不持久化、不跨会话复用）。
+       注入到 chrome.storage.local 的 common.settings.device-instance。 */
+    WCHAR instance[CX_DEVICE_INSTANCE_CAP];
 } HOME_SESSION_SLOT;
 
 typedef struct HOME_STATE {
@@ -81,6 +95,24 @@ typedef struct HOME_STATE {
     DWORD pendingSlot;
     WCHAR extensionVersion[64];
     BOOL operationOK;
+    /* ---- 设备槽位（141 §5/§8） ---- */
+    WCHAR deviceId[CX_DEVICE_ID_CAP];
+    /* 会话注入上下文：只在「启动临时浏览器会话」那一次调用前由 home_work 填好。
+       injectDeviceKeys 为 FALSE 时 home_build_settings 不写设备两键 ——
+       考试模式与设置对话框的预览/校验路径因此天然不参与设备判定（红线 2）。 */
+    BOOL injectDeviceKeys;
+    WCHAR injectInstance[CX_DEVICE_INSTANCE_CAP];
+    /* 宿主自己那条状态文案（会话增减/心跳/启动各写一份），避免互相覆盖。 */
+    WCHAR deviceNotice[256];
+    WCHAR deviceText[256];
+    WCHAR statusNotice[512];
+    CX_DEVICE_QUOTA quota;
+    HANDLE deviceWorker;
+    DWORD deviceOperation;      /* 位掩码 HOME_DEVICE_FETCH / HOME_DEVICE_REPORT */
+    int deviceReportCount;
+    struct HOME_DEVICE_JOB *deviceJob;
+    BOOL devicePending;         /* TRUE = 有设备操作在飞，UI 线程不再派新的 */
+    DWORD heartbeatAt;          /* 上次心跳的 GetTickCount，0 = 还没跑过 */
 } HOME_STATE;
 
 typedef struct SETTINGS_STATE {
@@ -432,23 +464,46 @@ static BOOL home_adapter_patch(const CX_HOME_CONFIG *config, char *patch, DWORD 
     return home_json_append_char(patch, cap, &n, '}');
 }
 
+/*
+   设备两键（141 §5.2 / §4.3）：
+     device_id        = 宿主 device_id   ← 所有会话相同（R7 要求全关能回落到 1）
+     client_instance  = 该会话新生成的    ← 每个会话必须不同
+   只在 injectDeviceKeys 为 TRUE（= 正在为临时浏览器会话构造 settings）时写入。
+   这两个键名必须与扩展侧 src/runtime/device-identity.ts 和
+   windows/node-source/config.mjs 的 DEVICE_ID_KEY / DEVICE_INSTANCE_KEY 逐字一致。
+*/
+static BOOL home_device_patch(const HOME_STATE *state, char *patch, DWORD cap) {
+    DWORD n = 0;
+    BOOL first = TRUE;
+    if (!state || !patch || cap < 8 || !home_json_append_char(patch, cap, &n, '{')) return FALSE;
+    if (!state->injectDeviceKeys) return home_json_append_char(patch, cap, &n, '}');
+    if (!home_json_append_pair(patch, cap, &n, CX_DEVICE_ID_KEY, state->deviceId, &first)) return FALSE;
+    if (!home_json_append_pair(patch, cap, &n, CX_DEVICE_INSTANCE_KEY, state->injectInstance, &first)) return FALSE;
+    return home_json_append_char(patch, cap, &n, '}');
+}
+
 static BOOL home_build_settings(const HOME_STATE *state, const CX_HOME_CONFIG *config,
     char *out, DWORD cap, DWORD *length, WCHAR *error, DWORD errorCap) {
-    char *buffers; char *base, *custom, *patch;
+    char *buffers; char *base, *custom, *patch, *device;
     DWORD shared = state->options->sharedSettingsLength, merged = 0; int converted;
     BOOL ok = FALSE;
     if (shared > CX_OPTIONS_JSON_CAP - 3) return FALSE;
-    buffers = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP * 3);
+    buffers = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP * 4);
     if (!buffers) return FALSE;
     base = buffers; custom = base + CX_OPTIONS_JSON_CAP; patch = custom + CX_OPTIONS_JSON_CAP;
+    device = patch + CX_OPTIONS_JSON_CAP;
     base[0] = '{'; CopyMemory(base + 1, state->options->sharedSettingsJson, shared); base[shared + 1] = '}';
     converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, config->settingsJson, -1, custom, CX_OPTIONS_JSON_CAP, NULL, NULL);
     if (!converted || !cx_config_merge_settings(base, shared + 2, custom, (DWORD)converted - 1,
         out, cap, &merged, error, errorCap)) goto done;
     if (!home_adapter_patch(config, patch, CX_OPTIONS_JSON_CAP)) goto done;
-    ok = cx_config_merge_settings(out, merged, patch, (DWORD)lstrlenA(patch), out, cap, length, error, errorCap);
+    if (!cx_config_merge_settings(out, merged, patch, (DWORD)lstrlenA(patch), out, cap, &merged, error, errorCap)) goto done;
+    /* 设备两键放在最后一步合并：即使前面任何一层带了同名键，也会被这里的宿主值覆盖，
+       保证「device_id 一定是宿主的、client_instance 一定是本会话的」。 */
+    if (!home_device_patch(state, device, CX_OPTIONS_JSON_CAP)) goto done;
+    ok = cx_config_merge_settings(out, merged, device, (DWORD)lstrlenA(device), out, cap, length, error, errorCap);
 done:
-    SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 3); HeapFree(GetProcessHeap(), 0, buffers); return ok;
+    SecureZeroMemory(buffers, CX_OPTIONS_JSON_CAP * 4); HeapFree(GetProcessHeap(), 0, buffers); return ok;
 }
 
 static BOOL home_apply_typed_settings(CX_OPTIONS *options, const char *settings,
@@ -476,6 +531,345 @@ done:
 
 static void home_status(HOME_STATE *state, const WCHAR *text) {
     if (state && state->status) SetWindowTextW(state->status, text ? text : L"");
+}
+
+/* ============================================================================
+   设备槽位（141 §5 / §8）
+   ----------------------------------------------------------------------------
+   两条硬约束决定了这里的结构：
+
+   1. **上报失败不阻断本地**（红线 3）：所有网络调用都在独立线程里跑，
+      结果经 HOME_DEVICE_DONE 回到 UI 线程；失败只改文案，绝不改变控制流。
+   2. **C5-2 只提醒不拦截**（红线 1 / R8）：over_limit 只决定「要不要弹提醒」，
+      「仍然新建」走的是和普通新建完全相同的 home_begin 分支。
+   ========================================================================== */
+
+#define HOME_DEVICE_FETCH  0x1u
+#define HOME_DEVICE_REPORT 0x2u
+
+typedef struct HOME_DEVICE_JOB {
+    CX_DEVICE_QUOTA quota;
+    BOOL quotaOk;
+    BOOL reportOk;
+    WCHAR reportError[256];
+} HOME_DEVICE_JOB;
+
+/* 当前实际打开的浏览器会话数（state->sessions 里非 NULL 的个数）。 */
+static int home_open_sessions(const HOME_STATE *state) {
+    DWORD i;
+    int count = 0;
+    if (!state) return 0;
+    for (i = 0; i < HOME_MAX_SESSIONS; ++i) if (state->sessions[i].session) ++count;
+    return count;
+}
+
+/* 设备配置路径：--config 显式路径 > dataDir > cwd\windows\data\config.json。 */
+static BOOL home_device_config_path(const HOME_STATE *state, WCHAR *out, DWORD cap) {
+    return cx_device_config_path(state->options->configPathSet ? state->options->configPath : NULL,
+        state->options->dataDir, out, cap);
+}
+
+/* 状态栏文案：设备行 + （可能有的）宿主提示。 */
+static void home_refresh_status(HOME_STATE *state) {
+    WCHAR text[512];
+    int sessions;
+    if (!state) return;
+    sessions = home_open_sessions(state);
+    if (!cx_device_status_text(&state->quota, sessions, text, 512)) return;
+    home_copy(state->deviceText, 256, text);
+    text[0] = 0;
+    home_append(text, 512, state->deviceText);
+    if (state->deviceNotice[0]) {
+        home_append(text, 512, L"\r\n");
+        home_append(text, 512, state->deviceNotice);
+    }
+    home_status(state, text);
+}
+
+static void home_device_notice(HOME_STATE *state, const WCHAR *notice) {
+    if (!state) return;
+    home_copy(state->deviceNotice, 256, notice ? notice : L"");
+    home_refresh_status(state);
+}
+
+/* 设备线程主体：一次只做一件事（查询配额 或 上报会话数），避免线程排队。 */
+static DWORD WINAPI home_device_work(LPVOID context) {
+    HOME_STATE *state = (HOME_STATE *)context;
+    HOME_DEVICE_JOB *job = state ? state->deviceJob : NULL;
+    if (!state || !job) { if (state) PostMessageW(state->window, HOME_DEVICE_DONE, 0, 0); return 0; }
+    if (state->deviceOperation & HOME_DEVICE_FETCH) {
+        job->quotaOk = cx_device_quota_fetch(state->config ? state->config->adapterBaseUrl : L"",
+            state->config ? state->config->apiKey : L"", 8000, &job->quota);
+    }
+    if (state->deviceOperation & HOME_DEVICE_REPORT) {
+        WCHAR error[256];
+        error[0] = 0;
+        /* count 取 state->deviceReportCount（home_device_kick 在派活前写好），
+           不是 job 自己的字段 —— job 由调用方保留，count 由 UI 线程按「当前会话数」更新，
+           混用会让上报值永远停在第一次分配时的 0。 */
+        job->reportOk = cx_device_sessions_report(state->config ? state->config->adapterBaseUrl : L"",
+            state->config ? state->config->apiKey : L"", state->deviceId, state->deviceReportCount, 8000, error, 256);
+        home_copy(job->reportError, 256, error);
+    }
+    PostMessageW(state->window, HOME_DEVICE_DONE, 0, 0);
+    return 0;
+}
+
+/*
+   派一次设备操作。已有操作在飞时只更新 deviceOperation（合并请求），不新开线程 ——
+   否则频繁开关会话会产生线程风暴，而每次上报都只是「把当前会话数告诉服务端」，
+   最新的一次天然覆盖旧的。
+*/
+static void home_device_kick(HOME_STATE *state, DWORD operation, int count) {
+    if (!state) return;
+    if (operation & HOME_DEVICE_REPORT) {
+        /* 没有 device_id 时上报无意义（服务端无从定位设备）；查询配额仍可做。 */
+        if (!state->deviceId[0]) operation &= ~HOME_DEVICE_REPORT;
+        else state->deviceReportCount = cx_device_sessions_clamp(count);
+    }
+    if (!operation) return;
+    state->deviceOperation |= operation;
+    if (state->devicePending) return;
+    if (!state->deviceJob) {
+        state->deviceJob = (HOME_DEVICE_JOB *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HOME_DEVICE_JOB));
+        if (!state->deviceJob) { state->deviceOperation = 0; return; }
+    }
+    state->devicePending = TRUE;
+    state->deviceWorker = CreateThread(NULL, 0, home_device_work, state, 0, NULL);
+    if (!state->deviceWorker) {
+        state->devicePending = FALSE; state->deviceOperation = 0;
+        home_device_notice(state, L"无法创建设备状态线程");
+    }
+}
+
+/* 会话数变化后立即上报（四个时机统一走这里）。 */
+static void home_device_report(HOME_STATE *state) {
+    home_device_kick(state, HOME_DEVICE_REPORT, home_open_sessions(state));
+}
+
+/*
+   同步等设备线程做完。只用于「窗口即将销毁」的那一刻（HOME_EXIT）：此时已经不能
+   靠 HOME_DEVICE_DONE 回到 UI 线程，必须就地收尾，否则 count=0 永远发不出去，
+   服务端会一直把崩溃前的 3 记成 3（R7 就不生效了）。
+   超时上限 12 秒 = 两次 8 秒请求里的一次；等不到也不阻塞退出（fail-open）。
+*/
+static void home_device_wait(HOME_STATE *state) {
+    if (!state || !state->deviceWorker) return;
+    if (WaitForSingleObject(state->deviceWorker, 12000) == WAIT_OBJECT_0) {
+        CloseHandle(state->deviceWorker);
+        state->deviceWorker = NULL;
+        state->devicePending = FALSE;
+        state->deviceOperation = 0;
+    }
+}
+
+/*
+   退出前把 count=0 真正发出去（R7 的灵魂：全关必须回落到 1，那 1 个是宿主自己）。
+
+   为什么必须同步：HOME_EXIT 紧接着 DestroyWindow，之后 HOME_DEVICE_DONE 再也
+   回不到 UI 线程，异步上报必然丢失 —— 服务端会把崩溃/退出前的 N 一直记成 N。
+   所以这里：先把手上的设备线程收干净，再就地同步发一次 0。
+   超时上限 3 秒：等不到也不阻断退出（fail-open，与 137 一致）。
+*/
+static void home_device_flush_exit(HOME_STATE *state) {
+    WCHAR error[256];
+    if (!state || !state->deviceId[0]) return;
+    /* 先把在飞的线程收干净，避免它随后又用旧 count 覆盖掉我们刚发的 0。 */
+    home_device_wait(state);
+    if (state->deviceJob) {
+        SecureZeroMemory(state->deviceJob, sizeof(*state->deviceJob));
+        HeapFree(GetProcessHeap(), 0, state->deviceJob);
+        state->deviceJob = NULL;
+    }
+    error[0] = 0;
+    (void)cx_device_sessions_report(state->config ? state->config->adapterBaseUrl : L"",
+        state->config ? state->config->apiKey : L"", state->deviceId, 0, 3000, error, 256);
+    if (error[0]) home_device_notice(state, error);
+}
+
+/* HOME_DEVICE_DONE：把设备线程结果搬到 UI 线程的 state 上。 */
+static void home_device_settle(HOME_STATE *state) {    HOME_DEVICE_JOB *job = state->deviceJob;
+    DWORD operation = state->deviceOperation;
+    if (state->deviceWorker) { WaitForSingleObject(state->deviceWorker, INFINITE); CloseHandle(state->deviceWorker); state->deviceWorker = NULL; }
+    state->devicePending = FALSE;
+    state->deviceOperation = 0;
+    if (!job) { home_refresh_status(state); return; }
+    if (operation & HOME_DEVICE_FETCH) {
+        if (job->quotaOk) {
+            state->quota = job->quota;
+            home_device_notice(state, L"");
+        } else {
+            /* fail-open：只改文案，不影响任何本地能力（含「新会话」）。 */
+            WCHAR notice[256];
+            notice[0] = 0;
+            home_copy(notice, 256, L"无法获取设备配额");
+            if (job->quota.error[0]) { home_append(notice, 256, L"："); home_append(notice, 256, job->quota.error); }
+            home_device_notice(state, notice);
+        }
+    }
+    if (operation & HOME_DEVICE_REPORT) {
+        if (job->reportOk) home_device_notice(state, L"");
+        else if (job->reportError[0]) {
+            WCHAR notice[256];
+            notice[0] = 0;
+            home_append(notice, 256, L"会话数未能上报：");
+            home_append(notice, 256, job->reportError);
+            home_device_notice(state, notice);
+        }
+    }
+    /* 刷新配额失败后重试一次心跳（心跳本身也会刷新配额）。 */
+    if (!(operation & HOME_DEVICE_FETCH)) home_refresh_status(state);
+}
+
+/*
+   超限提醒（R8）。
+
+   ⚠️ 返回值只表示「用户主动选择了仍然新建」，**不表示「允许」**。调用方无论走哪条
+   分支都会照常 home_begin —— 这正是 R8：**提醒，绝不拦截**。
+   这个对话框没有「禁止」语义：取消只是用户放弃本次点击。
+
+   为什么不用 MessageBoxW：默认按钮无法显式指定为「取消」以外的可测形态，
+   而且 MessageBoxW 是系统模态，测试无法用 WM_COMMAND 驱动。
+   自绘对话框把「默认焦点在取消」变成可断言的事实（DM_GETDEFID / BS_DEFPUSHBUTTON）。
+*/
+typedef struct HOME_PROMPT_STATE {
+    HWND window;
+    HWND text;
+    HWND proceed;
+    HWND cancel;
+    HFONT font;
+    BOOL accepted;              /* TRUE = 仍然新建 */
+    int inspections;            /* 供测试观察：对话框确实起来了 */
+} HOME_PROMPT_STATE;
+
+static LRESULT CALLBACK home_prompt_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    HOME_PROMPT_STATE *state = (HOME_PROMPT_STATE *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (message == WM_NCCREATE) {
+        CREATESTRUCTW *create = (CREATESTRUCTW *)lParam;
+        state = (HOME_PROMPT_STATE *)create->lpCreateParams;
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)state);
+        home_set_icon(window);
+    }
+    if (!state) return DefWindowProcW(window, message, wParam, lParam);
+    if (message == WM_COMMAND) {
+        switch (LOWORD(wParam)) {
+        case HOME_PROMPT_PROCEED: state->accepted = TRUE; DestroyWindow(window); return 0;
+        case HOME_PROMPT_CANCEL:
+        case IDCANCEL: DestroyWindow(window); return 0;
+        default: break;
+        }
+    }
+    if (message == WM_CLOSE) { DestroyWindow(window); return 0; }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+static BOOL home_prompt_register(void) {
+    WNDCLASSW klass;
+    ZeroMemory(&klass, sizeof(klass));
+    klass.lpfnWndProc = home_prompt_proc;
+    klass.hInstance = home_instance;
+    klass.hIcon = home_icon();
+    klass.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    klass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    klass.lpszClassName = HOME_DEVICE_PROMPT_CLASS;
+    return RegisterClassW(&klass) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+/* 返回 TRUE = 仍然新建。超限以外的任何情况都直接返回 TRUE（不打扰用户）。 */
+static BOOL home_device_prompt_modal(HOME_STATE *state) {
+    HOME_PROMPT_STATE *prompt;
+    WCHAR heading[128], body[768], line[256];
+    MSG message;
+    int got = 1;
+    if (!state || !cx_device_over_limit(&state->quota)) return TRUE;
+    prompt = (HOME_PROMPT_STATE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*prompt));
+    if (!prompt) return TRUE; /* 分配失败按「继续」处理：绝不因为提示而挡住用户 */
+    prompt->font = state->font;
+    prompt->window = CreateWindowExW(WS_EX_DLGMODALFRAME, HOME_DEVICE_PROMPT_CLASS, L"设备数量已达上限",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(520, home_dpi, 96), MulDiv(250, home_dpi, 96),
+        state->window, NULL, home_instance, prompt);
+    if (!prompt->window) { HeapFree(GetProcessHeap(), 0, prompt); return TRUE; }
+    wsprintfW(heading, L"设备数量已达上限（%d / %d）。", state->quota.used, state->quota.limit);
+    body[0] = 0;
+    home_append(body, 768, L"仍可新建浏览器，但可能无法正常使用：\r\n");
+    home_append(body, 768, L"搜题请求可能被拒绝，导致答题失败。\r\n\r\n");
+    home_append(body, 768, L"请到网页端「我的设备」移除不用的设备。");
+    line[0] = 0;
+    home_append(line, 256, heading);
+    home_append(line, 256, L"\r\n\r\n");
+    home_append(line, 256, body);
+    prompt->text = home_control(0, L"STATIC", line, WS_CHILD | WS_VISIBLE, 20, 16, 470, 140, prompt->window, 0);
+    prompt->proceed = home_control(0, L"BUTTON", L"仍然新建", WS_CHILD | WS_VISIBLE, 220, 175, 130, 32, prompt->window, HOME_PROMPT_PROCEED);
+    prompt->cancel = home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 365, 175, 130, 32, prompt->window, HOME_PROMPT_CANCEL);
+    if (prompt->font) {
+        if (prompt->text) SendMessageW(prompt->text, WM_SETFONT, (WPARAM)prompt->font, TRUE);
+        if (prompt->proceed) SendMessageW(prompt->proceed, WM_SETFONT, (WPARAM)prompt->font, TRUE);
+        if (prompt->cancel) SendMessageW(prompt->cancel, WM_SETFONT, (WPARAM)prompt->font, TRUE);
+    }
+    ShowWindow(prompt->window, SW_SHOW); ShowWindow(prompt->window, SW_SHOW);
+    UpdateWindow(prompt->window);
+    /* 默认焦点在「取消」（危险操作不设默认）。BS_DEFPUSHBUTTON 只是视觉默认，
+       键盘焦点必须显式给到 cancel，两者都做才算「默认焦点在取消」。 */
+    if (prompt->cancel) SetFocus(prompt->cancel);
+    EnableWindow(state->window, FALSE);
+    ++prompt->inspections;
+    while (IsWindow(prompt->window) && (got = GetMessageW(&message, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessageW(prompt->window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
+    }
+    if (IsWindow(prompt->window)) DestroyWindow(prompt->window);
+    if (!got) PostQuitMessage((int)message.wParam);
+    EnableWindow(state->window, TRUE);
+    SetForegroundWindow(state->window);
+    got = prompt->accepted;
+    SecureZeroMemory(prompt, sizeof(*prompt));
+    HeapFree(GetProcessHeap(), 0, prompt);
+    return got ? TRUE : FALSE;
+}
+
+/*
+   超限提醒的统一入口：判定在上，模态在 home_device_prompt_modal。
+
+   两个可注入点（home-tests.c 以文本 include 方式编译本文件，能直接改这两个静态变量）：
+     home_device_prompt_auto_proceed = TRUE  → 等价于用户点「仍然新建」
+     home_device_prompt_count               → 断言「每次点击只提醒一次」
+   生产路径两者都是初值，不改变行为。
+*/
+static int home_device_prompt_count;
+static BOOL home_device_prompt_auto_proceed;
+
+static BOOL home_device_confirm_over_limit(HOME_STATE *state) {
+    if (!state || !cx_device_over_limit(&state->quota)) return TRUE;
+    ++home_device_prompt_count;
+    if (home_device_prompt_auto_proceed) return TRUE;   /* 等价于用户点「仍然新建」 */
+    return home_device_prompt_modal(state);
+}
+
+/*
+   为一个即将启动的临时浏览器会话准备注入上下文。
+
+   抽成函数而不是内联在 home_work 里，是为了让 home-tests.c 能直接执行这段原文
+   来断言「不同会话不同 instance」—— 若测试自己去调 cx_device_instance_new，
+   把这里改成固定值时用例仍会绿（假钉子，2026-11-13 t143 踩过）。
+*/
+static BOOL home_device_begin_injection(HOME_STATE *state) {
+    if (!state) return FALSE;
+    state->injectDeviceKeys = TRUE;
+    if (!cx_device_instance_new(state->injectInstance, CX_DEVICE_INSTANCE_CAP)) {
+        /* 拿不到随机源时宁可不注入，也不要让多个会话共用同一个 instance
+           （那会让服务端把不同会话判成同一实例）。 */
+        state->injectDeviceKeys = FALSE;
+        state->injectInstance[0] = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void home_device_end_injection(HOME_STATE *state) {
+    if (!state) return;
+    state->injectDeviceKeys = FALSE;
+    SecureZeroMemory(state->injectInstance, sizeof(state->injectInstance));
 }
 
 static void home_refresh_list(HOME_STATE *state) {
@@ -511,7 +905,7 @@ static void home_refresh_list(HOME_STATE *state) {
 }
 
 static void home_poll_sessions(HOME_STATE *state) {
-    DWORD i; BOOL running;
+    DWORD i; BOOL running, changed = FALSE;
     WCHAR error[256];
     if (state->worker) return;
     for (i = 0; i < HOME_MAX_SESSIONS; ++i) {
@@ -520,12 +914,28 @@ static void home_poll_sessions(HOME_STATE *state) {
         if (!cx_browser_poll(state->sessions[i].session, &running, error, 256)) {
             if (error[0]) home_status(state, error);
         } else if (!running) {
+            /* 时机 2/4（141 §5.3）：进程自己退出 → 会话数 -1 后立即上报。 */
             cx_browser_destroy(state->sessions[i].session);
             state->sessions[i].session = NULL;
+            state->sessions[i].instance[0] = 0;
+            changed = TRUE;
             if (error[0]) home_status(state, error);
         }
     }
     home_refresh_list(state);
+    if (changed) {
+        home_device_report(state);
+        home_refresh_status(state);
+    }
+    /* 时机 5：心跳。复用本 500ms 的 poll 循环做 60 秒分频（不新开 timer）。
+       心跳同时刷新配额，服务端 3 分钟收不到就把它记 0（141 §5.4）。 */
+    {
+        DWORD now = GetTickCount();
+        if (!state->heartbeatAt || now - state->heartbeatAt >= HOME_HEARTBEAT_MS) {
+            state->heartbeatAt = now;
+            home_device_kick(state, HOME_DEVICE_REPORT | HOME_DEVICE_FETCH, home_open_sessions(state));
+        }
+    }
 }
 
 static DWORD WINAPI home_work(LPVOID context) {
@@ -579,12 +989,24 @@ static DWORD WINAPI home_work(LPVOID context) {
         if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) goto done;
     }
     if (state->operation == HOME_UPDATE) { state->operationOK = TRUE; goto done; }
+    /* 注入上下文只在这里填：这就是「临时浏览器会话」那一次构造。
+       考试模式（home_exam）与设置对话框的预览/校验都走 home_build_settings，
+       但它们不会置 injectDeviceKeys，所以天然不带设备两键（红线 2）。
+       实例标识每次点击都新生成 —— 不同会话一定不同值（141 §4.3）。 */
+    /* 注入上下文只在这里填：这就是「临时浏览器会话」那一次构造。
+       考试模式（home_exam）与设置对话框的预览/校验都走 home_build_settings，
+       但它们不会置 injectDeviceKeys，所以天然不带设备两键（红线 2）。
+       实例标识每次点击都新生成 —— 不同会话一定不同值（141 §4.3）。 */
+    (void)home_device_begin_injection(state);
     if (!home_build_settings(state, &state->pendingConfig, settings, CX_OPTIONS_JSON_CAP, &settingsLength, state->error, 512)) goto done;
     ZeroMemory(&options, sizeof(options)); options.browserPath = browserPath;
     options.crxData = data; options.crxSize = size; options.initialUrl = L"https://www.chaoxing.com/";
     options.settingsJsonUTF8 = settings;
     state->operationOK = cx_browser_start(&options, &state->pendingSession, state->error, 512);
 done:
+    /* 注入上下文只在本次调用内有效：任何后续（设置对话框预览、考试模式）
+       都不得意外带上设备两键。 */
+    home_device_end_injection(state);
     if (settings) { SecureZeroMemory(settings, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, settings); }
     if (browserPath) HeapFree(GetProcessHeap(), 0, browserPath);
     if (cacheDir) HeapFree(GetProcessHeap(), 0, cacheDir);
@@ -601,16 +1023,27 @@ static void home_buttons(HOME_STATE *state, BOOL enabled) {
 
 static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser, const CX_HOME_CONFIG *config) {
     DWORD i; LRESULT selected;
+    BOOL isNewSession;
     if (state->worker) return;
+    isNewSession = operation == HOME_EDGE || operation == HOME_CHROME;
     state->pendingSlot = HOME_MAX_SESSIONS;
     if (operation == HOME_CLOSE_SESSION) {
         selected = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
         if (selected != LB_ERR) state->pendingSlot = (DWORD)SendMessageW(state->list, LB_GETITEMDATA, selected, 0);
         if (state->pendingSlot >= HOME_MAX_SESSIONS) { home_status(state, L"请先选择一个临时会话"); return; }
-    } else if (operation == HOME_EDGE || operation == HOME_CHROME) {
+    } else if (isNewSession) {
         for (i = 0; i < HOME_MAX_SESSIONS; ++i) if (!state->sessions[i].session) break;
         if (i == HOME_MAX_SESSIONS) { home_status(state, L"临时会话已达到 8 个上限"); return; }
         state->pendingSlot = i;
+        /*
+           C5-2 / R8：超限只提醒，绝不拦截。
+
+           ⚠️ 这里刻意写成「先提示、无论结果都往下走」：home_device_confirm_over_limit
+           返回 FALSE 只代表用户自己点了取消（一次用户主动放弃），不是程序拦住了他。
+           任何「if (!confirm) return;」以外的校验都不要往这里加 —— 变异 S10 会把这条
+           改成拦截，scripts/device-quota.test.mjs 必须因此变红。
+        */
+        home_device_confirm_over_limit(state);
     }
     if (config) CopyMemory(&state->pendingConfig, config, sizeof(*config));
     home_copy(state->pendingBrowser, 16, browser); state->operation = operation;
@@ -1073,6 +1506,9 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
             state->sessions[state->pendingSlot].session = state->pendingSession;
             home_copy(state->sessions[state->pendingSlot].browser, 16, state->pendingBrowser); state->pendingSession = NULL;
             home_copy(state->sessions[state->pendingSlot].version, 64, state->extensionVersion);
+            /* 时机 1（141 §5.3）：cx_browser_start 成功 → 会话数 +1，立即上报。
+               只有真拿到 session 才计数，失败路径不虚增。 */
+            home_device_report(state);
         }
         cx_home_config_clear(&state->pendingConfig); home_buttons(state, TRUE); home_refresh_list(state);
         if (!state->operationOK) {
@@ -1081,16 +1517,23 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
             else state->closing = FALSE;
             return 0;
         }
+        /* 时机 3（141 §5.3）：主动关闭单个会话成功 → 会话数 -1，立即上报。 */
+        if (state->operation == HOME_CLOSE_SESSION) home_device_report(state);
+        /* 时机 4（141 §5.3）：退出全部 → 归 0，且必须真的发出去（R7 回落）。
+           HOME_EXIT 会销毁窗口，之后无法再走 HOME_DEVICE_DONE，所以同步发。 */
+        if (state->operation == HOME_EXIT) home_device_flush_exit(state);
         if (state->operation == HOME_EXIT) { KillTimer(window, HOME_TIMER); DestroyWindow(window); return 0; }
         if (state->operation == HOME_UPDATE) {
             home_copy(state->error, 512, L"已校验在线扩展 "); home_append(state->error, 512, state->extensionVersion);
             home_append(state->error, 512, L"；新会话将获取当前发布版本。"); home_status(state, state->error);
         } else home_status(state, state->operation == HOME_CLOSE_SESSION ? L"已关闭并清理临时会话"
             : L"临时会话已启动；关闭浏览器窗口后资料会自动清理");
+        home_refresh_status(state);
         if (state->closing) home_begin(state, HOME_EXIT, NULL, NULL);
         return 0;
     }
     if (message == WM_TIMER) { home_poll_sessions(state); return 0; }
+    if (message == HOME_DEVICE_DONE) { home_device_settle(state); return 0; }
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED) {
         CX_HOME_CONFIG *separate; WCHAR browser[16];
         if (state->worker && LOWORD(wParam) != HOME_EXIT) return 0;
@@ -1153,7 +1596,7 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     }
     home_default_font = CreateFontW(-MulDiv(14, home_dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-    if (!home_register_class()) {
+    if (!home_register_class() || !home_prompt_register()) {
         if (error && errorCap) lstrcpynW(error, L"无法注册原生主页窗口", (int)errorCap);
         if (home_default_font) DeleteObject(home_default_font); HeapFree(GetProcessHeap(), 0, state); return FALSE;
     }
@@ -1178,10 +1621,34 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     home_control(0, L"BUTTON", L"检查扩展更新", WS_CHILD | WS_VISIBLE, 185, 435, 150, 30, window, HOME_UPDATE);
     ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window); SetTimer(window, HOME_TIMER, 500, NULL);
     home_refresh_list(state);
+    /*
+       C4-1 + C4-2（141 §5.1 / R5）：
+         1) 取宿主 device_id（没有就生成并写回 windows/data/config.json）；
+         2) 立刻查一次 GET /api/user/device-quota —— 这一步同时完成「登记该槽位」，
+            所以 exe 一启动就占 1 个，哪怕用户从不点「新会话」。
+      两者都 fail-open：取不到 id 就不上报（只查配额），查不到配额只改状态栏文案。
+    */
+    {
+        WCHAR configPath[CX_HOME_EXTENSION_PATH_CAP];
+        WCHAR idError[256];
+        configPath[0] = 0; idError[0] = 0;
+        if (home_device_config_path(state, configPath, CX_HOME_EXTENSION_PATH_CAP)) {
+            (void)cx_device_id_ensure(configPath, options->noDiskWrite, state->deviceId,
+                CX_DEVICE_ID_CAP, idError, 256);
+        }
+        if (!state->deviceId[0] && idError[0]) home_device_notice(state, idError);
+        home_refresh_status(state);
+        home_device_kick(state, HOME_DEVICE_FETCH | (state->deviceId[0] ? HOME_DEVICE_REPORT : 0),
+            home_open_sessions(state));
+    }
     while ((got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
     if (state->worker) { WaitForSingleObject(state->worker, INFINITE); CloseHandle(state->worker); state->worker = NULL; }
+    /* 退出路径兜底：把 count=0 发出去（R7），再收设备线程与句柄。 */
+    home_device_flush_exit(state);
+    if (state->deviceWorker) { WaitForSingleObject(state->deviceWorker, INFINITE); CloseHandle(state->deviceWorker); state->deviceWorker = NULL; }
+    if (state->deviceJob) { SecureZeroMemory(state->deviceJob, sizeof(*state->deviceJob)); HeapFree(GetProcessHeap(), 0, state->deviceJob); state->deviceJob = NULL; }
     for (i = 0; i < HOME_MAX_SESSIONS; ++i) if (state->sessions[i].session) cx_browser_destroy(state->sessions[i].session);
     if (state->pendingSession) cx_browser_destroy(state->pendingSession);
     if (IsWindow(window)) DestroyWindow(window);
