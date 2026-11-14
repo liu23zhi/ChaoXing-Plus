@@ -210,7 +210,7 @@ test('AI fallback omits deepThinking by default and sends true when enabled', as
 
   assert.equal(Object.hasOwn(bodies[0], 'deepThinking'), false);
   assert.equal(bodies[1].deepThinking, true);
-  assert.match(urls[2], /\/adapter-service\/ai-fallback\/tasks$/);
+  // 2026-11-14 后端 API 前缀改名 /adapter-service -> /api：只保留 4 个搜索接口做旧扩展兼容，   // ai-fallback 不在兼容集内。这条断言原写 /adapter-service，是改名时的漏改。   assert.match(urls[2], /\/api\/ai-fallback\/tasks$/);
   assert.equal(bodies[2].deepThinking, true);
 });
 
