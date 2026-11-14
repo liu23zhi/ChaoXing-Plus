@@ -762,7 +762,17 @@ async function main() {
     if (!options.noDiskWrite && !options.printEffectiveConfig) await registerNewFile(configPath);
     const configStore = createConfigStore(configPath, {
       logger: (message) => logger.info(message),
-      persistEnabled: !options.noDiskWrite,
+      // ⚠️ printEffectiveConfig 也必须禁写盘（2026-11-15 修）。
+			//
+			// print 模式的契约是「只输出合并后的共享设置，不扫描、不启动、不写日志/配置/报告」
+			// （见 printEffectiveConfig 分支的注释与 --print-effective-config 的帮助文本）。
+			// 但 device_id 的 ensureDeviceId() 在 configStore.load() 里被无条件调用，
+			// 它会通过 schedulePersist 落盘 → print 模式实测会重写 config.json。
+			//
+			// 上面那行 registerNewFile 早已正确排除了 printEffectiveConfig，这里是同一
+			// 取舍漏在了 persistEnabled 上。两条必须一致，否则「print 不写盘」只对
+			// 注册文件成立、对配置写入不成立。
+			persistEnabled: !options.noDiskWrite && !options.printEffectiveConfig,
       onError: recordConfigFailure
     });
     configStoreForCleanup = configStore;

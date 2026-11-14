@@ -163,7 +163,24 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
     const generated = randomUUID();
     config.settings[DEVICE_ID_KEY] = generated;
     revision += 1;
-    schedulePersist();
+    // ⚠️ 这里**不**调 schedulePersist()（2026-11-15 修，合入后实测红）。
+    //
+    // 原先调用它，后果是启动时立刻排一次 250ms debounce 写盘。这带来两个问题：
+    //
+    // 1) **print 模式违约**：--print-effective-config 的契约是「不写配置」，
+    //    但它没开 noDiskWrite，于是这次写盘真的发生（windows-print-effective-config
+    //    的断言「print mode must not rewrite the config file」实测红）。
+    //
+    // 2) **与 watch 抢同一个文件**：watch({intervalMs:1500}) 靠 mtime 判变化。
+    //    启动那一次写盘与「用户/测试随后修改 config.json」叠在一起时，watch 的
+    //    mtime 比对会把真实变更判成未变化 → onConfigChange 不触发 → 不广播。
+    //    windows-host 的「配置热更新不能改变本次启动的 noDiskWrite 策略」因此在
+    //    任何 noDiskWrite 取值下都红（实测 pass 37 / fail 1）。
+    //
+    // 不调度 debounce 写盘，但要标脏：这样 flush() / 后续任何真实写入都会把它一起落盘。
+    // 只标脏不排定时器，既避免「启动即写」，又保证 device_id 不会丢（否则每次重启
+    // 都会生成新 ID → 占掉一个新设备槽位，违背 R5「exe 宿主槽位稳定」）。
+    if (persistEnabled) pending = true;
     return generated;
   }
 
