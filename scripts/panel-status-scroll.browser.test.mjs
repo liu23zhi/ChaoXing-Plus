@@ -19,6 +19,55 @@ const BOOTSTRAP = resolve(root, 'windows/share-file/windows-bootstrap.js');
 const PANEL = '#panel-common-work-results';
 const EXAM_URL = 'http://a.chaoxing.com/exam-ans/exam/list';
 
+// STATUS_SERIES_BODY 是**后端 detailed 端点响应的同构 mock**（不是随手编的数字）。
+//
+// 结构来源（逐字段对照，不要凭印象改）：
+//   internal/controller/service_status.go:17-26  `serviceStatusResponse`
+//   internal/service/service_status.go:35-51     `StatusPoint`
+//
+// ⚠️ `minute` 是 **Unix 秒 / 60**（`StatusPoint.Minute` 的注释：「该点所属的分钟」），
+// 前端 `buildServiceStatusBuckets` 会 ×60000 还原成毫秒。写成毫秒会让色带整体错位到 1970 年。
+//
+// ⚠️ 用**相对时间**（`Date.now()` 推），不写死绝对时刻 —— 写死会让这条用例在不同时区下
+// 渲染出不同的小时数，重演 `status-panel-http.test.mjs` 那个「本地绿 CI 红」。
+const STATUS_SERIES_BODY = (() => {
+  const nowMinute = Math.floor(Date.now() / 60000);
+  const points = [];
+  // 铺 288 个点（= 24h × 12 点/小时，与 STATUS_BUCKET_COUNT 一致），让色带与分钟列表都有内容。
+  for (let offset = 288; offset >= 1; offset -= 1) {
+    points.push({
+      minute: nowMinute - offset,
+      totalRequests: 3,
+      successRequests: 3,
+      failedRequests: 0,
+      upstreamFailures: 0,
+      timeoutFailures: 0,
+      authFailures: 0,
+      quotaFailures: 0,
+      avgLatencyMs: 80
+    });
+  }
+  return {
+    schemaVersion: 1,
+    status: 'healthy',
+    windowMinutes: 1440,
+    points,
+    summary: {
+      status: 'healthy',
+      successRate: 1,
+      successRateAvailable: true,
+      totalRequests: 864,
+      successRequests: 864,
+      failedRequests: 0,
+      avgLatencyMs: 80,
+      windowMinutes: 1440
+    },
+    capacity: 288,
+    retained: points.length,
+    restartedAt: new Date(Date.now() - 288 * 60000).toISOString()
+  };
+})();
+
 // 结果条数必须足够多，让 `[data-work-results-list]`（maxHeight 260px）真的可滚动。
 const FIXTURE_RESULTS = Array.from({ length: 24 }, (_, index) => ({
   question: `滚动位置回归题 ${index + 1}`,
@@ -38,6 +87,26 @@ async function openPanel(mode) {
   await page.setViewport({ width: 1100, height: 900, deviceScaleFactor: 1 });
   await page.setRequestInterception(true);
   page.on('request', (request) => {
+    const url = request.url();
+    if (process.env.CX_T214_DEBUG) console.log('[REQ]', request.resourceType(), url);
+    // 状态端点必须喂数据，否则面板走 `empty` 分支（只渲染摘要），三区块永远不出现。
+    //
+    // 2026-11-14：t180 把默认 fetcher 从 fixture 改成真实 HTTP 后，测试环境没有
+    // baseurl/key 就拿不到数据 —— 三区块代码本身没坏，是「没数据可画」。
+    // 这里必须同时满足三件事（缺一件拦截器就收不到请求）：
+    //   ① localStorage 里要有 key（否则 status-panel-http.ts:114 在发请求前就 return no-token）
+    //   ② baseurl 必须与页面同协议（EXAM_URL 是 http；若页面实际 origin 是 https，
+    //      请求会被混合内容策略拦掉，压根不进拦截器）
+    //   ③ localStorage 的值必须 JSON 序列化（runtime/store.ts:117 写入走 JSON.stringify，
+    //      裸字符串会让 JSON.parse 抛错后静默回退到 fallback）
+    if (url.includes('/service-status')) {
+      void request.respond({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(STATUS_SERIES_BODY)
+      });
+      return;
+    }
     if (request.isNavigationRequest()) {
       void request.respond({
         status: 200,
@@ -50,6 +119,15 @@ async function openPanel(mode) {
   });
   await page.goto(EXAM_URL);
   await page.evaluate(() => { localStorage.clear(); });
+  // 页面真实 origin 必须从页面里读：EXAM_URL 写的是 http，但实测被重定向到 https。
+  // 用 URL(EXAM_URL).origin 会得到 http，与页面 origin 不一致 ⇒ 状态请求被混合内容策略拦掉，
+  // 拦截器收不到任何请求（实测 [REQ] 里只有 document 与 favicon）。
+  const statusOrigin = await page.evaluate(() => location.origin);
+  // 见拦截器注释 ①②③：baseurl 与页面同源、key 非空、两者都 JSON 序列化。
+  await page.evaluate((origin) => {
+    localStorage.setItem('common.settings.tiku-adapter.baseurl', JSON.stringify(origin));
+    localStorage.setItem('common.settings.tiku-adapter.key', JSON.stringify('synthetic-status-key'));
+  }, await page.evaluate(() => location.origin));
 
   if (mode === 'windows') {
     const bootstrapSource = await readFile(BOOTSTRAP, 'utf8');
@@ -65,7 +143,13 @@ async function openPanel(mode) {
         'common.settings.extension-enabled': true,
         'common.settings.windows-panel-enabled': true,
         'common.settings.windows-no-disk-write': false,
-        'common.settings.windows-panel-collapsed': false
+        'common.settings.windows-panel-collapsed': false,
+        // ⚠️ Windows 端的 __CX_WIN_CONFIG_JSON__ 会**整体覆盖** localStorage 里的配置
+        // （windows-bootstrap.js:1102-1103 用这份快照灌进 runtimeStore）。
+        // baseurl/key 必须也写在这里，否则前面那两行 localStorage.setItem 会被冲掉，
+        // 状态请求继续走 no-token ⇒ 三区块 0 格（实测：不写就是 288 格变 0 格）。
+        'common.settings.tiku-adapter.baseurl': statusOrigin,
+        'common.settings.tiku-adapter.key': 'synthetic-status-key'
       },
       results: FIXTURE_RESULTS
     });
@@ -188,6 +272,11 @@ test('五个页签都能点，切走再切回滚动位置不变', async (t) => {
       // ---- 状态页真的有内容（三区块）----
       await page.click('[data-cx-panel-tab="status"]');
       await page.waitForSelector(`${PANEL} [data-cx-status-panel]`, { timeout: 10000 });
+      // ⚠️ 必须显式等三区块出现，不能断言时「刚好没到」。
+      // 面板容器先挂载、状态数据是异步 fetch 来的 —— 只等面板会拿到 hasBand=false，
+      // 表现为「3 次跑 1 次过、2 次失败」的竞态（实测确认）。
+      await page.waitForSelector(`${PANEL} [data-cx-status-band]`, { timeout: 10000 });
+      await page.waitForSelector(`${PANEL} [data-cx-status-minutes]`, { timeout: 10000 });
       const statusPanel = await page.evaluate((selector) => {
         const panel = document.querySelector(selector).querySelector('[data-cx-panel-tab-panel="status"]');
         return {
@@ -239,6 +328,11 @@ test('Windows 端保留状态页签，且状态页有内容', async (t) => {
 
       await page.click('[data-cx-panel-tab="status"]');
       await page.waitForSelector(`${PANEL} [data-cx-status-panel]`, { timeout: 10000 });
+      // ⚠️ 必须显式等三区块出现，不能断言时「刚好没到」。
+      // 面板容器先挂载、状态数据是异步 fetch 来的 —— 只等面板会拿到 hasBand=false，
+      // 表现为「3 次跑 1 次过、2 次失败」的竞态（实测确认）。
+      await page.waitForSelector(`${PANEL} [data-cx-status-band]`, { timeout: 10000 });
+      await page.waitForSelector(`${PANEL} [data-cx-status-minutes]`, { timeout: 10000 });
       const cells = await page.evaluate((selector) => document.querySelector(selector)
         .querySelectorAll('[data-cx-status-cell]').length, PANEL);
       assert.equal(cells, 288, `Windows 端状态页也必须是 288 格，实际 ${cells}`);
@@ -250,3 +344,4 @@ test('Windows 端保留状态页签，且状态页有内容', async (t) => {
     browser = undefined;
   }
 });
+
