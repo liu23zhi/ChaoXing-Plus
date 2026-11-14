@@ -62,7 +62,27 @@ export function buildServiceStatusUrl(baseurl: string, endpoint: string): string
 }
 
 export type ServiceStatusHttpFetcherOptions = {
-  baseurl: string;
+  /**
+   * 固定 baseurl（原有形态，保留向后兼容）。
+   *
+   * ⚠️ 它是**建 fetcher 那一刻**的快照。若用户在面板里改了题库地址，
+   * 这个值不会跟着变 —— 而那正是 2026-11-15 用户报的缺陷：
+   * 「改了题库设置里的 URL，状态 TAB 依旧请求默认 URL」。
+   * 需要跟随最新配置时请用 `getBaseurl`。
+   */
+  baseurl?: string;
+  /**
+   * 每次取数时**现读**的 baseurl。与 `baseurl` 二选一，同时给时本字段优先。
+   *
+   * 为什么要有它而不是只靠「保存后重建 fetcher」：重建依赖「保存路径只有一处」。
+   * 将来若出现第二个写入口（导入配置、多标签页同步、后台下发），
+   * 漏掉重建就会静默回到旧地址 —— 而那种缺陷在状态页只表现为「数据看着像旧的」，
+   * 极难发现。让 fetcher 每次读最新值，从结构上消除这个接缝。
+   *
+   * 两个都不给时按空串处理，交给下面 `if (!url) return null` 的既有静默分支 ——
+   * **不能抛异常**：那会让状态页整块崩掉，而它只是旁路展示。
+   */
+  getBaseurl?: () => string;
   /** 显式端点。默认值只用于「不知道新路径」的兜底，正常调用必须传。 */
   endpoint?: string;
   requester: ServiceStatusRequester;
@@ -97,12 +117,36 @@ export type ServiceStatusHttpFetcherOptions = {
  * 注意这里**不抛错**：抛错与返回 null 在 refresh 里行为相同（都保留旧快照），
  * 但返回 null 让我们能顺带回调 `onError` 而不制造未捕获的 rejection。
  */
+/**
+ * 从 options 里解析本次请求要用的 baseurl。
+ *
+ * 优先级：`getBaseurl()` > `baseurl` > 空串。
+ *
+ * `getBaseurl` 抛异常时**回退到 baseurl**（而不是把异常抛给调用方）：
+ * 状态页是旁路展示，配置读取函数若因为 storage 损坏之类的原因抛错，
+ * 让整个状态页崩掉远不如退回快照值。这与「取数失败保留旧快照」是同一条纪律。
+ */
+function resolveOptionsBaseUrl(options: ServiceStatusHttpFetcherOptions): string {
+  if (typeof options.getBaseurl === 'function') {
+    try {
+      const dynamic = options.getBaseurl();
+      if (typeof dynamic === 'string' && dynamic.trim()) {
+        return dynamic;
+      }
+    } catch {
+      // 读最新配置失败 → 退回下面的一次性快照值。
+    }
+  }
+  return typeof options.baseurl === 'string' ? options.baseurl : '';
+}
+
 export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcherOptions): ServiceStatusFetcher {
   const endpoint = String(options.endpoint ?? SERVICE_STATUS_ENDPOINT).trim();
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : SERVICE_STATUS_REQUEST_TIMEOUT_MS;
 
   return async (): Promise<ServiceStatusSnapshot | null> => {
-    const url = buildServiceStatusUrl(options.baseurl, endpoint);
+    // 每次取数都重新解析（getBaseurl 存在时），这样用户改了题库地址立即生效。
+    const url = buildServiceStatusUrl(resolveOptionsBaseUrl(options), endpoint);
     if (!url) {
       // 没配置 baseurl：不是错误，是「还没设置题库地址」。静默返回 null。
       return null;

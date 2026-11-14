@@ -34,8 +34,11 @@ import {
   setServiceStatusFetcher
 } from './status-panel.js';
 import {
+  buildServiceStatusUrl,
   createServiceStatusHttpFetcher,
-  fetchServiceStatusRequester
+  fetchServiceStatusRequester,
+  readHttpStatus,
+  SERVICE_STATUS_REQUEST_TIMEOUT_MS
 } from './status-panel-http.js';
 import {
   DEFAULT_TIKU_BASE_URL,
@@ -804,6 +807,76 @@ export function getStoredTikuAdapterConfig() {
  * ⚠️ 失败与 403 都**不弹全局错误**：状态页是旁路展示，取数失败不能干扰答题。
  * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
  */
+/**
+ * 探测题库地址与令牌是否可用（138 §5.3 的 P3）。
+ *
+ * # 为什么探测摘要端点而不是搜题接口
+ *
+ * `/api/service-status/summary` 是 AuthOrAccessToken 鉴权、只返回聚合数字，
+ * **不消耗搜题额度**。用 `/search` 探测会真的走一次计费链路 —— 用户点一次「保存」
+ * 就被扣一次钱，不可接受。
+ *
+ * 代价（如实记录）：探测通过只代表「地址通 + 令牌有效」，
+ * **不代表搜题真的能出答案**（上游题库可能全挂）。要覆盖后者需要换端点并接受扣费。
+ *
+ * # 三态必须分开，不能糊成「成功/失败」
+ *
+ *   200        → 连接正常（附延迟）
+ *   401 / 403  → 地址是通的，但**令牌不被接受** —— 用户动作是「换令牌」
+ *   其它/网络   → 地址本身不可达 —— 用户动作是「检查地址、网络、服务是否启动」
+ *
+ * 这两种失败的用户动作完全相反，糊成一个「连接失败」等于让用户两个都要试。
+ *
+ * # 永不抛异常、永不阻断保存
+ *
+ * 本函数只返回一句给人看的话。任何异常都吞掉并转成文案 ——
+ * 探测是**附加提示**，它失败不该影响「配置已保存」这个主结果。
+ */
+async function probeTikuAdapter(baseurl: string, accessKey: string): Promise<string> {
+  const normalized = resolveTikuAdapterBaseUrl(baseurl, DEFAULT_TIKU_BASE_URL);
+  const url = buildServiceStatusUrl(normalized, '/api/service-status/summary');
+  if (!url) {
+    return '⚠️ 未填写题库地址，未做连通性检测。';
+  }
+  if (!String(accessKey ?? '').trim()) {
+    return '⚠️ 未填写令牌，未做连通性检测。';
+  }
+
+  const startedAt = Date.now();
+  const controller = typeof AbortController === 'function' ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), SERVICE_STATUS_REQUEST_TIMEOUT_MS) : undefined;
+  try {
+    // ⚠️ fetchServiceStatusRequester 在 `!response.ok` 时**抛异常**（不是返回 response），
+    // 且异常上带 status/serverMessage。所以成功路径只能到 2xx，
+    // 4xx/5xx 必须走 catch + readHttpStatus(error) 判定 —— 见 status-panel-http.ts:238。
+    // 第一版按「返回 response 再读 status」写，编译能过但 401 会被当成「网络不可达」，
+    // 用户会被引向「检查地址」而不是「换令牌」。
+    await fetchServiceStatusRequester(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${String(accessKey).trim()}` },
+      signal: controller?.signal
+    } as RequestInit);
+    return `✅ 连接正常（${Date.now() - startedAt}ms）。`;
+  } catch (error) {
+    const status = readHttpStatus(error);
+    if (status === 401) {
+      return '⚠️ 地址可达，但令牌未被接受（HTTP 401）。请到题库后台确认令牌是否有效或已被停用。';
+    }
+    if (status === 403) {
+      return '⚠️ 地址可达，但该令牌无权访问状态接口（HTTP 403）。';
+    }
+    if (status !== null && status >= 400) {
+      return `⚠️ 地址可达但返回异常（HTTP ${status}）。配置已保存，状态页可能显示旧数据。`;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    return `⚠️ 无法连接题库地址（${reason}）。配置已保存，但搜题与状态页都会失败 —— 请检查地址、网络与服务是否启动。`;
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 function mountServiceStatusHttpFetcher() {
   const config = getStoredTikuAdapterConfig();
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL);
@@ -814,6 +887,14 @@ function mountServiceStatusHttpFetcher() {
   // 管理员端点带逐分钟 points，属运维可见信息，不能给每个持 key 的用户。
   setServiceStatusFetcher(createServiceStatusHttpFetcher({
     baseurl,
+    // ⚠️ 同时给 getBaseurl（2026-11-15，138 §5.2）：`baseurl` 是**建 fetcher 那一刻**的快照，
+    // 用户之后在面板改题库地址不会重建 fetcher，状态 Tab 就永远请求旧地址
+    // —— 这正是用户报的「改了题库 URL 但状态 TAB 依旧请求默认 URL」。
+    // 保存路径已补 mountServiceStatusHttpFetcher() 重建（见 saveButton 回调），
+    // 但仍给 getBaseurl 作第二道保险：将来若有第二个写入口（导入配置、多标签页同步），
+    // 不重建也仍然读最新值。二者的优先级在 status-panel-http 里定：getBaseurl 优先。
+    getBaseurl: () =>
+      resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
     // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
@@ -2497,7 +2578,21 @@ function createTikuAdapterConfigSection() {
   saveButton.onclick = async () => {
     setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
     setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
-    await $modal.alert('题库配置已保存。');
+    // 保存后立刻重建状态页 fetcher（138 §5.2 的 P1）：
+    // mountServiceStatusHttpFetcher 读的是「调用那一刻」的配置，不重建的话
+    // 状态 Tab 会一直请求保存前的旧地址 —— 这正是用户报的那个缺陷。
+    // 放在两次 set 之后：先落盘再重建，避免 fetcher 读到半截配置。
+    // try/catch 与 onrender 里那处一致：重建失败只该让状态页停在旧快照，
+    // 不能把「保存成功」这个结果带塌。
+    try {
+      mountServiceStatusHttpFetcher();
+    } catch {
+      // ignore: 状态页降级，配置已保存。
+    }
+    // 连通性探测（P3）：只提示，不阻断保存 —— 用户可能正在换服务器，
+    // 地址暂时不可达是正常的，阻断会让他没法保存。
+    const probe = await probeTikuAdapter(baseurlInput.value.trim(), keyInput.value.trim());
+    await $modal.alert(`题库配置已保存。\n\n${probe}`);
   };
 
   const jumpButton = createElement('button', { text: '跳转' });

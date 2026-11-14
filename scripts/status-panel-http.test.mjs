@@ -705,3 +705,108 @@ test('死分支守卫：`kind=forbidden` 无产出点，两种 4xx 实际都落 
       `${file} 的代码里出现了 kind:'forbidden' 的产出点。若这是有意新增的，请同时补该分支的行为用例，并删掉这条守卫`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// getBaseurl：状态 Tab 必须跟随「保存后的」题库地址（138 §5.2 的 P2）
+// ---------------------------------------------------------------------------
+//
+// 用户实测缺陷：在面板改了题库设置里的 URL，状态 TAB 依旧请求**默认 URL**。
+// 根因是 mountServiceStatusHttpFetcher 把 baseurl 当**值**捕获进 fetcher，
+// 之后不重建就永远用旧地址。
+//
+// 这一组是**变异验证逼出来的**：先只改实现（加 getBaseurl 支持）不写用例时，
+// 把 `typeof options.getBaseurl === 'function'` 短路成 `false &&` 测试仍然全绿
+// —— 说明既有 23 条一条都没覆盖到新行为。所以下列断言是补上真实防线，不是装饰。
+
+test('判据：getBaseurl 优先于 baseurl（同一 fetcher 两次取值可用不同地址）', async () => {
+  const { http } = await loadModules();
+
+  let currentBaseurl = 'https://first.example.com';
+  const seenUrls = [];
+  const fetcher = http.createServiceStatusHttpFetcher({
+    // 快照值是**旧**地址 —— 若 getBaseurl 未生效，请求会打到它。
+    baseurl: 'https://stale.example.com',
+    getBaseurl: () => currentBaseurl,
+    endpoint: '/api/service-status/summary',
+    accessKey: 'tk-abc',
+    requester: async (url) => {
+      seenUrls.push(url);
+      return { ok: true, status: 200, json: async () => ({ status: 'up' }) };
+    }
+  });
+
+  await fetcher({ now: Date.now() });
+  currentBaseurl = 'https://second.example.com';
+  await fetcher({ now: Date.now() });
+
+  assert.equal(seenUrls.length, 2, '两次取值都应发出请求');
+  assert.match(seenUrls[0], /^https:\/\/first\.example\.com\//, '第一次必须用 getBaseurl 的当前值');
+  assert.match(seenUrls[1], /^https:\/\/second\.example\.com\//,
+    '第二次必须用**改过之后**的地址 —— 这一条就是「状态 Tab 跟随题库设置」的直接判据');
+  // 反向断言：绝不能用 baseurl 快照值。短路 getBaseurl 的实现会命中这里。
+  for (const url of seenUrls) {
+    assert.equal(url.includes('stale.example.com'), false,
+      'getBaseurl 存在时不得退回 baseurl 快照值（这正是用户报的旧地址）');
+  }
+});
+
+test('判据：getBaseurl 返回空串时退回 baseurl（不是直接放弃请求）', async () => {
+  const { http } = await loadModules();
+
+  const seenUrls = [];
+  const fetcher = http.createServiceStatusHttpFetcher({
+    baseurl: 'https://fallback.example.com',
+    getBaseurl: () => '   ',
+    endpoint: '/api/service-status/summary',
+    accessKey: 'tk-abc',
+    requester: async (url) => {
+      seenUrls.push(url);
+      return { ok: true, status: 200, json: async () => ({ status: 'up' }) };
+    }
+  });
+
+  await fetcher({ now: Date.now() });
+  assert.equal(seenUrls.length, 1, '空白 getBaseurl 不应导致不发请求');
+  assert.match(seenUrls[0], /^https:\/\/fallback\.example\.com\//, '应退回 baseurl');
+});
+
+test('判据：getBaseurl 抛异常时退回 baseurl，不得让状态页崩掉', async () => {
+  const { http } = await loadModules();
+
+  const seenUrls = [];
+  const fetcher = http.createServiceStatusHttpFetcher({
+    baseurl: 'https://fallback.example.com',
+    getBaseurl: () => {
+      throw new Error('storage corrupted');
+    },
+    endpoint: '/api/service-status/summary',
+    accessKey: 'tk-abc',
+    requester: async (url) => {
+      seenUrls.push(url);
+      return { ok: true, status: 200, json: async () => ({ status: 'up' }) };
+    }
+  });
+
+  // 核心：不抛。状态页是旁路展示，配置读取抛错不该把整块带塌。
+  const snapshot = await fetcher({ now: Date.now() });
+  assert.ok(snapshot, '必须返回快照而不是抛异常');
+  assert.match(seenUrls[0], /^https:\/\/fallback\.example\.com\//, '应退回 baseurl');
+});
+
+test('判据：baseurl 与 getBaseurl 都不给时返回 null（静默，不抛）', async () => {
+  const { http } = await loadModules();
+
+  let called = false;
+  const fetcher = http.createServiceStatusHttpFetcher({
+    endpoint: '/api/service-status/summary',
+    accessKey: 'tk-abc',
+    requester: async () => {
+      called = true;
+      return { ok: true, status: 200, json: async () => ({ status: 'up' }) };
+    }
+  });
+
+  const snapshot = await fetcher({ now: Date.now() });
+  assert.equal(snapshot, null, '没有地址时必须返回 null，交给「还没设置题库地址」的静默分支');
+  assert.equal(called, false, '没地址就不该发请求');
+});
