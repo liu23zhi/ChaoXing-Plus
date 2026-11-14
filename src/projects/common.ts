@@ -814,7 +814,7 @@ function mountServiceStatusHttpFetcher() {
   // 管理员端点带逐分钟 points，属运维可见信息，不能给每个持 key 的用户。
   setServiceStatusFetcher(createServiceStatusHttpFetcher({
     baseurl,
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
     // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
     accessKey: config.key

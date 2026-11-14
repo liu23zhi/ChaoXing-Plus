@@ -29,7 +29,7 @@ async function loadModule() {
 const config = { baseurl: 'https://adapter.local', key: 'secret' };
 const payload = { qid: '', question: 'question', options: [], type: 0, courseName: '', extra: '' };
 const options = { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 1, retryAttempts: 1, retryDelayMs: 0, healthProbeDelayMs: 0 };
-const health = { success: true, status: 'succeeded', taskId: 'probe-1', statusUrl: 'https://status.other.local/adapter-service/search/status?taskId=probe-1' };
+const health = { success: true, status: 'succeeded', taskId: 'probe-1', statusUrl: 'https://status.other.local/api/search/status?taskId=probe-1' };
 const healthyStatus = { success: true, status: 'succeeded', taskId: 'probe-1', result: { answer: {} } };
 const answer = { question: 'question', answer: { answerText: 'answer' } };
 
@@ -45,11 +45,11 @@ test('health probe checks the returned status URL before creating a normal task'
     throw new Error(`unexpected URL ${url}`);
   };
   try {
-    assert.equal(mod.createTikuAdapterSearchHealthUrl(config.baseurl), 'https://adapter.local/adapter-service/search/health');
+    assert.equal(mod.createTikuAdapterSearchHealthUrl(config.baseurl), 'https://adapter.local/api/search/health');
     assert.deepEqual(await mod.requestTikuAdapterSearchTask(config, payload, options), answer);
     assert.deepEqual(calls.map((call) => call.url), [
-      'https://adapter.local/adapter-service/search/health', health.statusUrl,
-      'https://adapter.local/adapter-service/search/tasks'
+      'https://adapter.local/api/search/health', health.statusUrl,
+      'https://adapter.local/api/search/tasks'
     ]);
     assert.equal(calls[1].init.headers.Authorization, 'Bearer secret');
   } finally {
@@ -73,14 +73,14 @@ test('failed health handshake falls back to sync without creating an async task'
       if (String(url).endsWith('/search/health')) return brokenHealth();
       if (String(url).includes('unreachable.local')) throw new TypeError('Failed to fetch');
       if (String(url) === health.statusUrl) return Response.json(healthyStatus);
-      if (String(url).endsWith('/adapter-service/search')) return Response.json(answer);
+      if (String(url).endsWith('/api/search')) return Response.json(answer);
       throw new Error(`unexpected URL ${url}`);
     };
     try {
       assert.deepEqual(await mod.requestTikuAdapterSearchTask(config, payload, options), answer);
       assert.equal(calls.filter((url) => url.endsWith('/search/health')).length, 3);
       assert.equal(calls.some((url) => url.endsWith('/search/tasks')), false);
-      assert.equal(calls.at(-1), 'https://adapter.local/adapter-service/search');
+      assert.equal(calls.at(-1), 'https://adapter.local/api/search');
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -95,13 +95,13 @@ test('health status returning HTML is not mistaken for a usable async endpoint',
     calls.push(String(url));
     if (String(url).endsWith('/search/health')) return Response.json(health);
     if (String(url) === health.statusUrl) return new Response('<html>proxy page</html>', { status: 200 });
-    if (String(url).endsWith('/adapter-service/search')) return Response.json(answer);
+    if (String(url).endsWith('/api/search')) return Response.json(answer);
     throw new Error(`unexpected URL ${url}`);
   };
   try {
     assert.deepEqual(await mod.requestTikuAdapterSearchTask(config, payload, options), answer);
     assert.equal(calls.filter((url) => url === health.statusUrl).length, 3);
-    assert.equal(calls.at(-1), 'https://adapter.local/adapter-service/search');
+    assert.equal(calls.at(-1), 'https://adapter.local/api/search');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -115,13 +115,13 @@ test('health status without a search result selects the legacy endpoint', async 
     calls.push(String(url));
     if (String(url).endsWith('/search/health')) return Response.json(health);
     if (String(url) === health.statusUrl) return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1' });
-    if (String(url).endsWith('/adapter-service/search')) return Response.json(answer);
+    if (String(url).endsWith('/api/search')) return Response.json(answer);
     throw new Error(`unexpected URL ${url}`);
   };
   try {
     assert.deepEqual(await mod.requestTikuAdapterSearchTask(config, payload, options), answer);
     assert.equal(calls.filter((url) => url === health.statusUrl).length, 3);
-    assert.equal(calls.at(-1), 'https://adapter.local/adapter-service/search');
+    assert.equal(calls.at(-1), 'https://adapter.local/api/search');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -140,7 +140,7 @@ test('explicit legacy sync mode retries a transient failure with one stable idem
     const wrapper = mod.createTikuAdapterAnswererWrapper({ ...config, asyncSearch: false });
     assert.deepEqual(await wrapper.executeRequest({ data: payload, timeoutMs: 1000 }), answer);
     assert.equal(calls.length, 2);
-    assert.ok(calls.every((call) => call.url === 'https://adapter.local/adapter-service/search'));
+    assert.ok(calls.every((call) => call.url === 'https://adapter.local/api/search'));
     assert.ok(calls[0].init.headers['Idempotency-Key']);
     assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
     assert.equal(calls[0].init.body, calls[1].init.body);
@@ -160,7 +160,7 @@ test('health authentication failure does not select sync search', async () => {
     };
     try {
       await assert.rejects(mod.requestTikuAdapterSearchTask(config, payload, options), (error) => error.status === status);
-      assert.deepEqual(calls, ['https://adapter.local/adapter-service/search/health']);
+      assert.deepEqual(calls, ['https://adapter.local/api/search/health']);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -182,16 +182,16 @@ test('create 404 falls back to sync, but status 404 after creation does not', as
           : Response.json({ success: true, status: 'running', taskId: 'task-1' });
       }
       if (String(url).includes('taskId=task-1')) return Response.json({ message: 'missing route' }, { status: 404 });
-      if (String(url).endsWith('/adapter-service/search')) return Response.json(answer);
+      if (String(url).endsWith('/api/search')) return Response.json(answer);
       throw new Error(`unexpected URL ${url}`);
     };
     try {
       if (failingPath === 'create') {
         assert.deepEqual(await mod.requestTikuAdapterSearchTask(config, payload, options), answer);
-        assert.equal(calls.at(-1), 'https://adapter.local/adapter-service/search');
+        assert.equal(calls.at(-1), 'https://adapter.local/api/search');
       } else {
         await assert.rejects(mod.requestTikuAdapterSearchTask(config, payload, options), /3 consecutive/);
-        assert.equal(calls.filter((url) => url.endsWith('/adapter-service/search')).length, 0);
+        assert.equal(calls.filter((url) => url.endsWith('/api/search')).length, 0);
       }
     } finally {
       globalThis.fetch = originalFetch;
@@ -214,7 +214,7 @@ test('AI task creation retries a transient failure with the same idempotency key
     });
     assert.equal(infos[0].results[0].answer, 'answer');
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].url, 'https://adapter.local/adapter-service/ai-fallback/tasks');
+    assert.equal(calls[0].url, 'https://adapter.local/api/ai-fallback/tasks');
     assert.ok(calls[0].init.headers['Idempotency-Key']);
     assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
     assert.equal(calls[0].init.body, calls[1].init.body);
@@ -231,7 +231,7 @@ test('AI task replay with a terminal id fetches the completed task result', asyn
     urls.push(String(url));
     if (urls.length === 1) throw new TypeError('Failed to fetch');
     if (String(url).endsWith('/ai-fallback/tasks')) {
-      return Response.json({ success: true, status: 'succeeded', taskId: 'replayed', statusUrl: '/adapter-service/ai-fallback/status?taskId=replayed' });
+      return Response.json({ success: true, status: 'succeeded', taskId: 'replayed', statusUrl: '/api/ai-fallback/status?taskId=replayed' });
     }
     return Response.json({ success: true, status: 'succeeded', taskId: 'replayed', result: { question: 'question', answer: 'answer' } });
   };
@@ -242,7 +242,7 @@ test('AI task replay with a terminal id fetches the completed task result', asyn
     });
     assert.equal(infos[0].results[0].answer, 'answer');
     assert.equal(urls.length, 3);
-    assert.equal(urls.at(-1), 'https://adapter.local/adapter-service/ai-fallback/status?taskId=replayed');
+    assert.equal(urls.at(-1), 'https://adapter.local/api/ai-fallback/status?taskId=replayed');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -259,21 +259,21 @@ test('local HTTP integration preserves health, creation, polling and sync fallba
         response.writeHead(status, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify(body));
       };
-      if (url.pathname === '/adapter-service/search/health') {
+      if (url.pathname === '/api/search/health') {
         send(scenario === 'health-failed' ? 503 : 200, scenario === 'health-failed'
           ? { message: 'unavailable' }
-          : { success: true, status: 'succeeded', taskId: 'probe', statusUrl: '/adapter-service/search/status?taskId=probe' });
-      } else if (url.pathname === '/adapter-service/search/status' && url.searchParams.get('taskId') === 'probe') {
+          : { success: true, status: 'succeeded', taskId: 'probe', statusUrl: '/api/search/status?taskId=probe' });
+      } else if (url.pathname === '/api/search/status' && url.searchParams.get('taskId') === 'probe') {
         send(200, { success: true, status: 'succeeded', taskId: 'probe', result: { answer: {} } });
-      } else if (url.pathname === '/adapter-service/search/tasks') {
+      } else if (url.pathname === '/api/search/tasks') {
         send(scenario === 'create-404' ? 404 : 202, scenario === 'create-404'
           ? { message: 'missing' }
           : { success: false, status: 'running', taskId: 'job' });
-      } else if (url.pathname === '/adapter-service/search/status' && url.searchParams.get('taskId') === 'job') {
+      } else if (url.pathname === '/api/search/status' && url.searchParams.get('taskId') === 'job') {
         send(scenario === 'status-failed' ? 404 : 200, scenario === 'status-failed'
           ? { message: 'missing' }
           : { success: true, status: 'succeeded', taskId: 'job', result: answer });
-      } else if (url.pathname === '/adapter-service/search') {
+      } else if (url.pathname === '/api/search') {
         send(200, answer);
       } else {
         send(500, { message: 'unexpected path' });
@@ -294,26 +294,26 @@ test('local HTTP integration preserves health, creation, polling and sync fallba
       const paths = calls.map((call) => call.path);
       if (scenario === 'async-success') {
         assert.deepEqual(paths, [
-          '/adapter-service/search/health', '/adapter-service/search/status',
-          '/adapter-service/search/tasks', '/adapter-service/search/status'
+          '/api/search/health', '/api/search/status',
+          '/api/search/tasks', '/api/search/status'
         ]);
       } else if (scenario === 'health-failed') {
         assert.deepEqual(paths, [
-          '/adapter-service/search/health', '/adapter-service/search/health',
-          '/adapter-service/search/health', '/adapter-service/search'
+          '/api/search/health', '/api/search/health',
+          '/api/search/health', '/api/search'
         ]);
       } else if (scenario === 'create-404') {
         assert.deepEqual(paths, [
-          '/adapter-service/search/health', '/adapter-service/search/status',
-          '/adapter-service/search/tasks', '/adapter-service/search'
+          '/api/search/health', '/api/search/status',
+          '/api/search/tasks', '/api/search'
         ]);
       } else {
         assert.deepEqual(paths, [
-          '/adapter-service/search/health', '/adapter-service/search/status',
-          '/adapter-service/search/tasks', '/adapter-service/search/status',
-          '/adapter-service/search/status', '/adapter-service/search/status'
+          '/api/search/health', '/api/search/status',
+          '/api/search/tasks', '/api/search/status',
+          '/api/search/status', '/api/search/status'
         ]);
-        assert.equal(paths.includes('/adapter-service/search'), false);
+        assert.equal(paths.includes('/api/search'), false);
       }
     } finally {
       await new Promise((resolve) => server.close(resolve));

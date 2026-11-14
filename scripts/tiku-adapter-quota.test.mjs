@@ -48,7 +48,7 @@ for (const status of [200, 401, 503]) {
         assert.equal(infos[0].error, `${quota}: ${quotaMessage}`);
         assert.equal(infos[0].response.taskId, undefined);
         assert.equal(calls.length, 1);
-        assert.equal(new URL(calls[0][0]).pathname, preferAsyncTask ? '/adapter-service/ai-fallback/tasks' : '/adapter-service/ai-fallback');
+        assert.equal(new URL(calls[0][0]).pathname, preferAsyncTask ? '/api/ai-fallback/tasks' : '/api/ai-fallback');
         assert.equal(errors.isTikuAdapterBalanceBlocked(local.baseurl, local.key), false);
       } finally { globalThis.fetch = previous; adapter.resetTikuAdapterBalanceGuard(local); }
     });
@@ -89,7 +89,7 @@ for (const kind of ['normal', 'AI']) {
     const previous = globalThis.fetch; const local = { ...config, key: `paid-status-${kind}` }; const methods = [];
     globalThis.fetch = async (url, init) => {
       const parsed = new URL(url); const path = parsed.pathname; methods.push([init.method, path, parsed.searchParams.get('taskId')]);
-      if (path.endsWith('/health')) return Response.json({ success: true, status: 'succeeded', taskId: 'health', statusUrl: '/adapter-service/search/status?taskId=health' });
+      if (path.endsWith('/health')) return Response.json({ success: true, status: 'succeeded', taskId: 'health', statusUrl: '/api/search/status?taskId=health' });
       if (parsed.searchParams.get('taskId') === 'health') return Response.json({ success: true, status: 'succeeded', taskId: 'health', result: { answer: {} } });
       if (init.method === 'POST') {
         errors.markTikuAdapterBalanceBlocked(local.baseurl, local.key);

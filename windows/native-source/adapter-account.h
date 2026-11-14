@@ -9,6 +9,16 @@
 #define CX_ADAPTER_TOKEN_CAP 4096
 #define CX_ADAPTER_CAPTCHA_IMAGE_CAP 32768
 
+// API 路径前缀（2026-11-14 后端改名 /adapter-service → /api）。
+//
+// 用户填的 base URL 可能带也可能不带前缀，两种历史形态都要能正确拼接：
+//   https://host                 -> https://host/api/...
+//   https://host/adapter-service -> https://host/api/...
+// 所以「剥前缀」的匹配必须同时认新旧两个后缀，否则老用户存下来的
+// base URL 会变成 https://host/adapter-service/api/...（双前缀，必 404）。
+#define CX_ADAPTER_API_PREFIX_NEW L"/api"
+#define CX_ADAPTER_API_PREFIX_LEGACY L"/adapter-service"
+
 typedef struct CX_ADAPTER_REPLY {
     DWORD status;
     char *body;

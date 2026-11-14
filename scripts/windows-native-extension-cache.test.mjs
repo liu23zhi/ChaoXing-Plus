@@ -31,17 +31,17 @@ test('native extension cache is verified, atomic, refreshable and disabled by no
       requests.push({ method: req.method, url: req.url, auth: req.headers.authorization });
       assert.equal(req.headers.authorization, undefined, 'public extension requests must not include credentials');
       const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
-      if (req.method === 'GET' && req.url === '/adapter-service/extensions/edge/latest') {
+      if (req.method === 'GET' && req.url === '/api/extensions/edge/latest') {
         return json(200, {
           source: 'edge',
           extensionId: 'lcmeenlnjihhjcjoakekikoaldigonac',
           version: serviceVersion,
           size: packageBytes.length,
           sha256: hash,
-          downloadUrl: `/adapter-service/extensions/edge/download?sha256=${hash}`
+          downloadUrl: `/api/extensions/edge/download?sha256=${hash}`
         });
       }
-      if (req.method === 'GET' && req.url === `/adapter-service/extensions/edge/download?sha256=${hash}`) {
+      if (req.method === 'GET' && req.url === `/api/extensions/edge/download?sha256=${hash}`) {
         res.writeHead(200, { 'Content-Type': 'application/x-chrome-extension' });
         return res.end(packageBytes);
       }
@@ -55,17 +55,17 @@ test('native extension cache is verified, atomic, refreshable and disabled by no
       requestsTwo.push({ method: req.method, url: req.url, auth: req.headers.authorization });
       assert.equal(req.headers.authorization, undefined, 'public extension requests must not include credentials');
       const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
-      if (req.method === 'GET' && req.url === '/adapter-service/extensions/edge/latest') {
+      if (req.method === 'GET' && req.url === '/api/extensions/edge/latest') {
         return json(200, {
           source: 'edge',
           extensionId: 'lcmeenlnjihhjcjoakekikoaldigonac',
           version: '5.6.7.8',
           size: packageBytes.length,
           sha256: hash,
-          downloadUrl: `/adapter-service/extensions/edge/download?sha256=${hash}`
+          downloadUrl: `/api/extensions/edge/download?sha256=${hash}`
         });
       }
-      if (req.method === 'GET' && req.url === `/adapter-service/extensions/edge/download?sha256=${hash}`) {
+      if (req.method === 'GET' && req.url === `/api/extensions/edge/download?sha256=${hash}`) {
         res.writeHead(200, { 'Content-Type': 'application/x-chrome-extension' });
         return res.end(packageBytes);
       }

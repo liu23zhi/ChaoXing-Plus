@@ -25,9 +25,24 @@ export class TikuAdapterRequestError extends Error {
 const balanceBlockedScopes = new Set<string>();
 const balanceNotifiedScopes = new Set<string>();
 
+/**
+ * 本仓 API 的路径前缀。新前缀 /api 与旧前缀 /adapter-service 同义：
+ * 2026-11-14 后端改名后，**已安装的旧扩展仍会请求旧前缀**（四个搜索接口保留兼容），
+ * 所以错误分类必须同时认两者，否则旧路径的失败不会被识别成适配器错误。
+ */
+const API_PREFIXES = ['/api/', '/adapter-service/'] as const;
+
+function apiPrefixIndex(pathname: string): number {
+  for (const prefix of API_PREFIXES) {
+    const index = pathname.indexOf(prefix);
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
 export function isTikuAdapterRequestUrl(rawUrl: string): boolean {
   try {
-    return new URL(rawUrl).pathname.includes('/adapter-service/');
+    return apiPrefixIndex(new URL(rawUrl).pathname) >= 0;
   } catch {
     return false;
   }
@@ -36,7 +51,7 @@ export function isTikuAdapterRequestUrl(rawUrl: string): boolean {
 export function resolveTikuAdapterRequestIdentity(rawUrl: string, headers: Record<string, string> = {}) {
   try {
     const url = new URL(rawUrl);
-    const adapterPathIndex = url.pathname.indexOf('/adapter-service/');
+    const adapterPathIndex = apiPrefixIndex(url.pathname);
     const basePath = adapterPathIndex >= 0 ? url.pathname.slice(0, adapterPathIndex) : url.pathname.replace(/\/+$/, '');
     const authorization = Object.entries(headers).find(([name]) => name.toLowerCase() === 'authorization')?.[1] ?? '';
     const key = authorization.replace(/^Bearer\s+/i, '').trim();

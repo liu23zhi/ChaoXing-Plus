@@ -81,16 +81,30 @@ static BOOL aw_starts_with_ci(const WCHAR *text, const WCHAR *prefix) {
     return TRUE;
 }
 static BOOL aw_build_login_url(const WCHAR *base, WCHAR *url, DWORD cap) {
-    DWORD length, suffixLength = (DWORD)lstrlenW(L"/adapter-service");
+    /*
+     * 剥掉 base URL 尾部的 API 前缀后再拼 /login。
+     *
+     * 2026-11-14 后端改名 /adapter-service → /api：用户保存的 base URL 既可能带
+     * 旧前缀也可能带新前缀，两者都要认，否则会拼出
+     * https://host/adapter-service/login 这种不存在的页面路径。
+     *
+     * 长度一律 lstrlenW 现算，不写死 16（旧实现硬编码了旧前缀的字符数）。
+     */
+    static const WCHAR *const prefixes[] = { L"/api", L"/adapter-service" };
+    DWORD length, i;
     if (!base || !url || cap < 8) return FALSE;
     lstrcpynW(url, base, (int)cap);
     length = (DWORD)lstrlenW(url);
     while (length && (url[length - 1] == L' ' || url[length - 1] == L'\t')) url[--length] = 0;
     if (!aw_starts_with_ci(url, L"http://") && !aw_starts_with_ci(url, L"https://")) return FALSE;
     while (length && url[length - 1] == L'/') url[--length] = 0;
-    if (length >= suffixLength && !lstrcmpiW(url + length - suffixLength, L"/adapter-service")) {
-        length -= suffixLength; url[length] = 0;
-        while (length && url[length - 1] == L'/') url[--length] = 0;
+    for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        DWORD suffixLength = (DWORD)lstrlenW(prefixes[i]);
+        if (length >= suffixLength && !lstrcmpiW(url + length - suffixLength, prefixes[i])) {
+            length -= suffixLength; url[length] = 0;
+            while (length && url[length - 1] == L'/') url[--length] = 0;
+            break;
+        }
     }
     if (!length || length + 7 >= cap) return FALSE;
     lstrcatW(url, L"/login"); return TRUE;

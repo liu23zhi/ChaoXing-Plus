@@ -57,7 +57,7 @@ const FIXTURE_RESULTS = (() => {
       error: JSON.stringify({
         errCode: 402,
         message: '当前 Key 额度已用尽或本次请求将超额',
-        request: { method: 'POST', path: '/adapter-service/search' }
+        request: { method: 'POST', path: '/api/search' }
       }),
       searchInfos: []
     },

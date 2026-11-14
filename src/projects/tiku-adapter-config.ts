@@ -123,17 +123,17 @@ export function resolveTikuAdapterBaseUrl(raw: string, fallback = DEFAULT_TIKU_B
 
 export function createTikuAdapterSearchUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/search` : '';
+  return normalized ? `${normalized}/api/search` : '';
 }
 
 export function createTikuAdapterSearchTaskUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/search/tasks` : '';
+  return normalized ? `${normalized}/api/search/tasks` : '';
 }
 
 export function createTikuAdapterSearchHealthUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/search/health` : '';
+  return normalized ? `${normalized}/api/search/health` : '';
 }
 
 export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string): string {
@@ -141,14 +141,14 @@ export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string
   if (!normalized) {
     return '';
   }
-  const url = new URL(`${normalized}/adapter-service/search/status`);
+  const url = new URL(`${normalized}/api/search/status`);
   url.searchParams.set('taskId', String(taskId ?? '').trim());
   return url.toString();
 }
 
 export function createTikuAdapterEvidenceUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/tiku/evidence` : '';
+  return normalized ? `${normalized}/api/tiku/evidence` : '';
 }
 
 export type TikuAdapterAnswerEvidencePayload = {
@@ -219,12 +219,12 @@ function createStableEvidenceIdempotencyKey(payload: TikuAdapterAnswerEvidencePa
 
 export function createTikuAdapterAIFallbackUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/ai-fallback` : '';
+  return normalized ? `${normalized}/api/ai-fallback` : '';
 }
 
 export function createTikuAdapterAIFallbackTaskUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
-  return normalized ? `${normalized}/adapter-service/ai-fallback/tasks` : '';
+  return normalized ? `${normalized}/api/ai-fallback/tasks` : '';
 }
 
 export function createTikuAdapterAIFallbackStatusUrl(baseurl: string, taskId: string): string {
@@ -232,7 +232,7 @@ export function createTikuAdapterAIFallbackStatusUrl(baseurl: string, taskId: st
   if (!normalized) {
     return '';
   }
-  const url = new URL(`${normalized}/adapter-service/ai-fallback/status`);
+  const url = new URL(`${normalized}/api/ai-fallback/status`);
   url.searchParams.set('taskId', String(taskId ?? '').trim());
   return url.toString();
 }

@@ -259,7 +259,7 @@ export function buildServiceStatusBuckets(
 }
 
 // ---------------------------------------------------------------------------
-// 数据来源：抽成可注入的 fetcher，便于接 T-18 的 GET /adapter-service/admin/service-status
+// 数据来源：抽成可注入的 fetcher，便于接 T-18 的 GET /api/admin/service-status
 // ---------------------------------------------------------------------------
 
 export type ServiceStatusBreakdown = {
@@ -304,10 +304,10 @@ export type ServiceStatusBreakdown = {
  * 但**它没有被任何用例覆盖到**，改动相关代码时不要假定它已测过。
  *
  * 实测背景（captain 起真实 TIKU 实例打的）：
- * - `GET /adapter-service/service-status/summary` 无凭据 → **401**「请重新登录」
+ * - `GET /api/service-status/summary` 无凭据 → **401**「请重新登录」
  * - 同上 + 非法 Bearer → **401**
  * - 同上 + 真实 access token → **200**（这条路才是 PLUS 实际走的）
- * - `GET /adapter-service/admin/service-status` + **有效普通 token** → **401**（不是 403！）
+ * - `GET /api/admin/service-status` + **有效普通 token** → **401**（不是 403！）
  *
  * 最后一条是关键：`controller.Auth`（`user.go:213-232`）在 `ParseJwtWithClaims` 失败时
  * 直接 401 返回；access token 不是 JWT，所以在 `RequireAdmin` 之前就被 401 拦掉了。
@@ -384,7 +384,7 @@ export type ServiceStatusFetcher = (options: ServiceStatusFetchOptions) => Promi
  * 定位是「运维可见信息」——「什么时段多少请求、成功多少、平均延迟」是运营情报，
  * 不该开给每个持 key 的用户。摘要端点只给聚合数字。
  */
-export const SERVICE_STATUS_ENDPOINT = '/adapter-service/service-status/summary';
+export const SERVICE_STATUS_ENDPOINT = '/api/service-status/summary';
 
 /**
  * 管理员端点（`RequireAdmin` + 逐分钟 points）。
@@ -392,7 +392,7 @@ export const SERVICE_STATUS_ENDPOINT = '/adapter-service/service-status/summary'
  * 当前**不接**——PLUS 没有管理员登录态。保留常量是为了将来做管理员视图时不用再找
  * 一次路径；也用来在注释里说明「为什么不能拿它给普通用户用」。
  */
-export const SERVICE_STATUS_ADMIN_ENDPOINT = '/adapter-service/admin/service-status';
+export const SERVICE_STATUS_ADMIN_ENDPOINT = '/api/admin/service-status';
 
 /**
  * `points[].minute` 是「Unix 时间戳 / 60」（`internal/service/service_status.go:37`）。
@@ -465,11 +465,11 @@ function parseIsoToMs(value: unknown): number | null {
  * ```
  * 现在有两个数据源，**语义判定优先用服务端权威字段**：
  *
- * 1. **摘要端点**（`/adapter-service/service-status/summary`，普通用户可用）：
+ * 1. **摘要端点**（`/api/service-status/summary`，普通用户可用）：
  *    `{ schemaVersion, status, successRate, successRateAvailable, totalRequests,
  *       successRequests, failedRequests, avgLatencyMs, windowMinutes, retained,
  *       capacity, restartedAt }` —— **没有 points**。
- * 2. **admin 端点**（`/adapter-service/admin/service-status`，仅管理员）：带 `points[]`。
+ * 2. **admin 端点**（`/api/admin/service-status`，仅管理员）：带 `points[]`。
  *
  * 判定顺序（缺一不可）：
  * - `successRateAvailable === false` → `kind='empty'`（窗口内没有请求）
@@ -1195,7 +1195,7 @@ function createDayBand(
  *
  * ## 关于曲线（队长裁决方案 1 的后果）
  *
- * 普通用户走 `/adapter-service/service-status/summary`，该端点**不返回 points**，
+ * 普通用户走 `/api/service-status/summary`，该端点**不返回 points**，
  * 所以非管理员看到的是**纯摘要**：状态、成功率、请求总数、失败数、延迟、
  * 采样起点、采样点数/容量。**没有逐分钟曲线，也没有 288 格色带。**
  *

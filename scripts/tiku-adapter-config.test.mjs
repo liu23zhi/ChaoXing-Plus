@@ -51,7 +51,7 @@ test('resolves search url from normalized baseurl', async () => {
   assert.equal(typeof mod.createTikuAdapterSearchUrl, 'function');
   assert.equal(
     mod.createTikuAdapterSearchUrl('https://adapter.local/'),
-    'https://adapter.local/adapter-service/search'
+    'https://adapter.local/api/search'
   );
 });
 
@@ -60,11 +60,11 @@ test('creates async search task and status urls', async () => {
 
   assert.equal(
     mod.createTikuAdapterSearchTaskUrl('https://adapter.local/'),
-    'https://adapter.local/adapter-service/search/tasks'
+    'https://adapter.local/api/search/tasks'
   );
   assert.equal(
     mod.createTikuAdapterSearchStatusUrl('https://adapter.local/', 'task-1'),
-    'https://adapter.local/adapter-service/search/status?taskId=task-1'
+    'https://adapter.local/api/search/status?taskId=task-1'
   );
 });
 
@@ -116,7 +116,7 @@ test('creates a post wrapper using async search by default', async () => {
     key: 'demo-key'
   });
 
-  assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search/tasks');
+  assert.equal(wrapper.url, 'https://adapter.local/api/search/tasks');
   assert.equal(typeof wrapper.executeRequest, 'function');
   assert.equal(wrapper.method, 'post');
   assert.equal(wrapper.type, 'fetch');
@@ -136,7 +136,7 @@ test('disabling async search keeps the legacy synchronous endpoint', async () =>
     asyncSearch: false
   });
 
-  assert.equal(wrapper.url, 'https://adapter.local/adapter-service/search');
+  assert.equal(wrapper.url, 'https://adapter.local/api/search');
   assert.equal(typeof wrapper.executeRequest, 'function');
 });
 
@@ -187,7 +187,7 @@ test('answer evidence upload uses bearer auth, endpoint, and a stable idempotenc
   }
 
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].url, 'https://adapter.local/adapter-service/tiku/evidence');
+  assert.equal(calls[0].url, 'https://adapter.local/api/tiku/evidence');
   assert.equal(calls[0].init.method, 'POST');
   assert.equal(calls[0].init.headers.Authorization, 'Bearer secret');
   assert.equal(calls[0].init.headers['Idempotency-Key'], calls[1].init.headers['Idempotency-Key']);
@@ -232,18 +232,18 @@ test('async search submits once with idempotency, follows another-origin status 
 
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init });
-    if (String(url).endsWith('/adapter-service/search/health')) {
-      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1', statusUrl: 'https://tasks.other.test/adapter-service/search/status?taskId=probe-1' });
+    if (String(url).endsWith('/api/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1', statusUrl: 'https://tasks.other.test/api/search/status?taskId=probe-1' });
     }
     if (String(url).includes('taskId=probe-1')) {
       return Response.json({ success: true, status: 'succeeded', taskId: 'probe-1', result: { answer: {} } });
     }
-    if (String(url).endsWith('/adapter-service/search/tasks')) {
+    if (String(url).endsWith('/api/search/tasks')) {
       return Response.json({
         success: false,
         status: 'running',
         taskId: 'task-1',
-        statusUrl: 'https://tasks.other.test/adapter-service/search/status?taskId=task-1'
+        statusUrl: 'https://tasks.other.test/api/search/status?taskId=task-1'
       }, { status: 202 });
     }
     return Response.json({ success: true, status: 'succeeded', taskId: 'task-1', result });
@@ -258,14 +258,14 @@ test('async search submits once with idempotency, follows another-origin status 
 
     assert.deepEqual(response, result);
     assert.equal(calls.length, 4);
-    assert.equal(calls[0].url, 'https://adapter.local/adapter-service/search/health');
-    assert.equal(calls[1].url, 'https://tasks.other.test/adapter-service/search/status?taskId=probe-1');
-    assert.equal(calls[2].url, 'https://adapter.local/adapter-service/search/tasks');
+    assert.equal(calls[0].url, 'https://adapter.local/api/search/health');
+    assert.equal(calls[1].url, 'https://tasks.other.test/api/search/status?taskId=probe-1');
+    assert.equal(calls[2].url, 'https://adapter.local/api/search/tasks');
     assert.equal(calls[2].init.headers['Idempotency-Key'], 'stable-1');
     assert.deepEqual(JSON.parse(calls[2].init.body), {
       qid: '', question: '题目', options: [], type: 0, courseName: '', extra: ''
     });
-    assert.equal(calls[3].url, 'https://tasks.other.test/adapter-service/search/status?taskId=task-1');
+    assert.equal(calls[3].url, 'https://tasks.other.test/api/search/status?taskId=task-1');
     assert.equal(calls[3].init.headers.Authorization, 'Bearer secret');
   } finally {
     globalThis.fetch = originalFetch;
@@ -277,13 +277,13 @@ test('async ordinary search exposes only the standard insufficient-balance error
   const originalFetch = globalThis.fetch;
   let statusCalls = 0;
   globalThis.fetch = async (url) => {
-    if (String(url).endsWith('/adapter-service/search/health')) {
-      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-balance', statusUrl: 'https://balance-search.adapter.local/adapter-service/search/status?taskId=probe-balance' });
+    if (String(url).endsWith('/api/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe-balance', statusUrl: 'https://balance-search.adapter.local/api/search/status?taskId=probe-balance' });
     }
     if (String(url).includes('taskId=probe-balance')) {
       return Response.json({ success: true, status: 'succeeded', taskId: 'probe-balance', result: { answer: {} } });
     }
-    if (String(url).endsWith('/adapter-service/search/tasks')) {
+    if (String(url).endsWith('/api/search/tasks')) {
       return Response.json({ success: false, status: 'running', taskId: 'balance-search' }, { status: 202 });
     }
     statusCalls++;
@@ -457,11 +457,11 @@ test('tiku adapter config exposes long AI fallback timeouts and status helpers',
   assert.equal(typeof mod.createTikuAdapterAIFallbackStatusUrl, 'function');
   assert.equal(
     mod.createTikuAdapterAIFallbackTaskUrl('https://adapter.local/'),
-    'https://adapter.local/adapter-service/ai-fallback/tasks'
+    'https://adapter.local/api/ai-fallback/tasks'
   );
   assert.equal(
     mod.createTikuAdapterAIFallbackStatusUrl('https://adapter.local/', 'task-1'),
-    'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-1'
+    'https://adapter.local/api/ai-fallback/status?taskId=task-1'
   );
 });
 
@@ -515,7 +515,7 @@ test('AI fallback task endpoint 404 does not silently downgrade to the synchrono
     );
 
     assert.deepEqual(calls.map(({ url }) => url), [
-      'https://adapter.local/adapter-service/ai-fallback/tasks'
+      'https://adapter.local/api/ai-fallback/tasks'
     ]);
     assert.deepEqual(result[0].results, []);
     assert.match(result[0].error, /UPSTREAM_ERROR/);
@@ -532,15 +532,15 @@ test('AI fallback defaults to async and follows an absolute status URL from anot
 
   globalThis.fetch = async (url, init) => {
     urls.push(String(url));
-    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+    if (String(url).endsWith('/api/ai-fallback/tasks')) {
       return Response.json({
         success: false,
         status: 'running',
         taskId: 'task-1',
-        statusUrl: 'https://jobs.other.test/adapter-service/ai-fallback/status?taskId=task-1'
+        statusUrl: 'https://jobs.other.test/api/ai-fallback/status?taskId=task-1'
       });
     }
-    if (String(url).includes('/adapter-service/ai-fallback/status')) {
+    if (String(url).includes('/api/ai-fallback/status')) {
       statusAuthorizations.push(init.headers.Authorization);
       return Response.json({
         success: true,
@@ -569,8 +569,8 @@ test('AI fallback defaults to async and follows an absolute status URL from anot
     );
 
     assert.deepEqual(urls, [
-      'https://adapter.local/adapter-service/ai-fallback/tasks',
-      'https://jobs.other.test/adapter-service/ai-fallback/status?taskId=task-1'
+      'https://adapter.local/api/ai-fallback/tasks',
+      'https://jobs.other.test/api/ai-fallback/status?taskId=task-1'
     ]);
     assert.deepEqual(statusAuthorizations, ['Bearer secret']);
     assert.equal(result[0].results[0].answer, '2');
@@ -587,14 +587,14 @@ test('AI fallback polls task status until the adapter reports a final answer', a
 
   globalThis.fetch = async (url) => {
     urls.push(String(url));
-    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+    if (String(url).endsWith('/api/ai-fallback/tasks')) {
       return Response.json({
         success: false,
         status: 'running',
         taskId: 'task-1'
       });
     }
-    if (String(url).includes('/adapter-service/ai-fallback/status')) {
+    if (String(url).includes('/api/ai-fallback/status')) {
       statusCalls++;
       if (statusCalls === 1) {
         return Response.json({
@@ -623,7 +623,7 @@ test('AI fallback polls task status until the adapter reports a final answer', a
       { requestTimeoutMs: 1000, statusTimeoutMs: 1000, pollIntervalMs: 1, retryAttempts: 1, preferAsyncTask: true }
     );
 
-    assert.equal(urls.some((url) => url.includes('/adapter-service/ai-fallback/status?taskId=task-1')), true);
+    assert.equal(urls.some((url) => url.includes('/api/ai-fallback/status?taskId=task-1')), true);
     assert.equal(statusCalls, 2);
     assert.equal(result[0].results[0].answer, '答案');
     assert.equal(result[0].response.status, 'succeeded');
@@ -639,7 +639,7 @@ test('AI fallback treats terminal NO_ANSWER as complete without repeated status 
 
   globalThis.fetch = async (url) => {
     urls.push(String(url));
-    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+    if (String(url).endsWith('/api/ai-fallback/tasks')) {
       return Response.json({ success: false, status: 'running', taskId: 'task-no-answer' });
     }
     return Response.json({
@@ -658,7 +658,7 @@ test('AI fallback treats terminal NO_ANSWER as complete without repeated status 
     );
 
     assert.equal(urls.length, 2);
-    assert.equal(urls[1], 'https://adapter.local/adapter-service/ai-fallback/status?taskId=task-no-answer');
+    assert.equal(urls[1], 'https://adapter.local/api/ai-fallback/status?taskId=task-no-answer');
     assert.deepEqual(result[0].results, []);
     assert.equal(result[0].response.error.code, 'NO_ANSWER');
   } finally {
@@ -672,7 +672,7 @@ test('AI fallback async polling preserves insufficient balance code with a safe 
   let statusCalls = 0;
 
   globalThis.fetch = async (url) => {
-    if (String(url).endsWith('/adapter-service/ai-fallback/tasks')) {
+    if (String(url).endsWith('/api/ai-fallback/tasks')) {
       return Response.json({ success: false, status: 'running', taskId: 'balance-fallback' });
     }
     statusCalls++;

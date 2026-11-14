@@ -19,7 +19,7 @@ const { request } = require(resolve(outDir, 'core/utils/request.js'));
 const adapter = require(resolve(outDir, 'projects/tiku-adapter-config.js'));
 const raw = 'AI联网搜题第1轮失败（已尝试3次）: 对方服务器异常 (HTTP 400): model requires Responses; this account only supports Chat Completions';
 const config = { baseurl: 'https://adapter.local', key: 'error-test-key' };
-const searchUrl = `${config.baseurl}/adapter-service/search`;
+const searchUrl = `${config.baseurl}/api/search`;
 const opts = { method: 'post', headers: { Authorization: `Bearer ${config.key}` }, retry: { maxAttempts: 3, delayMs: 0 } };
 const fallbackOpts = { preferAsyncTask: false, retryAttempts: 3, retryDelayMs: 0, requestTimeoutMs: 1000 };
 

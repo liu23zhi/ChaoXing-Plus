@@ -28,7 +28,7 @@ test('common panel renders updated tiku adapter labels and bottom action buttons
   assert.equal(source.includes("const baseurlLabel = createElement('label', { text: '题库地址' });"), true);
   assert.equal(source.includes("const keyLabel = createElement('label', { text: '令牌' });"), true);
   assert.equal(source.includes('这里的设置会直接作用于当前学习流程。'), true);
-  assert.equal(source.includes('默认对接 POST {baseurl}/adapter-service/search'), false);
+  assert.equal(source.includes('默认对接 POST {baseurl}/api/search'), false);
   assert.equal(source.includes('开关项已改为状态方块，选择项改为平铺按钮，便于快速切换。'), false);
   assert.equal(source.includes('const actionsRow = createElement(\'div\');'), true);
   assert.equal(source.includes('actionsRow.append(saveButton, jumpButton);'), true);

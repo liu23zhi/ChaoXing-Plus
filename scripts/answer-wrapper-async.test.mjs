@@ -28,7 +28,7 @@ test('runtime answer wrapper invokes executeRequest for async task polling', asy
   const infos = await defaultAnswerWrapperHandler([{
       name: 'adapter',
       homepage: 'https://adapter.local',
-      url: 'https://adapter.local/adapter-service/search/tasks',
+      url: 'https://adapter.local/api/search/tasks',
       method: 'post',
       type: 'fetch',
       contentType: 'json',
@@ -41,7 +41,7 @@ test('runtime answer wrapper invokes executeRequest for async task polling', asy
       handler: 'return (response) => [response.question, response.answer]'
     }], {});
 
-  assert.equal(executeOptions.url, 'https://adapter.local/adapter-service/search/tasks');
+  assert.equal(executeOptions.url, 'https://adapter.local/api/search/tasks');
   assert.equal(executeOptions.method, 'post');
   assert.equal(executeOptions.timeoutMs, 60000);
   assert.equal(infos[0].results[0].answer, 'async-result');
@@ -52,7 +52,7 @@ test('runtime answer wrapper keeps the safe insufficient-balance text recognizab
   const infos = await defaultAnswerWrapperHandler([{
     name: 'adapter',
     homepage: 'https://adapter.local',
-    url: 'https://adapter.local/adapter-service/search/tasks',
+    url: 'https://adapter.local/api/search/tasks',
     method: 'post',
     type: 'fetch',
     contentType: 'json',

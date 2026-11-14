@@ -65,8 +65,8 @@ test('normal search sends deepThinking only when enabled on async and legacy rou
   const originalFetch = globalThis.fetch;
   const requests = [];
   globalThis.fetch = async (url, init) => {
-    if (String(url).endsWith('/adapter-service/search/health')) {
-      return Response.json({ success: true, status: 'succeeded', taskId: 'probe', statusUrl: 'https://adapter.local/adapter-service/search/status?taskId=probe' });
+    if (String(url).endsWith('/api/search/health')) {
+      return Response.json({ success: true, status: 'succeeded', taskId: 'probe', statusUrl: 'https://adapter.local/api/search/status?taskId=probe' });
     }
     if (String(url).includes('taskId=probe')) {
       return Response.json({ success: true, status: 'succeeded', taskId: 'probe', result: { answer: {} } });
@@ -100,8 +100,8 @@ test('normal search sends deepThinking only when enabled on async and legacy rou
   }
 
   assert.deepEqual(requests.map(({ url }) => new URL(url).pathname), [
-    '/adapter-service/search/tasks', '/adapter-service/search/tasks',
-    '/adapter-service/search', '/adapter-service/search'
+    '/api/search/tasks', '/api/search/tasks',
+    '/api/search', '/api/search'
   ]);
   for (const [index, request] of requests.entries()) {
     assert.equal(Object.hasOwn(request.body, 'deepThinking'), index % 2 === 1);

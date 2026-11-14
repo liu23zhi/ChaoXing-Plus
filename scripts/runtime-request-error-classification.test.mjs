@@ -13,7 +13,7 @@ register('./ci/ts-source-hooks.mjs', import.meta.url);
 const { request } = await import('../src/core/utils/request.js');
 const errors = await import('../src/core/utils/tiku-adapter-error.js');
 
-const adapterUrl = 'https://retry.adapter.test/adapter-service/search';
+const adapterUrl = 'https://retry.adapter.test/api/search';
 const authHeaders = (key) => ({ Authorization: `Bearer ${key}` });
 
 async function withFetch(handler, body) {

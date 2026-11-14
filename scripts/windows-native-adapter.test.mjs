@@ -52,7 +52,7 @@ test('native adapter uses complete captcha login, token authentication and verif
       requests.push({ method: req.method, url: req.url, auth: req.headers.authorization, payload });
       assert.equal(req.headers.cookie, undefined, 'native requests must not reuse web cookies');
       const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
-      if (req.url === '/adapter-service/public/register-status') {
+      if (req.url === '/api/public/register-status') {
         assert.equal(req.method, 'GET');
         const remote = ['remote-settings', 'remote-captcha'].includes(scenario);
         if (scenario === 'missing-provider') return json(200, { captchaApiBaseUrl: 'https://captcha.example.test', captchaType: 'SLIDER' });
@@ -62,19 +62,19 @@ test('native adapter uses complete captcha login, token authentication and verif
           captchaType: remote ? 'SLIDER' : 'RANDOM'
         });
       }
-      if (req.url === '/adapter-service/public/captcha/challenge') {
+      if (req.url === '/api/public/captcha/challenge') {
         assert.equal(req.method, 'POST'); assert.deepEqual(payload, { scene: 'login_password' });
         return json(200, { challengeId: 'challenge-1', imageData, expiresAt: '2030-01-01T00:00:00Z' });
       }
-      if (req.url === '/adapter-service/public/captcha/verify') {
+      if (req.url === '/api/public/captcha/verify') {
         assert.deepEqual(payload, { challengeId: 'challenge-1', scene: 'login_password', captchaCode: payload.captchaCode });
         return json(payload.captchaCode === 'a7b9' ? 200 : 400, payload.captchaCode === 'a7b9' ? { captchaToken: 'captcha-one-shot' } : { message: 'incorrect captcha' });
       }
-      if (req.url === '/adapter-service/user/login') {
+      if (req.url === '/api/user/login') {
         assert.equal(payload.username, 'mock-user'); assert.equal(payload.captchaToken, 'captcha-one-shot');
         return json(payload.password === 'p"ass\\word' ? 200 : 401, payload.password === 'p"ass\\word' ? { jwt: 'mock-jwt' } : { message: 'incorrect password' });
       }
-      if (req.url === '/adapter-service/access-tokens') {
+      if (req.url === '/api/access-tokens') {
         if (scenario === 'unauthorized') { assert.equal(req.method, 'GET'); assert.equal(req.headers.authorization, 'invalid-jwt'); return json(401, { message: 'unauthorized' }); }
         assert.equal(req.headers.authorization, 'mock-jwt');
         if (req.method === 'GET') return json(200, ['create', 'missing-token'].includes(scenario) ? [] : [{ id: 6, status: 'disabled', tokenValue: 'tk_disabled' }, { id: 7, status: 'enabled', tokenValue: 'tk_mock-existing' }]);
@@ -82,11 +82,11 @@ test('native adapter uses complete captcha login, token authentication and verif
         assert.match(payload.name, /^[a-zA-Z0-9_@]+$/, 'token name must satisfy the server restricted-name validator');
         return json(200, { token: 'tk_mock-created', accessToken: { id: 8 } });
       }
-      if (req.url === '/adapter-service/search/health') return json(req.headers.authorization === 'Bearer tk_mock-existing' ? 200 : 401, { ok: req.headers.authorization === 'Bearer tk_mock-existing' });
+      if (req.url === '/api/search/health') return json(req.headers.authorization === 'Bearer tk_mock-existing' ? 200 : 401, { ok: req.headers.authorization === 'Bearer tk_mock-existing' });
       assert.equal(req.headers.authorization, undefined, 'public extension requests must not include any credential');
-      if (req.url === '/adapter-service/extensions/edge/latest') {
-        const metadata = { source: 'edge', extensionId: 'lcmeenlnjihhjcjoakekikoaldigonac', version: '1.2.3.4', size: packageBytes.length, sha256: hash, downloadUrl: `/adapter-service/extensions/edge/download?sha256=${hash}` };
-        if (scenario === 'hash') metadata.sha256 = '0'.repeat(64), metadata.downloadUrl = `/adapter-service/extensions/edge/download?sha256=${metadata.sha256}`;
+      if (req.url === '/api/extensions/edge/latest') {
+        const metadata = { source: 'edge', extensionId: 'lcmeenlnjihhjcjoakekikoaldigonac', version: '1.2.3.4', size: packageBytes.length, sha256: hash, downloadUrl: `/api/extensions/edge/download?sha256=${hash}` };
+        if (scenario === 'hash') metadata.sha256 = '0'.repeat(64), metadata.downloadUrl = `/api/extensions/edge/download?sha256=${metadata.sha256}`;
         if (scenario === 'size') metadata.size++;
         if (scenario === 'version') metadata.version = '../bad';
         if (scenario === 'source') metadata.source = 'chrome';
@@ -94,7 +94,7 @@ test('native adapter uses complete captcha login, token authentication and verif
         if (scenario === 'redirect') { res.writeHead(302, { Location: '/unexpected-redirect' }); return res.end(); }
         return json(200, metadata);
       }
-      if (req.url.startsWith('/adapter-service/extensions/edge/download?sha256=')) { res.writeHead(200, { 'Content-Type': 'application/x-chrome-extension' }); return res.end(packageBytes); }
+      if (req.url.startsWith('/api/extensions/edge/download?sha256=')) { res.writeHead(200, { 'Content-Type': 'application/x-chrome-extension' }); return res.end(packageBytes); }
       throw new Error(`unexpected request ${req.method} ${req.url}`);
     } catch (error) { handlerError = error; res.writeHead(500); res.end('mock assertion failed'); }
   });
@@ -112,7 +112,7 @@ test('native adapter uses complete captcha login, token authentication and verif
       if (scenario === 'account') assert.equal(requests.length, 9);
       if (scenario === 'remote-settings') {
         assert.equal(requests.length, 1);
-        assert.equal(requests[0].url, '/adapter-service/public/register-status');
+        assert.equal(requests[0].url, '/api/public/register-status');
       }
       if (scenario === 'missing-provider') assert.equal(requests.length, 1, 'missing public config must not try a local CAPTCHA');
       if (scenario === 'missing-token') assert.equal(requests.length, 1, 'missing token must not be created unless explicitly requested');
@@ -131,19 +131,19 @@ test('native account HWND supports DPI, keyboard limits, icons and safe in-fligh
   let uiScenario = '';
   const server = http.createServer((req, res) => {
     requests.push(req.url);
-    if (req.url === '/adapter-service/public/register-status') {
+    if (req.url === '/api/public/register-status') {
       const remote = uiScenario === 'remote-captcha';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ captchaProvider: remote ? 'remote' : 'local', captchaApiBaseUrl: 'https://captcha.example.test', captchaType: 'SLIDER' }));
       return;
     }
-    if (req.url === '/adapter-service/public/captcha/challenge') {
+    if (req.url === '/api/public/captcha/challenge') {
       requestCount++;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ challengeId: 'challenge-1', imageData: `data:image/png;base64,${captchaPNG().toString('base64')}` }));
       return;
     }
-    if (req.url === '/adapter-service/search/health') {
+    if (req.url === '/api/search/health') {
       assert.equal(req.headers.authorization, 'Bearer tk_mock-existing');
       requestCount++;
       setTimeout(() => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}'); }, 300);
@@ -163,9 +163,9 @@ test('native account HWND supports DPI, keyboard limits, icons and safe in-fligh
       assert.match(result.stdout, /NATIVE ACCOUNT WINDOW TESTS PASS/);
     }
     assert.equal(requestCount, 4, 'API-key acceptance and in-flight close/quit plus local captcha each complete one data request');
-    assert.equal(requests.filter(url => url === '/adapter-service/public/register-status').length, 2,
+    assert.equal(requests.filter(url => url === '/api/public/register-status').length, 2,
       'local and remote CAPTCHA detection must fetch public auth settings');
-    assert.equal(requests.filter(url => url === '/adapter-service/public/captcha/challenge').length, 1,
+    assert.equal(requests.filter(url => url === '/api/public/captcha/challenge').length, 1,
       'only the local provider may request an image challenge');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

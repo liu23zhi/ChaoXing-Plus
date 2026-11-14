@@ -108,7 +108,7 @@ test('summarizes structured tiku errors while preserving a plain-text fallback',
     detail: '访问令牌不存在',
     request: {
       method: 'POST',
-      path: '/adapter-service/search',
+      path: '/api/search',
       authorization: 'Bearer tk_2...ec71'
     }
   });
@@ -118,7 +118,7 @@ test('summarizes structured tiku errors while preserving a plain-text fallback',
     title: '访问令牌鉴权失败',
     details: [
       '状态码：401',
-      '请求：POST /adapter-service/search',
+      '请求：POST /api/search',
       '详情：访问令牌不存在'
     ]
   });

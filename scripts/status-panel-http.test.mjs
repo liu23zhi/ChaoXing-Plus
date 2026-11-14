@@ -33,7 +33,7 @@ const THEME = {
   successFg: '#14663b', warningFg: '#7a4c00', dangerFg: '#a11818'
 };
 
-/** 摘要端点（`/adapter-service/service-status/summary`）的真实响应形状 —— 无 points。 */
+/** 摘要端点（`/api/service-status/summary`）的真实响应形状 —— 无 points。 */
 function summaryResponse({ available = true, successRate = 0.98, retained = 120, totalRequests = 1200, failedRequests = 24, avgLatencyMs = 210, restartedAt = '2026-11-14T01:00:00+08:00' } = {}) {
   return {
     schemaVersion: 1,
@@ -146,7 +146,7 @@ test('判据② 403 归一化成 kind=rejected，渲染「无权查看」且不�
   const forbiddenError = Object.assign(new Error('service-status HTTP 403'), { status: 403 });
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-abc',
     requester: async () => { throw forbiddenError; }
   });
@@ -179,7 +179,7 @@ test('★(a) 401 带服务端 message（脚本令牌）→ 界面必须出现这
   // 真实形态：服务端 401 + {"message": "..."}
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-script-bound',
     requester: async () => {
       throw Object.assign(new Error('service-status HTTP 401'), {
@@ -218,7 +218,7 @@ test('★(a) 服务端没给 message 时才回退通用文案', async () => {
 
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-abc',
     requester: async () => { throw Object.assign(new Error('service-status HTTP 401'), { status: 401 }); }
   });
@@ -245,7 +245,7 @@ test('★(b) 没配 key → kind=no-token，且**不发请求**', async () => {
   let requested = false;
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: '',
     requester: async () => { requested = true; return summaryResponse(); }
   });
@@ -268,14 +268,14 @@ test('★(b) no-token 与 rejected 的 kind、标记、文案三者都不同', a
 
   const noToken = await http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: '',
     requester: async () => summaryResponse()
   })({ now: Date.now() });
 
   const rejected = await http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-bad',
     requester: async () => { throw Object.assign(new Error('HTTP 401'), { status: 401 }); }
   })({ now: Date.now() });
@@ -300,7 +300,7 @@ test('判据②+ 401 与 403 分开：401「令牌未通过验证」，403「无
 
   const make = (status) => http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-x',
     requester: async () => { throw Object.assign(new Error(`HTTP ${status}`), { status }); }
   });
@@ -333,7 +333,7 @@ test('判据② 403 分支不能靠 status 数字以外的信号误判：网络�
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/admin/service-status',
+    endpoint: '/api/admin/service-status',
     requester: async () => { throw new Error('network down'); }
   });
   const snapshot = await fetcher({ now: Date.now() });
@@ -354,7 +354,7 @@ test('判据④ 取数失败保留旧快照；下一次成功能回到正常', a
   panel.setServiceStatusFetcher(http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/admin/service-status',
+    endpoint: '/api/admin/service-status',
     requester: async () => backendResponse({ points: makePoints(120, nowMs), retained: 120 })
   }));
   const good = await panel.refreshServiceStatusSnapshot({ now: nowMs });
@@ -376,7 +376,7 @@ test('判据④ 取数失败保留旧快照；下一次成功能回到正常', a
   panel.setServiceStatusFetcher(http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/admin/service-status',
+    endpoint: '/api/admin/service-status',
     requester: async () => backendResponse({ points: makePoints(60, nowMs), retained: 60 })
   }));
   const recovered = await panel.refreshServiceStatusSnapshot({ now: nowMs + 2000 });
@@ -395,7 +395,7 @@ test('判据⑤ 正常 1440 点 → 288 格，且分档仍走 11 档配色', asy
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/admin/service-status',
+    endpoint: '/api/admin/service-status',
     requester: async () => backendResponse({ points: makePoints(1440, nowMs), retained: 1440 })
   });
   const snapshot = await fetcher({ now: nowMs });
@@ -474,7 +474,7 @@ test('fetcher 在 baseurl 为空时静默返回 null（未配置题库地址不�
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: '',
-    endpoint: '/adapter-service/admin/service-status',
+    endpoint: '/api/admin/service-status',
     requester: async () => { called = true; return {}; }
   });
   assert.equal(await fetcher({ now: Date.now() }), null);
@@ -487,11 +487,11 @@ test('fetcher 把 endpoint 拼成绝对 URL，且不依赖默认常量', async (
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com/',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     requester: async (url) => { seen.push(url); return summaryResponse({ retained: 0, available: false }); }
   });
   await fetcher({ now: Date.now() });
-  assert.deepEqual(seen, ['https://tiku.example.com/adapter-service/service-status/summary'],
+  assert.deepEqual(seen, ['https://tiku.example.com/api/service-status/summary'],
     'baseurl 尾部斜杠要被吃掉，endpoint 前导斜杠保留');
 });
 
@@ -505,7 +505,7 @@ test('★ successRateAvailable=false（没请求）→ kind=empty；不画格子
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     requester: async () => summaryResponse({ available: false, successRate: 0, retained: 0, totalRequests: 0, failedRequests: 0 })
   });
   const snapshot = await fetcher({ now: Date.now() });
@@ -526,7 +526,7 @@ test('★ successRateAvailable=true 且 successRate=0（全失败）→ kind=ok�
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     // 100 请求 0 成功 —— 这是「全失败」，必须报警感，不能当成「没数据」。
     requester: async () => summaryResponse({ available: true, successRate: 0, retained: 5, totalRequests: 100, failedRequests: 100 })
   });
@@ -579,7 +579,7 @@ test('★ summary 端点（无 points）→ 摘要模式：不渲染 288 格，�
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     requester: async () => summaryResponse({ available: true, successRate: 0.98, retained: 120, totalRequests: 1200, failedRequests: 24, avgLatencyMs: 210 })
   });
   const snapshot = await fetcher({ now: Date.now() });
@@ -625,7 +625,7 @@ test('fetcher 带 Authorization: Bearer <key>（AuthOrAccessToken 需要它才�
   const seen = [];
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-abc123',
     requester: async (url, init) => { seen.push({ url, init }); return summaryResponse(); }
   });
@@ -641,7 +641,7 @@ test('fetcher 在没配 key 时不发请求（所以也不会伪造空 Bearer）
   const seen = [];
   const fetcher = http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: '',
     requester: async (url, init) => { seen.push({ url, init }); return summaryResponse(); }
   });
@@ -658,7 +658,7 @@ test('死分支守卫：`kind=forbidden` 无产出点，两种 4xx 实际都落 
   // 这条用例的价值不是「测试功能」，而是**防止有人误以为 forbidden 已被覆盖**。
   //
   // 背景（captain 2026-11-14 起真实 TIKU 实例实测）：
-  //   GET /adapter-service/admin/service-status + **有效普通 token** → **401**，不是 403。
+  //   GET /api/admin/service-status + **有效普通 token** → **401**，不是 403。
   // 原因是 router.go 上挂了 `controller.Auth`，它用 `ParseJwtWithClaims` 验 JWT；
   // access token 不是 JWT，所以在 `RequireAdmin` 之前就被 401 拦掉。
   // ⇒ 这个服务里 403 在这条链路上根本到不了（`RequireAdmin` 的 403 只对
@@ -670,7 +670,7 @@ test('死分支守卫：`kind=forbidden` 无产出点，两种 4xx 实际都落 
 
   const make = (status) => http.createServiceStatusHttpFetcher({
     baseurl: 'https://tiku.example.com',
-    endpoint: '/adapter-service/service-status/summary',
+    endpoint: '/api/service-status/summary',
     accessKey: 'tk-test',
     requester: async () => { throw Object.assign(new Error(`HTTP ${status}`), { status }); }
   });

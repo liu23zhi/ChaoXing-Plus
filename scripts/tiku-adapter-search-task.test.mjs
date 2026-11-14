@@ -36,7 +36,7 @@ async function loadModule() {
 
 function pollOptions(getStatus, overrides = {}) {
   return {
-    statusUrlBase: 'https://adapter.local/adapter-service/search/status',
+    statusUrlBase: 'https://adapter.local/api/search/status',
     pollIntervalMs: 0,
     timeoutMs: 10000,
     maxConsecutiveFailures: 3,

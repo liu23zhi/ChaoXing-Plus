@@ -52,16 +52,26 @@ test('quota detection never fires on non-object payloads or unrelated codes', ()
 });
 
 test('adapter url detection and identity extraction reject malformed input instead of throwing', () => {
-  assert.equal(errors.isTikuAdapterRequestUrl('https://adapter.test/adapter-service/search'), true);
+  assert.equal(errors.isTikuAdapterRequestUrl('https://adapter.test/api/search'), true);
   assert.equal(errors.isTikuAdapterRequestUrl('https://adapter.test/search'), false);
   assert.equal(errors.isTikuAdapterRequestUrl('not a url'), false);
 
-  const identity = errors.resolveTikuAdapterRequestIdentity('https://adapter.test/api/adapter-service/search', {
+  // 前缀之后的路径段被剥掉，baseurl 只保留到前缀之前（前缀本身不进 baseurl）。
+  const identity = errors.resolveTikuAdapterRequestIdentity('https://adapter.test/api/search', {
     authorization: 'Bearer  test-key  '
   });
-  assert.deepEqual(identity, { baseurl: 'https://adapter.test/api', key: 'test-key' }, 'Bearer 前缀与两端空白都该剥掉');
+  assert.deepEqual(identity, { baseurl: 'https://adapter.test', key: 'test-key' }, 'Bearer 前缀与两端空白都该剥掉');
 
-  const noKey = errors.resolveTikuAdapterRequestIdentity('https://adapter.test/adapter-service/search', {});
+  // 旧前缀同样要能识别（2026-11-14 改名后保留了四个搜索接口的兼容）。
+  assert.equal(errors.isTikuAdapterRequestUrl('https://adapter.test/adapter-service/search'), true,
+    '旧前缀 /adapter-service 仍须被识别为适配器请求');
+  assert.deepEqual(
+    errors.resolveTikuAdapterRequestIdentity('https://adapter.test/adapter-service/search/tasks', {}),
+    { baseurl: 'https://adapter.test', key: '' },
+    '旧前缀的路径段也应被剥掉',
+  );
+
+  const noKey = errors.resolveTikuAdapterRequestIdentity('https://adapter.test/api/search', {});
   assert.deepEqual(noKey, { baseurl: 'https://adapter.test', key: '' });
 
   assert.deepEqual(errors.resolveTikuAdapterRequestIdentity('::::'), { baseurl: '', key: '' }, '非法 URL 返回空身份，不抛');

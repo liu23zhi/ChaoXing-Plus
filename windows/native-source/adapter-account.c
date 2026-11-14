@@ -75,6 +75,29 @@ static BOOL cx_mem_equal(const void *left, const void *right, DWORD length) {
     for (i = 0; i < length; i++) if (a[i] != b[i]) return FALSE;
     return TRUE;
 }
+
+/*
+ * cx_strip_api_prefix 把 `length` 长度的 URL 尾部若为 API 前缀则剥掉，返回新长度。
+ *
+ * 为什么需要它（2026-11-14 后端改名 /adapter-service → /api）：
+ * 用户保存的 base URL 有两种历史形态（带旧前缀 / 不带前缀）。若不剥，
+ * 拼接后会出现 https://host/adapter-service/api/... 这类双前缀，必然 404。
+ * 两个前缀都要认：老用户存的是旧前缀，新用户可能存新前缀。
+ *
+ * 长度一律用 lstrlenW 现算，**不写死 16** —— 旧实现硬编码了 "/adapter-service"
+ * 的字符数，改前缀时会静默算出错误位置。
+ */
+static DWORD cx_strip_api_prefix(const WCHAR *text, DWORD length) {
+    DWORD legacy = cx_wlen(CX_ADAPTER_API_PREFIX_LEGACY);
+    DWORD current = cx_wlen(CX_ADAPTER_API_PREFIX_NEW);
+    if (text && length >= legacy &&
+        cx_mem_equal(text + length - legacy, CX_ADAPTER_API_PREFIX_LEGACY, legacy * sizeof(WCHAR)))
+        return length - legacy;
+    if (text && length >= current &&
+        cx_mem_equal(text + length - current, CX_ADAPTER_API_PREFIX_NEW, current * sizeof(WCHAR)))
+        return length - current;
+    return length;
+}
 static void cx_error(WCHAR *out, DWORD cap, const WCHAR *value) {
     if (out && cap) lstrcpynW(out, value, (int)cap);
 }
@@ -128,7 +151,7 @@ static BOOL cx_build_url(const WCHAR *base, const WCHAR *path, WCHAR *out, DWORD
     DWORD n, p;
     if (!base || !path || !out || cap < 2) return FALSE;
     n = cx_wlen(base); while (n && base[n - 1] == L'/') n--;
-    if (n >= 16 && cx_mem_equal(base + n - 16, L"/adapter-service", 16 * sizeof(WCHAR))) n -= 16;
+    n = cx_strip_api_prefix(base, n);
     p = 0; while (path[p] == L'/') p++;
     if (n + 1 + cx_wlen(path + p) >= cap) return FALSE;
     CopyMemory(out, base, (SIZE_T)n * sizeof(WCHAR)); out[n] = L'/';
@@ -237,7 +260,7 @@ BOOL cx_adapter_auth_settings(const WCHAR *baseUrl, CX_ADAPTER_AUTH_SETTINGS *se
     ZeroMemory(settings, sizeof(*settings));
     /* The web client defaults to remote. Fail closed if the provider is omitted. */
     lstrcpyW(settings->captchaProvider, L"remote");
-    ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/public/register-status", NULL, NULL, 10000, 65536, &reply, error, errorCap);
+    ok = cx_adapter_request(baseUrl, L"GET", L"/api/public/register-status", NULL, NULL, 10000, 65536, &reply, error, errorCap);
     if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"读取服务端验证码配置失败。"); cx_adapter_reply_free(&reply); return FALSE; }
     if (!cx_response_string(&reply, "captchaProvider", provider, 32)) {
         cx_adapter_reply_free(&reply); cx_error(error, errorCap, L"服务端验证码配置格式无效；为避免使用错误验证码，未显示本地图验证码。"); return FALSE;
@@ -248,9 +271,9 @@ BOOL cx_adapter_auth_settings(const WCHAR *baseUrl, CX_ADAPTER_AUTH_SETTINGS *se
     cx_adapter_reply_free(&reply);
     return TRUE;
 }
-BOOL cx_adapter_captcha_begin(const WCHAR *baseUrl, CX_ADAPTER_CAPTCHA *captcha, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captcha) return FALSE; ZeroMemory(captcha, sizeof(*captcha)); if (!cx_json_value("scene", L"login_password", &json, &length)) { cx_error(error, errorCap, L"验证码请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/challenge", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"获取站内图形验证码失败。"); cx_adapter_reply_free(&reply); return FALSE; } ok = cx_response_string(&reply, "challengeId", captcha->challengeId, 128); { JT *t = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT)); int n = t ? jparse(reply.body, (int)reply.length, t, 4096) : -1; int v = n > 0 ? jkey(reply.body, t, 0, "imageData") : -1; if (v < 0 || !t || !jstr(reply.body, t, v, captcha->imageData, CX_ADAPTER_CAPTCHA_IMAGE_CAP)) ok = FALSE; if (t) HeapFree(GetProcessHeap(), 0, t); } if (ok) (void)cx_response_string(&reply, "expiresAt", captcha->expiresAt, 64); cx_adapter_reply_free(&reply); if (!ok) cx_error(error, errorCap, L"验证码响应格式无效。"); return ok; }
-BOOL cx_adapter_captcha_verify(const WCHAR *baseUrl, const WCHAR *challengeId, const WCHAR *answer, WCHAR *captchaToken, DWORD tokenCap, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captchaToken || !cx_json_begin3("challengeId", challengeId, "scene", L"login_password", "captchaCode", answer, &json, &length)) { cx_error(error, errorCap, L"验证码校验编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/public/captcha/verify", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "captchaToken", captchaToken, tokenCap)) { if (ok) cx_reply_error(&reply, error, errorCap, L"验证码校验失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"验证码校验失败。"); cx_adapter_reply_free(&reply); return FALSE; } cx_adapter_reply_free(&reply); return TRUE; }
-BOOL cx_adapter_account_login(const WCHAR *baseUrl, const WCHAR *username, const WCHAR *password, const WCHAR *captchaToken, CX_ADAPTER_ACCOUNT *account, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!account) { cx_error(error, errorCap, L"账号状态无效。"); return FALSE; } cx_adapter_account_clear(account); if (!cx_json_begin3("username", username, "password", password, "captchaToken", captchaToken, &json, &length)) { cx_error(error, errorCap, L"登录请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/user/login", NULL, json, 15000, 65536, &reply, error, errorCap); SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "jwt", account->jwt, CX_ADAPTER_TOKEN_CAP)) { if (ok) cx_reply_error(&reply, error, errorCap, L"账号登录失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"账号登录失败。"); cx_adapter_reply_free(&reply); cx_adapter_account_clear(account); return FALSE; } lstrcpynW(account->username, username ? username : L"", 256); cx_adapter_reply_free(&reply); return TRUE; }
+BOOL cx_adapter_captcha_begin(const WCHAR *baseUrl, CX_ADAPTER_CAPTCHA *captcha, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captcha) return FALSE; ZeroMemory(captcha, sizeof(*captcha)); if (!cx_json_value("scene", L"login_password", &json, &length)) { cx_error(error, errorCap, L"验证码请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/api/public/captcha/challenge", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"获取站内图形验证码失败。"); cx_adapter_reply_free(&reply); return FALSE; } ok = cx_response_string(&reply, "challengeId", captcha->challengeId, 128); { JT *t = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4096 * sizeof(JT)); int n = t ? jparse(reply.body, (int)reply.length, t, 4096) : -1; int v = n > 0 ? jkey(reply.body, t, 0, "imageData") : -1; if (v < 0 || !t || !jstr(reply.body, t, v, captcha->imageData, CX_ADAPTER_CAPTCHA_IMAGE_CAP)) ok = FALSE; if (t) HeapFree(GetProcessHeap(), 0, t); } if (ok) (void)cx_response_string(&reply, "expiresAt", captcha->expiresAt, 64); cx_adapter_reply_free(&reply); if (!ok) cx_error(error, errorCap, L"验证码响应格式无效。"); return ok; }
+BOOL cx_adapter_captcha_verify(const WCHAR *baseUrl, const WCHAR *challengeId, const WCHAR *answer, WCHAR *captchaToken, DWORD tokenCap, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!captchaToken || !cx_json_begin3("challengeId", challengeId, "scene", L"login_password", "captchaCode", answer, &json, &length)) { cx_error(error, errorCap, L"验证码校验编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/api/public/captcha/verify", NULL, json, 10000, 65536, &reply, error, errorCap); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "captchaToken", captchaToken, tokenCap)) { if (ok) cx_reply_error(&reply, error, errorCap, L"验证码校验失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"验证码校验失败。"); cx_adapter_reply_free(&reply); return FALSE; } cx_adapter_reply_free(&reply); return TRUE; }
+BOOL cx_adapter_account_login(const WCHAR *baseUrl, const WCHAR *username, const WCHAR *password, const WCHAR *captchaToken, CX_ADAPTER_ACCOUNT *account, WCHAR *error, DWORD errorCap) { CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok; if (!account) { cx_error(error, errorCap, L"账号状态无效。"); return FALSE; } cx_adapter_account_clear(account); if (!cx_json_begin3("username", username, "password", password, "captchaToken", captchaToken, &json, &length)) { cx_error(error, errorCap, L"登录请求编码失败。"); return FALSE; } ok = cx_adapter_request(baseUrl, L"POST", L"/api/user/login", NULL, json, 15000, 65536, &reply, error, errorCap); SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json); if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "jwt", account->jwt, CX_ADAPTER_TOKEN_CAP)) { if (ok) cx_reply_error(&reply, error, errorCap, L"账号登录失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"账号登录失败。"); cx_adapter_reply_free(&reply); cx_adapter_account_clear(account); return FALSE; } lstrcpynW(account->username, username ? username : L"", 256); cx_adapter_reply_free(&reply); return TRUE; }
 static BOOL cx_find_token(const CX_ADAPTER_REPLY *reply, CX_ADAPTER_ACCOUNT *account) {
     JT *t; char *token; int count, i, status, value, id; BOOL ok = FALSE;
     if (!reply || !reply->body || !account) return FALSE;
@@ -274,13 +297,13 @@ BOOL cx_adapter_account_token(const WCHAR *baseUrl, BOOL createIfMissing, CX_ADA
     CX_ADAPTER_REPLY reply; char *json; DWORD length; BOOL ok;
     if (!account || !account->jwt[0]) { cx_error(error, errorCap, L"尚未登录适配器账号。"); return FALSE; }
     account->apiKey[0] = 0; account->accessTokenId = 0;
-    ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/access-tokens", account->jwt, NULL, 15000, 262144, &reply, error, errorCap);
+    ok = cx_adapter_request(baseUrl, L"GET", L"/api/access-tokens", account->jwt, NULL, 15000, 262144, &reply, error, errorCap);
     if (!ok || reply.status < 200 || reply.status >= 300) { if (ok) cx_reply_error(&reply, error, errorCap, L"获取账号访问令牌失败。"); cx_adapter_reply_free(&reply); return FALSE; }
     ok = cx_find_token(&reply, account); cx_adapter_reply_free(&reply);
     if (ok) return TRUE;
     if (!createIfMissing) { cx_error(error, errorCap, L"账号密码登录已成功，但账号没有可用访问令牌。请勾选“没有访问令牌时创建原生客户端专用令牌”后重试，或先在服务端创建令牌。"); return FALSE; }
     if (!cx_json_token_create(&json, &length)) { cx_error(error, errorCap, L"令牌请求编码失败。"); return FALSE; }
-    ok = cx_adapter_request(baseUrl, L"POST", L"/adapter-service/access-tokens", account->jwt, json, 15000, 65536, &reply, error, errorCap);
+    ok = cx_adapter_request(baseUrl, L"POST", L"/api/access-tokens", account->jwt, json, 15000, 65536, &reply, error, errorCap);
     SecureZeroMemory(json, length); HeapFree(GetProcessHeap(), 0, json);
     if (!ok || reply.status < 200 || reply.status >= 300 || !cx_response_string(&reply, "token", account->apiKey, CX_ADAPTER_TOKEN_CAP) || !account->apiKey[0]) {
         if (ok) cx_reply_error(&reply, error, errorCap, L"创建访问令牌失败。"); else if (error && !error[0]) cx_error(error, errorCap, L"创建访问令牌失败。");
@@ -294,7 +317,7 @@ BOOL cx_adapter_key_check(const WCHAR *baseUrl, const WCHAR *apiKey, WCHAR *erro
     auth = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (CX_ADAPTER_TOKEN_CAP + 8) * sizeof(WCHAR));
     if (!auth) { cx_error(error, errorCap, L"内存不足。"); return FALSE; }
     lstrcpyW(auth, L"Bearer "); lstrcpyW(auth + 7, apiKey);
-    ok = cx_adapter_request(baseUrl, L"GET", L"/adapter-service/search/health", auth, NULL, 10000, 65536, &reply, error, errorCap);
+    ok = cx_adapter_request(baseUrl, L"GET", L"/api/search/health", auth, NULL, 10000, 65536, &reply, error, errorCap);
     SecureZeroMemory(auth, (CX_ADAPTER_TOKEN_CAP + 8) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, auth);
     if (ok && (reply.status < 200 || reply.status >= 300)) cx_reply_error(&reply, error, errorCap, L"API key 无效或服务不可用。");
     ok = ok && reply.status >= 200 && reply.status < 300; cx_adapter_reply_free(&reply);
@@ -453,8 +476,8 @@ static BOOL cx_extension_service_identity(const WCHAR *baseUrl, BYTE identity[32
     if (!parts.dwHostNameLength || parts.dwExtraInfoLength) goto done;
     pathLength = parts.dwUrlPathLength;
     while (pathLength && path[pathLength - 1] == L'/') pathLength--;
-    if (pathLength >= 16 && cx_mem_equal(path + pathLength - 16, L"/adapter-service", 16 * sizeof(WCHAR)))
-        pathLength -= 16;
+    pathLength = cx_strip_api_prefix(path, pathLength);
+    /* 原「剥 /adapter-service 后缀」逻辑已抽成 cx_strip_api_prefix（见上方定义）。 */
     if (pathLength == 1 && path[0] == L'/') pathLength = 0;
     canonicalCap = parts.dwSchemeLength + parts.dwHostNameLength + pathLength + 64;
     canonical = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)canonicalCap * sizeof(WCHAR));
@@ -546,7 +569,7 @@ static BOOL cx_adapter_extension_fetch_online(const WCHAR *baseUrl, const WCHAR 
     if (!wide) { cx_error(error, errorCap, L"内存不足。"); return FALSE; }
     latestPath = wide; downloadPath = latestPath + 256; expectedPath = downloadPath + 2048; advertisedVersion = expectedPath + 256; advertisedSource = advertisedVersion + 128;
     canonicalSource = cx_ascii_equal(source, L"edge") ? L"edge" : L"chrome";
-    pathUsed = 0; latestPath[0] = 0; cx_append_w(latestPath, 256, &pathUsed, L"/adapter-service/extensions/"); cx_append_w(latestPath, 256, &pathUsed, canonicalSource); cx_append_w(latestPath, 256, &pathUsed, L"/latest");
+    pathUsed = 0; latestPath[0] = 0; cx_append_w(latestPath, 256, &pathUsed, L"/api/extensions/"); cx_append_w(latestPath, 256, &pathUsed, canonicalSource); cx_append_w(latestPath, 256, &pathUsed, L"/latest");
     if (!cx_adapter_request(baseUrl, L"GET", latestPath, NULL, NULL, 15000, 65536, &latest, error, errorCap)) goto done;
     if (latest.status < 200 || latest.status >= 300) {
         cx_error(error, errorCap, latest.status == 503 ? L"服务端尚无已验证扩展，请在管理后台检查扩展更新。"
@@ -562,7 +585,7 @@ static BOOL cx_adapter_extension_fetch_online(const WCHAR *baseUrl, const WCHAR 
     for (i = 0; i < 32; i++) if (extensionId[i] < 'a' || extensionId[i] > 'p') { cx_error(error, errorCap, L"扩展标识无效。"); goto done; }
     for (i = 0; i < 64; i++) { char c = advertisedHash[i]; if (c >= 'A' && c <= 'F') c += 'a' - 'A'; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { cx_error(error, errorCap, L"扩展 SHA-256 格式无效。"); goto done; } advertisedHash[i] = c; }
     { int wchars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, downloadUrl, -1, downloadPath, 2048); if (wchars <= 0) { cx_error(error, errorCap, L"扩展下载路径编码无效。"); goto done; } }
-    pathUsed = 0; expectedPath[0] = 0; cx_append_w(expectedPath, 256, &pathUsed, L"/adapter-service/extensions/"); cx_append_w(expectedPath, 256, &pathUsed, canonicalSource); cx_append_w(expectedPath, 256, &pathUsed, L"/download?sha256="); for (i = 0; i < 64; i++) expectedPath[pathUsed++] = (WCHAR)advertisedHash[i]; expectedPath[pathUsed] = 0;
+    pathUsed = 0; expectedPath[0] = 0; cx_append_w(expectedPath, 256, &pathUsed, L"/api/extensions/"); cx_append_w(expectedPath, 256, &pathUsed, canonicalSource); cx_append_w(expectedPath, 256, &pathUsed, L"/download?sha256="); for (i = 0; i < 64; i++) expectedPath[pathUsed++] = (WCHAR)advertisedHash[i]; expectedPath[pathUsed] = 0;
     if (lstrcmpW(expectedPath, downloadPath)) { cx_error(error, errorCap, L"扩展下载路径不属于当前服务或版本。"); goto done; }
     if (!cx_adapter_request(baseUrl, L"GET", downloadPath, NULL, NULL, 60000, 64UL * 1024UL * 1024UL, &package, error, errorCap) || package.status < 200 || package.status >= 300 || package.length != advertisedSize || !cx_sha256((BYTE *)package.body, package.length, digest) || !cx_hex_digest(digest, actualHash) || !cx_hex_equal(actualHash, advertisedHash)) { cx_error(error, errorCap, L"扩展下载包大小或 SHA-256 校验失败。"); goto done; }
     *data = (BYTE *)package.body; *size = package.length; package.body = NULL; package.length = 0; if (version && versionCap) lstrcpynW(version, advertisedVersion, (int)versionCap); if (extensionIdOut && extensionIdCap) lstrcpynA(extensionIdOut, extensionId, extensionIdCap); ok = TRUE;
