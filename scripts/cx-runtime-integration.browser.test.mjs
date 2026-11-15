@@ -203,6 +203,29 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
   // 冷 profile 下整个 bundle 要启动完才会挂面板；共享 runner 上 25s 仍会偶发超时（实测 26.2s）。
   // 超时属于基础设施抖动，不该让真实回归变红，给到 45s。
   await page.waitForSelector('#panel-common-work-results', { timeout: 45000 });
+  try {
+    await page.waitForSelector('#panel-common-work-results', { timeout: 45000 });
+  } catch (probeError) {
+    // DIAG 临时诊断：面板没出现时，打印它到底存不存在/为什么不可见。
+    const diag = await page.evaluate(() => {
+      const el = document.getElementById('panel-common-work-results');
+      const top = document.documentElement;
+      return {
+        exists: Boolean(el),
+        display: el ? getComputedStyle(el).display : null,
+        rects: el ? el.getClientRects().length : null,
+        lockedOut: el ? (el.dataset.chaoxingPlusLockedOut ?? null) : null,
+        owner: top.dataset.chaoxingPlusPanelOwner ?? null,
+        href: location.href,
+        panelIds: Array.from(document.querySelectorAll('[id^="panel-"]')).map((e) => e.id),
+        bodyChildren: document.body ? document.body.children.length : -1
+      };
+    });
+    console.log('[DIAG] pageKind=' + pageKind + ' ' + JSON.stringify(diag));
+    console.log('[DIAG] pageerrors=' + JSON.stringify(errors.slice(0, 5)));
+    console.log('[DIAG] logs-tail=' + JSON.stringify(logs.slice(-8)));
+    throw probeError;
+  }
   return { page, searched, requests, logs };
 }
 
