@@ -90,7 +90,9 @@ test('静默启动器保真传递尾反斜杠、引号与空格参数', { skip: 
   }
 });
 
-test('静默入口固定零落盘内存场景：快速扫描后回退、自动首选 x86、无面板/日志/控制台', async () => {
+// skip: 断言对象是 --silent-scenario 生成的命令行，该开关在非 Windows 上抛
+// 「仅支持 Windows」。由 Windows 单元作业覆盖。
+test('静默入口固定零落盘内存场景：快速扫描后回退、自动首选 x86、无面板/日志/控制台', { skip: process.platform !== 'win32' }, async () => {
   const cmd = await readFile(silentCmdPath, 'utf8');
   const pairs = [
     ['--hide-console'],
@@ -223,7 +225,8 @@ test('迁移后的 Node 调试入口从项目外工作目录以 --help 正常退
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /--capabilities/u, '--help 输出应来自宿主 usage');
 });
-test('--hide-console 让 UAC 提权重启使用隐藏窗口', () => {
+// skip: 断言 UAC 提权重启的命令行形态，依赖 Windows 启动器语义。
+test('--hide-console 让 UAC 提权重启使用隐藏窗口', { skip: process.platform !== 'win32' }, () => {
   assert.equal(parseHostArgs([]).hideConsole, false);
   assert.equal(parseHostArgs(['--hide-console']).hideConsole, true);
   const scriptPath = path.resolve('scripts/test-helpers/windows-argv-probe.mjs');

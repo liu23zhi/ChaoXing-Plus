@@ -125,7 +125,9 @@ test('进入考试助手保持纯 ASCII 且不发送重复点击', () => {
   assert.doesNotMatch(text, /0\.34333|0\.11143/u, '不得再用客户区比例推算按钮坐标');
 });
 
-test('圆角弹窗按钮可被扫描命中，普通页面不会误判', () => {
+// skip: 走 PowerShell + 原生窗口辅助脚本定位真实弹窗按钮，依赖 Windows GUI。
+// 由 Windows 单元/可见窗口作业覆盖。
+test('圆角弹窗按钮可被扫描命中，普通页面不会误判', { skip: process.platform !== 'win32' }, () => {
   const harness = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -225,7 +227,8 @@ test('检测未通过时点掉确认弹窗再等页面', async () => {
   assert.ok(confirmBody.indexOf('Get-ClientDialogWindow') < confirmBody.indexOf('Find-ClientConfirmButton'),
     '必须先定位弹窗窗口再扫描按钮');
 });
-test('真实 CI 帧：检测未通过弹窗的确定按钮能被定位', () => {
+// skip: 同上，需要真实 Windows 弹窗。
+test('真实 CI 帧：检测未通过弹窗的确定按钮能被定位', { skip: process.platform !== 'win32' }, () => {
   const harness = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -276,7 +279,8 @@ function Scan-Crop([string]$Path, [double]$left, [double]$top, [double]$width, [
   assert.ok(Math.abs(entryX - 601) <= 20 && Math.abs(entryY - 78) <= 20, `进入考试按钮位置异常: ${entryX},${entryY}`);
 });
 
-test('按弹窗窗口自身坐标也能定位确定按钮', () => {
+// skip: 同上，需要真实 Windows 弹窗。
+test('按弹窗窗口自身坐标也能定位确定按钮', { skip: process.platform !== 'win32' }, () => {
   // CI 帧里弹窗是独立窗口：只截到弹窗时，用宽裁剪带（2%..98% x / 10%..95% y）必须仍能命中。
   const harness = String.raw`
 $ErrorActionPreference = 'Stop'

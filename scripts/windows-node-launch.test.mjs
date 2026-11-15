@@ -20,7 +20,9 @@ function createHelper() {
   return helper;
 }
 
-test('ordinary launcher transports arguments as UTF-8 JSON without temporary files', async () => {
+// skip: spawnWindowsClient 走 Windows 进程创建语义（参数经 stdio 传给一个 Node 子进程
+// 再由它拉起客户端），在非 Windows 上无法构造。由 Windows 单元作业覆盖。
+test('ordinary launcher transports arguments as UTF-8 JSON without temporary files', { skip: process.platform !== 'win32' }, async () => {
   const helper = createHelper();
   let input = '', invocation;
   helper.stdin.on('data', (chunk) => { input += chunk.toString('utf8'); });

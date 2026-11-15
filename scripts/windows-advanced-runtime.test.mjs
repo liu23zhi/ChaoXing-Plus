@@ -134,7 +134,11 @@ test('self-destruct 客户端从未启动时，全屏与进程事件都不得触
   assert.deepEqual(reasons, [], '未启动 CXExam 时不得自毁');
 });
 
-test('静默场景固定调参：自毁键、全屏规则、手动放行、零落盘与扫描策略', () => {
+// skip: --silent-scenario 在非 Windows 上直接抛「仅支持 Windows」（options.mjs 的平台
+// 断言，不是本用例的缺陷）。这条断言的对象是 Windows 专属的参数组合，
+// 由 Windows 单元作业覆盖；在 Ubuntu 覆盖率作业里跳过它不影响 windows/node-source
+// 组的统计口径（该组另有 60+ 条跨平台用例在跑）。
+test('静默场景固定调参：自毁键、全屏规则、手动放行、零落盘与扫描策略', { skip: process.platform !== 'win32' }, () => {
   const silent = parseHostArgs(['--silent-scenario', '--execution-mode', 'memory']);
   assert.equal(silent.silentScenario, true);
   assert.equal(silent.silentDeleteSimulate, false);

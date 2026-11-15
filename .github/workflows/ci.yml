@@ -167,7 +167,21 @@ jobs:
           # 覆盖率只能统计被 Node 模块加载器加载过的文件，所以在 Ubuntu 上跑。
           # 必须先 build：缺 dist/ 时 manifest 相关用例会假失败，与覆盖率无关。
           set -o pipefail
-          mapfile -t testFiles < <(find scripts -maxdepth 1 -name '*.test.mjs' -type f | sort)
+          # ⚠️ 必须排除**启动真实浏览器的用例**（本轮修复，CI run 43651620853）。
+          #
+          # 它们由 Windows 的「浏览器端交互回归」作业专门跑（那边 Chrome 可用，收集
+          # 口径就是「含 puppeteer.launch( 的 *.test.mjs」）。在 Ubuntu 上再跑一遍必然
+          # 失败：Ubuntu 23.10+ 的 AppArmor 限制 user namespaces，Chrome 直接
+          #   FATAL:zygote_host_impl_linux.cc:130] No usable sandbox!
+          # 实测该 run 因此挂了 269 条（全部 failureType: 'hookFailed'，一条业务断言
+          # 都没跑到），并连带把覆盖率门禁拖红。
+          #
+          # 口径与 Windows 作业保持**同一套判据**（按源码是否调用 puppeteer.launch
+          # 收集），不按文件名猜：windows-parameter-generator.test.mjs 名字像平台测试，
+          # 实际是浏览器测试（hookFailed 而非平台断言），按名字筛会误伤。
+          mapfile -t browserDriven < <(grep -lE 'puppeteer\.launch\(' scripts/*.test.mjs 2>/dev/null | sort)
+          echo "移交浏览器作业的用例: ${#browserDriven[@]}"
+          mapfile -t testFiles < <(find scripts -maxdepth 1 -name '*.test.mjs' -type f | sort | grep -vFxf <(printf '%s\n' "${browserDriven[@]}"))
           echo "测试文件数: ${#testFiles[@]}"
           # --import 注册 src 的 .ts 解析 hook：构建产物来自 .ts（build.mjs 的
           # resolve.extensions 把 .ts 排在 .js 前，PR #19），不加它 src 组会去统计

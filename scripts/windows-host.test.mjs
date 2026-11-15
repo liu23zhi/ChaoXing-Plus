@@ -1140,7 +1140,9 @@ test('宿主 --diagnose 会采集渲染诊断并写入诊断文件', async () =>
   }
 });
 
-test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', async () => {
+// skip: --self-check 会探测 Windows 专属的运行条件（系统目录、原生宿主产物）。
+// 由 Windows 单元作业覆盖。
+test('宿主 --self-check 在缺少 clientPath 时仍能通过核心检查', { skip: process.platform !== 'win32' }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cxplus-selfcheck-'));
   const assetsDir = path.join(directory, 'assets');
   await writeFixtureAssets(assetsDir, {

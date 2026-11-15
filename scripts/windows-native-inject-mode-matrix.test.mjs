@@ -71,7 +71,19 @@ function ready() {
 //   CI + 构建缺失        → fail（配置错，必须暴露）
 //   本机 + 构建缺失       → skip（开发者没构建是正常的）
 //   真实样���缺失          → 一律 skip（私有资产，从不进入 CI）
-const IN_CI = Boolean(process.env.CI) || process.env.GITHUB_ACTIONS === 'true';
+// ⚠️ 必须是「CI **且 Windows**」，不能只看 CI（本轮修复，CI run 43651620853）。
+//
+// 这个常量的用途是：「CI 里构建必须存在，缺失就是配置错，所以不 skip、让
+// requireBuild() 抛错」。但那个前提**只对 Windows 作业成立** —— 原生宿主
+// （host.exe / 夹具 PE）只在 Windows 上构建，Ubuntu 的覆盖率作业拿不到。
+//
+// 只写 Boolean(process.env.CI) 时，Ubuntu 上 ciRequiresBuild=true 会让
+// buildSkipReason() 返回 false（不 skip），于是 requireBuild() 抛出
+// 「assert.equal(process.platform, 'win32')」—— 实测该 run 挂了 4 条
+// （1447/1450/1451/1452），失败信息指向「不是 Windows」，与真实原因
+// （这个作业本就不该跑本文件）不符，排查时误导性很强。
+const IN_CI = (Boolean(process.env.CI) || process.env.GITHUB_ACTIONS === 'true')
+  && process.platform === 'win32';
 
 // buildSkipReason 返回 skip 原因字符串；返回 false 表示应当执行。
 // ciRequiresBuild=true 时若构建缺失则**不**返回 skip —— 让它落到用例里报错，

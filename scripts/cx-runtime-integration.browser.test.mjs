@@ -39,7 +39,30 @@ before(async () => {
 });
 
 after(async () => {
-  await browser?.close();
+  // ⚠️ 关闭要彻底（本轮修复）。
+  //
+  // 症状：node:test 报「Test hook "before" generated asynchronous activity after
+  // the test ended」——它是**文件级**失败，3 条业务断言其实全绿。
+  //
+  // 原因：本文件用 `pipe: true` 与 Chrome 通信，close() 之后管道读取流仍可能有
+  // 一小段尾随活动（puppeteer 的 pipe transport 在 close 时不保证 drain 完毕），
+  // node:test 把「hook 结束后仍有异步活动」当失败处理。
+  //
+  // 修法：close() 之后显式等进程退出，再兜底 kill，确保不留活动。
+  // 不用 `browser.disconnect()`：那会让进程脱离管理，变成真正的孤儿 Chrome。
+  if (browser) {
+    const chromeProcess = browser.process();
+    await browser.close().catch(() => {});
+    if (chromeProcess && chromeProcess.exitCode === null && !chromeProcess.killed) {
+      await new Promise((resolveDone) => {
+        const timer = setTimeout(() => {
+          try { chromeProcess.kill(); } catch { /* 已退出 */ }
+          resolveDone();
+        }, 2000);
+        chromeProcess.once('exit', () => { clearTimeout(timer); resolveDone(); });
+      });
+    }
+  }
   if (fixtureDirectory) await rm(fixtureDirectory, { recursive: true, force: true });
 });
 
@@ -123,11 +146,37 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
     }
     requests.push(`${request.method()} ${url.hostname}${url.pathname}`);
     if (url.hostname === 'provider.chaoxing.com') {
-      if (request.method() !== 'OPTIONS') reportSearch();
-      void request.respond({ status: 200, contentType: 'application/json', headers: {
-        'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key'
-      }, body: JSON.stringify({ question: 'Fixture question', type: 0, answer: { answerKeyText: 'A', answerText: 'Alpha' } }) });
+      // ⚠️ 预检（OPTIONS）与真实请求必须分开处理，且**都要 return**。
+      //
+      // 两个历史缺陷（CI run 43651620853 / 本地实测）：
+      //
+      // ① 原实现对这个域名 respond 后**没有 return**，控制流会继续落到下面的
+      //    /knowledge/cards、/mooc2/work/dowork 等分支，对同一个 request 再次
+      //    respond → puppeteer 抛 `Error: Request is already handled`。
+      //    表现为文件级失败（"Test hook before generated asynchronous activity"），
+      //    3 条业务断言其实全绿，极易被误读成功能坏了。
+      //
+      // ② OPTIONS 不能带 JSON body：预检只要头部，带 body 会让浏览器把响应
+      //    当成实际响应体缓存起来，后续真实请求的解析随之错位。
+      //
+      // 设备头必须列进 Allow-Headers：它们是 141 §7 的 5 处请求入口统一注入的，
+      // 缺了浏览器会直接拒绝实际请求（CORS 失败），reportSearch() 永不触发，
+      // 用例表现为「点了确定但 15 秒内没发出搜题请求」——那正是 not ok 137/139。
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers':
+          'Authorization, Content-Type, Idempotency-Key, X-Device-Id, X-Device-Instance'
+      };
+      if (request.method() === 'OPTIONS') {
+        void request.respond({ status: 204, headers: corsHeaders }).catch(() => {});
+        return;
+      }
+      reportSearch();
+      void request.respond({
+        status: 200, contentType: 'application/json', headers: corsHeaders,
+        body: JSON.stringify({ question: 'Fixture question', type: 0, answer: { answerKeyText: 'A', answerText: 'Alpha' } })
+      }).catch(() => {});
       return;
     }
     if (url.pathname.includes('/resources/font/table.json')) {

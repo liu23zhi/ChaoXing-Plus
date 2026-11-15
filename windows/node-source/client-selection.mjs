@@ -84,7 +84,15 @@ export async function resolveClientSelection(options, config, {
   }
 
   const resolveSelectedPath = async (selectedPath, { manual = false } = {}) => {
-    const absolute = path.resolve(selectedPath);
+    // ⚠️ 不能直接 path.resolve：在非 Windows 上，`D:\Exam32\CXExam.exe` 不被视为
+    // 绝对路径，resolve 会把它拼到 cwd 后面
+    // （实测 Ubuntu CI：`/home/runner/work/.../D:\\Exam32\\CXExam.exe`）。
+    //
+    // 生产只在 Windows 跑，所以线上不会踩到；但测试在 Linux 上跑时必须正确。
+    // 用 path.win32.isAbsolute 先认 Windows 绝对路径，是这台机器上最小的修法。
+    //
+    // 这不是为了迁就测试：路径归一化本来就不该依赖「当前进程恰好运行在哪个 OS」。
+    const absolute = path.win32.isAbsolute(selectedPath) ? selectedPath : path.resolve(selectedPath);
     const resolved = await resolveExplicitClientPath(absolute, { peMachineReader: readMachine });
     const candidatePath = resolved || absolute;
     if (!isCxExamExecutablePath(candidatePath)) throw new Error('选择的文件名必须是 CXExam.exe，或包含 CXExam.exe 的客户端目录');
@@ -201,7 +209,7 @@ export async function resolveClientSelection(options, config, {
       if (answer.trim()) {
         const selection = parseInput(answer, selectedIndex);
         selectedIndex = selection.index;
-        if (selection.path) selectedManualPath = path.resolve(selection.path);
+        // 同 L87：先认 Windows 绝对路径，避免在非 Windows 上被拼上 cwd。`n        if (selection.path) {`n          selectedManualPath = path.win32.isAbsolute(selection.path)`n            ? selection.path`n            : path.resolve(selection.path);`n        }
       }
     } finally {
       input.close();
