@@ -111,6 +111,17 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
   t.after(() => {
     assert.deepEqual(startupErrors, [], 'whole-runtime startup must complete without errors');
     assert.deepEqual(errors, [], 'the complete bundle must not throw in the course fixture');
+    // 某个 script 初始化失败必须显式变红（本轮新增）。
+    //
+    // start() 现在按 script 隔离错误，一个失败不再中断后面的 script —— 面板会照常
+    // 挂上。但「面板出来了」不等于「功能是好的」：CI run 43666425749 的 work 页上，
+    // 失败点从 `#panel-common-work-results` 推后到 `.swal2-popup .swal2-cancel`，
+    // 说明面板被救回来了、work 逻辑仍然坏。
+    //
+    // 放在 t.after 而不是 openPage 返回前：start() 是异步的，oncomplete 可能在
+    // openPage 返回之后才跑完（实测放在返回前一次都没捕获到）。
+    const scriptFailures = logs.filter((line) => /\] script .+ failed/.test(line));
+    assert.deepEqual(scriptFailures, [], 'no script may fail to initialize; logs=' + JSON.stringify(logs.slice(-12)));
   });
   await page.evaluateOnNewDocument(() => {
     for (const [key, value] of Object.entries({
@@ -203,6 +214,7 @@ async function openPage(t, { withTask = false, existingPage, pageKind = 'course'
   // 冷 profile 下整个 bundle 要启动完才会挂面板；共享 runner 上 25s 仍会偶发超时（实测 26.2s）。
   // 超时属于基础设施抖动，不该让真实回归变红，给到 45s。
   await page.waitForSelector('#panel-common-work-results', { timeout: 45000 });
+  return { page, searched, requests, logs };
   return { page, searched, requests, logs };
 }
 

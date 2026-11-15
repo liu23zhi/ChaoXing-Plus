@@ -78,7 +78,9 @@ function createFakeWindowDependencies(outputValue) {
   return { fsImpl, execFileImpl, files, calls };
 }
 
-test('showClientSelectionWindow 通过 PowerShell 进程契约解析选中结果', async () => {
+// skip: showClientSelectionWindow 在非 Windows 上返回 {status:'unavailable', reason:'not-windows'}
+// （生产代码的平台判定，不是本用例缺陷）。由 Windows 单元/可见窗口作业覆盖。
+test('showClientSelectionWindow 通过 PowerShell 进程契约解析选中结果', { skip: process.platform !== 'win32' }, async () => {
   const deps = createFakeWindowDependencies({ path: 'D:\\Exam\\CXExam.exe', index: 2, manual: false, cancelled: false });
   const result = await showClientSelectionWindow({
     candidates: [{ path: 'D:\\Exam\\CXExam.exe', machine: 'x86' }],
@@ -100,7 +102,8 @@ test('showClientSelectionWindow 通过 PowerShell 进程契约解析选中结果
   assert.equal(payload.iconPath, resolve(root, 'windows/share-file/assets/app-icon.ico'));
 });
 
-test('showClientSelectionWindow 返回取消，并在 PowerShell 失败时标记不可用', async () => {
+// skip: 同上，依赖 Windows PowerShell 窗口契约。
+test('showClientSelectionWindow 返回取消，并在 PowerShell 失败时标记不可用', { skip: process.platform !== 'win32' }, async () => {
   const cancelled = await showClientSelectionWindow({
     candidates: [{ path: 'D:\\Exam\\CXExam.exe', machine: 'x86' }],
     ...createFakeWindowDependencies({ cancelled: true, autoClosed: true })
@@ -119,7 +122,8 @@ test('showClientSelectionWindow 返回取消，并在 PowerShell 失败时标记
   assert.equal(emptyDeps.calls.length, 1);
 });
 
-test('选择窗口使用标准输入输出传递推荐序号，避免创建临时业务文件', async () => {
+// skip: 同上。
+test('选择窗口使用标准输入输出传递推荐序号，避免创建临时业务文件', { skip: process.platform !== 'win32' }, async () => {
   const deps = createFakeWindowDependencies({ cancelled: true });
   await showClientSelectionWindow({
     candidates: [{ path: 'C:\\Exam64\\CXExam.exe', machine: 'x64' }, { path: 'D:\\Exam32\\CXExam.exe', machine: 'x86' }],
@@ -131,7 +135,8 @@ test('选择窗口使用标准输入输出传递推荐序号，避免创建临�
   assert.equal(payload.preferredIndex, 1);
 });
 
-test('选择窗口保留跨 stdout/stderr 数据块的 UTF-8 中文路径与错误', async () => {
+// skip: 同上。
+test('选择窗口保留跨 stdout/stderr 数据块的 UTF-8 中文路径与错误', { skip: process.platform !== 'win32' }, async () => {
   const moduleUrl = new URL('../windows/node-source/selection-window.mjs', import.meta.url).href;
   const selectedPath = 'D:\\考试客户端\\CXExam.exe';
   const failureReason = '考试客户端选择失败';
