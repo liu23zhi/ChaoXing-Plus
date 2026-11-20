@@ -269,6 +269,16 @@ export type ServiceStatusBreakdown = {
   quota: number;
 };
 
+/** 普通状态页公开的搜题接口分桶摘要（不混用全站聚合）。 */
+export type SearchEndpointStatus = {
+  status: 'healthy' | 'degraded' | 'down' | 'unknown';
+  successRate: number | null;
+  totalRequests: number;
+  successRequests: number;
+  avgLatencyMs: number | null;
+  samples: number;
+};
+
 /**
  * 快照的三种**互斥**语义。这是本文件最重要的一条约定。
  *
@@ -370,6 +380,8 @@ export type ServiceStatusSnapshot = {
    */
   restartedAtMs: number | null;
   updatedAt: number;
+  /** 新版摘要端点的搜题专属分桶。缺失时必须显示无数据，不能回退成全站状态。 */
+  search?: SearchEndpointStatus | null;
 };
 
 export type ServiceStatusFetchOptions = { now: number };
@@ -456,6 +468,33 @@ function parseIsoToMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeSearchEndpointStatus(payload: Record<string, unknown>, summary: Record<string, unknown>): SearchEndpointStatus | null {
+  const endpoints = asRecord(payload.endpoints) ?? asRecord(summary.endpoints);
+  const search = asRecord(endpoints?.search);
+  if (!search) return null;
+
+  const totalRequests = Math.max(0, toFiniteNumber(search.totalRequests ?? search.total_requests) ?? 0);
+  const successRequests = Math.min(totalRequests, Math.max(0, toFiniteNumber(search.successRequests ?? search.success_requests) ?? 0));
+  const samples = Math.max(0, toFiniteNumber(search.samples) ?? 0);
+  const successRate = totalRequests > 0 ? successRequests / totalRequests : null;
+  let status: SearchEndpointStatus['status'] = 'unknown';
+  if (samples > 0 && successRate !== null) {
+    status = successRate >= 0.95 ? 'healthy' : successRate >= 0.7 ? 'degraded' : 'down';
+  }
+
+  return {
+    status,
+    successRate,
+    totalRequests,
+    successRequests,
+    // The backend uses zero for an empty bucket; present that as unknown latency.
+    avgLatencyMs: totalRequests > 0
+      ? Math.max(0, toFiniteNumber(search.avgLatencyMs ?? search.avg_latency_ms) ?? 0)
+      : null,
+    samples
+  };
+}
+
 /**
  * 后端响应 → 内部快照。
  *
@@ -488,6 +527,7 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
   const payload = asRecord(record.data) ?? record;
   const summary = asRecord(payload.summary) ?? {};
   const breakdownRecord = asRecord(summary.breakdown) ?? asRecord(payload.breakdown) ?? {};
+  const search = normalizeSearchEndpointStatus(payload, summary);
 
   const successRate = toFiniteNumber(summary.successRate ?? payload.successRate ?? payload.success_rate);
   const samples = normalizeSamples(payload.points ?? payload.buckets ?? payload.history);
@@ -534,7 +574,8 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
     retained,
     capacity: toFiniteNumber(payload.capacity) ?? 0,
     restartedAtMs: parseIsoToMs(payload.restartedAt ?? payload.restarted_at),
-    updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? Date.now()
+    updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? Date.now(),
+    search
   };
 }
 
@@ -705,7 +746,15 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
     retained: STATUS_BUCKET_COUNT,
     capacity: 1440,
     restartedAtMs: windowStart,
-    updatedAt: nowMs
+    updatedAt: nowMs,
+    search: {
+      status: 'healthy',
+      successRate: 0.992,
+      totalRequests: 1240,
+      successRequests: 1230,
+      avgLatencyMs: 234,
+      samples: 5
+    }
   };
 }
 
@@ -829,30 +878,6 @@ function createHintLine(theme: ServiceStatusPanelTheme, text: string) {
 
 type StatusTone = { color: string; text: string };
 
-/**
- * 底部那行「数据自 X 起」。
- *
- * 三种 kind 各说各的，**不能**统一成「数据自 <updatedAt> 起」——
- * `updatedAt` 只说明「什么时候拉的」，而 `restartedAtMs` 才是「曲线真正的起点」。
- * 后端重启后 points 为空，此时用户最需要知道的是「采样从这个时刻开始」，
- * 所以优先用 `restartedAtMs`。
- */
-function serviceStatusSourceText(snapshot: ServiceStatusSnapshot | null): string {
-  if (!snapshot) {
-    return '尚未取到服务状态数据。';
-  }
-  // 注意：`kind === 'forbidden'` 当前**没有任何产出点**（见类型定义处的说明），
-  // 这里是防御性分支，不要以为它被测过。
-  if (snapshot.kind === 'forbidden') {
-    return '服务状态不可用（该身份无法读取）。';
-  }
-  const since = snapshot.restartedAtMs !== null ? formatServiceStatusClock(snapshot.restartedAtMs) : '';
-  if (snapshot.kind === 'empty') {
-    return since ? `暂无采样数据（服务自 ${since} 起）` : '暂无采样数据（服务刚重启）';
-  }
-  return since ? `数据自 ${since} 起` : `数据更新于 ${formatServiceStatusClock(snapshot.updatedAt)}`;
-}
-
 function resolveStatusTone(snapshot: ServiceStatusSnapshot | null, theme: ServiceStatusPanelTheme): StatusTone {
   // 「看不了」优先于一切：它既不是异常也不是无数据，必须有自己的文案，
   // 否则用户会把权限问题读成「服务挂了」。
@@ -876,15 +901,29 @@ function resolveStatusTone(snapshot: ServiceStatusSnapshot | null, theme: Servic
   return { color: theme.muted, text: '无数据' };
 }
 
-function createSummaryCard(
+function createSearchStatusCard(
   snapshot: ServiceStatusSnapshot | null,
   theme: ServiceStatusPanelTheme,
   onRequestRefresh: (() => void) | undefined
-) {
+): HTMLElement {
   const card = createSectionCard(theme);
-  card.dataset.cxStatusSummary = 'true';
+  card.dataset.cxStatusSearch = 'true';
+  card.append(createSectionTitle(theme, '搜题接口'));
 
-  const tone = resolveStatusTone(snapshot, theme);
+  const search = snapshot?.search ?? null;
+  let tone: StatusTone;
+  if (snapshot?.kind === 'no-token' || snapshot?.kind === 'rejected' || snapshot?.kind === 'forbidden') {
+    tone = resolveStatusTone(snapshot, theme);
+  } else if (!search || search.samples === 0 || search.status === 'unknown') {
+    tone = { color: theme.muted, text: '无数据' };
+  } else if (search.status === 'healthy') {
+    tone = { color: theme.successFg, text: '正常' };
+  } else if (search.status === 'degraded') {
+    tone = { color: theme.warningFg, text: '降级' };
+  } else {
+    tone = { color: theme.dangerFg, text: '异常' };
+  }
+
   const headRow = el('div');
   headRow.style.display = 'flex';
   headRow.style.alignItems = 'center';
@@ -907,28 +946,26 @@ function createSummaryCard(
   label.style.lineHeight = '1.4';
   label.style.color = tone.color;
   label.style.minWidth = '0';
-
   headRow.append(dot, label);
   card.append(headRow);
 
-  const rateText = snapshot
-    ? `成功率 ${formatServiceStatusPercent(snapshot.successRate)}  ·  延迟 ${snapshot.avgLatencyMs === null ? '未知' : `${snapshot.avgLatencyMs}ms`}`
-    : '还没有拉到服务状态数据。';
-  card.append(createHintLine(theme, rateText));
-
-  if (snapshot) {
-    card.append(createHintLine(theme, `最近 5 分钟 · ${snapshot.totalRequests} 次请求 · 失败 ${snapshot.failedRequests} 次`));
-    const parts = [
-      ['上游超时', snapshot.breakdown.upstream],
-      ['鉴权失败', snapshot.breakdown.auth],
-      ['配额耗尽', snapshot.breakdown.quota],
-      ['其他失败', snapshot.breakdown.timeout]
-    ] as const;
-    const breakdownText = parts
-      .filter(([, value]) => value > 0)
-      .map(([name, value]) => `${name} ${value}`)
-      .join(' · ');
-    card.append(createHintLine(theme, breakdownText ? `失败分类（1h）：${breakdownText}` : '失败分类（1h）：无失败'));
+  if (snapshot?.kind === 'no-token') {
+    card.append(createHintLine(theme, '状态数据需要通过访问令牌读取。请在「题库配置」里填写 tikuAdapter 访问令牌后刷新。'));
+  } else if (snapshot?.kind === 'rejected' || snapshot?.kind === 'forbidden') {
+    const serverMessage = String(snapshot.serverMessage ?? '').trim();
+    card.append(createHintLine(theme, serverMessage || (snapshot.authProblem === 'forbidden'
+      ? '当前访问令牌无权读取状态数据，请联系管理员确认权限。'
+      : '访问令牌未通过服务端验证，请检查题库配置中的令牌。')));
+  } else if (!search) {
+    card.append(createHintLine(theme, '当前服务暂未提供搜题接口统计，请更新题库服务后重试。'));
+  } else if (search.samples === 0) {
+    card.append(createHintLine(theme, '尚未采集到搜题接口状态数据。'));
+  } else if (search.totalRequests === 0) {
+    card.append(createHintLine(theme, '最近采样窗口内没有搜题请求。'));
+  } else {
+    const latency = search.avgLatencyMs === null ? '未知' : `${Math.round(search.avgLatencyMs)}ms`;
+    card.append(createHintLine(theme, `成功率 ${formatServiceStatusPercent(search.successRate)} · 平均延迟 ${latency}`));
+    card.append(createHintLine(theme, `最近 5 分钟 · ${search.successRequests} 次成功 / ${search.totalRequests} 次请求`));
   }
 
   const footer = el('div');
@@ -938,12 +975,9 @@ function createSummaryCard(
   footer.style.gap = '8px';
   footer.style.minWidth = '0';
   footer.style.flexWrap = 'wrap';
-
-  const updated = createHintLine(
-    theme,
-    serviceStatusSourceText(snapshot)
-  );
-  footer.append(updated);
+  footer.append(createHintLine(theme, snapshot
+    ? `数据更新于 ${formatServiceStatusClock(snapshot.updatedAt)}`
+    : '尚未取到搜题接口状态数据。'));
 
   const refresh = el('button');
   refresh.type = 'button';
@@ -958,256 +992,20 @@ function createSummaryCard(
   refresh.style.fontSize = '12px';
   refresh.style.fontWeight = '700';
   refresh.disabled = !onRequestRefresh;
-  if (!onRequestRefresh) {
-    refresh.title = '状态页刷新入口未接线';
-  }
-  refresh.onclick = () => {
-    if (onRequestRefresh) onRequestRefresh();
-  };
+  if (!onRequestRefresh) refresh.title = '状态页刷新入口未接线';
+  refresh.onclick = () => onRequestRefresh?.();
   footer.append(refresh);
-
   card.append(footer);
   return card;
 }
 
-type MinuteList = { element: HTMLElement; scrollTo: (startMs: number) => void };
-
-function createMinuteList(snapshot: ServiceStatusSnapshot | null, theme: ServiceStatusPanelTheme): MinuteList {
-  const card = createSectionCard(theme);
-  card.append(createSectionTitle(theme, '最近每分钟（最新在上）'));
-
-  const list = el('div');
-  list.dataset.cxStatusMinutes = 'true';
-  list.style.display = 'grid';
-  list.style.gap = '4px';
-  // position:relative 是 `scrollTo` 用 offsetTop 的前提：没有它，行的 offsetParent
-  // 会落到更外层（面板 root），offsetTop 变成相对整页的坐标，滚动位置直接算飞。
-  list.style.position = 'relative';
-  list.style.maxHeight = '190px';
-  list.style.overflowY = 'auto';
-  list.style.overflowX = 'hidden';
-  list.style.overscrollBehavior = 'contain';
-  list.style.scrollbarWidth = 'thin';
-  list.style.minWidth = '0';
-  list.style.maxWidth = '100%';
-
-  const rows = (snapshot?.minuteSamples ?? [])
-    .map((sample) => ({
-      startMs: sample.startMs,
-      requests: Math.max(0, Number(sample.requests) || 0),
-      succeeded: Math.max(0, Number(sample.succeeded) || 0)
-    }))
-    .sort((left, right) => right.startMs - left.startMs)
-    .slice(0, STATUS_MINUTE_ROW_LIMIT)
-    .map((sample) => ({
-      ...sample,
-      successRate: sample.requests > 0 ? sample.succeeded / sample.requests : null
-    }));
-
-  if (rows.length === 0) {
-    list.append(createHintLine(theme, '暂无逐分钟数据。'));
-    card.append(list);
-    return { element: card, scrollTo: () => undefined };
-  }
-
-  rows.forEach((row) => {
-    const tier = resolveServiceStatusTier(row.successRate);
-    const item = el('div');
-    // 三列定宽 + 一列可收缩：`minmax(0, 1fr)` 是防止长文本把行撑宽的关键。
-    item.style.display = 'grid';
-    item.style.gridTemplateColumns = '42px 10px minmax(0, 1fr)';
-    item.style.alignItems = 'center';
-    item.style.gap = '6px';
-    item.style.minHeight = `${STATUS_MINUTE_ROW_HEIGHT - 4}px`;
-    item.style.minWidth = '0';
-    item.dataset.cxStatusMinute = String(row.startMs);
-    item.dataset.cxStatusTier = tier.id;
-
-    const clock = el('span');
-    clock.textContent = formatServiceStatusClock(row.startMs);
-    clock.style.fontSize = '12px';
-    clock.style.color = theme.muted;
-
-    const swatch = el('span');
-    swatch.style.display = 'inline-block';
-    swatch.style.width = '10px';
-    swatch.style.height = '10px';
-    swatch.style.borderRadius = '3px';
-    swatch.style.background = tier.color;
-
-    const detail = el('span');
-    detail.textContent = `${formatServiceStatusPercent(row.successRate)}  ·  ${row.requests} 次`;
-    detail.style.fontSize = '12px';
-    detail.style.color = theme.text;
-    detail.style.minWidth = '0';
-    detail.style.overflow = 'hidden';
-    detail.style.textOverflow = 'ellipsis';
-    detail.style.whiteSpace = 'nowrap';
-
-    item.append(clock, swatch, detail);
-    list.append(item);
-  });
-
-  card.append(list);
-
-  const scrollTo = (startMs: number) => {
-    const index = rows.findIndex((row) => row.startMs <= startMs);
-    const target = index >= 0 ? index : rows.length - 1;
-    try {
-      // 优先用真实元素偏移：行高由内容与字体决定，不是常量。
-      // 早先按 `STATUS_MINUTE_ROW_HEIGHT` 折算会随字号/折行累积误差，实测滚到第 53 行
-      // 而不是第 59 行（60 行列表，行高 22px + 间距 4px 时折算值必然偏小）。
-      const targetNode = list.children[target] as HTMLElement | undefined;
-      const offset = targetNode?.offsetTop;
-      list.scrollTop = typeof offset === 'number' && Number.isFinite(offset) && offset >= 0
-        ? offset
-        : Math.max(0, target * STATUS_MINUTE_ROW_HEIGHT);
-    } catch {
-      // 无布局环境（测试沙箱）下滚动失败不影响其它功能。
-    }
-  };
-
-  return { element: card, scrollTo };
-}
-
-function createDayBand(
-  buckets: readonly ServiceStatusBucket[],
-  theme: ServiceStatusPanelTheme,
-  scrollToMinute: (startMs: number) => void
-) {
-  const card = createSectionCard(theme);
-  card.dataset.cxStatusDayBand = 'true';
-  card.append(createSectionTitle(theme, '24 小时预览'));
-
-  const band = el('div');
-  band.dataset.cxStatusBand = 'true';
-  band.setAttribute('role', 'img');
-  band.setAttribute('aria-label', `最近 24 小时成功率色带，共 ${STATUS_BUCKET_COUNT} 格，每格 ${STATUS_BUCKET_MINUTES} 分钟`);
-  band.style.display = 'flex';
-  // 单行（118 §3.1）：行数恒为 1，不要再改成双行网格。
-  band.style.flexWrap = 'nowrap';
-  band.style.width = '100%';
-  band.style.maxWidth = '100%';
-  band.style.height = '26px';
-  band.style.borderRadius = '6px';
-  band.style.overflow = 'hidden';
-  band.style.boxSizing = 'border-box';
-  band.style.background = SERVICE_STATUS_NO_DATA_TIER.color;
-  band.dataset.cxStatusBandRows = String(STATUS_BAND_ROWS);
-
-  for (let index = 0; index < STATUS_BUCKET_COUNT; index += 1) {
-    const bucket = buckets[index];
-    const tier = resolveServiceStatusTier(bucket ? bucket.successRate : null);
-    const cell = el('div');
-    cell.dataset.cxStatusCell = String(index);
-    cell.dataset.cxStatusTier = tier.id;
-    cell.dataset.cxStatusStart = String(bucket ? bucket.startMs : 0);
-    // flex-basis 0 + min-width 0：288 格等分容器宽度，任何一格都不会把父级撑宽。
-    cell.style.flex = '1 1 0';
-    cell.style.width = '0';
-    cell.style.minWidth = '0';
-    cell.style.height = '100%';
-    cell.style.background = tier.color;
-    // 不加阈值线标记（118 §4）：格子内保持零子节点，只有颜色。
-    cell.title = bucket
-      ? `${formatServiceStatusClock(bucket.startMs)} · 成功率 ${formatServiceStatusPercent(bucket.successRate)} · ${bucket.requests} 次请求`
-      : '无数据';
-    cell.onclick = () => {
-      scrollToMinute(bucket ? bucket.startMs : 0);
-    };
-    band.append(cell);
-  }
-
-  card.append(band);
-
-  const axis = el('div');
-  axis.style.display = 'flex';
-  axis.style.justifyContent = 'space-between';
-  axis.style.gap = '4px';
-  axis.style.minWidth = '0';
-  const firstStart = buckets.length > 0 ? buckets[0].startMs : 0;
-  const middleStart = buckets.length > 0 ? buckets[Math.floor(STATUS_BUCKET_COUNT / 2)].startMs : 0;
-  const lastStart = buckets.length > 0 ? buckets[buckets.length - 1].startMs : 0;
-  for (const text of [
-    formatServiceStatusClock(firstStart),
-    formatServiceStatusClock(middleStart),
-    `现在 ${formatServiceStatusClock(lastStart + STATUS_BUCKET_MS)}`
-  ]) {
-    const tick = el('span');
-    tick.textContent = text;
-    tick.style.fontSize = '11px';
-    tick.style.color = theme.subtle;
-    tick.style.whiteSpace = 'nowrap';
-    axis.append(tick);
-  }
-  card.append(axis);
-
-  // 图例：固定 3 列网格（12 项 → 4 行）。用 grid 而不是 flex-wrap，
-  // 每项宽度由列宽封顶，360px 下无论文案多长都不会横向溢出。
-  const legend = el('div');
-  legend.dataset.cxStatusLegend = 'true';
-  legend.style.display = 'grid';
-  legend.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
-  legend.style.gap = '4px 6px';
-  legend.style.minWidth = '0';
-  for (const tier of SERVICE_STATUS_LEGEND) {
-    const item = el('div');
-    item.style.display = 'flex';
-    item.style.alignItems = 'center';
-    item.style.gap = '5px';
-    item.style.minWidth = '0';
-    item.dataset.cxStatusLegendTier = tier.id;
-
-    const swatch = el('span');
-    swatch.style.display = 'inline-block';
-    swatch.style.width = '9px';
-    swatch.style.height = '9px';
-    swatch.style.borderRadius = '2px';
-    swatch.style.flex = '0 0 auto';
-    swatch.style.background = tier.color;
-
-    const text = el('span');
-    text.textContent = tier.label;
-    text.style.fontSize = '11px';
-    text.style.color = theme.muted;
-    text.style.minWidth = '0';
-    text.style.overflow = 'hidden';
-    text.style.textOverflow = 'ellipsis';
-    text.style.whiteSpace = 'nowrap';
-
-    item.append(swatch, text);
-    legend.append(item);
-  }
-  card.append(legend);
-
-  card.append(createHintLine(theme, '每格 5 分钟；悬停看具体值，点击跳到对应分钟。无数据格是灰色，不是最低档。'));
-  return card;
-}
-
 /**
- * 状态页主体。**按 `kind` 分三种形态**，这是本任务的核心：
- * - `forbidden`：只渲染「看不了」说明，**不建色带、不建列表**（`cells === 0`）。
- *   文案按 `authProblem` 分流：401 →「请先配置访问令牌」，403 →「令牌无权查看」。
- *   让权限问题渲染成「全部失败」是最容易犯的错。
- * - `empty`：只渲染「暂无采样数据」+ 自某时刻起，同样**不建色带**（`cells === 0`）。
- *   绝不把空数组补成 288/1440 个 0 桶。
- * - `ok`：摘要数字 +（有 points 时）逐分钟曲线。
- *
- * ## 关于曲线（队长裁决方案 1 的后果）
- *
- * 普通用户走 `/api/service-status/summary`，该端点**不返回 points**，
- * 所以非管理员看到的是**纯摘要**：状态、成功率、请求总数、失败数、延迟、
- * 采样起点、采样点数/容量。**没有逐分钟曲线，也没有 288 格色带。**
- *
- * 只有响应里**确实带了 points**（即 admin 端点）时才画曲线 —— 这样同一套渲染
- * 既能服务普通用户，也能在将来给管理员复用，且不会伪造出「有曲线」的假象。
- * 界面用 `[data-cx-status-mode]` 标明是 `summary` 还是 `detail`，不靠用户猜。
- *
- * 返回的元素不依赖任何 common.ts 符号，可以被单独抽取执行。
+ * PLUS 普通状态页只显示搜题接口的状态与公开分桶摘要。
+ * 全站指标可能被 health-check / 管理页等其他请求稀释，不可作为搜题状态的回退值；
+ * admin points 也不在这个用户界面展示。
  */
 export function createStatusPanelSection(options: ServiceStatusPanelOptions): HTMLElement {
   const theme = options.theme;
-  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const snapshot = options.snapshot ?? null;
 
   const container = el('div');
@@ -1219,163 +1017,10 @@ export function createStatusPanelSection(options: ServiceStatusPanelOptions): HT
   container.style.maxWidth = '100%';
   container.style.boxSizing = 'border-box';
 
-  const summaryCard = createSummaryCard(snapshot, theme, options.onRequestRefresh);
-
-  // 压根没配令牌：引导去配置，没有任何图表。
-  if (snapshot?.kind === 'no-token') {
-    container.append(summaryCard, createStatusNoticeCard(
-      theme,
-      '未配置访问令牌',
-      '状态数据需要通过访问令牌读取。请在面板「题库配置」里填写 tikuAdapter 访问令牌后点「立即刷新」。',
-      'no-token'
-    ));
-    return container;
-  }
-
-  // 发了请求但被拒：**优先显示服务端原话**，只有拿不到时才回退通用文案。
-  if (snapshot?.kind === 'rejected' || snapshot?.kind === 'forbidden') {
-    const serverMessage = String(snapshot.serverMessage ?? '').trim();
-    const forbidden = snapshot.authProblem === 'forbidden';
-    container.append(summaryCard, createStatusNoticeCard(
-      theme,
-      forbidden ? '无权查看' : '令牌未通过验证',
-      serverMessage
-        // 服务端给了原因就直接用它 —— 前端猜不出「这是脚本令牌」之类的原因。
-        ? serverMessage
-        : forbidden
-          ? '当前访问令牌有效，但服务端拒绝提供状态数据。请联系管理员确认该令牌的权限。'
-          : '访问令牌未通过服务端验证。请到面板「题库配置」检查令牌是否正确、是否已被停用。',
-      forbidden ? 'forbidden' : 'rejected'
-    ));
-    return container;
-  }
-
-  // 尚无采样：说明 + 「自某时刻起」，同样不画格子。
-  if (snapshot?.kind === 'empty') {
-    const since = snapshot.restartedAtMs !== null ? formatServiceStatusClock(snapshot.restartedAtMs) : '';
-    container.append(summaryCard, createStatusNoticeCard(
-      theme,
-      '暂无采样数据',
-      since
-        ? `服务自 ${since} 起开始采样，窗口内还没有产生请求。稍后刷新即可看到数据。`
-        : '服务刚开始采样，窗口内还没有产生请求。稍后刷新即可看到数据。',
-      'empty'
-    ));
-    return container;
-  }
-
-  // 有数据：先看有没有逐分钟点。有才画曲线，没有就只给摘要卡片。
-  const hasSeries = (snapshot?.buckets.length ?? 0) > 0;
-  container.dataset.cxStatusMode = hasSeries ? 'detail' : 'summary';
-  if (!hasSeries) {
-    container.append(summaryCard, createStatusMetricsCard(snapshot, theme));
-    return container;
-  }
-
-  const buckets = buildServiceStatusBuckets(snapshot?.buckets ?? [], now);
-  // 先建列表，色带点击要引用它的滚动函数；再按「状态 → 色带 → 列表」的视觉顺序挂载。
-  const minuteList = createMinuteList(snapshot, theme);
-  container.append(
-    summaryCard,
-    createDayBand(buckets, theme, minuteList.scrollTo),
-    minuteList.element
-  );
+  // 普通用户页面只展示 public summary 内的搜题接口分桶；不以全站指标作为回退。
+  container.dataset.cxStatusMode = 'search';
+  container.append(createSearchStatusCard(snapshot, theme, options.onRequestRefresh));
   return container;
-}
-
-/** 非「有数据」形态的说明卡片。刻意不含任何 `[data-cx-status-cell]`。 */
-function createStatusNoticeCard(
-  theme: ServiceStatusPanelTheme,
-  title: string,
-  detail: string,
-  kind: 'empty' | 'no-token' | 'rejected' | 'forbidden'
-): HTMLElement {
-  const card = createSectionCard(theme);
-  card.dataset.cxStatusNotice = kind;
-  card.append(createSectionTitle(theme, title), createHintLine(theme, detail));
-  return card;
-}
-
-/**
- * 摘要卡片：**纯数字，没有曲线**。
- *
- * 这是普通用户看到的形态（summary 端点不给 points）。四项聚合指标 + 采样说明。
- * 用 2 列网格而不是表格：360px 宽下 2 列刚好，4 列会挤成不可读。
- * 每个数字都带单位与口径说明，避免用户把「窗口内请求数」读成「累计」。
- */
-function createStatusMetricsCard(
-  snapshot: ServiceStatusSnapshot | null,
-  theme: ServiceStatusPanelTheme
-): HTMLElement {
-  const card = createSectionCard(theme);
-  card.dataset.cxStatusMetrics = 'true';
-  card.append(createSectionTitle(theme, '当前窗口摘要'));
-
-  const successText = snapshot && snapshot.successRateAvailable === false
-    ? '窗口内无请求'
-    : formatServiceStatusPercent(snapshot?.successRate ?? null);
-
-  const avgLatencyText = snapshot?.avgLatencyMs === null || snapshot?.avgLatencyMs === undefined
-    ? '未知'
-    : `${Math.round(snapshot.avgLatencyMs)}ms`;
-
-  const metrics: Array<[string, string]> = [
-    ['成功率', successText],
-    ['平均延迟', avgLatencyText],
-    ['请求总数', snapshot ? String(snapshot.totalRequests) : '—'],
-    ['失败请求', snapshot ? String(snapshot.failedRequests) : '—']
-  ];
-
-  const grid = el('div');
-  grid.style.display = 'grid';
-  grid.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
-  grid.style.gap = '8px';
-  grid.style.minWidth = '0';
-
-  for (const [label, value] of metrics) {
-    const item = el('div');
-    item.style.display = 'grid';
-    item.style.gap = '2px';
-    item.style.padding = '8px 10px';
-    item.style.borderRadius = '10px';
-    item.style.background = theme.surface;
-    item.style.border = `1px solid ${theme.border}`;
-    item.style.minWidth = '0';
-    item.dataset.cxStatusMetric = label;
-
-    const labelNode = el('div');
-    labelNode.textContent = label;
-    labelNode.style.fontSize = '11px';
-    labelNode.style.color = theme.subtle;
-    labelNode.style.whiteSpace = 'nowrap';
-
-    const valueNode = el('div');
-    valueNode.textContent = value;
-    valueNode.style.fontSize = '15px';
-    valueNode.style.fontWeight = '800';
-    valueNode.style.color = theme.text;
-    valueNode.style.minWidth = '0';
-    valueNode.style.overflow = 'hidden';
-    valueNode.style.textOverflow = 'ellipsis';
-    valueNode.style.whiteSpace = 'nowrap';
-
-    item.append(labelNode, valueNode);
-    grid.append(item);
-  }
-  card.append(grid);
-
-  // 采样口径：告诉用户这是「最近 5 分钟窗口」的数字，不是累计值。
-  const retainedText = snapshot && snapshot.capacity > 0
-    ? `已采样 ${snapshot.retained}/${snapshot.capacity} 个分钟点`
-    : snapshot ? `已采样 ${snapshot.retained} 个分钟点` : '';
-  card.append(createHintLine(
-    theme,
-    retainedText
-      ? `成功率与请求数来自最近 5 分钟窗口；${retainedText}。`
-      : '成功率与请求数来自最近 5 分钟窗口。'
-  ));
-  card.append(createHintLine(theme, '这是摘要视图，不含逐分钟曲线（普通账号不返回分钟明细）。'));
-  return card;
 }
 
 /** 状态页在被裁掉的端（或数据源异常）时的占位说明。 */

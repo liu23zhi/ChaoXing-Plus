@@ -34,11 +34,8 @@ import {
   setServiceStatusFetcher
 } from './status-panel.js';
 import {
-  buildServiceStatusUrl,
   createServiceStatusHttpFetcher,
-  fetchServiceStatusRequester,
-  readHttpStatus,
-  SERVICE_STATUS_REQUEST_TIMEOUT_MS
+  fetchServiceStatusRequester
 } from './status-panel-http.js';
 import {
   DEFAULT_TIKU_BASE_URL,
@@ -47,7 +44,8 @@ import {
   createTikuAdapterAnswererWrapper,
   getTikuAdapterConfigProblem,
   isValidTikuAdapterBaseUrl,
-  resolveTikuAdapterBaseUrl
+  resolveTikuAdapterBaseUrl,
+  testTikuAdapterConfig
 } from './tiku-adapter-config.js';
 
 export interface CommonWorkOptions {
@@ -807,76 +805,6 @@ export function getStoredTikuAdapterConfig() {
  * ⚠️ 失败与 403 都**不弹全局错误**：状态页是旁路展示，取数失败不能干扰答题。
  * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
  */
-/**
- * 探测题库地址与令牌是否可用（138 §5.3 的 P3）。
- *
- * # 为什么探测摘要端点而不是搜题接口
- *
- * `/api/service-status/summary` 是 AuthOrAccessToken 鉴权、只返回聚合数字，
- * **不消耗搜题额度**。用 `/search` 探测会真的走一次计费链路 —— 用户点一次「保存」
- * 就被扣一次钱，不可接受。
- *
- * 代价（如实记录）：探测通过只代表「地址通 + 令牌有效」，
- * **不代表搜题真的能出答案**（上游题库可能全挂）。要覆盖后者需要换端点并接受扣费。
- *
- * # 三态必须分开，不能糊成「成功/失败」
- *
- *   200        → 连接正常（附延迟）
- *   401 / 403  → 地址是通的，但**令牌不被接受** —— 用户动作是「换令牌」
- *   其它/网络   → 地址本身不可达 —— 用户动作是「检查地址、网络、服务是否启动」
- *
- * 这两种失败的用户动作完全相反，糊成一个「连接失败」等于让用户两个都要试。
- *
- * # 永不抛异常、永不阻断保存
- *
- * 本函数只返回一句给人看的话。任何异常都吞掉并转成文案 ——
- * 探测是**附加提示**，它失败不该影响「配置已保存」这个主结果。
- */
-async function probeTikuAdapter(baseurl: string, accessKey: string): Promise<string> {
-  const normalized = resolveTikuAdapterBaseUrl(baseurl, DEFAULT_TIKU_BASE_URL);
-  const url = buildServiceStatusUrl(normalized, '/api/service-status/summary');
-  if (!url) {
-    return '⚠️ 未填写题库地址，未做连通性检测。';
-  }
-  if (!String(accessKey ?? '').trim()) {
-    return '⚠️ 未填写令牌，未做连通性检测。';
-  }
-
-  const startedAt = Date.now();
-  const controller = typeof AbortController === 'function' ? new AbortController() : undefined;
-  const timer = controller ? setTimeout(() => controller.abort(), SERVICE_STATUS_REQUEST_TIMEOUT_MS) : undefined;
-  try {
-    // ⚠️ fetchServiceStatusRequester 在 `!response.ok` 时**抛异常**（不是返回 response），
-    // 且异常上带 status/serverMessage。所以成功路径只能到 2xx，
-    // 4xx/5xx 必须走 catch + readHttpStatus(error) 判定 —— 见 status-panel-http.ts:238。
-    // 第一版按「返回 response 再读 status」写，编译能过但 401 会被当成「网络不可达」，
-    // 用户会被引向「检查地址」而不是「换令牌」。
-    await fetchServiceStatusRequester(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${String(accessKey).trim()}` },
-      signal: controller?.signal
-    } as RequestInit);
-    return `✅ 连接正常（${Date.now() - startedAt}ms）。`;
-  } catch (error) {
-    const status = readHttpStatus(error);
-    if (status === 401) {
-      return '⚠️ 地址可达，但令牌未被接受（HTTP 401）。请到题库后台确认令牌是否有效或已被停用。';
-    }
-    if (status === 403) {
-      return '⚠️ 地址可达，但该令牌无权访问状态接口（HTTP 403）。';
-    }
-    if (status !== null && status >= 400) {
-      return `⚠️ 地址可达但返回异常（HTTP ${status}）。配置已保存，状态页可能显示旧数据。`;
-    }
-    const reason = error instanceof Error ? error.message : String(error);
-    return `⚠️ 无法连接题库地址（${reason}）。配置已保存，但搜题与状态页都会失败 —— 请检查地址、网络与服务是否启动。`;
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
-}
-
 function mountServiceStatusHttpFetcher() {
   const config = getStoredTikuAdapterConfig();
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL);
@@ -898,7 +826,8 @@ function mountServiceStatusHttpFetcher() {
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
     // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
-    accessKey: config.key
+    accessKey: config.key,
+    scriptIdentity: config.scriptIdentity
   }));
 }
 
@@ -2589,10 +2518,41 @@ function createTikuAdapterConfigSection() {
     } catch {
       // ignore: 状态页降级，配置已保存。
     }
-    // 连通性探测（P3）：只提示，不阻断保存 —— 用户可能正在换服务器，
-    // 地址暂时不可达是正常的，阻断会让他没法保存。
-    const probe = await probeTikuAdapter(baseurlInput.value.trim(), keyInput.value.trim());
-    await $modal.alert(`题库配置已保存。\n\n${probe}`);
+    await $modal.alert({ content: '题库配置已保存。', icon: 'success' });
+  };
+
+  const testButton = createElement('button', { text: '测试' });
+  applyActionButtonStyle(testButton, 'default');
+  testButton.onclick = async () => {
+    testButton.disabled = true;
+    testButton.textContent = '测试中…';
+    try {
+      const result = await testTikuAdapterConfig({
+        baseurl: baseurlInput.value.trim(),
+        key: keyInput.value.trim(),
+        scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
+      });
+      const content = result.state === 'ok'
+        ? `✅ 服务器正常，访问令牌有效（${result.latencyMs ?? 0}ms）。`
+        : result.state === 'invalid-key'
+          ? `⚠️ 服务器正常，但访问令牌无效或无权使用（HTTP ${result.httpStatus}）。`
+          : result.state === 'rate-limited'
+            ? '⚠️ 服务器正常，但校验过于频繁，暂时无法确认令牌状态（HTTP 429）。请稍后再试。'
+            : result.state === 'invalid-config'
+              ? result.problem === 'missing-key'
+                ? '请先填写访问令牌。'
+                : '请先填写有效的题库地址。'
+              : result.httpStatus
+                ? `❌ 服务器异常或接口不可用（HTTP ${result.httpStatus}）。`
+                : '❌ 无法连接服务器，或连接被浏览器网络策略拦截。请检查地址、网络、服务状态和 CORS 配置。';
+      const icon = result.state === 'ok' ? 'success'
+        : result.state === 'invalid-config' ? 'info'
+          : result.state === 'invalid-key' || result.state === 'rate-limited' ? 'warning' : 'error';
+      await $modal.alert({ content, icon });
+    } finally {
+      testButton.disabled = false;
+      testButton.textContent = '测试';
+    }
   };
 
   const jumpButton = createElement('button', { text: '跳转' });
@@ -2629,7 +2589,7 @@ function createTikuAdapterConfigSection() {
   actionsRow.style.display = 'flex';
   actionsRow.style.gap = '8px';
   actionsRow.style.flexWrap = 'wrap';
-  actionsRow.append(saveButton, jumpButton);
+  actionsRow.append(saveButton, testButton, jumpButton);
 
   keyWrap.append(keyLabel, keyInput);
   container.append(header, baseurlWrap, keyWrap, actionsRow);

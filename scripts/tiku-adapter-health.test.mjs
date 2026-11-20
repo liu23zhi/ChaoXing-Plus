@@ -57,6 +57,52 @@ test('health probe checks the returned status URL before creating a normal task'
   }
 });
 
+test('settings connectivity test checks only the authenticated search health endpoint', async () => {
+  const mod = await loadModule();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json(health);
+  };
+  try {
+    const result = await mod.testTikuAdapterConfig({ ...config, scriptIdentity: 'session-1' });
+    assert.equal(result.state, 'ok');
+    assert.equal(calls.length, 1, 'a test click should issue one non-billable request');
+    assert.equal(calls[0].url, 'https://adapter.local/api/search/health');
+    assert.equal(calls[0].init.method, 'GET');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer secret');
+    assert.equal(calls[0].init.headers['X-Script-Identity'], 'session-1');
+    assert.ok(calls[0].init.headers['X-Device-Id']);
+    assert.ok(calls[0].init.headers['X-Device-Instance']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings connectivity test distinguishes invalid key, rate limit, and server errors', async () => {
+  const mod = await loadModule();
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    { status: 401, state: 'invalid-key' },
+    { status: 403, state: 'invalid-key' },
+    { status: 429, state: 'rate-limited' },
+    { status: 503, state: 'server-error' }
+  ];
+  try {
+    for (const testCase of cases) {
+      globalThis.fetch = async () => Response.json({ message: 'fixture' }, { status: testCase.status });
+      const result = await mod.testTikuAdapterConfig(config);
+      assert.equal(result.state, testCase.state, `HTTP ${testCase.status}`);
+      assert.equal(result.httpStatus, testCase.status);
+    }
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    assert.equal((await mod.testTikuAdapterConfig(config)).state, 'server-error');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('failed health handshake falls back to sync without creating an async task', async () => {
   const mod = await loadModule();
   const originalFetch = globalThis.fetch;

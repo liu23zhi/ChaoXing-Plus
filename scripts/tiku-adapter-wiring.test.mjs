@@ -31,10 +31,12 @@ test('common panel renders updated tiku adapter labels and bottom action buttons
   assert.equal(source.includes('默认对接 POST {baseurl}/api/search'), false);
   assert.equal(source.includes('开关项已改为状态方块，选择项改为平铺按钮，便于快速切换。'), false);
   assert.equal(source.includes('const actionsRow = createElement(\'div\');'), true);
-  assert.equal(source.includes('actionsRow.append(saveButton, jumpButton);'), true);
+  assert.equal(source.includes('actionsRow.append(saveButton, testButton, jumpButton);'), true);
   assert.equal(source.includes('container.append(header, baseurlWrap, keyWrap, actionsRow);'), true);
   assert.equal(source.includes('baseurlRow.append(baseurlInput);'), true);
+  assert.equal(source.includes("createElement('button', { text: '测试' })"), true);
   assert.equal(source.includes('题库配置已保存。'), true);
+  assert.equal(source.includes('await testTikuAdapterConfig({'), true);
 });
 
 test('common panel defines a shared wrap style for long question text', async () => {

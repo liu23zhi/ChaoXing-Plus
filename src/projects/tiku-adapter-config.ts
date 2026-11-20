@@ -34,6 +34,13 @@ export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1260;
 
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
+export type TikuAdapterConfigTestResult = {
+  state: 'ok' | 'invalid-key' | 'rate-limited' | 'server-error' | 'invalid-config';
+  httpStatus?: number;
+  latencyMs?: number;
+  problem?: TikuAdapterConfigProblem;
+};
+
 export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER' | 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED';
 
 export type TikuAdapterAIFallbackResult = {
@@ -135,6 +142,56 @@ export function createTikuAdapterSearchTaskUrl(baseurl: string): string {
 export function createTikuAdapterSearchHealthUrl(baseurl: string): string {
   const normalized = resolveTikuAdapterBaseUrl(baseurl);
   return normalized ? `${normalized}/api/search/health` : '';
+}
+
+/**
+ * Verify server reachability and access-token validity without running a search.
+ * The health endpoint only reads or creates an owner-scoped synthetic task and
+ * never calls a provider or creates a billing record.
+ */
+export async function testTikuAdapterConfig(
+  config: TikuAdapterConfig,
+  timeoutMs = TIKU_ADAPTER_SEARCH_HEALTH_TIMEOUT_MS
+): Promise<TikuAdapterConfigTestResult> {
+  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
+  const key = String(config.key ?? '').trim();
+  const problem = getTikuAdapterConfigProblem({ baseurl, key });
+  if (problem) return { state: 'invalid-config', problem };
+
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1, Math.floor(timeoutMs)));
+  try {
+    const response = await fetch(createTikuAdapterSearchHealthUrl(baseurl), {
+      method: 'GET',
+      headers: {
+        ...tikuAdapterDeviceHeaders(),
+        Authorization: createTikuAdapterAuthorizationHeader(key),
+        ...(String(config.scriptIdentity ?? '').trim()
+          ? { 'X-Script-Identity': String(config.scriptIdentity).trim() }
+          : {})
+      },
+      signal: controller.signal
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { state: 'invalid-key', httpStatus: response.status };
+    }
+    if (response.status === 429) {
+      return { state: 'rate-limited', httpStatus: response.status };
+    }
+    if (!response.ok) return { state: 'server-error', httpStatus: response.status };
+
+    const payload = await response.json() as Partial<TikuAdapterTaskEnvelope>;
+    if (payload.success !== true || String(payload.status ?? '').toLowerCase() !== 'succeeded'
+      || !String(payload.taskId ?? '').trim() || !String(payload.statusUrl ?? '').trim()) {
+      return { state: 'server-error', httpStatus: response.status };
+    }
+    return { state: 'ok', latencyMs: Date.now() - startedAt };
+  } catch {
+    return { state: 'server-error' };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function createTikuAdapterSearchStatusUrl(baseurl: string, taskId: string): string {

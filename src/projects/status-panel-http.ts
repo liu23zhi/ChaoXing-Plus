@@ -94,6 +94,8 @@ export type ServiceStatusHttpFetcherOptions = {
    * 不带会回退到登录 JWT 分支 → 401。
    */
   accessKey?: string;
+  /** Short-lived script session identity, when the server requires it for adapter keys. */
+  scriptIdentity?: string;
   /**
    * 只在 `kind === 'forbidden'` 时被调用（用于界面提示或埋点）。
    * **不用于弹全局错误** —— 状态页取数失败不能干扰答题。
@@ -172,7 +174,12 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
         cache: 'no-store',
         // AuthOrAccessToken 只在带 Authorization 时才走 access-token 分支；
         // 不带会回退到登录 JWT 分支 → 401「请重新登录」。
-        headers: { Authorization: `Bearer ${accessKey}` },
+        headers: {
+          Authorization: `Bearer ${accessKey}`,
+          ...(String(options.scriptIdentity ?? '').trim()
+            ? { 'X-Script-Identity': String(options.scriptIdentity).trim() }
+            : {})
+        },
         signal: controller?.signal
       });
       const snapshot = normalizeServiceStatusSnapshot(raw);
