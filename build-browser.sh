@@ -37,14 +37,24 @@ if ! node -e '
   process.exit(supported ? 0 : 1);
 '; then
   echo "错误：当前 Node.js 为 ${NODE_VERSION}。Vite 8 需要 Node.js 20.19+ 或 22.12+。" >&2
-  echo "请在当前环境升级 Node.js，不要让 WSL 的 Linux Node 与 Windows npm 混用。" >&2
+  echo "请在 WSL 中执行以下命令升级，并确保 node/npm 都来自 WSL：" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash" >&2
+  echo "  source \"\$HOME/.nvm/nvm.sh\"" >&2
+  echo "  nvm install 22 && nvm alias default 22 && nvm use 22" >&2
+  echo "  hash -r && node --version && npm --version && command -v npm" >&2
+  echo "确认 command -v npm 不再输出 /mnt/c/.../nodejs/npm 后，重新执行：" >&2
+  echo "  ./build-browser.sh" >&2
   exit 1
 fi
 
 NPM_PATH="$(command -v npm)"
 if [[ "$NODE_PLATFORM" == "linux" && "$NPM_PATH" == /mnt/* ]]; then
   echo "错误：当前使用的是 WSL/Linux Node.js ${NODE_VERSION}，但 npm 来自 Windows：${NPM_PATH}" >&2
-  echo "请在 WSL 中安装并使用同一套 Node.js/npm（例如 Node.js 20.19+ 或 22.12+）。" >&2
+  echo "请先执行：" >&2
+  echo "  source \"\$HOME/.nvm/nvm.sh\" && nvm install 22 && nvm use 22" >&2
+  echo "  hash -r && command -v node && command -v npm" >&2
+  echo "确认 node/npm 都来自 \$HOME/.nvm 后，重新执行：" >&2
+  echo "  ./build-browser.sh" >&2
   exit 1
 fi
 
