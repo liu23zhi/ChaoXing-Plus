@@ -35,10 +35,12 @@ export const TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS = 1260;
 export type TikuAdapterConfigProblem = 'missing-baseurl' | 'invalid-baseurl' | 'missing-key';
 
 export type TikuAdapterConfigTestResult = {
-  state: 'ok' | 'invalid-key' | 'rate-limited' | 'server-error' | 'invalid-config';
+  state: 'ok' | 'invalid-key' | 'device-limit-exceeded' | 'rate-limited' | 'server-error' | 'invalid-config';
   httpStatus?: number;
   latencyMs?: number;
   problem?: TikuAdapterConfigProblem;
+  deviceLimit?: number;
+  deviceUsed?: number;
 };
 
 export type TikuAdapterAIFallbackErrorCode = 'AI_UNAVAILABLE' | 'NO_ANSWER' | 'UPSTREAM_ERROR' | 'INVALID_INPUT' | 'UNSAFE_TO_ANSWER' | 'INSUFFICIENT_BALANCE' | 'ACCESS_TOKEN_QUOTA_EXCEEDED';
@@ -173,7 +175,28 @@ export async function testTikuAdapterConfig(
       },
       signal: controller.signal
     });
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 403) {
+      // Device bans share the legacy code with capacity failures. Only the
+      // stable capacity reason (or older responses with consistent counts)
+      // gets its own UI; a bare legacy code cannot establish capacity failure.
+      const failure = await response.json().catch(() => null) as Record<string, unknown> | null;
+      const legacyCapacity = failure?.reason === undefined
+        && typeof failure?.limit === 'number' && Number.isSafeInteger(failure.limit) && failure.limit > 0
+        && typeof failure?.used === 'number' && Number.isSafeInteger(failure.used) && failure.used >= failure.limit;
+      if (failure?.code === 'DEVICE_LIMIT_EXCEEDED'
+        && (failure.reason === 'limit-exceeded' || legacyCapacity)) {
+        const result: TikuAdapterConfigTestResult = { state: 'device-limit-exceeded', httpStatus: response.status };
+        if (typeof failure.limit === 'number' && Number.isSafeInteger(failure.limit) && failure.limit >= 0) {
+          result.deviceLimit = failure.limit;
+        }
+        if (typeof failure.used === 'number' && Number.isSafeInteger(failure.used) && failure.used >= 0) {
+          result.deviceUsed = failure.used;
+        }
+        return result;
+      }
+      return { state: 'invalid-key', httpStatus: response.status };
+    }
+    if (response.status === 401) {
       return { state: 'invalid-key', httpStatus: response.status };
     }
     if (response.status === 429) {
@@ -181,12 +204,24 @@ export async function testTikuAdapterConfig(
     }
     if (!response.ok) return { state: 'server-error', httpStatus: response.status };
 
-    const payload = await response.json() as Partial<TikuAdapterTaskEnvelope>;
+    const payload = await response.json() as Partial<TikuAdapterTaskEnvelope> & {
+      deviceAccess?: { allowed?: unknown; reason?: unknown; limit?: unknown; used?: unknown };
+    };
     if (payload.success !== true || String(payload.status ?? '').toLowerCase() !== 'succeeded'
       || !String(payload.taskId ?? '').trim() || !String(payload.statusUrl ?? '').trim()) {
       return { state: 'server-error', httpStatus: response.status };
     }
-    return { state: 'ok', latencyMs: Date.now() - startedAt };
+    const result: TikuAdapterConfigTestResult = { state: 'ok', latencyMs: Date.now() - startedAt };
+    const access = payload.deviceAccess;
+    // Existing devices keep access when their account limit is lowered, but
+    // the server can report an over-capacity account separately from denial.
+    if (access?.allowed === true && access.reason === 'already-registered'
+      && typeof access.limit === 'number' && Number.isSafeInteger(access.limit) && access.limit > 0
+      && typeof access.used === 'number' && Number.isSafeInteger(access.used) && access.used > access.limit) {
+      result.deviceLimit = access.limit;
+      result.deviceUsed = access.used;
+    }
+    return result;
   } catch {
     return { state: 'server-error' };
   } finally {

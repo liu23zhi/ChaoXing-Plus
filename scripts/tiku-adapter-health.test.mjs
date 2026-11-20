@@ -103,6 +103,92 @@ test('settings connectivity test distinguishes invalid key, rate limit, and serv
   }
 });
 
+test('settings connectivity test separates device capacity from blocked devices and token failures', async () => {
+  const mod = await loadModule();
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', reason: 'limit-exceeded', limit: 2, used: 3 }, state: 'device-limit-exceeded' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', limit: 2, used: 3 }, state: 'device-limit-exceeded' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', reason: 'device-blacklisted', limit: 2, used: 3 }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', reason: 'user-blocked', limit: 2, used: 3 }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', reason: 'forbidden', limit: -1, used: 3 }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', limit: -1, used: 3 }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', limit: 0, used: 0 }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED' }, state: 'invalid-key' },
+    { body: { code: 'DEVICE_LIMIT_EXCEEDED', reason: 'unknown-reason', limit: 2, used: 3 }, state: 'invalid-key' },
+    { body: { message: 'DEVICE_LIMIT_EXCEEDED limit-exceeded' }, state: 'invalid-key' }
+  ];
+  try {
+    for (const { body, state } of cases) {
+      globalThis.fetch = async () => Response.json(body, { status: 403 });
+      const result = await mod.testTikuAdapterConfig(config);
+      assert.equal(result.state, state, JSON.stringify(body));
+      assert.equal(result.httpStatus, 403);
+      if (state === 'device-limit-exceeded') {
+        assert.equal(result.deviceLimit, 2);
+        assert.equal(result.deviceUsed, 3);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings connectivity test ignores malformed device counts and preserves non-JSON auth errors', async () => {
+  const mod = await loadModule();
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const value of [-1, 1.5, '2', null, 9007199254740992]) {
+      globalThis.fetch = async () => Response.json({ code: 'DEVICE_LIMIT_EXCEEDED', reason: 'limit-exceeded', limit: value, used: value }, { status: 403 });
+      const result = await mod.testTikuAdapterConfig(config);
+      assert.equal(result.state, 'device-limit-exceeded');
+      assert.equal(result.deviceLimit, undefined);
+      assert.equal(result.deviceUsed, undefined);
+    }
+    for (const status of [401, 403]) {
+      globalThis.fetch = async () => new Response('<html>permission denied</html>', { status });
+      const result = await mod.testTikuAdapterConfig(config);
+      assert.equal(result.state, 'invalid-key');
+      assert.equal(result.httpStatus, status);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings connectivity test reports valid over-capacity metadata without rejecting an existing device', async () => {
+  const mod = await loadModule();
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => Response.json({
+      ...health,
+      deviceAccess: { allowed: true, reason: 'already-registered', limit: 2, used: 3 }
+    });
+    const result = await mod.testTikuAdapterConfig(config);
+    assert.equal(result.state, 'ok', 'a registered device remains usable after the limit is reduced');
+    assert.equal(result.deviceLimit, 2);
+    assert.equal(result.deviceUsed, 3);
+    assert.ok(Number.isFinite(result.latencyMs));
+
+    for (const deviceAccess of [
+      null, [], 'over-capacity',
+      { allowed: false, reason: 'already-registered', limit: 2, used: 3 },
+      { allowed: true, reason: 'limit-exceeded', limit: 2, used: 3 },
+      { allowed: true, reason: 'already-registered', limit: 2, used: 2 },
+      ...[-1, 0, 1.5, '2', null, 9007199254740992].map(limit => ({ allowed: true, reason: 'already-registered', limit, used: 3 })),
+      ...[-1, 1.5, '3', null, 9007199254740992].map(used => ({ allowed: true, reason: 'already-registered', limit: 2, used }))
+    ]) {
+      globalThis.fetch = async () => Response.json({ ...health, deviceAccess });
+      const result = await mod.testTikuAdapterConfig(config);
+      assert.equal(result.state, 'ok');
+      assert.equal(result.deviceLimit, undefined, JSON.stringify(deviceAccess));
+      assert.equal(result.deviceUsed, undefined, JSON.stringify(deviceAccess));
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('failed health handshake falls back to sync without creating an async task', async () => {
   const mod = await loadModule();
   const originalFetch = globalThis.fetch;

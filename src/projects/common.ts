@@ -45,7 +45,8 @@ import {
   getTikuAdapterConfigProblem,
   isValidTikuAdapterBaseUrl,
   resolveTikuAdapterBaseUrl,
-  testTikuAdapterConfig
+  testTikuAdapterConfig,
+  type TikuAdapterConfig
 } from './tiku-adapter-config.js';
 
 export interface CommonWorkOptions {
@@ -2505,20 +2506,30 @@ function createTikuAdapterConfigSection() {
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
   saveButton.onclick = async () => {
-    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
-    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
-    // 保存后立刻重建状态页 fetcher（138 §5.2 的 P1）：
-    // mountServiceStatusHttpFetcher 读的是「调用那一刻」的配置，不重建的话
-    // 状态 Tab 会一直请求保存前的旧地址 —— 这正是用户报的那个缺陷。
-    // 放在两次 set 之后：先落盘再重建，避免 fetcher 读到半截配置。
-    // try/catch 与 onrender 里那处一致：重建失败只该让状态页停在旧快照，
-    // 不能把「保存成功」这个结果带塌。
+    if (saveButton.disabled) return;
+    saveButton.disabled = true;
+    const config = {
+      baseurl: baseurlInput.value.trim(),
+      key: keyInput.value.trim(),
+      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
+    };
     try {
-      mountServiceStatusHttpFetcher();
-    } catch {
-      // ignore: 状态页降级，配置已保存。
+      setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, config.baseurl);
+      setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, config.key);
+      // 两项配置落盘后再重建状态页 fetcher，避免继续请求旧地址。
+      try {
+        mountServiceStatusHttpFetcher();
+      } catch {
+        // 状态页降级不影响配置保存和连接测试。
+      }
+      const tested = config.baseurl && config.key ? await runConfigTest(config) : undefined;
+      await $modal.alert({
+        content: `题库配置已保存。${tested ? `\n\n${tested.content}` : ''}`,
+        icon: tested?.icon ?? 'success'
+      });
+    } finally {
+      saveButton.disabled = false;
     }
-    await $modal.alert({ content: '题库配置已保存。', icon: 'success' });
   };
 
   const testButton = createElement('button', { text: '测试' });
@@ -2531,7 +2542,7 @@ function createTikuAdapterConfigSection() {
   applyHintTextStyle(testResult);
   testResult.style.padding = '10px 12px';
   testResult.style.borderRadius = '9px';
-  testResult.style.whiteSpace = 'normal';
+  testResult.style.whiteSpace = 'pre-line';
   testResult.style.overflowWrap = 'anywhere';
   let testRevision = 0;
   const clearTestResult = () => {
@@ -2539,9 +2550,9 @@ function createTikuAdapterConfigSection() {
     testResult.hidden = true;
     testResult.textContent = '';
   };
-  testButton.onclick = async () => {
-    if (testButton.disabled) return;
+  async function runConfigTest(config: TikuAdapterConfig) {
     const revision = ++testRevision;
+    saveButton.disabled = true;
     testButton.disabled = true;
     testButton.textContent = '测试中…';
     testResult.hidden = false;
@@ -2549,40 +2560,56 @@ function createTikuAdapterConfigSection() {
     testResult.style.color = panelPinkTheme.infoFg;
     testResult.style.background = panelPinkTheme.infoBg;
     try {
-      const result = await testTikuAdapterConfig({
-        baseurl: baseurlInput.value.trim(),
-        key: keyInput.value.trim(),
-        scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
-      });
-      if (revision !== testRevision) return;
+      const result = await testTikuAdapterConfig({ ...config });
+      const existingDevicesOverLimit = result.state === 'ok'
+        && result.deviceLimit !== undefined && result.deviceLimit > 0
+        && result.deviceUsed !== undefined && result.deviceUsed > result.deviceLimit;
       const content = result.state === 'ok'
-        ? `✅ 服务器正常，访问令牌有效（${result.latencyMs ?? 0}ms）。`
+        ? `✅ 服务器正常，访问令牌有效（${result.latencyMs ?? 0}ms）。${existingDevicesOverLimit
+          ? `\n⚠️ 当前已绑定 ${result.deviceUsed} 台，超过设备上限 ${result.deviceLimit} 台。本机可继续使用，新设备将受限；请在个人中心移除不用的设备。` : ''}`
         : result.state === 'invalid-key'
           ? `⚠️ 服务器正常，但访问令牌无效或无权使用（HTTP ${result.httpStatus}）。`
-          : result.state === 'rate-limited'
-            ? '⚠️ 服务器正常，但校验过于频繁，暂时无法确认令牌状态（HTTP 429）。请稍后再试。'
-            : result.state === 'invalid-config'
-              ? result.problem === 'missing-key'
-                ? '请先填写访问令牌。'
-                : '请先填写有效的题库地址。'
-              : result.httpStatus
-                ? `❌ 服务器异常或接口不可用（HTTP ${result.httpStatus}）。`
-                : '❌ 无法连接服务器，或连接被浏览器网络策略拦截。请检查地址、网络、服务状态和 CORS 配置。';
-      const tone = result.state === 'ok' ? 'success'
+          : result.state === 'device-limit-exceeded'
+            ? `⚠️ 服务器正常，但设备数量已达上限${result.deviceUsed !== undefined && result.deviceLimit !== undefined
+              ? `（已用 ${result.deviceUsed} 台，上限 ${result.deviceLimit} 台）` : ''}。请在个人中心移除不用的设备后重试。`
+            : result.state === 'rate-limited'
+              ? '⚠️ 服务器正常，但校验过于频繁，暂时无法确认令牌状态（HTTP 429）。请稍后再试。'
+              : result.state === 'invalid-config'
+                ? result.problem === 'missing-key'
+                  ? '请先填写访问令牌。'
+                  : '请先填写有效的题库地址。'
+                : result.httpStatus
+                  ? `❌ 服务器异常或接口不可用（HTTP ${result.httpStatus}）。`
+                  : '❌ 无法连接服务器，或连接被浏览器网络策略拦截。请检查地址、网络、服务状态和 CORS 配置。';
+      const tone = result.state === 'ok' && !existingDevicesOverLimit ? 'success'
         : result.state === 'server-error' ? 'danger' : 'warning';
-      testResult.textContent = content;
-      testResult.style.color = panelPinkTheme[`${tone}Fg`];
-      testResult.style.background = panelPinkTheme[`${tone}Bg`];
-    } catch {
       if (revision === testRevision) {
-        testResult.textContent = '测试未完成，请稍后重试。';
+        testResult.textContent = content;
+        testResult.style.color = panelPinkTheme[`${tone}Fg`];
+        testResult.style.background = panelPinkTheme[`${tone}Bg`];
+      }
+      return { content, icon: tone === 'success' ? 'success' as const : 'warning' as const };
+    } catch {
+      const content = '测试未完成，请稍后重试。';
+      if (revision === testRevision) {
+        testResult.textContent = content;
         testResult.style.color = panelPinkTheme.dangerFg;
         testResult.style.background = panelPinkTheme.dangerBg;
       }
+      return { content, icon: 'warning' as const };
     } finally {
+      saveButton.disabled = false;
       testButton.disabled = false;
       testButton.textContent = '测试';
     }
+  }
+  testButton.onclick = async () => {
+    if (testButton.disabled || saveButton.disabled) return;
+    await runConfigTest({
+      baseurl: baseurlInput.value.trim(),
+      key: keyInput.value.trim(),
+      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
+    });
   };
 
   const jumpButton = createElement('button', { text: '跳转' });

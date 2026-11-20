@@ -203,8 +203,8 @@ test('common ignores panel-authored shared config mutations so focused inputs ar
   assert.equal(source.includes('function serializeSharedStoreValue(value: unknown): string | undefined'), true);
   assert.equal(source.includes('function shouldRefreshPanelForSharedValues(values: Record<string, unknown>)'), true);
   assert.equal(source.includes('lastSharedAttributeValues.set(getSharedStoreAttributeName(key), serialized);'), true);
-  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());'), true);
-  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());'), true);
+  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, config.baseurl);'), true);
+  assert.equal(source.includes('setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, config.key);'), true);
   // Editing invalidates an inline test result; it must not save or rebuild the panel.
   assert.match(source, /keyInput\.oninput = clearTestResult;/);
   const clearTestResult = source.match(/const clearTestResult = \(\) => \{([\s\S]*?)\n  \};/);
