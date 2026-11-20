@@ -2523,15 +2523,38 @@ function createTikuAdapterConfigSection() {
 
   const testButton = createElement('button', { text: '测试' });
   applyActionButtonStyle(testButton, 'default');
+  const testResult = createElement('div');
+  testResult.dataset.cxTikuTestResult = 'true';
+  testResult.setAttribute('role', 'status');
+  testResult.setAttribute('aria-live', 'polite');
+  testResult.hidden = true;
+  applyHintTextStyle(testResult);
+  testResult.style.padding = '10px 12px';
+  testResult.style.borderRadius = '9px';
+  testResult.style.whiteSpace = 'normal';
+  testResult.style.overflowWrap = 'anywhere';
+  let testRevision = 0;
+  const clearTestResult = () => {
+    testRevision += 1;
+    testResult.hidden = true;
+    testResult.textContent = '';
+  };
   testButton.onclick = async () => {
+    if (testButton.disabled) return;
+    const revision = ++testRevision;
     testButton.disabled = true;
     testButton.textContent = '测试中…';
+    testResult.hidden = false;
+    testResult.textContent = '正在测试当前填写的题库地址与令牌…';
+    testResult.style.color = panelPinkTheme.infoFg;
+    testResult.style.background = panelPinkTheme.infoBg;
     try {
       const result = await testTikuAdapterConfig({
         baseurl: baseurlInput.value.trim(),
         key: keyInput.value.trim(),
         scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
       });
+      if (revision !== testRevision) return;
       const content = result.state === 'ok'
         ? `✅ 服务器正常，访问令牌有效（${result.latencyMs ?? 0}ms）。`
         : result.state === 'invalid-key'
@@ -2545,10 +2568,17 @@ function createTikuAdapterConfigSection() {
               : result.httpStatus
                 ? `❌ 服务器异常或接口不可用（HTTP ${result.httpStatus}）。`
                 : '❌ 无法连接服务器，或连接被浏览器网络策略拦截。请检查地址、网络、服务状态和 CORS 配置。';
-      const icon = result.state === 'ok' ? 'success'
-        : result.state === 'invalid-config' ? 'info'
-          : result.state === 'invalid-key' || result.state === 'rate-limited' ? 'warning' : 'error';
-      await $modal.alert({ content, icon });
+      const tone = result.state === 'ok' ? 'success'
+        : result.state === 'server-error' ? 'danger' : 'warning';
+      testResult.textContent = content;
+      testResult.style.color = panelPinkTheme[`${tone}Fg`];
+      testResult.style.background = panelPinkTheme[`${tone}Bg`];
+    } catch {
+      if (revision === testRevision) {
+        testResult.textContent = '测试未完成，请稍后重试。';
+        testResult.style.color = panelPinkTheme.dangerFg;
+        testResult.style.background = panelPinkTheme.dangerBg;
+      }
     } finally {
       testButton.disabled = false;
       testButton.textContent = '测试';
@@ -2584,6 +2614,8 @@ function createTikuAdapterConfigSection() {
   keyInput.value = stored.key;
   keyInput.placeholder = '请输入访问令牌';
   applyControlChrome(keyInput);
+  baseurlInput.oninput = clearTestResult;
+  keyInput.oninput = clearTestResult;
 
   const actionsRow = createElement('div');
   actionsRow.style.display = 'flex';
@@ -2592,7 +2624,7 @@ function createTikuAdapterConfigSection() {
   actionsRow.append(saveButton, testButton, jumpButton);
 
   keyWrap.append(keyLabel, keyInput);
-  container.append(header, baseurlWrap, keyWrap, actionsRow);
+  container.append(header, baseurlWrap, keyWrap, actionsRow, testResult);
   return container;
 }
 
