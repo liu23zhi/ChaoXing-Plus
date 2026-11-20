@@ -38,6 +38,12 @@ if ! node -e '
 '; then
   echo "错误：当前 Node.js 为 ${NODE_VERSION}。Vite 8 需要 Node.js 20.19+ 或 22.12+。" >&2
   echo "请在 WSL 中执行以下命令升级，并确保 node/npm 都来自 WSL：" >&2
+  echo "  # 也可以使用 apt（Ubuntu/Debian）：" >&2
+  echo "  sudo apt update && sudo apt install -y curl ca-certificates" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+  echo "  sudo apt install -y nodejs" >&2
+  echo "  hash -r && node --version && npm --version && command -v node && command -v npm" >&2
+  echo "  # 或使用 nvm：" >&2
   echo "  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash" >&2
   echo "  source \"\$HOME/.nvm/nvm.sh\"" >&2
   echo "  nvm install 22 && nvm alias default 22 && nvm use 22" >&2
@@ -51,6 +57,11 @@ NPM_PATH="$(command -v npm)"
 if [[ "$NODE_PLATFORM" == "linux" && "$NPM_PATH" == /mnt/* ]]; then
   echo "错误：当前使用的是 WSL/Linux Node.js ${NODE_VERSION}，但 npm 来自 Windows：${NPM_PATH}" >&2
   echo "请先执行：" >&2
+  echo "  sudo apt update && sudo apt install -y curl ca-certificates" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+  echo "  sudo apt install -y nodejs" >&2
+  echo "  hash -r && command -v node && command -v npm" >&2
+  echo "也可以使用 nvm：" >&2
   echo "  source \"\$HOME/.nvm/nvm.sh\" && nvm install 22 && nvm use 22" >&2
   echo "  hash -r && command -v node && command -v npm" >&2
   echo "确认 node/npm 都来自 \$HOME/.nvm 后，重新执行：" >&2
