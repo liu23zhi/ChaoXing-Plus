@@ -1,5 +1,5 @@
 import md5 from 'md5';
-import Typr from 'typr.js';
+import { Font } from '@fredli74/typr';
 import {
   createDefaultQuestionResolver,
   DEFAULT_WORKER_THREAD_COUNT,
@@ -7276,12 +7276,13 @@ async function mappingRecognize(doc: Document = document) {
     const font = fontFaceEl.textContent?.match(/base64,([\w\W]+?)'/)?.[1];
     if (font) {
       $console.log('正在识别繁体字');
-      const code = Typr.parse(base64ToUint8Array(font));
+      const bytes = base64ToUint8Array(font);
+      const code = new Font(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
       const match: Record<string, number> = {};
       for (let i = 19968; i < 40870; i++) {
-        const glyph = Typr.U.codeToGlyph(code, i);
+        const glyph = code.codeToGlyph(i);
         if (!glyph) continue;
-        const path = Typr.U.glyphToPath(code, glyph);
+        const path = code.glyphToPath(glyph);
         const hex = md5(JSON.stringify(path)).slice(24);
         match[i.toString()] = typrMapping[hex];
       }

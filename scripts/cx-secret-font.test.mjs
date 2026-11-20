@@ -20,18 +20,12 @@ import { register } from 'node:module';
 
 register('./ci/ts-source-hooks.mjs', import.meta.url);
 
-// typr.js 在模块顶层读 window.TextDecoder，Node 里必须先补上再 import。
-// 它是个 2019 年的 UMD 包（index.js 单文件），没有 ESM 构建，无法避开这一步。
-if (typeof globalThis.window === 'undefined') {
-  globalThis.window = { TextDecoder };
-}
-
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = resolve(here, '../tests/fixtures/encrypted-font');
 const fixtureBase64 = readFileSync(resolve(fixtureDir, 'fixture.ttf.base64'), 'utf8').trim();
 const fixtureExpected = JSON.parse(readFileSync(resolve(fixtureDir, 'expected-hashes.json'), 'utf8'));
 
-const { default: Typr } = await import('typr.js');
+const { Font } = await import('@fredli74/typr');
 const { default: md5 } = await import('md5');
 const {
   CX_SECRET_FONT_FAMILY,
@@ -78,7 +72,15 @@ function secretFontCss(base64 = fixtureBase64, family = 'font-cxsecret') {
 }`;
 }
 
-const typography = { parse: (bytes) => Typr.parse(bytes), U: Typr.U };
+const parseFont = (bytes) => new Font(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+const Typr = {
+  parse: parseFont,
+  U: {
+    codeToGlyph: (font, code) => font.codeToGlyph(code),
+    glyphToPath: (font, glyphIndex) => font.glyphToPath(glyphIndex)
+  }
+};
+const typography = { parse: parseFont, U: Typr.U };
 
 // ---------------------------------------------------------------------------
 // 1. 核心算法口径：glyphToPath -> JSON.stringify -> md5 -> slice(24)

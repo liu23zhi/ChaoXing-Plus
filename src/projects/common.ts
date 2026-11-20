@@ -826,6 +826,7 @@ function mountServiceStatusHttpFetcher() {
       resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
+    includeSearchHistory: true,
     // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
     accessKey: config.key,
     scriptIdentity: config.scriptIdentity
@@ -2524,7 +2525,7 @@ function createTikuAdapterConfigSection() {
       }
       const tested = config.baseurl && config.key ? await runConfigTest(config) : undefined;
       await $modal.alert({
-        content: `题库配置已保存。${tested ? `\n\n${tested.content}` : ''}`,
+        content: `题库配置已保存。${tested ? `\n\n连接测试结果\n${tested.content}` : ''}`,
         icon: tested?.icon ?? 'success'
       });
     } finally {

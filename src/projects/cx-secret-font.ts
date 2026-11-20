@@ -85,7 +85,7 @@ export interface SecretFontScanReport {
   failure?: SecretFontFailure;
 }
 
-/** typr.js 的最小契约面，避免为测试伪造整个库。 */
+/** 字体解析器的最小契约面，避免为测试伪造整个库。 */
 export interface SecretFontTypography {
   parse(bytes: Uint8Array): unknown;
   U: {
@@ -95,7 +95,7 @@ export interface SecretFontTypography {
 }
 
 export interface SecretFontScanOptions {
-  /** 字体解析器（生产传 typr.js）。缺省时无法算 hash，扫描会以 font-parse-failed 收尾。 */
+  /** 字体解析器。缺省时无法算 hash，扫描会以 font-parse-failed 收尾。 */
   typography?: SecretFontTypography;
   /** md5 实现（生产传 md5 包）。缺省时无法算 hash。 */
   digest?: (input: string) => string;

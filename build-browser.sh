@@ -19,13 +19,32 @@ trap on_error ERR
 
 if ! command -v node >/dev/null 2>&1; then
   echo "错误：未安装 Node.js，或 Node.js 不在 PATH 中。" >&2
-  echo "请安装 Node.js 12 或更高版本后重新运行此脚本。" >&2
+  echo "请在当前环境安装 Node.js 20.19+ 或 22.12+ 后重新运行此脚本。" >&2
   exit 1
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "错误：未安装 npm，或 npm 不在 PATH 中。" >&2
   echo "请随 Node.js 一起安装 npm 后重新运行此脚本。" >&2
+  exit 1
+fi
+
+NODE_PLATFORM="$(node -p 'process.platform')"
+NODE_VERSION="$(node -p 'process.versions.node')"
+if ! node -e '
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  const supported = major > 22 || (major === 22 && minor >= 12) || (major === 20 && minor >= 19);
+  process.exit(supported ? 0 : 1);
+'; then
+  echo "错误：当前 Node.js 为 ${NODE_VERSION}。Vite 8 需要 Node.js 20.19+ 或 22.12+。" >&2
+  echo "请在当前环境升级 Node.js，不要让 WSL 的 Linux Node 与 Windows npm 混用。" >&2
+  exit 1
+fi
+
+NPM_PATH="$(command -v npm)"
+if [[ "$NODE_PLATFORM" == "linux" && "$NPM_PATH" == /mnt/* ]]; then
+  echo "错误：当前使用的是 WSL/Linux Node.js ${NODE_VERSION}，但 npm 来自 Windows：${NPM_PATH}" >&2
+  echo "请在 WSL 中安装并使用同一套 Node.js/npm（例如 Node.js 20.19+ 或 22.12+）。" >&2
   exit 1
 fi
 

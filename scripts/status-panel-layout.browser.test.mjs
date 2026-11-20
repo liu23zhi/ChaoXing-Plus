@@ -101,7 +101,7 @@ test('搜题状态面板适配 360px 宽度并且不显示全站细节', async (
     assert.ok(metrics.sectionWidth <= metrics.sectionClientWidth + 1);
     assert.ok(metrics.docScrollWidth <= metrics.viewportWidth);
     assert.equal(metrics.searchCardCount, 1);
-    assert.equal(metrics.bandCount, 0, '普通状态页不展示全站时间曲线');
+    assert.equal(metrics.bandCount, 1, '普通状态页展示搜题接口24小时色带，不展示全站时间曲线');
     assert.match(metrics.text, /搜题接口/);
     assert.doesNotMatch(metrics.text, /全站|当前窗口摘要|失败请求|最近每分钟/);
   } finally {

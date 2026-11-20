@@ -382,6 +382,8 @@ export type ServiceStatusSnapshot = {
   updatedAt: number;
   /** 新版摘要端点的搜题专属分桶。缺失时必须显示无数据，不能回退成全站状态。 */
   search?: SearchEndpointStatus | null;
+  /** 独立搜题分钟序列；null/缺失表示旧服务未提供或历史请求失败，[]表示尚无采样。 */
+  searchHistory?: ServiceStatusSample[] | null;
 };
 
 export type ServiceStatusFetchOptions = { now: number };
@@ -397,6 +399,7 @@ export type ServiceStatusFetcher = (options: ServiceStatusFetchOptions) => Promi
  * 不该开给每个持 key 的用户。摘要端点只给聚合数字。
  */
 export const SERVICE_STATUS_ENDPOINT = '/api/service-status/summary';
+export const SERVICE_STATUS_SERIES_ENDPOINT = '/api/service-status/series';
 
 /**
  * 管理员端点（`RequireAdmin` + 逐分钟 points）。
@@ -575,7 +578,9 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
     capacity: toFiniteNumber(payload.capacity) ?? 0,
     restartedAtMs: parseIsoToMs(payload.restartedAt ?? payload.restarted_at),
     updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? Date.now(),
-    search
+    search,
+    // points 是全站序列，不能用它为搜题接口补历史；当前窗口空也不丢失旧时段请求。
+    searchHistory: Array.isArray(payload.searchPoints) ? normalizeSamples(payload.searchPoints) : null
   };
 }
 
@@ -747,6 +752,7 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
     capacity: 1440,
     restartedAtMs: windowStart,
     updatedAt: nowMs,
+    searchHistory: buckets,
     search: {
       status: 'healthy',
       successRate: 0.992,
@@ -999,6 +1005,108 @@ function createSearchStatusCard(
   return card;
 }
 
+function createSearchHistoryBand(snapshot: ServiceStatusSnapshot | null, theme: ServiceStatusPanelTheme, nowMs: number): HTMLElement {
+  const card = createSectionCard(theme);
+  card.dataset.cxStatusHistory = 'search';
+  card.append(createSectionTitle(theme, '最近 24 小时'));
+  const history = snapshot?.searchHistory;
+  const available = Array.isArray(history);
+  const samples = (history ?? []).filter(sample => sample.startMs >= nowMs - STATUS_WINDOW_MS && sample.startMs <= nowMs);
+  // 右端包含当前未结束的 5 分钟；刚刚发生的请求不必再等整桶结束才显色。
+  const buckets = buildServiceStatusBuckets(samples, nowMs + STATUS_BUCKET_MS);
+  const band = el('div');
+  band.dataset.cxStatusBand = 'search';
+  band.setAttribute('role', 'group');
+  band.setAttribute('aria-label', '最近24小时搜题成功率，使用左右方向键查看时段，Home或End跳到最早或最新');
+  band.tabIndex = 0;
+  band.style.display = 'flex';
+  band.style.flexWrap = 'nowrap';
+  band.style.width = '100%';
+  band.style.minWidth = '0';
+  band.style.height = '18px';
+  band.style.borderRadius = '6px';
+  band.style.overflow = 'hidden';
+  band.style.background = SERVICE_STATUS_NO_DATA_TIER.color;
+  band.style.outlineOffset = '3px';
+
+  const detail = createHintLine(theme, '');
+  detail.dataset.cxStatusBucketDetail = 'true';
+  detail.setAttribute('role', 'status');
+  detail.setAttribute('aria-live', 'polite');
+  let selected = buckets.length - 1;
+  const describe = (bucket: ServiceStatusBucket): string => {
+    const day = new Date(bucket.startMs);
+    const interval = `${day.getMonth() + 1}/${day.getDate()} ${formatServiceStatusClock(bucket.startMs)}–${formatServiceStatusClock(Math.min(nowMs, bucket.startMs + STATUS_BUCKET_MS))}`;
+    if (!available) return `${interval} · 历史暂不可用`;
+    if (!history?.length) return `${interval} · 尚未采集到历史数据`;
+    if (bucket.requests === 0) return `${interval} · 没有搜题请求`;
+    return `${interval} · 成功率 ${formatServiceStatusPercent(bucket.successRate)} · ${bucket.requests} 次请求`;
+  };
+  const select = (index: number) => {
+    selected = Math.min(buckets.length - 1, Math.max(0, index));
+    detail.textContent = describe(buckets[selected]);
+  };
+  for (let index = 0; index < buckets.length; index += 1) {
+    const bucket = buckets[index];
+    const cell = el('span');
+    cell.dataset.cxStatusBucket = String(index);
+    cell.style.flex = '1 1 0';
+    cell.style.minWidth = '0';
+    cell.style.height = '100%';
+    cell.style.background = resolveServiceStatusTier(bucket.successRate).color;
+    cell.title = describe(bucket);
+    cell.setAttribute('aria-hidden', 'true');
+    cell.onmouseenter = () => select(index);
+    cell.onclick = () => select(index);
+    band.append(cell);
+  }
+  band.onkeydown = (event) => {
+    let index = selected;
+    if (event.key === 'ArrowLeft') index -= 1;
+    else if (event.key === 'ArrowRight') index += 1;
+    else if (event.key === 'Home') index = 0;
+    else if (event.key === 'End') index = buckets.length - 1;
+    else return;
+    event.preventDefault();
+    select(index);
+  };
+  select(selected);
+  const axis = el('div');
+  axis.style.display = 'flex';
+  axis.style.justifyContent = 'space-between';
+  axis.append(createHintLine(theme, '24 小时前'), createHintLine(theme, '现在'));
+  const legend = el('div');
+  legend.style.display = 'flex';
+  legend.style.flexWrap = 'wrap';
+  legend.style.gap = '6px 12px';
+  for (const [color, label] of [
+    [resolveServiceStatusTier(1).color, '成功'], [resolveServiceStatusTier(0.7).color, '部分失败'],
+    [resolveServiceStatusTier(0).color, '全失败'], [SERVICE_STATUS_NO_DATA_TIER.color, '无请求']
+  ]) {
+    const item = el('div');
+    item.style.fontSize = '12px';
+    item.style.lineHeight = '1.6';
+    item.style.color = theme.subtle;
+    const dot = el('span');
+    dot.style.display = 'inline-block';
+    dot.style.width = '7px';
+    dot.style.height = '7px';
+    dot.style.marginRight = '5px';
+    dot.style.borderRadius = '50%';
+    dot.style.background = color;
+    const labelText = el('span');
+    labelText.textContent = label;
+    item.append(dot, labelText);
+    legend.append(item);
+  }
+  card.append(band, axis, detail, legend);
+  card.append(createHintLine(theme, !available
+    ? '历史暂不可用，请稍后刷新或更新题库服务。当前状态仍可单独查看。'
+    : !history.length ? '尚未采集到搜题历史，色带暂以灰色显示。'
+      : '每格 5 分钟，按请求总量加权；灰色表示无请求或尚无采样。'));
+  return card;
+}
+
 /**
  * PLUS 普通状态页只显示搜题接口的状态与公开分桶摘要。
  * 全站指标可能被 health-check / 管理页等其他请求稀释，不可作为搜题状态的回退值；
@@ -1020,6 +1128,12 @@ export function createStatusPanelSection(options: ServiceStatusPanelOptions): HT
   // 普通用户页面只展示 public summary 内的搜题接口分桶；不以全站指标作为回退。
   container.dataset.cxStatusMode = 'search';
   container.append(createSearchStatusCard(snapshot, theme, options.onRequestRefresh));
+  if (snapshot?.searchHistory !== undefined
+    && (snapshot.searchHistory !== null || snapshot.search !== null)
+    && !['no-token', 'rejected', 'forbidden'].includes(snapshot?.kind ?? '')) {
+    const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+    container.append(createSearchHistoryBand(snapshot, theme, now));
+  }
   return container;
 }
 
