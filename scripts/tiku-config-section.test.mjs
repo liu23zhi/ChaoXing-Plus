@@ -25,6 +25,7 @@ function createSection(document, probe) {
     applyControlChrome() {}, applyActionButtonStyle() {},
     isWindowsHostRuntime: () => false,
     DEFAULT_TIKU_BASE_URL: 'https://adapter.example',
+    resolveTikuAdapterBaseUrl: (raw, fallback) => String(raw ?? '').trim() || fallback,
     testTikuAdapterConfig: probe,
     TIKU_ADAPTER_BASEURL_KEY: 'baseurl', TIKU_ADAPTER_KEY_KEY: 'key',
     setRuntimeStoreValueFromPanel: (key, value) => { saved[key] = value; events.push(key); },
@@ -55,6 +56,14 @@ test('题库配置测试结果直接展示在按钮下方，不弹窗', async ()
       assert.deepEqual(modals, []);
       assert.equal(root.children.at(-1), result, '结果显示在配置操作区下方');
     }
+  });
+});
+
+test('配置说明告知默认地址行为和令牌获取入口', async () => {
+  await withMinimalDom(async document => {
+    const { root } = createSection(document, async () => ({ state: 'ok' }));
+    assert.match(root.textContentAll, /题库地址留空会恢复默认地址/);
+    assert.match(root.textContentAll, /访问令牌.*创建或获取/);
   });
 });
 
@@ -111,17 +120,49 @@ test('保存非空配置后自动测试，并将同一结果显示在弹窗和�
   });
 });
 
-test('保存空地址或空令牌时只保存，不发出测试请求', async () => {
+test('保存空地址时恢复默认地址并继续测试，空令牌时只保存不发请求', async () => {
   await withMinimalDom(async document => {
-    for (const values of [['', 'key'], ['https://adapter.example', ''], [' ', ' ']]) {
+    for (const [values, expectedBaseurl, expectedCalls] of [
+      [['', 'key'], 'https://adapter.example', 1],
+      [['https://adapter.example', ''], 'https://adapter.example', 0],
+      [[' ', ' '], 'https://adapter.example', 0]
+    ]) {
       let calls = 0;
-      const { root, saveButton, modals, saved } = createSection(document, async () => { calls += 1; return { state: 'ok' }; });
+      const { root, saveButton, modals, saved } = createSection(document, async config => {
+        calls += 1;
+        assert.equal(config.baseurl, expectedBaseurl);
+        return { state: 'ok' };
+      });
       root.querySelectorAll('input').forEach((input, i) => { input.value = values[i]; });
       await saveButton.onclick();
-      assert.deepEqual(saved, { baseurl: values[0].trim(), key: values[1].trim() });
-      assert.equal(calls, 0);
-      assert.deepEqual(modals, [{ content: '题库配置已保存。', icon: 'success' }]);
+      assert.deepEqual(saved, { baseurl: expectedBaseurl, key: values[1].trim() });
+      assert.equal(calls, expectedCalls);
+      if (values[1].trim()) {
+        assert.match(modals[0].content, /连接测试结果/);
+        if (!values[0].trim()) {
+          assert.equal(root.querySelectorAll('input')[0].value, expectedBaseurl);
+          assert.match(modals[0].content, /已恢复默认题库地址/);
+        }
+      } else {
+        assert.equal(modals[0].icon, 'warning');
+        assert.match(modals[0].content, /未填写访问令牌/);
+        assert.match(modals[0].content, /adapter\/access-tokens/);
+      }
     }
+  });
+});
+
+test('测试时令牌为空仍显示行内缺失提示，并弹窗引导获取令牌', async () => {
+  await withMinimalDom(async document => {
+    let calls = 0;
+    const { root, testButton, modals } = createSection(document, async () => { calls += 1; return { state: 'ok' }; });
+    root.querySelectorAll('input')[1].value = '';
+    await testButton.onclick();
+    assert.equal(calls, 0, '令牌为空不得请求服务器');
+    assert.match(root.querySelector('[data-cx-tiku-test-result]').textContent, /请先填写访问令牌/);
+    assert.equal(modals.length, 1);
+    assert.match(modals[0].content, /获取令牌/);
+    assert.match(modals[0].content, /adapter\/access-tokens/);
   });
 });
 

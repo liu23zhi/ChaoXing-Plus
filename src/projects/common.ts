@@ -2479,7 +2479,13 @@ function createTikuAdapterConfigSection() {
   });
   applyHintTextStyle(description);
 
-  header.append(title, description);
+  const guide = createElement('div', {
+    text: '题库地址留空会恢复默认地址；令牌必须填写。没有令牌时，请登录题库服务并在“访问令牌”页面创建或获取。'
+  });
+  applyHintTextStyle(guide);
+  guide.style.color = panelPinkTheme.subtle;
+
+  header.append(title, description, guide);
 
   const baseurlWrap = createElement('div');
   baseurlWrap.style.display = 'grid';
@@ -2504,17 +2510,32 @@ function createTikuAdapterConfigSection() {
   // 输入框统一外观：与设置区控件一致，触控目标 ≥ 32px。
   applyControlChrome(baseurlInput);
 
+  const readConfig = (): TikuAdapterConfig => {
+    const enteredBaseurl = baseurlInput.value.trim();
+    return {
+      // 空地址代表恢复默认题库地址；无效的非空地址保留给测试函数返回明确错误。
+      baseurl: resolveTikuAdapterBaseUrl(enteredBaseurl, DEFAULT_TIKU_BASE_URL) || enteredBaseurl,
+      key: keyInput.value.trim(),
+      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
+    };
+  };
+
+  const getTokenManagementUrl = (baseurl: string): string => {
+    const normalized = resolveTikuAdapterBaseUrl(baseurl, DEFAULT_TIKU_BASE_URL);
+    return normalized ? `${normalized}/adapter/access-tokens` : '';
+  };
+
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
   saveButton.onclick = async () => {
     if (saveButton.disabled) return;
     saveButton.disabled = true;
-    const config = {
-      baseurl: baseurlInput.value.trim(),
-      key: keyInput.value.trim(),
-      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
-    };
+    const enteredBaseurl = baseurlInput.value.trim();
+    const config = readConfig();
+    const missingKey = !config.key;
+    const tokenUrl = getTokenManagementUrl(config.baseurl);
     try {
+      if (!enteredBaseurl && config.baseurl) baseurlInput.value = config.baseurl;
       setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, config.baseurl);
       setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, config.key);
       // 两项配置落盘后再重建状态页 fetcher，避免继续请求旧地址。
@@ -2523,10 +2544,18 @@ function createTikuAdapterConfigSection() {
       } catch {
         // 状态页降级不影响配置保存和连接测试。
       }
-      const tested = config.baseurl && config.key ? await runConfigTest(config) : undefined;
+      // 令牌为空时保存配置但不发起测试请求；默认地址仍可用于后续获取令牌。
+      const tested = config.key ? await runConfigTest(config) : undefined;
+      const defaultBaseurlNotice = !enteredBaseurl && config.baseurl
+        ? `\n\n已恢复默认题库地址：${config.baseurl}` : '';
+      const missingKeyNotice = missingKey
+        ? `\n\n⚠️ 未填写访问令牌，题库搜题可能无法正常使用。${tokenUrl
+          ? `\n请登录题库服务并前往以下地址获取令牌：\n${tokenUrl}`
+          : '\n请先配置有效的题库地址，再获取令牌。'}` : '';
       await $modal.alert({
-        content: `题库配置已保存。${tested ? `\n\n连接测试结果\n${tested.content}` : ''}`,
-        icon: tested?.icon ?? 'success'
+        content: `题库配置已保存。${defaultBaseurlNotice}${missingKeyNotice}${tested
+          ? `\n\n连接测试结果\n${tested.content}` : ''}`,
+        icon: tested?.icon ?? (missingKey ? 'warning' : 'success')
       });
     } finally {
       saveButton.disabled = false;
@@ -2561,7 +2590,10 @@ function createTikuAdapterConfigSection() {
     testResult.style.color = panelPinkTheme.infoFg;
     testResult.style.background = panelPinkTheme.infoBg;
     try {
-      const result = await testTikuAdapterConfig({ ...config });
+      // 令牌为空时只更新本地提示，不发出没有鉴权意义的请求。
+      const result = config.key
+        ? await testTikuAdapterConfig({ ...config })
+        : { state: 'invalid-config' as const, problem: 'missing-key' as const };
       const existingDevicesOverLimit = result.state === 'ok'
         && result.deviceLimit !== undefined && result.deviceLimit > 0
         && result.deviceUsed !== undefined && result.deviceUsed > result.deviceLimit;
@@ -2606,11 +2638,15 @@ function createTikuAdapterConfigSection() {
   }
   testButton.onclick = async () => {
     if (testButton.disabled || saveButton.disabled) return;
-    await runConfigTest({
-      baseurl: baseurlInput.value.trim(),
-      key: keyInput.value.trim(),
-      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
-    });
+    const config = readConfig();
+    const tested = await runConfigTest(config);
+    if (!config.key) {
+      const tokenUrl = getTokenManagementUrl(config.baseurl);
+      await $modal.alert({
+        content: `当前未填写访问令牌，无法验证题库权限。\n\n请登录题库服务并前往以下地址创建或获取令牌：\n${tokenUrl || '请先填写有效的题库地址。'}\n\n获取令牌后粘贴回“令牌”输入框，再点击“测试”。`,
+        icon: 'warning'
+      });
+    }
   };
 
   const jumpButton = createElement('button', { text: '跳转' });
