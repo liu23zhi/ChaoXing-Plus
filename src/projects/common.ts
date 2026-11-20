@@ -3265,7 +3265,7 @@ function createWorkResultsPanel() {
   const tabLabels: Record<WorkResultsPanelTab, string> = {
     overview: '结果',
     tiku: '题库配置',
-    status: '状态',
+    status: '题库状态',
     cache: '缓存',
     study: '学习设置'
   };
