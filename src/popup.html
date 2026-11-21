@@ -223,6 +223,13 @@
         </span>
       </label>
       <div class="note">关闭后超星页面不再运行自动学习与答题；切换后已打开的页面会自动刷新。</div>
+      <label class="switch-row" for="diagnostics-enabled">
+        <span class="switch-copy"><span class="switch-label">回传扩展诊断日志</span>
+          <span class="switch-state" id="diagnostics-state" aria-live="polite">正在读取设置…</span></span>
+        <span class="switch"><input id="diagnostics-enabled" type="checkbox" role="switch" aria-describedby="diagnostics-note" disabled />
+          <span class="switch-track"></span><span class="switch-thumb"></span></span>
+      </label>
+      <div class="note" id="diagnostics-note">默认关闭。开启后仅向上方显示的题库服务发送扩展版本、事件类型、时间、次数和耗时，不发送页面地址、题目、答案、密钥或控制台原文。切换题库或账号需重新开启。</div>
       <button id="open-chaoxing" class="button" type="button">打开超星官网</button>
     </section>
     <script type="module" src="./popup.js"></script>
