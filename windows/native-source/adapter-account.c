@@ -213,8 +213,63 @@ static BOOL cx_json_token_create(char **out, DWORD *length) {
     { static const char tail[] = ",\"totalQuotaLimit\":0}"; DWORD tailLength = (DWORD)sizeof(tail) - 1; CopyMemory(json + used, tail, tailLength); used += tailLength; json[used] = 0; }
     *out = json; *length = used; return TRUE;
 }
-static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
+BOOL cx_adapter_same_origin_path(const WCHAR *base, const WCHAR *url, WCHAR *path, DWORD cap) {
+    URL_COMPONENTS source, target; DWORD n, i;
+    if (!base || !url || !url[0] || !path || cap < 2 || !cx_load_http()) return FALSE;
+    path[0] = 0;
+    for (i = 0; url[i]; ++i) if (url[i] == L'#' || url[i] < 33 || url[i] == L'\\') return FALSE;
+    if (url[0] == L'/') {
+        if (url[1] == L'/' || cx_wlen(url) >= cap) return FALSE;
+        lstrcpyW(path, url); return TRUE;
+    }
+    ZeroMemory(&source, sizeof(source)); ZeroMemory(&target, sizeof(target));
+    source.dwStructSize = target.dwStructSize = sizeof(source);
+    source.dwSchemeLength = source.dwHostNameLength = source.dwUserNameLength = source.dwPasswordLength = (DWORD)-1;
+    target.dwSchemeLength = target.dwHostNameLength = target.dwUserNameLength = target.dwPasswordLength = (DWORD)-1;
+    target.dwUrlPathLength = target.dwExtraInfoLength = (DWORD)-1;
+    if (!g_http.crack(base, 0, 0, &source) || !g_http.crack(url, 0, 0, &target)
+        || source.dwUserNameLength || source.dwPasswordLength || target.dwUserNameLength || target.dwPasswordLength
+        || (source.nScheme != INTERNET_SCHEME_HTTP && source.nScheme != INTERNET_SCHEME_HTTPS)
+        || source.nScheme != target.nScheme || source.nPort != target.nPort
+        || source.dwHostNameLength != target.dwHostNameLength
+        || CompareStringOrdinal(source.lpszHostName, source.dwHostNameLength, target.lpszHostName, target.dwHostNameLength, TRUE) != CSTR_EQUAL) return FALSE;
+    n = target.dwUrlPathLength;
+    if (!n || n + target.dwExtraInfoLength >= cap) return FALSE;
+    CopyMemory(path, target.lpszUrlPath, n * sizeof(WCHAR));
+    if (target.dwExtraInfoLength) { CopyMemory(path + n, target.lpszExtraInfo, target.dwExtraInfoLength * sizeof(WCHAR)); n += target.dwExtraInfoLength; }
+    path[n] = 0; return TRUE;
+}
+
+static BOOL cx_http_remaining(HINTERNET request, DWORD started, DWORD timeout) {
+    DWORD elapsed = GetTickCount() - started, remaining;
+    if (elapsed >= timeout) return FALSE;
+    remaining = timeout - elapsed;
+    return g_http.setTimeouts(request, (int)remaining, (int)remaining, (int)remaining, (int)remaining);
+}
+
+typedef struct CX_HTTP_DEADLINE {
+    HANDLE done;
+    HINTERNET request;
+    DWORD timeout;
+} CX_HTTP_DEADLINE;
+
+/* WinHTTP's receive timeout resets on each packet, including inside one
+   synchronous ReadData. Closing the request is the documented cancellation
+   path; exchange the owner so cleanup never closes the handle twice. */
+static DWORD WINAPI cx_http_deadline_work(LPVOID context) {
+    CX_HTTP_DEADLINE *deadline = (CX_HTTP_DEADLINE *)context;
+    if (WaitForSingleObject(deadline->done, deadline->timeout) == WAIT_TIMEOUT) {
+        HINTERNET request = (HINTERNET)InterlockedExchangePointer((PVOID volatile *)&deadline->request, NULL);
+        if (request) g_http.close(request);
+    }
+    return 0;
+}
+
+static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *identity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
     WCHAR *buffers = NULL, *url, *host, *object, *extra, *headers, *authHeader; URL_COMPONENTS parts; HINTERNET session = NULL, conn = NULL, req = NULL; DWORD status = 0, statusSize = sizeof(status), used = 0, got, cap, flags = 0, disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION; BYTE *body = NULL; BOOL ok = FALSE;
+    DWORD started = GetTickCount();
+    CX_HTTP_DEADLINE deadline; HANDLE watchdog = NULL;
+    ZeroMemory(&deadline, sizeof(deadline));
     if (reply) { reply->status = 0; reply->body = NULL; reply->length = 0; }
     if (error && errorCap) error[0] = 0;
     if (!reply || !method || !cx_load_http()) { cx_error(error, errorCap, L"扩展服务地址或请求参数无效。"); return FALSE; }
@@ -231,19 +286,36 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     req = conn ? g_http.openRequest(conn, method, object, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags) : NULL;
     if (!session || !conn || !req || !g_http.setTimeouts(req, (int)timeout, (int)timeout, (int)timeout, (int)timeout)
         || !g_http.setOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled))) { cx_error(error, errorCap, L"无法连接扩展服务。"); goto done; }
+    deadline.done = CreateEventW(NULL, TRUE, FALSE, NULL); deadline.request = req;
+    deadline.timeout = GetTickCount() - started;
+    if (deadline.timeout >= timeout) goto done;
+    deadline.timeout = timeout - deadline.timeout;
+    if (deadline.done) watchdog = CreateThread(NULL, 0, cx_http_deadline_work, &deadline, 0, NULL);
+    if (!watchdog) { cx_error(error, errorCap, L"无法启动请求超时监视。"); goto done; }
     used = 0; if (auth && *auth) { if (!cx_append_w(authHeader, 4300, &used, L"Authorization: ") || !cx_append_w(authHeader, 4300, &used, auth) || !cx_append_w(authHeader, 4300, &used, L"\r\n")) { cx_error(error, errorCap, L"鉴权信息过长。"); goto done; } }
     used = 0; headers[0] = 0; if (!cx_append_w(headers, 4608, &used, L"Accept: application/json\r\n") || !cx_append_w(headers, 4608, &used, L"Content-Type: application/json; charset=utf-8\r\n") || (auth && *auth && !cx_append_w(headers, 4608, &used, authHeader))) { cx_error(error, errorCap, L"请求头过长。"); goto done; }
+    if (identity && *identity && (!cx_append_w(headers, 4608, &used, L"X-Script-Identity: ") || !cx_append_w(headers, 4608, &used, identity) || !cx_append_w(headers, 4608, &used, L"\r\n"))) { cx_error(error, errorCap, L"脚本身份请求头过长。"); goto done; }
     if (!g_http.addHeaders(req, headers, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) { cx_error(error, errorCap, L"设置请求头失败。"); goto done; }
-    if (!g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
+    if (!cx_http_remaining(req, started, timeout) || !g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0)
+        || !cx_http_remaining(req, started, timeout) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
     if (!g_http.query(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &statusSize, NULL)) { cx_error(error, errorCap, L"扩展服务返回状态未知。"); goto done; }
     cap = bodyLimit ? bodyLimit : (8UL * 1024UL * 1024UL); body = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)cap + 1); if (!body) { cx_error(error, errorCap, L"内存不足。"); goto done; }
     used = 0;
-    for (;;) { if (!g_http.read(req, body + used, cap + 1 - used, &got)) { cx_error(error, errorCap, L"读取扩展服务响应失败。"); goto done; } if (!got) break; used += got; if (used > cap) { cx_error(error, errorCap, L"扩展服务响应过大。"); goto done; } }
+    for (;;) { if (!cx_http_remaining(req, started, timeout) || !g_http.read(req, body + used, cap + 1 - used, &got)) { cx_error(error, errorCap, L"读取扩展服务响应失败或超时。"); goto done; } if (!got) break; used += got; if (used > cap) { cx_error(error, errorCap, L"扩展服务响应过大。"); goto done; } }
     body[used] = 0; reply->status = status; reply->body = (char *)body; reply->length = used; body = NULL; ok = TRUE;
     if (status < 200 || status >= 300) cx_error(error, errorCap, L"扩展服务拒绝请求。");
-done: if (body) HeapFree(GetProcessHeap(), 0, body); if (req) g_http.close(req); if (conn) g_http.close(conn); if (session) g_http.close(session); if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
+done:
+    if (deadline.done) SetEvent(deadline.done);
+    if (watchdog) { WaitForSingleObject(watchdog, INFINITE); CloseHandle(watchdog); }
+    if (body) HeapFree(GetProcessHeap(), 0, body);
+    if (deadline.done) req = (HINTERNET)InterlockedExchangePointer((PVOID volatile *)&deadline.request, NULL);
+    if (req) g_http.close(req);
+    if (deadline.done) CloseHandle(deadline.done);
+    if (conn) g_http.close(conn); if (session) g_http.close(session);
+    if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
 }
-BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
+BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, NULL, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
+BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const WCHAR *identity, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, identity, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply) { if (reply && reply->body) HeapFree(GetProcessHeap(), 0, reply->body); if (reply) { reply->body = NULL; reply->length = 0; reply->status = 0; } }
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account) { if (account) { SecureZeroMemory(account, sizeof(*account)); account->accessTokenId = 0; } }
 

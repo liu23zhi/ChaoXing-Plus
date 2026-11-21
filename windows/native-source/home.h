@@ -24,6 +24,8 @@ void cx_home_config_init(CX_HOME_CONFIG *config);
 BOOL cx_home_config_apply_options(CX_HOME_CONFIG *config, const CX_OPTIONS *options,
     WCHAR *error, DWORD errorCap);
 void cx_home_config_clear(CX_HOME_CONFIG *config);
+BOOL cx_home_config_apply_session(const CX_HOME_CONFIG *config, CX_OPTIONS *options,
+    WCHAR *error, DWORD errorCap);
 
 /* Runs the first-level native page. The existing examination client flow is
    invoked only after the user selects the second-level page. */

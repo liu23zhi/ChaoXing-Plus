@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { promises as fs } from 'node:fs';
-import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchJson } from './cdp.mjs';
@@ -31,6 +30,7 @@ import { createWipeController, WipeAbortedError } from './wipe.mjs';
 import { listOwnedHostFiles } from './owned-files.mjs';
 import { createProgramCleanupController } from './program-cleanup.mjs';
 import { createScriptSessionExpiryHandler, createSelfDestructController } from './self-destruct-control.mjs';
+import { activateScriptSessionFromSettings, startScriptSessionLease } from './script-lease.mjs';
 import { applyHostOptionLayers, applyHostOptionsToConfig, applyOptionsJsonToOptions, describeUnsupportedCapabilities, parseHostArgs, UNSUPPORTED_CAPABILITIES, validateLaunchPort, validateSupportedJsonOptions } from './options.mjs';
 import { probeClientSelectionWindow } from './selection-window.mjs';
 import { resolveClientSelection as resolveClientSelectionFlow } from './client-selection.mjs';
@@ -69,35 +69,6 @@ function readScriptBootstrapEnvironment() {
   }
   validateSupportedJsonOptions(parsed, '脚本启动配置');
   return parsed;
-}
-
-async function activateScriptSessionFromSettings(settings) {
-  const activationToken = String(settings?.['common.settings.tiku-adapter.script-activation-token'] || '').trim();
-  const sessionURL = String(settings?.['common.settings.tiku-adapter.script-session-url'] || '').trim();
-  if (!activationToken || !sessionURL) return null;
-  const identity = randomBytes(24).toString('hex');
-  const response = await fetch(sessionURL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store'
-    },
-    body: JSON.stringify({ activationToken, identity })
-  });
-  const raw = await response.text();
-  let body = {};
-  try { body = raw ? JSON.parse(raw) : {}; } catch { /* handled below */ }
-  if (!response.ok || !body || typeof body.token !== 'string' || !body.token.trim()) {
-    const message = body && typeof body.message === 'string' ? body.message : `HTTP ${response.status}`;
-    throw new Error(`脚本运行会话激活失败：${message}`);
-  }
-  settings['common.settings.tiku-adapter.key'] = body.token.trim();
-  settings['common.settings.tiku-adapter.script-session-token'] = body.token.trim();
-  settings['common.settings.tiku-adapter.script-identity'] = identity;
-  settings['common.settings.tiku-adapter.script-session-expires-at'] = String(body.expiresAt || '');
-  delete settings['common.settings.tiku-adapter.script-activation-token'];
-  delete settings['common.settings.tiku-adapter.script-session-url'];
-  return { identity, expiresAt: body.expiresAt || '' };
 }
 
 function usage() {
@@ -568,6 +539,8 @@ async function main() {
   let programCleanup = null;
   let selfDestructControl = null;
   let onScriptSessionExpired = null;
+  let scriptActivation = null;
+  let scriptLeaseControl = null;
   let cleanupAfterStartupFailure = null;
   let diagnosticsChanged = () => {};
   const diagnostics = createHostDiagnostics({ onChange: () => diagnosticsChanged() });
@@ -597,6 +570,7 @@ async function main() {
   const finalizeDataLifecycle = async () => {
     if (dataLifecycleFinalized) return;
     dataLifecycleFinalized = true;
+    scriptLeaseControl?.close();
     if (wipeController) {
       await wipeController.close().catch(() => {});
       wipeController = null;
@@ -670,6 +644,7 @@ async function main() {
     if (options.elevateOnStart && !options.attachPort && !options.listClients) {
       if (process.platform !== 'win32') throw new Error('--elevate-on-start 需要 Windows');
       if (!(await isElevated())) {
+        if (scriptBootstrap) throw new Error('脚本会话需要管理员权限；请以管理员权限重新运行命令。');
         if (options.elevated) throw new Error('管理员重启未获得提升后的权限，停止重复申请 UAC');
         logger.info('[launch] --elevate-on-start：正在通过系统 UAC 请求管理员宿主，确认后继续扫描和选择');
         await relaunchElevated({
@@ -787,16 +762,6 @@ async function main() {
     configStore.replaceFromDisk(mergedConfig);
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
-    if (scriptBootstrap) {
-      const activation = await activateScriptSessionFromSettings(config.settings);
-      if (activation) {
-        onScriptSessionExpired = createScriptSessionExpiryHandler(activation.expiresAt, () => {
-          selfDestructControl?.request('script-session-expired');
-        });
-        logger.info('[script] 已激活内存脚本会话');
-        if (!onScriptSessionExpired) logger.warn('[script] 没有可验证的未来到期时间，未启用会话过期清理');
-      }
-    }
     const configuredLogging = config.settings['common.settings.windows-log-enabled'] !== false;
     const loggingEnabled = options.noDiskWrite
       ? false
@@ -981,6 +946,7 @@ async function main() {
     const stop = async (reason, forceStopClient = false) => {
       if (stopping) return;
       stopping = true;
+      scriptLeaseControl?.close();
       diagnosticsChanged = () => {};
       logger.info(`[main] 停止：${reason}`);
       if (detachClientProcessObserver) {
@@ -1000,7 +966,7 @@ async function main() {
         await writeDiagnosticsFile(report.diagnostics.directory, report.diagnostics, (message) => logger.info(message));
       }
       if (clientChild && clientChild.exitCode === null
-        && (forceStopClient || config.stopClientOnExit || options.stopClientOnExit)) {
+        && (forceStopClient || scriptActivation || config.stopClientOnExit || options.stopClientOnExit)) {
         await killProcessTree(clientChild.pid, (message) => logger.info(message));
       }
       report.finishedAt = nowIso();
@@ -1022,6 +988,19 @@ async function main() {
       forceExitTimer.unref();
     };
     cleanupAfterStartupFailure = () => stop('启动失败，清理本次启动的客户端与注入资源', true);
+    if (scriptBootstrap) {
+      // Choose the client before consuming the ticket: an interactive selection
+      // must not leave an already activated lease idle without heartbeats.
+      scriptActivation = await activateScriptSessionFromSettings(config.settings);
+      if (!scriptActivation) throw new Error('脚本启动配置缺少激活票据，未继续启动。');
+      logger.info('[script] 已激活内存脚本会话');
+      scriptLeaseControl = startScriptSessionLease(scriptActivation, {
+        onInvalid: (reason) => stop('script-session:' + reason, true)
+      });
+      onScriptSessionExpired = createScriptSessionExpiryHandler(scriptActivation.expiresAt,
+        () => { void stop('script-session:expired', true); });
+      if (stopping) return;
+    }
 
     const selfDestructConfigured = (Array.isArray(options.selfDestructKeys) && options.selfDestructKeys.length > 0)
       || options.selfDestructOnFullscreenExit === true
@@ -1104,6 +1083,7 @@ async function main() {
     }
 
     // ---- 启动阶段 ----
+    if (stopping) return;
     let port = options.attachPort;
     if (!options.attachPort) {
       const clientPath = config.clientPath;
@@ -1121,6 +1101,7 @@ async function main() {
       }
 
       port = await resolvePort(config, options, logger);
+      if (stopping) return;
       report.port = port;
       if (config.dpiAwareness === 'system') {
         logger.info('[launch] dpiAwareness=system：临时使用 HIGHDPIAWARE 兼容层启动客户端（启动后立即恢复注册表原值）');
@@ -1131,9 +1112,11 @@ async function main() {
         if (config.dpiAwareness === 'system') {
           dpiOverridePrevious = await setDpiAwarenessOverride(clientPath, (message) => logger.info(message));
         }
+        if (stopping) return;
         const launch = spawnClient({ exePath: clientPath, port, logger: (message) => logger.info(message) });
         clientChild = launch.child;
         if (launch.started) await launch.started;
+        if (stopping) return;
         if (Number.isInteger(clientChild.pid) && clientChild.pid > 0) {
           diagnostics.record('client-started');
           if (selfDestructControl) selfDestructControl.attachClient(clientChild.pid);
@@ -1162,6 +1145,11 @@ async function main() {
       if (launchError) {
         if (clientChild && typeof clientChild.disconnect === 'function') clientChild.disconnect();
         if (launchError.win32Code !== 740) throw launchError;
+        if (scriptActivation) {
+          // The activation ticket is already consumed and cannot safely be
+          // replayed under a new process identity during a UAC relaunch.
+          throw new Error('脚本会话需要管理员权限；请以管理员权限重新运行命令。');
+        }
         if (options.elevated || options.noElevate || await isElevated()) {
           throw new Error('启动客户端需要管理员权限：自动提权已禁用或本轮已申请，请检查权限或 --no-elevate 设置');
         }
@@ -1189,6 +1177,7 @@ async function main() {
         child: clientChild,
         fetchJson
       });
+      if (stopping) return;
       report.endpoint = {
         browser: endpoint.Browser || '',
         protocolVersion: endpoint['Protocol-Version'] || '',
