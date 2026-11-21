@@ -88,6 +88,7 @@ async function createVideoMonitor(mod) {
   runInNewContext(script, {
     ...mod,
     doc,
+    setting: { enableAnswer: false, videoQuizStrategy: 'ignore' },
     attachment: { jobid: 'video-1', property: { name: '木雕' } },
     CXAnalyses: { getCurrentChapterStayKey: () => 'chapter-1' },
     buildChapterCorrelationId: () => 'chapter-1:video-1',

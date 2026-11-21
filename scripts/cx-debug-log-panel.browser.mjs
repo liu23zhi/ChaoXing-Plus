@@ -31,6 +31,7 @@ before(async () => {
     ${panel}
     window.__logTest = {
       append: appendDebugLogPanelEntry,
+      sequence: nextDebugSequence,
       duplicate(id) {
         const message = {
           namespace: debugLogPanelMessageNamespace,
@@ -110,6 +111,36 @@ async function addFrame(page) {
   }, {}, frameUrl);
   return page.frames().find(frame => frame.parentFrame());
 }
+
+test('long summaries cannot hide structured task outcomes in the copied panel log', async () => {
+  const page = await openPage();
+  try {
+    await page.addScriptTag({ content: script });
+    await page.evaluate(() => window.__logTest.append('warn', 'bounded-task-outcome', {
+      reason: 'completion-unconfirmed', executionState: 'returned', completionConfirmed: false
+    }, 'summary '.repeat(1000)));
+    await page.waitForFunction(() => document.querySelector('[data-cx-debug-log-panel-body]')?.textContent.includes('bounded-task-outcome'));
+    await clickButton(page, '复制');
+    const copied = await page.evaluate(() => window.__copied.at(-1));
+    assert.match(copied, /"reason": "completion-unconfirmed"/u);
+    assert.match(copied, /"completionConfirmed": false/u);
+  } finally { await page.close(); }
+});
+
+test('diagnostic sequences continue across frames and reinjection in one course page', async () => {
+  const page = await openPage();
+  try {
+    await page.addScriptTag({ content: script });
+    const first = await page.evaluate(() => Number(window.__logTest.sequence()));
+    const frame = await addFrame(page);
+    await frame.addScriptTag({ content: script });
+    const second = await frame.evaluate(() => Number(window.__logTest.sequence()));
+    await page.addScriptTag({ content: script });
+    const third = await page.evaluate(() => Number(window.__logTest.sequence()));
+    assert.equal(second, first + 1);
+    assert.equal(third, second + 1);
+  } finally { await page.close(); }
+});
 
 test('saved enabled setting shows the panel at startup without a log or toggle', async () => {
   const page = await openPage();

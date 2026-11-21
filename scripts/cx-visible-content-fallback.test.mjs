@@ -10,6 +10,18 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const cxPath = resolve(scriptsDir, '..', 'src', 'projects', 'cx.ts');
 const messagePath = resolve(scriptsDir, '..', 'src', 'runtime', 'message.ts');
 
+function findSourceNode(source, predicate) {
+  const ast = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
+  let found;
+  const visit = (node) => {
+    if (predicate(node)) found = node;
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.ok(found, 'find the current implementation under test');
+  return found;
+}
+
 test('cx rate hack only registers the seekBarControl override once per top window runtime', async () => {
   const source = await readFile(cxPath, 'utf8');
 
@@ -209,7 +221,14 @@ test('cx waits 10 seconds before checking sibling sub tasks to avoid stale refre
   assert.equal(source.includes('const canCheckSiblingSubTasksAfterProcessedJobs = searchedJobs.length > 0 && !searching && attachmentCount === 0 && !hasPendingJobAttachments;'), true);
   assert.equal(source.includes('shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs'), true);
   assert.equal(source.includes('await sleep(siblingSubTaskRefreshDelayMs);'), true);
-  assert.match(source, /if \(shouldWaitBeforeSiblingSubTaskCheck\) \{\s+await sleep\(siblingSubTaskRefreshDelayMs\);\s+\}\s+const chapterCompletionDiagnostics = getCurrentChapterCompletionDiagnostics\(\);/);
+  const waitGuard = findSourceNode(source, (node) => ts.isIfStatement(node)
+    && node.expression.getText() === 'shouldWaitBeforeSiblingSubTaskCheck');
+  assert.ok(ts.isBlock(waitGuard.thenStatement));
+  const businessStatements = waitGuard.thenStatement.statements.filter((statement) => !(ts.isExpressionStatement(statement)
+    && ts.isCallExpression(statement.expression) && statement.expression.expression.getText() === 'logDebug'));
+  assert.deepEqual(businessStatements.map((statement) => statement.getText()), ['await sleep(siblingSubTaskRefreshDelayMs);']);
+  const following = waitGuard.parent.statements[waitGuard.parent.statements.indexOf(waitGuard) + 1];
+  assert.equal(following.getText(), 'const chapterCompletionDiagnostics = getCurrentChapterCompletionDiagnostics();');
 });
 
 test('cx pauses only after checking all sibling sub tasks three times without finding runnable work', async () => {
@@ -225,7 +244,7 @@ test('cx increments sibling sub-task attempts even when a refresh restores the p
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('const attempts = progress.attempts + 1;'), true);
-  assert.equal(source.includes('this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: activeTabKey });'), true);
+  assert.match(source, /this\.setChapterSubTaskProgress\(\{ attempts, lastActiveTabKey: activeTabKey(?: \|\| '')? \}\);/u);
   assert.equal(source.includes('this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: nextTabKey });'), true);
 });
 
@@ -315,7 +334,34 @@ test('only unfinished-task mode can return to an earlier ordinary chapter after 
   assert.equal(source.includes("} else if (opts.mode === 'job' && !CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {"), true);
   assert.equal(source.includes('content = \'当前章节已完成，正在返回前面的未完成章节继续学习。\';'), true);
   assert.equal(source.includes('showTopCenterNotice(content, { duration: 5000, tone: \'info\' });'), true);
-  assert.equal(source.includes('firstUnfinishedChapter?.querySelector<HTMLElement>(\'.posCatalog_name\')?.click();'), true);
+  assert.equal(source.includes("scheduleChapterClick(firstUnfinishedChapter?.querySelector<HTMLElement>('.posCatalog_name'), 'return-unfinished-chapter', 1000);"), true);
+  const clickHelper = findSourceNode(source, (node) => ts.isVariableDeclaration(node) && node.name.getText() === 'scheduleChapterClick');
+  let currentPage = 'original-page';
+  let clicks = 0;
+  const timers = [];
+  const schedule = vm.runInNewContext(ts.transpileModule(`const schedule = ${clickHelper.initializer.getText()}; schedule;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText, {
+    CXAnalyses: { getCurrentChapterStayKey: () => currentPage }, getPagePosition: () => ({}),
+    studyRunId: 'test-run', buildChapterCorrelationId: () => 'correlation', logDebug() {},
+    setTimeout(callback, delayMs) { timers.push({ callback, delayMs }); }
+  });
+  const target = { isConnected: true, click() { clicks++; } };
+  schedule(target, 'return-unfinished-chapter', 1000);
+  assert.equal(clicks, 0, 'the chapter click must wait for its timer');
+  assert.equal(timers[0].delayMs, 1000);
+  timers[0].callback();
+  assert.equal(clicks, 1, 'the extracted helper must dispatch the original chapter click');
+  schedule(target, 'return-unfinished-chapter', 1000);
+  currentPage = 'manually-selected-page';
+  timers[1].callback();
+  assert.equal(clicks, 1, 'manual navigation must cancel the delayed chapter click');
+  let currentTarget = target;
+  schedule(() => currentTarget, 'return-first-chapter', 10000);
+  target.isConnected = false;
+  currentTarget = { isConnected: true, click() { clicks++; } };
+  timers[2].callback();
+  assert.equal(clicks, 2, 'a same-page directory rebuild must resolve the current target when the timer fires');
   assert.equal(source.includes('已经抵达最后一个章节！但仍然有任务点未完成，请手动切换至未完成的章节。'), true);
 });
 
@@ -390,8 +436,10 @@ test('cx throttles repetitive study and job diagnostics while preserving state-c
   assert.equal(source.includes("throttleKey: `study-scan:${scanCorrelationId}:${visibleContentState}:${result.visibleContentState}:${String(Boolean(result.job))}:${String(searching)}`"), true);
   assert.equal(source.includes("throttleKey: `chapter-candidate:${jobCorrelationId}`"), true);
   assert.equal(source.includes("throttleKey: `chapter-status:${jobCorrelationId}:${workType}:${String(chapterStatusComplete)}:${String(alreadySearched)}`"), true);
-  assert.equal(source.includes("throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}`"), true);
-  assert.equal(source.includes("throttleKey: `job-skip:${jobCorrelationId}:already-searched`"), true);
+  assert.equal(source.includes("throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}:${executionDiagnosticKey}`"), true);
+  assert.equal(source.includes("throttleKey: `job-skip:${jobCorrelationId}:already-searched:${executionDiagnosticKey}`"), true);
+  assert.equal(source.includes('taskDiagnostics.executionState,'), true);
+  assert.equal(source.includes('taskDiagnostics.mediaExecution?.outcome,'), true);
   assert.equal(source.includes("throttleKey: `job-skip:${jobCorrelationId}:no-runnable-handler`"), true);
 });
 

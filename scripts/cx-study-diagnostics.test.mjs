@@ -103,36 +103,152 @@ test('job diagnostics explicitly report that a new task has not been enqueued', 
   }
 });
 
-function searchFixture({ execute = async () => ({ outcome: 'ended', completionConfirmed: false }), rawAttachment = attachment() } = {}) {
+function searchFixture({ execute = async () => ({ outcome: 'ended', completionConfirmed: false }), rawAttachment = attachment(),
+  frameAttributes = {}, attachments = [rawAttachment], tasks = {}, initialJobs = [], throttleLogs = false } = {}) {
   const logs = [];
+  const throttleStore = new Map();
   const media = mediaElement();
   const document = { querySelector: (selector) => /video|audio/u.test(selector) ? media : null, querySelectorAll: () => [] };
+  const attributes = { jobid: 'job-1', data: '{"jobid":"job-1"}', src: '/ananas/modules/video/index.html', ...frameAttributes };
   const root = {
-    getAttribute(name) {
-      return name === 'jobid' ? 'job-1' : name === 'data' ? '{"jobid":"job-1"}'
-        : name === 'src' ? '/ananas/modules/video/index.html' : null;
-    },
+    getAttribute: (name) => attributes[name] ?? null,
     contentWindow: { document }
   };
   root.contentWindow.frameElement = root;
   const context = evaluate(declarations(new Set([...diagnosticNames,
-    'searchJob', 'mergeVisibleContentState', 'isVisibleQuestionFallbackState'])), {
-    $gm: { unsafeWindow: { document: {}, attachments: [rawAttachment] } },
-    getDeferredChapterContext: () => ({ tabKey: 'tab-1', state: { tasks: {} } }),
+    'searchJob', 'mergeVisibleContentState', 'isVisibleQuestionFallbackState', 'shouldSkipThrottledDebugLog'])), {
+    Date: class extends Date { static now() { return 1000; } },
+    getDebugLogThrottleStore: () => throttleStore,
+    $gm: { unsafeWindow: { document: {}, attachments } },
+    getDeferredChapterContext: () => ({ tabKey: 'tab-1', state: { tasks } }),
     searchIFrame: () => [root], domSearch: () => ({ videojs: {} }),
     CXAnalyses: { getCurrentChapterStayKey: () => 'chapter-1', isCurrentChapterFinished: () => false },
     getCurrentChapterCompletionDiagnostics: () => ({ currentChapterFinished: false }),
     buildChapterCorrelationId: () => 'correlation', clearTopCenterNotice: noop, scrollToLearningTask: noop,
-    logDebug(level, label, detail, text, meta) { logs.push({ level, label, detail: plain(detail), text, meta }); },
+    logDebug(level, label, detail, text, meta) {
+      if (throttleLogs && level === 'info' && meta?.throttleKey
+        && context.shouldSkipThrottledDebugLog(meta.throttleKey, meta.throttleMs)) return;
+      logs.push({ level, label, detail: plain(detail), text, meta });
+    },
     $message: { warn: noop, info: noop, success: noop },
     $console: { warn: noop, log: noop }, JobRunner: { media: execute }
   });
-  const jobs = [];
+  const jobs = [...initialJobs];
   return {
     logs, jobs,
-    search: () => context.searchJob({ enableMedia: true, restudy: false, forceLearn: false }, jobs)
+    navigateAway() {
+      Object.defineProperty(root.contentWindow, 'document', {
+        get() { throw new Error('frame document is no longer accessible'); }
+      });
+    },
+    search: (retryTarget) => context.searchJob({ enableMedia: true, restudy: false, forceLearn: false }, jobs, retryTarget)
   };
 }
+
+for (const entry of [
+  { reason: 'missing-job-id', options: { frameAttributes: { jobid: null, data: '{}' } }, state: 'visible-unmapped' },
+  { reason: 'missing-attachment', options: { attachments: [] }, state: 'visible-unmapped' },
+  { reason: 'retry-target-mismatch', options: {}, retryTarget: { tabKey: 'other-tab', jobId: 'job-1' }, state: 'finished-job' },
+  { reason: 'retry-target-mismatch', options: {}, retryTarget: { tabKey: 'tab-1', jobId: 'other-job' }, state: 'finished-job' },
+  { reason: 'deferred-task', options: { tasks: { first: { tabKey: 'tab-1', jobId: 'job-1', state: 'deferred' } } }, state: 'finished-job' },
+  { reason: 'deferred-task', options: { tasks: { first: { tabKey: 'tab-1', jobId: 'job-1', state: 'abandoned' } } }, retryTarget: { tabKey: 'tab-1', jobId: 'job-1' }, state: 'finished-job' },
+  { reason: 'expired-job', options: { initialJobs: [{ jobId: 'job-1', expired: true, attachment: attachment() }] }, state: 'finished-job' }
+]) {
+  test(`real search explains ${entry.reason} without enqueuing a task (${entry.retryTarget?.jobId ?? entry.options.tasks?.first?.state ?? 'ordinary scan'})`, () => {
+    const fixture = searchFixture(entry.options);
+    const beforeCount = fixture.jobs.length;
+    const result = fixture.search(entry.retryTarget);
+    assert.equal(result.visibleContentState, entry.state);
+    assert.equal(result.job, undefined);
+    assert.equal(fixture.jobs.length, beforeCount);
+    const skipped = fixture.logs.find((log) => log.detail?.reason === entry.reason);
+    assert.ok(skipped, 'a no-job return must retain its structured cause');
+    assert.equal(skipped.detail.visibleContentState, entry.state);
+    assert.equal(skipped.detail.targetJobId, entry.reason === 'missing-job-id' ? null : 'job-1');
+    assert.ok(skipped.meta?.correlationId, 'a skipped candidate must remain linked to its chapter');
+  });
+}
+
+for (const frameData of ['{"jobid":"private-malformed-data"', 'null', '42', '[]']) {
+  test(`invalid iframe data ${frameData} retains a runnable task identified by its jobid attribute`, () => {
+    const fixture = searchFixture({ frameAttributes: { data: frameData } });
+    let result;
+    assert.doesNotThrow(() => { result = fixture.search(); });
+    assert.equal(result.job?.jobId, 'job-1');
+    assert.equal(fixture.jobs.length, 1);
+    const failure = fixture.logs.find((log) => log.detail?.reason === 'invalid-frame-data');
+    assert.ok(failure, 'malformed input must be visible without aborting the scan');
+    assert.equal(failure.level, 'warn');
+    assert.equal(failure.detail.targetJobId, 'job-1');
+    assert.doesNotMatch(JSON.stringify(fixture.logs), /private-malformed-data/u);
+  });
+}
+
+test('a queued task has an enqueue event instead of claiming it was skipped', () => {
+  const fixture = searchFixture();
+  assert.ok(fixture.search().job);
+  const enqueued = fixture.logs.find((log) => log.detail?.reason === 'job-enqueued');
+  assert.equal(enqueued.label, '任务点入队诊断');
+  assert.equal(enqueued.detail.taskDiagnostics.executionState, 'queued');
+  assert.equal(fixture.logs.some((log) => /跳过/u.test(log.label) && log.detail?.reason === 'job-enqueued'), false);
+});
+
+for (const outcome of ['ended', 'load-failed']) {
+  test(`search throttling preserves a running task becoming returned with ${outcome} in the same millisecond`, async () => {
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const fixture = searchFixture({ throttleLogs: true, execute: () => pending });
+    const first = fixture.search();
+    const execution = first.job.func();
+    fixture.search();
+    fixture.search();
+    const mediaResult = { outcome, completionConfirmed: false, completionWaitTimedOut: outcome === 'ended' };
+    release(mediaResult);
+    await execution;
+    fixture.search();
+    fixture.search();
+    const searches = fixture.logs.filter((log) => log.label === '任务点搜索诊断');
+    assert.deepEqual(searches.map((log) => log.detail.taskDiagnostics.executionState), ['not-enqueued', 'running', 'returned']);
+    const skips = fixture.logs.filter((log) => log.detail?.reason === 'already-searched');
+    assert.deepEqual(skips.map((log) => log.detail.taskDiagnostics.executionState), ['running', 'returned']);
+    assert.equal(searches.at(-1).detail.taskDiagnostics.mediaExecution.outcome, outcome);
+    assert.equal(fixture.jobs.length, 1, 'state diagnostics must not schedule a task twice');
+  });
+}
+
+test('search throttling retains changed media failure evidence on a task whose execution state is unchanged', () => {
+  const mediaResult = { outcome: 'ended', completionConfirmed: false, completionWaitTimedOut: true };
+  const fixture = searchFixture({ throttleLogs: true, initialJobs: [{
+    jobId: 'job-1', attachment: attachment(), executionState: 'returned', mediaExecution: mediaResult
+  }] });
+  fixture.search();
+  fixture.search();
+  mediaResult.outcome = 'load-failed';
+  mediaResult.completionWaitTimedOut = false;
+  fixture.search();
+  fixture.search();
+  const searches = fixture.logs.filter((log) => log.label === '任务点搜索诊断');
+  assert.deepEqual(searches.map((log) => log.detail.taskDiagnostics.mediaExecution.outcome), ['ended', 'load-failed']);
+  const skips = fixture.logs.filter((log) => log.detail?.reason === 'already-searched');
+  assert.deepEqual(skips.map((log) => log.detail.taskDiagnostics.mediaExecution.outcome), ['ended', 'load-failed']);
+  assert.equal(fixture.jobs.length, 1);
+});
+
+test('search throttling does not hide an execution that throws immediately after a running scan', async () => {
+  let fail;
+  const pending = new Promise((resolve, reject) => { fail = reject; });
+  const fixture = searchFixture({ throttleLogs: true, execute: () => pending });
+  const first = fixture.search();
+  const execution = first.job.func();
+  fixture.search();
+  fail(new TypeError('private failure message'));
+  await assert.rejects(execution, { name: 'TypeError' });
+  fixture.search();
+  const searches = fixture.logs.filter((log) => log.label === '任务点搜索诊断');
+  assert.deepEqual(searches.map((log) => log.detail.taskDiagnostics.executionState), ['not-enqueued', 'running', 'threw']);
+  assert.equal(searches.at(-1).detail.taskDiagnostics.errorName, 'TypeError');
+  assert.doesNotMatch(JSON.stringify(fixture.logs), /private failure message/u);
+});
 
 test('the enabled log panel retains skip reason and task state inside bounded diagnostic output', async () => {
   const fixture = searchFixture();
@@ -203,6 +319,22 @@ test('real search retains thrown execution evidence without copying the raw exce
   assert.doesNotMatch(JSON.stringify(fixture.logs), /secret\.example|token=private/u);
   assert.ok(fixture.logs.some((entry) => entry.label === '任务执行结果诊断'));
 });
+
+for (const shouldThrow of [false, true]) {
+  test(`a navigated frame cannot replace a ${shouldThrow ? 'failed' : 'successful'} task result with a diagnostic error`, async () => {
+    const failure = new Error('original task error');
+    const fixture = searchFixture({ execute: async () => {
+      fixture.navigateAway();
+      if (shouldThrow) throw failure;
+      return { outcome: 'ended', completionConfirmed: true };
+    } });
+    const { job } = fixture.search();
+    if (shouldThrow) await assert.rejects(job.func(), (error) => error === failure);
+    else await assert.doesNotReject(job.func());
+    assert.equal(job.executionState, shouldThrow ? 'threw' : 'returned');
+    assert.equal(typeof job.executionEndedAt, 'number');
+  });
+}
 
 for (const failure of [
   Object.assign(new Error('private-message'), { name: 'https://secret.example?token=private-name' }),
@@ -464,9 +596,11 @@ test('a delayed failure exit wins once while an ended event is still waiting for
   assert.equal(result.chapterWaitResult, null);
   assert.equal(fixture.terminalLogs().length, 1);
   assert.equal(fixture.terminalLogs()[0].detail.mediaExecution.outcome, 'load-failed');
+  const terminalLogCount = fixture.logs.length;
   release(false);
   await ended;
-  assert.deepEqual(fixture.waits, [{ type: 'attachment', timeout: 15000 }, { type: 'chapter', timeout: 10000 }]);
+  assert.deepEqual(fixture.waits, [{ type: 'attachment', timeout: 15000 }], 'a settled media task must not start another completion wait');
+  assert.equal(fixture.logs.length, terminalLogCount, 'terminal results must not be followed by late phase logs');
   assert.equal(fixture.terminalLogs().length, 1, 'late completion wait cannot overwrite the failed terminal result');
   assert.equal(fixture.terminalLogs()[0].detail.mediaExecution.outcome, 'load-failed');
 });

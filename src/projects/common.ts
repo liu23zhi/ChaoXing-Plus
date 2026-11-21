@@ -2639,7 +2639,7 @@ function createTikuAdapterConfigSection() {
   testButton.onclick = async () => {
     if (testButton.disabled || saveButton.disabled) return;
     const config = readConfig();
-    const tested = await runConfigTest(config);
+    await runConfigTest(config);
     if (!config.key) {
       const tokenUrl = getTokenManagementUrl(config.baseurl);
       await $modal.alert({
