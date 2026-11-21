@@ -77,7 +77,7 @@ $multiResourceSource | Set-Content -LiteralPath $multiResourceFile -Encoding Uni
 & $resourceCompiler /nologo ('/i' + $sourceRoot) ('/fo' + $multiResourceObject) $multiResourceFile
 if ($LASTEXITCODE -ne 0) { throw 'Multi-file icon compilation failed.' }
 $common = @('/nologo','/c','/TC','/W4','/O1','/GS-','/Gs9999999','/Zl','/utf-8','/DUNICODE','/D_UNICODE','/D_WIN32_WINNT=0x0601','/DWINVER=0x0601',('/I' + (Join-Path $toolRoot 'include')),('/I' + (Join-Path $include 'shared')),('/I' + (Join-Path $include 'um')),('/I' + (Join-Path $include 'ucrt')),('/I' + $sourceRoot))
-$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','device-quota','diagnostics','elevation','dpi','silent','purge','wipe','browser-extension','browser-session','adapter-account','account-window','home','host')
+$sources = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','device-quota','diagnostics','elevation','dpi','silent','purge','wipe','browser-extension','browser-session','adapter-account','account-window','script-lease','home','host')
 foreach ($source in $sources) {
     & $compiler.FullName @common ('/Fo' + (Join-Path $build ($source + '.obj'))) (Join-Path $sourceRoot ($source + '.c'))
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $source" }
@@ -140,7 +140,7 @@ try {
         $testObject = Join-Path $build 'injection-tests.obj'
         & $compiler.FullName @common ('/Fo' + $testObject) (Join-Path $sourceRoot 'tests\injection-tests.c')
         if ($LASTEXITCODE -ne 0) { throw 'Native injection test compilation failed.' }
-        $homeObjects = @('browser-extension','browser-session','adapter-account','account-window','home','device-quota')
+        $homeObjects = @('browser-extension','browser-session','adapter-account','account-window','home','device-quota','script-lease')
         $testObjects = @('memory','json','process','discovery','options','assets','selection','session','audit','config-store','device-quota','diagnostics','elevation','dpi','silent','purge','wipe') + $homeObjects | ForEach-Object { Join-Path $build ($_ + '.obj') }
         $testArgs = $linkArgs | Where-Object { $_ -notlike '/OUT:*' -and $_ -notlike '/ENTRY:*' -and $_ -notlike '/MANIFESTINPUT:*' }
         & $linker @testArgs /ENTRY:InjectionTestMain ('/OUT:' + (Join-Path $bin 'injection-tests.exe')) @testObjects $testObject $resourceObject kernel32.lib user32.lib shell32.lib gdi32.lib comdlg32.lib ws2_32.lib advapi32.lib iphlpapi.lib version.lib
@@ -151,7 +151,8 @@ try {
             @{ Name = 'adapter-account-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account'); Resources = @() },
             @{ Name = 'extension-cache-tests'; Entry = 'ExtensionCacheTestMain'; Objects = @('memory','json','adapter-account'); Resources = @() },
             @{ Name = 'account-window-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','adapter-account','account-window'); Resources = @($resourceObject); Manifest = 'host.manifest' },
-            @{ Name = 'home-tests'; Entry = 'HomeTestMain'; Objects = @('memory','json','options','config-store','device-quota','adapter-account'); Resources = @($resourceObject) },
+            @{ Name = 'home-tests'; Entry = 'HomeTestMain'; Objects = @('memory','json','options','config-store','device-quota','adapter-account','script-lease'); Resources = @($resourceObject) },
+            @{ Name = 'script-lease-tests'; Entry = 'ScriptLeaseTestMain'; Objects = @('memory','json','adapter-account'); Resources = @() },
             @{ Name = 'assets-tests'; Entry = 'AssetTestMain'; Objects = @('memory','assets'); Resources = @($resourceObject) },
             @{ Name = 'options-tests'; Entry = 'WinMainCRTStartup'; Objects = @('memory','json','options','config-store'); Resources = @() },
             @{ Name = 'discovery-cache-driver'; Entry = 'DiscoveryCacheDriverMain'; Objects = @('memory','process','discovery'); Resources = @() },

@@ -19,6 +19,7 @@
 #include "elevation.h"
 #include "dpi.h"
 #include "home.h"
+#include "script-lease.h"
 #include "resource.h"
 
 /* 前置声明：定义在文件后部，早期调用点需要原型，避免隐式声明（C4013）。 */
@@ -140,6 +141,7 @@ static WCHAR h_selected_path[HOST_PATH_CAP];
 static WCHAR h_scan_cache_path[CX_OPTIONS_PATH_CAP + 64];
 static WCHAR h_script_bootstrap_b64[CX_OPTIONS_JSON_CAP * 2];
 static char h_script_bootstrap_json[CX_OPTIONS_JSON_CAP + 1];
+static BOOL h_script_bootstrap_present;
 /* Artifacts created by this run, captured so --no-retain-data can remove only
    the files this process wrote; pre-existing user data stays untouched. */
 static WCHAR h_created_log_path[HOST_PATH_CAP];
@@ -200,6 +202,8 @@ static BOOL h_load_script_bootstrap(CX_OPTIONS *options, WCHAR *error, DWORD err
     }
     h_zero(h_script_bootstrap_b64, sizeof(h_script_bootstrap_b64));
     h_zero(h_script_bootstrap_json, sizeof(h_script_bootstrap_json));
+    h_script_bootstrap_present = TRUE;
+    options->noDiskWrite = options->noDiskWriteSet = TRUE;
     return TRUE;
 }
 static const char *h_inject_mode_name(const WCHAR *mode) {
@@ -2469,6 +2473,7 @@ static void h_audit_page_message(const char *json, const JT *tokens, int params)
     }
 }
 static BOOL h_operation_active(void) {
+    if (!cx_script_lease_valid()) return FALSE;
     if (h_silent_done) return FALSE;
     if (h_client_pid && !proc_alive(h_client_pid)) return FALSE;
     if (h_duration && GetTickCount() - h_started >= h_duration) return FALSE;
@@ -3013,6 +3018,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     int attempt = 0;
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
+    if (!cx_script_lease_valid()) { h_error(error, errorCap, L"脚本会话已失效，未启动客户端。"); return FALSE; }
     /* 多文件版（外置资源）不能删除发布原件：EXE 与 assets 被删掉就再也起不来。
        因此它只拒绝"删除发布文件"这一类意图，自毁与启动清理降级为"只清理运行痕迹"。 */
     if (!cx_asset_resources_embedded() && (options->stageRequest || options->stagedBoot)) {
@@ -3289,6 +3295,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             goto done;
         }
         h_report.stopReason = "launch-failed";
+        if (!cx_script_lease_valid()) { h_error(error, errorCap, L"脚本会话已失效，未启动客户端。"); goto done; }
         if (!h_choose_port(options, &port)) { h_error(error, errorCap, L"no usable loopback CDP port"); goto done; }
         if (options->dpiAware) {
             h_report.stopReason = "dpi-override-failed";
@@ -3297,6 +3304,10 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
             h_audit_event("info", "dpi", "Applying temporary system DPI compatibility for owned client launch");
         }
         h_report.stopReason = "launch-failed";
+        if (!cx_script_lease_valid()) {
+            if (dpi) cx_dpi_restore(dpi, error, errorCap);
+            h_error(error, errorCap, L"脚本会话已失效，未启动客户端。"); goto done;
+        }
         if (h_dll_proxy_mode) {
             WCHAR proxyPort[16];
             wsprintfW(proxyPort, L"%u", (unsigned)port);
@@ -3371,7 +3382,7 @@ done:
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");
     if (bootstrap) HeapFree(GetProcessHeap(), 0, bootstrap); if (bundle) HeapFree(GetProcessHeap(), 0, bundle); if (style) HeapFree(GetProcessHeap(), 0, style); if (trampoline) HeapFree(GetProcessHeap(), 0, trampoline);
     if (client) {
-        if (!ok || options->stopClientOnExit) { proc_stop_owned(h_client_pid); WaitForSingleObject(client, 5000); }
+        if (!ok || options->stopClientOnExit || cx_script_lease_active()) { proc_stop_owned(h_client_pid); WaitForSingleObject(client, 5000); }
         CloseHandle(client);
     }
     cx_discovery_free(&result);
@@ -3409,6 +3420,11 @@ static BOOL h_home_exam(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     WCHAR **original = NULL, **arguments = NULL, *jsonWide = NULL;
     char *json = NULL; DWORD length, childCode = 1; int argc = 0, i, converted;
     if (!h_needs_elevation) { h_exit_code = 0; return ok; }
+    if (cx_script_lease_active()) {
+        h_needs_elevation = FALSE;
+        cx_script_lease_cancel();
+        h_error(error, errorCap, L"脚本会话不能转交已消费的激活票据，请以管理员权限重新运行命令。"); return FALSE;
+    }
     h_needs_elevation = FALSE;
     original = CommandLineToArgvW(GetCommandLineW(), &argc);
     arguments = (WCHAR **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(argc + 5) * sizeof(WCHAR *));
@@ -3683,6 +3699,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
             return 1;
         }
         if (!elevated) {
+            if (h_script_bootstrap_present) {
+                if (!h_base_options.quiet) h_print(L"请以管理员权限重新运行脚本命令。"); return 1;
+            }
             argv = CommandLineToArgvW(GetCommandLineW(), &argc);
             if (!argv) { if (!h_base_options.quiet) h_print(L"Cannot preserve administrator restart arguments"); return 1; }
             ok = cx_elevation_restart(h_restart_path, argc - 1, argv + 1, NULL, &childCode, h_main_error, HOST_ERROR_CAP);
@@ -3692,15 +3711,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         }
     }
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 2;
-    if (h_default_gui && !h_base_options.attachPortSet && !h_base_options.listClients) {
+    {
         CX_HOME_CONFIG *homeConfig = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*homeConfig));
         if (!homeConfig) { WSACleanup(); return 1; }
         cx_home_config_init(homeConfig);
         ok = cx_home_config_apply_options(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP)
-            && cx_home_run(&h_base_options, homeConfig, h_home_exam, h_main_error, HOST_ERROR_CAP);
+            && cx_home_config_apply_session(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP);
+        if (ok) {
+            if (h_default_gui && !h_base_options.attachPortSet && !h_base_options.listClients)
+                ok = cx_home_run(&h_base_options, homeConfig, h_home_exam, h_main_error, HOST_ERROR_CAP);
+            else ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP);
+        }
+        if (cx_script_lease_active() && h_needs_elevation) {
+            h_needs_elevation = FALSE; ok = FALSE;
+            h_error(h_main_error, HOST_ERROR_CAP, L"请以管理员权限重新运行脚本命令。");
+        }
+        cx_script_lease_stop();
         cx_home_config_clear(homeConfig); HeapFree(GetProcessHeap(), 0, homeConfig);
-    } else {
-        ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP);
     }
     WSACleanup();
     if (h_needs_elevation) {

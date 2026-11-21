@@ -55,6 +55,10 @@ BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method,
     DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply,
     WCHAR *error, DWORD errorCap);
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply);
+BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method,
+    const WCHAR *path, const WCHAR *authorization, const WCHAR *identity, const char *json,
+    DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap);
+BOOL cx_adapter_same_origin_path(const WCHAR *baseUrl, const WCHAR *url, WCHAR *path, DWORD cap);
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account);
 
 /* Public auth settings select the only captcha flow the native UI may use.
