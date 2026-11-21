@@ -2,7 +2,7 @@ const BASE='common.settings.tiku-adapter.baseurl', KEY='common.settings.tiku-ada
 const ID='common.settings.tiku-adapter.script-identity', SESSION='common.settings.tiku-adapter.script-session-token';
 export const EXAM_DENIED='考试模式仅限已激活、身份匹配且未过期的专属脚本会话。普通题库令牌不能启动。';
 export function needsExamGrant(opts) {
-  return !(opts.help || opts.version || opts.capabilities || opts.selfCheck || opts.listClients || opts.printEffectiveConfig);
+  return !(opts.help || opts.version || opts.capabilities || opts.selfCheck || (opts.listClients && !opts.attachPort) || opts.printEffectiveConfig);
 }
 export function hasActivationInput(settings) {
   try {

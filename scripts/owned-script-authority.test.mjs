@@ -4,7 +4,7 @@ import {captureExamGrant,dispatchWithExamGrant,needsExamGrant,hasActivationInput
 
 test('owner launcher separates read-only options from exam launch',()=>{
   for(const k of ['version','help','capabilities','selfCheck','listClients','printEffectiveConfig']) assert.equal(needsExamGrant({[k]:true}),false);
-  assert.equal(needsExamGrant({}),true);assert.equal(needsExamGrant({clientPath:'fixture'}),true);
+  assert.equal(needsExamGrant({listClients:true,attachPort:5678}),true); assert.equal(needsExamGrant({}),true);assert.equal(needsExamGrant({clientPath:'fixture'}),true);
   assert.equal(hasActivationInput({}),false);assert.equal(hasActivationInput({ 'common.settings.tiku-adapter.key':'tk_ordinary'}),false);
 });
 test('only an originally exchanged, same-service same-token same-identity unexpired grant reaches the no-op runner',()=>{

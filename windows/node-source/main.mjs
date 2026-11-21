@@ -78,6 +78,7 @@ async function activateScriptSessionFromSettings(settings) {
   const activationToken = String(settings?.['common.settings.tiku-adapter.script-activation-token'] || '').trim();
   const sessionURL = String(settings?.['common.settings.tiku-adapter.script-session-url'] || '').trim();
   if (!activationToken || !sessionURL) return null;
+  if (!hasActivationInput(settings)) throw Error(EXAM_DENIED); // never accept an exchange from another origin
   const identity = randomBytes(24).toString('hex');
   const response = await fetch(sessionURL, {
     method: 'POST',
@@ -796,7 +797,7 @@ async function main() {
     configStore.replaceFromDisk(mergedConfig);
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
-    if (scriptBootstrap) {
+    if (scriptBootstrap && needsExamGrant(options)) {
       const activation = await activateScriptSessionFromSettings(config.settings);
       if (activation) {
         verifiedExam = captureExamGrant(config.settings, activation);

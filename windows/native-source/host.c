@@ -3677,7 +3677,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     /* 静默场景启动后会把自身改名为 .cxdel；提权重启必须指向仍然存在的镜像。 */
     const WCHAR *h_restart_path = h_silent_parked[0] ? h_silent_parked : h_exe_path;
     /* This legacy direct path has no grant from the authenticated home session. Read-only tools remain available. */
-    if ((!h_default_gui || h_base_options.attachPortSet) && !h_base_options.listClients) {
+    if ((!h_default_gui || h_base_options.attachPortSet) && (!h_base_options.listClients || h_base_options.attachPortSet)) {
         if (!h_base_options.quiet) h_print(L"Direct exam launch requires a verified, active script session in the owned launcher.");
         return 1;
     }

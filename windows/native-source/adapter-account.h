@@ -19,6 +19,7 @@
 #define CX_ADAPTER_API_PREFIX_NEW L"/api"
 #define CX_ADAPTER_API_PREFIX_LEGACY L"/adapter-service"
 
+#include "owned-script-authority.h"
 typedef struct CX_ADAPTER_REPLY {
     DWORD status;
     char *body;
@@ -55,6 +56,8 @@ BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method,
     DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply,
     WCHAR *error, DWORD errorCap);
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply);
+/* Only our own launcher's ready event. No caller-supplied method/path/headers/content. */
+BOOL cx_adapter_report_owned_exam_ready(const CX_OWNED_RUN_GRANT *grant,const WCHAR *device,const WCHAR *launch);
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account);
 
 /* Public auth settings select the only captcha flow the native UI may use.

@@ -20,8 +20,9 @@ static __inline BOOL cx_grant_time(const WCHAR *s, FILETIME *out) {
     if(n<20||n>40||s[4]!=L'-'||s[7]!=L'-'||s[10]!=L'T'||s[13]!=L':'||s[16]!=L':')return FALSE;
     ZeroMemory(&st,sizeof(st));st.wYear=(WORD)cx_grant_number(s,0,4);st.wMonth=(WORD)cx_grant_number(s,5,2);
     st.wDay=(WORD)cx_grant_number(s,8,2);st.wHour=(WORD)cx_grant_number(s,11,2);st.wMinute=(WORD)cx_grant_number(s,14,2);st.wSecond=(WORD)cx_grant_number(s,17,2);
-    if(st.wYear<1970||st.wYear>9999||!SystemTimeToFileTime(&st,&time))return FALSE;
-    if(s[i]==L'.') {++i;while(i<n&&s[i]>=L'0'&&s[i]<=L'9'){++i;++digits;}if(!digits||digits>9)return FALSE;}
+    if(st.wYear<1970||st.wYear>9999)return FALSE;
+    if(s[i]==L'.') {++i;while(i<n&&s[i]>=L'0'&&s[i]<=L'9'){if(digits<3)st.wMilliseconds+=(WORD)((s[i]-L'0')*(digits==0?100:(digits==1?10:1)));++i;++digits;}if(!digits||digits>9)return FALSE;}
+    if(!SystemTimeToFileTime(&st,&time))return FALSE;
     if(i+1==n&&s[i]==L'Z') {*out=time;return TRUE;}
     if(i+6!=n||(s[i]!=L'+'&&s[i]!=L'-')||s[i+3]!=L':')return FALSE;
     sign=s[i]==L'+'?1:-1;h=cx_grant_number(s,i+1,2);m=cx_grant_number(s,i+4,2);if(h>23||m>59)return FALSE;
