@@ -509,7 +509,60 @@ export type Job = {
   func: ((finalAttempt?: boolean) => Promise<JobExecutionResult | void>) | undefined;
   expired?: boolean;
   terminalExpired?: boolean;
+  executionState?: 'queued' | 'running' | 'returned' | 'threw';
+  executionStartedAt?: number;
+  executionEndedAt?: number;
+  executionErrorName?: string;
+  mediaExecution?: MediaExecutionDiagnostics;
 };
+
+type MediaExecutionDiagnostics = ReturnType<typeof getStudyAttachmentDiagnostics> & ReturnType<typeof getStudyMediaDiagnostics> & {
+  outcome: 'ended' | 'media-not-found' | 'load-failed';
+  attachmentWaitResult: boolean | null;
+  chapterWaitResult: boolean | null;
+  completionConfirmed: boolean;
+  completionSource: 'attachment-passed' | 'attachment-no-longer-job' | 'chapter-icon' | 'none';
+  completionWaitTimedOut: boolean;
+  completionWaitDurationMs: number;
+  executionDurationMs: number;
+  attemptedRouteCount: number;
+};
+
+function getStudyAttachmentDiagnostics(attachment: Attachment | undefined) {
+  return {
+    attachmentJob: typeof attachment?.job === 'boolean' ? attachment.job : null,
+    attachmentPassed: typeof attachment?.isPassed === 'boolean' ? attachment.isPassed : null,
+    attachmentCompletionConfirmed: attachment?.isPassed === true || attachment?.job === false
+  };
+}
+
+function getStudyMediaDiagnostics(doc: Document) {
+  const media = doc.querySelector<HTMLMediaElement>('video, audio');
+  const finite = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return {
+    mediaPresent: Boolean(media),
+    mediaCurrentTime: finite(media?.currentTime),
+    mediaDuration: finite(media?.duration),
+    mediaEnded: typeof media?.ended === 'boolean' ? media.ended : null,
+    mediaPaused: typeof media?.paused === 'boolean' ? media.paused : null,
+    mediaReadyState: finite(media?.readyState),
+    mediaNetworkState: finite(media?.networkState),
+    mediaErrorCode: finite(media?.error?.code)
+  };
+}
+
+function getStudyJobDiagnostics(attachment: Attachment | undefined, job?: Job) {
+  return {
+    ...getStudyAttachmentDiagnostics(attachment),
+    executionState: job?.executionState ?? (job ? 'queued' : 'not-enqueued'),
+    executionStartedAt: job?.executionStartedAt ?? null,
+    executionEndedAt: job?.executionEndedAt ?? null,
+    executionDurationMs: job?.executionStartedAt === undefined ? null
+      : Math.max(0, (job.executionEndedAt ?? Date.now()) - job.executionStartedAt),
+    mediaExecution: job?.mediaExecution ?? null,
+    errorName: job?.executionErrorName ?? null
+  };
+}
 
 type ChapterDisposition = 'completed' | 'saved' | 'deferred' | 'manual' | 'disabled' | 'not-ready' | 'missing' | 'retryable-failure' | 'terminal-expired';
 
@@ -3741,6 +3794,7 @@ export async function study(opts: StudyOptions) {
     const result = searchJob(opts, searchedJobs);
     visibleContentState = result.visibleContentState;
     const scanCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey());
+    const pageAttachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
     logDebug('info', '课程学习扫描诊断', {
       scanRound,
       visibleContentState,
@@ -3748,7 +3802,13 @@ export async function study(opts: StudyOptions) {
       attachmentCount,
       searching,
       hasJob: Boolean(result.job),
-      searchedJobCount: searchedJobs.length
+      searchedJobCount: searchedJobs.length,
+      attachmentScanBudgetRemaining: attachmentCount,
+      pageAttachmentCount: pageAttachments.length,
+      pendingAttachmentCount: pageAttachments.filter((item) => item.job === true && item.isPassed !== true).length,
+      confirmedAttachmentCount: pageAttachments.filter((item) => item.isPassed === true || item.job === false).length,
+      returnedJobCount: searchedJobs.filter((item) => item.executionState === 'returned').length,
+      failedExecutionCount: searchedJobs.filter((item) => item.executionState === 'threw' || item.mediaExecution?.outcome === 'load-failed' || item.mediaExecution?.outcome === 'media-not-found').length
     }, `课程学习扫描诊断详情：visibleContentState=${visibleContentState} resultVisibleContentState=${result.visibleContentState} scanRound=${scanRound} attachmentCount=${attachmentCount} searching=${String(searching)} hasJob=${String(Boolean(result.job))} searchedJobCount=${searchedJobs.length}`, {
       correlationId: scanCorrelationId,
       throttleKey: `study-scan:${scanCorrelationId}:${visibleContentState}:${result.visibleContentState}:${String(Boolean(result.job))}:${String(searching)}`
@@ -4382,8 +4442,20 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
             : workType === 'finished'
               ? 'finished-job'
               : 'visible-nonjob';
+      const visibleContentStateReason = chapterStatusComplete ? 'chapter-test-complete'
+        : alreadyProcessedMediaJob ? 'already-searched-media'
+          : workType === 'job' ? 'attachment-job'
+            : workType === 'finished' ? 'attachment-passed' : 'non-job';
+      const taskDiagnostics = {
+        ...getStudyJobDiagnostics(attachment, alreadySearchedJob),
+        ...getStudyMediaDiagnostics(win.document),
+        visibleContentStateReason,
+        chapterStatusApplicable: Boolean(chapterTest),
+        currentChapterFinished: CXAnalyses.isCurrentChapterFinished()
+      };
 
       logDebug('info', '任务点搜索诊断', {
+        taskDiagnostics,
         frameSrc,
         targetJobId,
         jobName,
@@ -4406,11 +4478,14 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
 
       if (alreadySearched) {
         logDebug('info', '任务点已处理跳过诊断', {
+          taskDiagnostics,
           frameSrc,
           targetJobId,
           jobName,
           visibleContentState,
           hasFunc: false,
+          hasPreviousHandler: Boolean(alreadySearchedJob.func),
+          handlerScheduled: false,
           reason: 'already-searched'
         }, undefined, {
           correlationId: jobCorrelationId,
@@ -4441,7 +4516,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
             const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
-            await JobRunner.media(opts, win.document, attachment);
+            job.mediaExecution = await JobRunner.media(opts, win.document, attachment);
           };
         }
       } else if (chapterTest) {
@@ -4599,6 +4674,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
 
       if (!func) {
         logDebug('info', '任务点已处理跳过诊断', {
+          taskDiagnostics,
           frameSrc,
           targetJobId,
           jobName,
@@ -4620,10 +4696,45 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
         jobId: String(targetJobId),
         chapterTest: Boolean(chapterTest),
         attachment,
-        func
+        executionState: 'queued',
+        func: async (finalAttempt = false) => {
+          job.executionState = 'running';
+          job.executionStartedAt = Date.now();
+          job.executionEndedAt = undefined;
+          job.executionErrorName = undefined;
+          job.mediaExecution = undefined;
+          try {
+            const result = await func(finalAttempt);
+            job.executionState = 'returned';
+            return result;
+          } catch (error) {
+            job.executionState = 'threw';
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : undefined;
+            job.executionErrorName = typeof name === 'string'
+              && ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'DOMException', 'AbortError'].includes(name)
+              ? name : 'UnknownError';
+            throw error;
+          } finally {
+            job.executionEndedAt = Date.now();
+            logDebug(job.executionState === 'threw' ? 'error' : 'info', '任务执行结果诊断', {
+              targetJobId,
+              jobName,
+              finalAttempt,
+              taskDiagnostics: {
+                ...getStudyJobDiagnostics(attachment, job),
+                ...getStudyMediaDiagnostics(win.document)
+              },
+              currentChapterFinished: CXAnalyses.isCurrentChapterFinished()
+            }, undefined, { correlationId: jobCorrelationId });
+          }
+        }
       };
 
       logDebug('info', '任务点已处理跳过诊断', {
+        taskDiagnostics: {
+          ...taskDiagnostics,
+          ...getStudyJobDiagnostics(attachment, job)
+        },
         frameSrc,
         targetJobId,
         jobName,
@@ -4662,14 +4773,56 @@ export function fixedVideoProgress() {
 }
 
 const JobRunner = {
-  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment) {
+  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment): Promise<MediaExecutionDiagnostics> {
     const { playbackRate = 1, volume = 0, muteMedia = true } = setting;
+    const startedAt = Date.now();
+    const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+      targetJobId: attachment?.jobid || attachment?.property?._jobid,
+      jobName: attachment?.property?.name || attachment?.property?.title
+    });
     const media = await waitForMedia({ root: doc });
     const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
+    const reportResult = (
+      outcome: MediaExecutionDiagnostics['outcome'],
+      attachmentWaitResult: boolean | null = null,
+      chapterWaitResult: boolean | null = null,
+      attemptedRouteCount = 0,
+      completionWaitDurationMs = 0
+    ): MediaExecutionDiagnostics => {
+      const attachmentDiagnostics = getStudyAttachmentDiagnostics(attachment);
+      const completionSource = attachmentDiagnostics.attachmentPassed === true ? 'attachment-passed'
+        : attachmentDiagnostics.attachmentJob === false ? 'attachment-no-longer-job'
+          : chapterWaitResult === true ? 'chapter-icon' : 'none';
+      const result: MediaExecutionDiagnostics = {
+        outcome,
+        ...attachmentDiagnostics,
+        ...getStudyMediaDiagnostics(doc),
+        attachmentWaitResult,
+        chapterWaitResult,
+        completionConfirmed: completionSource !== 'none',
+        completionSource,
+        completionWaitTimedOut: attachmentWaitResult === false && chapterWaitResult === false,
+        completionWaitDurationMs,
+        executionDurationMs: Math.max(0, Date.now() - startedAt),
+        attemptedRouteCount
+      };
+      const level = outcome !== 'ended' ? 'error' : result.completionConfirmed ? 'info' : 'warn';
+      logDebug(level, '媒体任务执行结果诊断', {
+        targetJobId: attachment?.jobid || attachment?.property?._jobid || '',
+        jobName: attachment?.property?.name || attachment?.property?.title || '',
+        outcome,
+        completionConfirmed: result.completionConfirmed,
+        completionSource,
+        mediaExecution: result
+      }, `媒体执行结果：outcome=${outcome} completionConfirmed=${String(result.completionConfirmed)} source=${completionSource} waitTimedOut=${String(result.completionWaitTimedOut)}`, {
+        correlationId: mediaCorrelationId
+      });
+      return result;
+    };
 
     if (!videojs || !media) {
       $console.error('视频检测不到，请尝试刷新或者手动切换下一章。');
-      return;
+      return reportResult('media-not-found');
     }
 
     state.study.videojs = videojs as HTMLElement;
@@ -4696,15 +4849,23 @@ const JobRunner = {
       void loop();
     }
 
-    return new Promise<void>((resolve) => {
+    return new Promise<MediaExecutionDiagnostics>((resolve) => {
       const attemptedVideoRoutes = new Set<unknown>();
+      let settled = false;
+      let ending = false;
+      const finishMedia = (
+        outcome: MediaExecutionDiagnostics['outcome'],
+        attachmentWaitResult: boolean | null = null,
+        chapterWaitResult: boolean | null = null,
+        completionWaitDurationMs = 0
+      ) => {
+        if (settled) return;
+        settled = true;
+        resolve(reportResult(outcome, attachmentWaitResult, chapterWaitResult, attemptedVideoRoutes.size, completionWaitDurationMs));
+      };
       let lastVideoRouteSwitchAt: number | undefined;
       let lastVideoRouteWaitLoggedAt: number | undefined;
       let lastVideoRouteStateKey: string | undefined;
-      const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
-        targetJobId: attachment?.jobid || attachment?.property?._jobid,
-        jobName: attachment?.property?.name || attachment?.property?.title
-      });
       const reloadInterval = setInterval(() => {
         const videoDiagnostics = inspectVideoLoadState(doc);
         const videoRouteStateKey = JSON.stringify({
@@ -4764,7 +4925,7 @@ const JobRunner = {
           $console.error('检测到视频加载失败，即将跳过视频。');
           $message.error('检测到视频加载失败，即将跳过视频。');
           clearInterval(reloadInterval);
-          setTimeout(resolve, 3000);
+          setTimeout(() => finishMedia('load-failed'), 3000);
         }
 
         if (!shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
@@ -4788,14 +4949,18 @@ const JobRunner = {
 
       media.addEventListener('pause', onPause);
       media.addEventListener('ended', async () => {
+        if (settled || ending) return;
+        ending = true;
         media.removeEventListener('pause', onPause);
         $console.log('视频播放完毕');
         clearInterval(reloadInterval);
+        const completionWaitStartedAt = Date.now();
         const finished = await waitForAttachmentComplete(attachment, 15000);
+        let chapterFinished: boolean | null = null;
         if (!finished) {
-          await waitForCurrentChapterFinished(10000);
+          chapterFinished = await waitForCurrentChapterFinished(10000);
         }
-        resolve();
+        finishMedia('ended', finished, chapterFinished, Math.max(0, Date.now() - completionWaitStartedAt));
       });
 
       $console.log('视频开始播放');

@@ -163,7 +163,7 @@ test('cx waits for video attachment or chapter completion before leaving a media
   const source = await readFile(cxPath, 'utf8');
 
   assert.equal(source.includes('await JobRunner.media(opts, win.document, attachment);'), true);
-  assert.equal(source.includes("async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment) {"), true);
+  assert.match(source, /async media\(setting: Pick<StudyOptions,[^\n]+doc: Document, attachment\?: Attachment\): Promise<MediaExecutionDiagnostics> \{/u);
   assert.equal(source.includes('const finished = await waitForAttachmentComplete(attachment, 15000);'), true);
   assert.equal(source.includes('await waitForCurrentChapterFinished(10000);'), true);
 });
