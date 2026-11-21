@@ -19,9 +19,8 @@ test('manifest declares storage permission for shared tiku config sync', async (
 test('manifest packages the tab pause service worker without broadening permissions', async () => {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.deepEqual(manifest.background, { service_worker: 'extension-worker.js', type: 'module' });
-  for (const file of ['extension-worker.js', 'extension-diagnostics.js']) {
-    assert.equal(await readFile(resolve('dist', file), 'utf8'), await readFile(resolve('src', file), 'utf8'));
-  }
+  assert.equal(await readFile(resolve('dist/extension-worker.js'),'utf8'), await readFile(resolve('src/extension-worker.js'),'utf8'));
+  assert.equal(await readFile(resolve('dist/extension-diagnostics.js'),'utf8'), await readFile(resolve('windows/node-source/extension-log-core.mjs'),'utf8'));
   assert.match(await readFile(resolve('dist/extension-worker.js'), 'utf8'), /import '\.\/extension-tab-pause\.js'/);
   assert.deepEqual(manifest.permissions, ['storage']);
   assert.equal(await readFile(resolve('dist/extension-tab-pause.js'), 'utf8'),

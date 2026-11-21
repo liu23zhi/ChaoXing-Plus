@@ -58,10 +58,11 @@ function copyStaticFiles() {
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
-  for (const file of ['extension-tab-pause.js', 'extension-worker.js', 'extension-diagnostics.js']) {
+  for (const file of ['extension-tab-pause.js', 'extension-worker.js']) {
     copyFileSync('src/' + file, 'dist/' + file);
   }
-  writeFileSync('dist/extension-build-defaults.js', 'export const defaultTikuBaseUrl = ' + JSON.stringify(defaultTikuBaseUrl) + ';\n');
+
+  copyFileSync('windows/node-source/extension-log-core.mjs', 'dist/extension-diagnostics.js');
 
   if (existsSync('icon/icon_512X512.png')) {
     copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');

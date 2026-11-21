@@ -232,7 +232,7 @@ static BOOL home_response_string(const CX_ADAPTER_REPLY *reply, const char *key,
 static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activationToken,
                                  const WCHAR *sessionUrl, WCHAR *error, DWORD errorCap) {
     WCHAR path[CX_OPTIONS_PATH_CAP], identity[CX_HOME_SCRIPT_IDENTITY_CAP];
-    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512];
+    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512], expiresAt[64];
     char *json = NULL;
     DWORD jsonLength = 0, used = 0, i;
     BOOL ok = FALSE;
@@ -275,6 +275,9 @@ static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activation
     }
     home_copy(config->apiKey, CX_HOME_API_KEY_CAP, sessionToken);
     home_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+    expiresAt[0]=0;
+    (void)home_response_string(&reply, "expiresAt", expiresAt, 64);
+    (void)cx_grant_capture(&config->verifiedExam, config->adapterBaseUrl, sessionToken, identity, expiresAt);
     ok = TRUE;
 done:
     cx_adapter_reply_free(&reply);
@@ -1469,7 +1472,8 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     return accepted;
 }
 
-static void home_exam(HOME_STATE *state) {
+static void home_authorized_exam(void *context) {
+    HOME_STATE *state=(HOME_STATE *)context;
     CX_OPTIONS *options; char *settings; DWORD length = 0;
     if (!state->examRun) return;
     options = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*options));
@@ -1491,6 +1495,14 @@ static void home_exam(HOME_STATE *state) {
 done:
     if (settings) { SecureZeroMemory(settings, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, settings); }
     if (options) { SecureZeroMemory(options, sizeof(*options)); HeapFree(GetProcessHeap(), 0, options); }
+}
+
+static void home_exam(HOME_STATE *state) {
+    if (!state || !state->config || !state->examRun) return;
+    if (!cx_grant_dispatch(&state->config->verifiedExam, state->config->adapterBaseUrl, state->config->apiKey, state->config->scriptIdentity,
+                           home_authorized_exam, state)) {
+        home_status(state, L"考试模式仅限已激活且未过期的专属脚本会话。普通题库令牌不能启动。");
+    }
 }
 
 static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
