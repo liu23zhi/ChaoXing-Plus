@@ -9,6 +9,7 @@
 #include "device-quota.h"
 #include "json.h"
 #include "resource.h"
+#include "script-lease.h"
 
 #define HOME_CLASS L"CXPlusNativeHome"
 #define SETTINGS_CLASS L"CXPlusNativeHomeSettings"
@@ -174,45 +175,7 @@ static void home_append(WCHAR *out, DWORD cap, const WCHAR *value) {
 static BOOL home_json_append_char(char *out, DWORD cap, DWORD *at, char c);
 static BOOL home_json_append_utf8(char *out, DWORD cap, DWORD *at, const WCHAR *value);
 
-static void home_hex32(WCHAR *out, DWORD cap, DWORD *at, DWORD value) {
-    static const WCHAR digits[] = L"0123456789abcdef";
-    int i;
-    if (!out || !at || *at + 8 >= cap) return;
-    for (i = 7; i >= 0; --i) out[(*at)++] = digits[(value >> (i * 4)) & 0x0f];
-    out[*at] = 0;
-}
-
-static void home_build_script_identity(WCHAR *out, DWORD cap) {
-    DWORD at = 0;
-    if (!out || cap < 2) return;
-    out[0] = 0;
-    home_append(out, cap, L"native-"); at = (DWORD)lstrlenW(out);
-    home_hex32(out, cap, &at, GetTickCount());
-    home_append(out, cap, L"-"); at = (DWORD)lstrlenW(out);
-    home_hex32(out, cap, &at, GetCurrentProcessId());
-    home_append(out, cap, L"-"); at = (DWORD)lstrlenW(out);
-    home_hex32(out, cap, &at, GetCurrentThreadId());
-}
-
-static BOOL home_extract_url_path(const WCHAR *url, WCHAR *out, DWORD cap) {
-    DWORD i = 0, slash = 0, scheme = 0;
-    if (!url || !out || cap < 2) return FALSE;
-    out[0] = 0;
-    while (url[i] && !(url[i] == L':' && url[i + 1] == L'/' && url[i + 2] == L'/')) ++i;
-    if (!url[i]) return FALSE;
-    scheme = i + 3;
-    i = scheme;
-    while (url[i] && url[i] != L'/' && url[i] != L'?' && url[i] != L'#') ++i;
-    if (!url[i]) { home_copy(out, cap, L"/"); return TRUE; }
-    slash = i;
-    if (url[slash] == L'/') {
-        if (lstrlenW(url + slash) >= (int)cap) return FALSE;
-        lstrcpynW(out, url + slash, (int)cap);
-    } else {
-        home_copy(out, cap, L"/");
-    }
-    return TRUE;
-}
+static BOOL home_build_script_identity(WCHAR *out, DWORD cap) { return cx_script_identity(out, cap); }
 
 static BOOL home_response_string(const CX_ADAPTER_REPLY *reply, const char *key,
                                  WCHAR *out, DWORD cap) {
@@ -233,16 +196,19 @@ static BOOL home_response_string(const CX_ADAPTER_REPLY *reply, const char *key,
 static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activationToken,
                                  const WCHAR *sessionUrl, WCHAR *error, DWORD errorCap) {
     WCHAR path[CX_OPTIONS_PATH_CAP], identity[CX_HOME_SCRIPT_IDENTITY_CAP];
-    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512], expiresAt[64];
+    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512];
+    WCHAR expiresAt[64], heartbeatUrl[CX_OPTIONS_PATH_CAP];
     char *json = NULL;
     DWORD jsonLength = 0, used = 0, i;
     BOOL ok = FALSE;
     CX_ADAPTER_REPLY reply;
     if (!config || !activationToken || !activationToken[0] || !sessionUrl || !sessionUrl[0]) return TRUE;
-    if (!home_extract_url_path(sessionUrl, path, CX_OPTIONS_PATH_CAP)) {
+    if (!cx_adapter_same_origin_path(config->adapterBaseUrl, sessionUrl, path, CX_OPTIONS_PATH_CAP)) {
         home_copy(error, errorCap, L"脚本会话地址无效，无法激活。"); return FALSE;
     }
-    home_build_script_identity(identity, CX_HOME_SCRIPT_IDENTITY_CAP);
+    if (!home_build_script_identity(identity, CX_HOME_SCRIPT_IDENTITY_CAP)) {
+        home_copy(error, errorCap, L"无法生成安全的脚本身份码，未继续启动。"); return FALSE;
+    }
     json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 65536);
     if (!json) { home_copy(error, errorCap, L"脚本会话激活内存不足。"); return FALSE; }
     json[used++] = '{';
@@ -275,6 +241,11 @@ static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activation
         home_copy(error, errorCap, L"脚本会话响应无效，未继续启动。"); ok = FALSE; goto done;
     }
     home_copy(config->apiKey, CX_HOME_API_KEY_CAP, sessionToken);
+    if (!home_response_string(&reply, "expiresAt", expiresAt, 64)
+        || !home_response_string(&reply, "heartbeatUrl", heartbeatUrl, CX_OPTIONS_PATH_CAP)
+        || !cx_script_lease_start(config->adapterBaseUrl, heartbeatUrl, sessionToken, identity, expiresAt, error, errorCap)) {
+        ok = FALSE; goto done;
+    }
     home_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
     expiresAt[0]=0;
     (void)home_response_string(&reply, "expiresAt", expiresAt, 64);
@@ -466,6 +437,21 @@ static BOOL home_adapter_patch(const CX_HOME_CONFIG *config, char *patch, DWORD 
     if (config->scriptIdentity[0]
         && !home_json_append_pair(patch, cap, &n, "common.settings.tiku-adapter.script-identity", config->scriptIdentity, &first)) return FALSE;
     return home_json_append_char(patch, cap, &n, '}');
+}
+
+BOOL cx_home_config_apply_session(const CX_HOME_CONFIG *config, CX_OPTIONS *options,
+    WCHAR *error, DWORD errorCap) {
+    char *patch; DWORD n, length; BOOL ok = FALSE;
+    if (!config->scriptIdentity[0]) return TRUE;
+    patch = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
+    if (!patch) return FALSE;
+    CopyMemory(patch, "{\"settings\":", 12);
+    if (home_adapter_patch(config, patch + 12, CX_OPTIONS_JSON_CAP - 64)) {
+        n = (DWORD)lstrlenA(patch);
+        CopyMemory(patch + n, ",\"noDiskWrite\":true}", 21); length = n + 20;
+        ok = cx_options_apply_json_utf8(options, patch, (int)length, error, errorCap);
+    }
+    SecureZeroMemory(patch, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, patch); return ok;
 }
 
 /*
@@ -911,6 +897,9 @@ static void home_refresh_list(HOME_STATE *state) {
 static void home_poll_sessions(HOME_STATE *state) {
     DWORD i; BOOL running, changed = FALSE;
     WCHAR error[256];
+    if (!cx_script_lease_valid() && !state->closing) {
+        SendMessageW(state->window, WM_CLOSE, 0, 0); return;
+    }
     if (state->worker) return;
     for (i = 0; i < HOME_MAX_SESSIONS; ++i) {
         if (!state->sessions[i].session) continue;
@@ -1006,6 +995,7 @@ static DWORD WINAPI home_work(LPVOID context) {
     ZeroMemory(&options, sizeof(options)); options.browserPath = browserPath;
     options.crxData = data; options.crxSize = size; options.initialUrl = L"https://www.chaoxing.com/";
     options.settingsJsonUTF8 = settings;
+    if (!cx_script_lease_valid()) goto done;
     state->operationOK = cx_browser_start(&options, &state->pendingSession, state->error, 512);
 done:
     /* 注入上下文只在本次调用内有效：任何后续（设置对话框预览、考试模式）
@@ -1030,6 +1020,7 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     BOOL isNewSession;
     if (state->worker) return;
     isNewSession = operation == HOME_EDGE || operation == HOME_CHROME;
+    if (isNewSession && !cx_script_lease_valid()) { SendMessageW(state->window, WM_CLOSE, 0, 0); return; }
     state->pendingSlot = HOME_MAX_SESSIONS;
     if (operation == HOME_CLOSE_SESSION) {
         selected = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
@@ -1498,6 +1489,7 @@ static void home_authorized_exam(void *context) {
     HOME_STATE *state=(HOME_STATE *)context;
     CX_OPTIONS *options; char *settings; DWORD length = 0;
     if (!state->examRun) return;
+    if (!cx_script_lease_valid()) { SendMessageW(state->window, WM_CLOSE, 0, 0); return; }
     options = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*options));
     settings = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
     if (!options || !settings) goto done;
@@ -1594,6 +1586,7 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         }
     }
     if (message == WM_CLOSE) {
+        cx_script_lease_cancel();
         state->closing = TRUE;
         if (state->worker) home_status(state, L"正在等待当前操作结束，随后关闭并清理所有临时会话...");
         else home_begin(state, HOME_EXIT, NULL, NULL);
@@ -1689,6 +1682,7 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     if (IsWindow(window)) DestroyWindow(window);
     if (home_default_font) DeleteObject(home_default_font); home_default_font = NULL;
     SecureZeroMemory(state, sizeof(*state)); HeapFree(GetProcessHeap(), 0, state);
+    cx_script_lease_stop();
     cx_home_config_clear(config);
     if (got < 0) { if (error && errorCap) lstrcpynW(error, L"主页消息循环失败", (int)errorCap); return FALSE; }
     return TRUE;

@@ -4,7 +4,7 @@ import { createSelfDestructMonitor, SELF_DESTRUCT_STATES } from './self-destruct
 // 确认、延迟与最终清理回调。确认只在交互控制台询问；无人值守时必须显式
 // 使用 --no-self-destruct-confirm，否则不执行破坏性操作。
 
-function parseActivationDeadline(expiresAt) {
+export function parseActivationDeadline(expiresAt) {
   const value = typeof expiresAt === 'string' || typeof expiresAt === 'number' ? String(expiresAt).trim() : '';
   if (/^\d{10}$/u.test(value)) return Number(value) * 1000;
   if (/^\d{13}$/u.test(value)) return Number(value);

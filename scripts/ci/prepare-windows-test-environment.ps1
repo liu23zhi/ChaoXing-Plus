@@ -49,6 +49,7 @@ $executables = [ordered]@{
   CX_NATIVE_PROCESS_FIXTURE_EXE = 'process-fixture.exe'
   CX_NATIVE_DIAGNOSTICS_EXE = 'diagnostics-tests.exe'
   CX_NATIVE_HOME_EXE = 'home-tests.exe'
+  CX_NATIVE_SCRIPT_LEASE_EXE = 'script-lease-tests.exe'
   CX_NATIVE_EXTENSION_CACHE_EXE = 'extension-cache-tests.exe'
   CX_NATIVE_ADAPTER_EXE = 'adapter-account-tests.exe'
   CX_NATIVE_ACCOUNT_WINDOW_EXE = 'account-window-tests.exe'

@@ -42,6 +42,8 @@ function runHome(dpi, visible = false) {
     'closing intention survives a failed download and finishes shutdown',
     'shutdown closes and destroys every owned browser session',
     'exam page receives a private options copy with the current shared settings',
+    'ordinary account credentials cannot dispatch the exam workflow',
+    'synthetic successful exchange captures a private exam grant',
     'home form settings update the typed host options used by the exam runtime',
     'home settings serialize host-managed keys exactly once',
     // 设备槽位（141 §5/§8 / R5–R8）
@@ -70,7 +72,11 @@ function runHome(dpi, visible = false) {
     '--no-disk-write keeps the device id in memory and never creates the config file',
     'an existing config without a device id gets one injected',
     'injecting the device id preserves every other key in the config file',
-    'the complete home page exits after asynchronous cleanup'
+    'the complete home page exits after asynchronous cleanup',
+    'script activation uses a fresh 32 byte cryptographic hexadecimal identity',
+    'activated sessions replace consumed tickets in memory and force no disk writes',
+    'a failed script lease closes every owned browser through normal cleanup',
+    'shutdown joins and clears the script heartbeat worker'
   ]) assert.ok(result.stdout.includes(`PASS ${expected}`), result.stdout);
 }
 

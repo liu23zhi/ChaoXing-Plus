@@ -97,6 +97,10 @@ static const WCHAR *test_browser_id(const CX_BROWSER_SESSION *session) {
     (void)session; return L"lcmeenlnjihhjcjoakekikoaldigonac";
 }
 static BOOL test_account_window(HWND parent, CX_HOME_CONFIG *config) { (void)parent; (void)config; return FALSE; }
+static BOOL test_owned_exam_ready(const CX_OWNED_RUN_GRANT *grant, const WCHAR *device, const WCHAR *launch) {
+    /* This first-party UI fixture must never send diagnostics to a live service. */
+    (void)grant; (void)device; (void)launch; return FALSE;
+}
 
 /* 设备槽位的替身先声明、后定义（定义放在 #include "../home.c" 之后，
    这样可以复用 device-quota.h 的类型而不依赖 home.c 内部的静态辅助函数）。 */
@@ -123,6 +127,7 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 #define cx_browser_pid test_browser_pid
 #define cx_browser_extension_id test_browser_id
 #define cx_account_window test_account_window
+#define cx_adapter_report_owned_exam_ready test_owned_exam_ready
 #define cx_browser_extension_verify test_extension_verify
 /* 设备槽位：网络一律不真的发出去，只记录「该发的都发了」。 */
 #define cx_device_quota_fetch test_device_quota_fetch
@@ -887,13 +892,60 @@ static void CALLBACK home_tick(HWND window, UINT message, UINT_PTR timer, DWORD 
     check(rect.right - rect.left == MulDiv(150, home_dpi, 96), "home controls scale from the active DPI");
     check(showWindows ? IsWindowVisible(home) : !IsWindowVisible(home), "home visibility matches the requested UI smoke mode");
     SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM, BN_CLICKED), 0);
+    check(!examCalled, "ordinary account credentials cannot dispatch the exam workflow");
+    /* The positive UI flow uses an in-memory synthetic exchange receipt; no file
+       or command-line setting may manufacture the production grant. */
+    home_copy(shared.apiKey, CX_HOME_API_KEY_CAP, L"sr_fixture_verified_session_0123456789");
+    cx_script_identity(shared.scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP);
+    check(cx_grant_capture(&shared.verifiedExam, shared.adapterBaseUrl, shared.apiKey,
+        shared.scriptIdentity, L"2099-01-01T00:00:00Z"), "synthetic successful exchange captures a private exam grant");
+    SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM, BN_CLICKED), 0);
     check(examCalled && state->options == &options && options.sharedSettingsJson[0],
         "returning from the exam page preserves the home options");
     SendMessageW(home, WM_CLOSE, 0, 0);
 }
 
+static void script_session_tests(void) {
+    CX_HOME_CONFIG *config = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*config));
+    CX_OPTIONS *local = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*local));
+    HOME_STATE *state; WCHAR identity[65], error[256]; DWORD start;
+    if (!config || !local) ExitProcess(3);
+    cx_home_config_init(config); cx_options_init(local);
+    cx_script_identity(identity, 65); home_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+    home_copy(config->apiKey, CX_HOME_API_KEY_CAP, L"sr_fixture");
+    check(cx_home_config_apply_session(config, local, error, 256) && local->noDiskWrite
+        && contains(local->sharedSettingsJson, "\"common.settings.tiku-adapter.key\":\"sr_fixture\"")
+        && contains(local->sharedSettingsJson, "\"common.settings.tiku-adapter.script-identity\":")
+        && contains(local->sharedSettingsJson, "\"common.settings.tiku-adapter.script-activation-token\":\"\""),
+        "activated sessions replace consumed tickets in memory and force no disk writes");
+    cx_home_config_clear(config); SecureZeroMemory(local, sizeof(*local));
+    HeapFree(GetProcessHeap(), 0, config); HeapFree(GetProcessHeap(), 0, local);
+    check(cx_script_lease_start(L"http://127.0.0.1:1", L"/heartbeat", L"sr_fixture", identity,
+        L"2099-01-01T00:00:00Z", error, 256), "script lease monitor starts without exposing credentials");
+    closedSessions = destroyedSessions = 0;
+    state = make_home();
+    state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)25;
+    cx_script_lease_cancel(); home_poll_sessions(state);
+    start = GetTickCount();
+    while (IsWindow(state->window) && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    check(!IsWindow(state->window) && closedSessions == 1 && destroyedSessions == 1,
+        "a failed script lease closes every owned browser through normal cleanup");
+    cx_script_lease_stop();
+    check(!cx_script_lease_active(), "shutdown joins and clears the script heartbeat worker");
+    free_home(state);
+}
+
 void HomeTestMain(void) {
     WCHAR text[16]; BOOL ok;
+    {
+        WCHAR first[128], second[128]; DWORD i; BOOL hex = TRUE;
+        home_build_script_identity(first, 128); home_build_script_identity(second, 128);
+        for (i = 0; first[i]; ++i) if (!((first[i] >= L'0' && first[i] <= L'9') || (first[i] >= L'a' && first[i] <= L'f'))) hex = FALSE;
+        check(lstrlenW(first) == 64 && hex && lstrcmpW(first, second) != 0,
+            "script activation uses a fresh 32 byte cryptographic hexadecimal identity");
+    }
     text[0] = 0;
     GetEnvironmentVariableW(L"CX_TEST_NATIVE_WINDOW", text, 16); showWindows = text[0] == L'1';
     fetchEntered = CreateEventW(NULL, TRUE, FALSE, NULL); fetchRelease = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -909,6 +961,7 @@ void HomeTestMain(void) {
     settings_tests(); dialog_tests(); browser_selection_tests(); worker_tests();
     device_key_tests(); device_injection_tests(); device_report_tests();
     device_status_tests(); device_over_limit_tests(); device_config_path_tests(); device_id_tests();
+    script_session_tests();
     if (!SetTimer(NULL, 0, 20, home_tick)) ExitProcess(5);
     options.noDiskWrite = TRUE;
     options.noDiskWriteSet = TRUE;
