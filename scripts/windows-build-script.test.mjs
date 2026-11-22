@@ -11,24 +11,6 @@ import path from 'node:path';
 
 const root = path.resolve('.');
 
-function decodeWindowsScript(bytes, relative) {
-  if (relative === 'windows/native-source/build-windows.ps1') {
-    assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], '含中文的 PowerShell 5.1 构建脚本必须使用 UTF-8 BOM');
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  }
-  if (relative === 'windows/native-source/build-windows.cmd') {
-    assert.notDeepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'CMD 入口不得包含 UTF-8 BOM');
-    const text = new TextDecoder('gbk', { fatal: true }).decode(bytes);
-    assert.match(text, /Windows 原生构建入口/u);
-    assert.doesNotMatch(text, /\uFFFD/u);
-    assert.match(text, /\r\n/u, '含中文的 CMD 入口必须使用 CRLF');
-    assert.doesNotMatch(text, /(?<!\r)\n/u, '含中文的 CMD 入口不能包含裸 LF，否则 cmd.exe 会错误拆分中文行');
-    return text;
-  }
-  assert.equal(bytes.filter(value => value > 127).length, 0, `${relative} 必须保持纯 ASCII`);
-  return bytes.toString('utf8');
-}
-
 function findGitBash() {
   if (process.platform !== 'win32') return '';
   const located = spawnSync('where.exe', ['git.exe'], { encoding: 'utf8', windowsHide: true });
@@ -124,8 +106,9 @@ test('build-windows.cmd / build-windows-node.cmd 是不依赖 Git Bash 的 CMD �
   for (const [name, expected] of cases) {
     const sourceDirectory = name.includes('-node') ? 'node-source' : 'native-source';
     const bytes = await readFile(path.join(root, 'windows', sourceDirectory, name));
-    if (name !== 'build-windows.cmd') assert.equal(bytes.includes(13), false, `${name} 必须使用 LF 换行`);
-    const text = decodeWindowsScript(bytes, `windows/${sourceDirectory}/${name}`);
+    assert.equal(bytes.includes(13), false, `${name} 必须使用 LF 换行`);
+    assert.equal(bytes.filter((value) => value > 127).length, 0, `${name} 必须保持纯 ASCII`);
+    const text = bytes.toString('utf8');
     for (const token of expected) assert.equal(text.includes(token), true, `${name} 缺少步骤：${token}`);
     assert.doesNotMatch(text, /bash build-windows/u, `${name} 不得依赖 Git Bash`);
     assert.match(text, /--skip-tests/u, `${name} 必须支持 --skip-tests`);
@@ -139,27 +122,18 @@ test('迁移后的两个 CMD 构建入口从项目外执行 --help 只显示帮�
   ]) {
     const launcher = path.join(root, 'windows', directory, name);
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${launcher}" --help`], {
-      encoding: 'buffer', timeout: 15000, windowsHide: true, windowsVerbatimArguments: true,
+      encoding: 'utf8', timeout: 15000, windowsHide: true, windowsVerbatimArguments: true,
       cwd: tmpdir(),
       // 帮助无需工具链；解析回归也不能意外触发真正的构建。
       env: { ...process.env, PATH: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32') }
     });
-    const stdout = new TextDecoder(directory === 'native-source' ? 'gbk' : 'utf-8', { fatal: true }).decode(result.stdout);
-    const stderr = result.stderr.toString('utf8');
-    assert.equal(result.status, 0, `${name}: ${stdout}\n${stderr}`);
-    const lines = stdout.trim().split(/\r?\n/u);
-    if (directory === 'native-source') {
-      assert.equal(lines.length, 3);
-      assert.equal(lines[0], `用法：${name} [--skip-tests] [--no-deps]`);
-      assert.match(lines[1], /构建原生 x86/u);
-      assert.match(lines[2], /--no-deps/u);
-    } else {
-      assert.equal(lines.length, 2, `${name} 只能输出用法和描述`);
-      assert.equal(lines[0], `Usage: ${name} [--skip-tests]`);
-      assert.match(lines[1], /^\s*Builds /u);
-    }
-    assert.doesNotMatch(stdout, /\[build-windows\].*(?:building|正在)/iu);
-    assert.equal(stderr, '');
+    assert.equal(result.status, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+    const lines = result.stdout.trim().split(/\r?\n/u);
+    assert.equal(lines.length, 2, `${name} 只能输出用法和描述`);
+    assert.equal(lines[0], `Usage: ${name} [--skip-tests]`);
+    assert.match(lines[1], /^\s*Builds /u);
+    assert.doesNotMatch(result.stdout, /\bbuilding\b|npm run|vite/iu);
+    assert.equal(result.stderr, '');
   }
 });
 
@@ -233,15 +207,12 @@ test('Windows 专用文件归入三目录，插件构建继续使用原位共享
   const browserBuild = await readFile(path.join(root, 'build.mjs'), 'utf8');
   assert.match(browserBuild, /src\/index\.ts/u);
   assert.match(browserBuild, /outDir:\s*['"]dist['"]/u);
-  const sharedWindowsFiles = [...browserBuild.matchAll(/['"](windows\/(?:node-source|native-source|share-file)\/[^'"]+)['"]/gu)]
-    .map(match => match[1]);
-  assert.deepEqual(sharedWindowsFiles, ['windows/node-source/extension-log-core.mjs'],
-    '扩展只复用明确登记的诊断核心，不得调用原生/Node宿主构建或写入Windows产物目录');
+  assert.doesNotMatch(browserBuild, /windows\/(?:node-source|native-source|share-file)/u);
   assert.equal((await readFile(path.join(root, 'src/index.ts'))).length > 0, true);
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   assert.equal(packageJson.scripts.build, 'node build.mjs');
 });
-test('Windows 脚本验证明确编码：中文构建 PS1 使用 BOM、中文 CMD 使用 GBK，其余保留 ASCII', async () => {
+test('windows 脚本保持纯 ASCII，避免控制台/PS 5.1 解码乱码', async () => {
   const directories = ['windows/native-source', 'windows/native-scripts', 'windows/node-source', 'windows/node-scripts', 'windows/share-file'];
   const extensions = ['.cmd', '.ps1', '.vbs'];
   for (const directory of directories) {
@@ -256,8 +227,9 @@ test('Windows 脚本验证明确编码：中文构建 PS1 使用 BOM、中文 CM
       const extension = extensions.find((ext) => entry.name.endsWith(ext));
       if (!extension) continue;
       const bytes = await readFile(path.join(root, directory, entry.name));
-      decodeWindowsScript(bytes, `${directory}/${entry.name}`);
-      if (extension === '.cmd' && `${directory}/${entry.name}` !== 'windows/native-source/build-windows.cmd') {
+      assert.equal(bytes.filter((value) => value > 127).length, 0,
+        `${directory}/${entry.name} 必须保持纯 ASCII（中文会按 ANSI 解码成乱码）`);
+      if (extension === '.cmd') {
         assert.equal(bytes.includes(13), false, `${directory}/${entry.name} 必须使用 LF 换行`);
       }
     }

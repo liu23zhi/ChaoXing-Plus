@@ -15,21 +15,8 @@ $msvc = Get-ChildItem (Join-Path $vsPath 'VC/Tools/MSVC') -Directory | Sort-Obje
 $cl = Join-Path $msvc.FullName 'bin/Hostx64/x86/cl.exe'
 $link = Join-Path $msvc.FullName 'bin/Hostx64/x86/link.exe'
 $dumpbin = Join-Path $msvc.FullName 'bin/Hostx64/x86/dumpbin.exe'
-# dumpbin resolves mspdbcore.dll from PATH; VS keeps it in Common7\IDE and the
-# host-specific VC\bin folders. Inject those dirs so /exports works reliably.
-$vsRootDir = @($vsPath | Select-Object -First 1)[0]
-$pdbDirs = @(Get-ChildItem -Path (Join-Path $vsRootDir 'Common7\IDE'), (Join-Path $msvc.FullName 'bin\Hostx64\x64'), (Join-Path $msvc.FullName 'bin\Hostx86\x86') -Filter 'mspdbcore.dll' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DirectoryName -Unique)
-if ($pdbDirs.Count -gt 0) { $env:Path = (($pdbDirs) -join ';') + ';' + $env:Path }
-# Resolve the SDK root the same way the main build does: registry KitsRoot10
-# (the SDK may live on a non-default drive), with the classic Program Files
-# location kept only as a fallback.
-$sdkRoot = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue).KitsRoot10
-if (-not $sdkRoot) { $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10' }
-if (-not (Test-Path -LiteralPath $sdkRoot -PathType Container)) { throw "Windows SDK root not found: $sdkRoot" }
-$sdkVer = Get-ChildItem -LiteralPath (Join-Path $sdkRoot 'Lib') -Directory -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'um\x86\kernel32.lib') } |
-    Sort-Object Name -Descending | Select-Object -First 1
-if (-not $sdkVer) { throw "Windows SDK x86 import libraries not found under: $sdkRoot" }
+$sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
+$sdkVer = Get-ChildItem (Join-Path $sdkRoot 'Lib') -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $sdkLib = Join-Path $sdkVer.FullName 'um/x86'
 $sdkInc = Join-Path $sdkRoot ('Include/' + $sdkVer.Name + '/um')
 $sdkShared = Join-Path $sdkRoot ('Include/' + $sdkVer.Name + '/shared')
