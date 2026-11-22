@@ -123,7 +123,7 @@ export function mergeHostConfigLayers({ defaultHostConfig, appConfig, selectedCo
   );
 }
 
-export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250, persistEnabled = true, onError = () => {} } = {}) {
+export function createConfigStore(filePath, { logger = () => {}, debounceMs = 250, persistEnabled = true, onError = () => {}, onPersist = () => {} } = {}) {
   let config = normalizeConfig(undefined);
   let revision = 0;
   let timer = null;
@@ -192,6 +192,7 @@ export function createConfigStore(filePath, { logger = () => {}, debounceMs = 25
       const temporary = `${filePath}.${process.pid}.tmp`;
       await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
       await fs.rename(temporary, filePath);
+      try { onPersist(); } catch { /* A diagnostic observer must not change save semantics. */ }
     } catch (error) {
       notifyError();
       throw error;
