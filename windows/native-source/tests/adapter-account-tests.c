@@ -14,7 +14,35 @@ void WinMainCRTStartup(void) {
     BYTE *package = NULL; DWORD size = 0; BOOL ok;
     check(GetEnvironmentVariableW(L"CX_ADAPTER_TEST_BASE", base, 2048) > 0, "mock base configured");
     GetEnvironmentVariableW(L"CX_ADAPTER_TEST_SCENARIO", scenario, 64);
-    if (!lstrcmpW(scenario, L"account")) {
+    if (!lstrcmpW(scenario, L"script-address")) {
+        static WCHAR input[4096];
+        static const WCHAR *invalid[] = {L"", L"ftp://127.0.0.1/script", L"http://127.0.0.2/script",
+            L"https://user:password@127.0.0.1/script", L"https://127.0.0.1/script?query",
+            L"https://127.0.0.1/script#fragment", L"https://127.0.0.1/white space",
+            L"https://127.0.0.1/back\\slash", L"https://127.0.0.1/script%2Fother",
+            L"https://127.0.0.1/path/../other", L"https://127.0.0.1//other",
+            L"powershell -c \"iex(irm https://127.0.0.1/script); echo no\"",
+            L"powershell -c \"iex(irm https://127.0.0.1/script -MaximumRedirection 1 -TimeoutSec 15)\"",
+            L"powershell -c \"iex(irm https://127.0.0.1/script -Headers @{})\""};
+        DWORD i;
+        for (i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+            check(!cx_adapter_script_address_check(invalid[i], error, 512) && error[0], "unsafe or unsupported input rejected");
+        wsprintfW(input, L"%s/available", base);
+        check(cx_adapter_script_address_check(input, error, 512), "exact script path checked");
+        check(cx_adapter_script_address_check(base, error, 512), "bare script authority sends HEAD to root");
+        wsprintfW(input, L"powershell -c \"iex(irm %s/available)\"", base);
+        check(cx_adapter_script_address_check(input, error, 512), "compact command is parsed as a URL");
+        wsprintfW(input, L"  PowerShell -c \"iex(irm '%s/available')\" \r\n", base);
+        check(cx_adapter_script_address_check(input, error, 512), "copied command accepts outer whitespace and a quoted URL");
+        wsprintfW(input, L"powershell -c \"iex(irm %s/available -MaximumRedirection 0 -TimeoutSec 15)\"", base);
+        check(cx_adapter_script_address_check(input, error, 512), "current TiKu command suffix is recognized without execution");
+        wsprintfW(input, L"%s/no-marker", base);
+        check(!cx_adapter_script_address_check(input, error, 512), "204 without the script availability marker is rejected");
+        wsprintfW(input, L"%s/web-ui", base);
+        check(!cx_adapter_script_address_check(input, error, 512), "200 is rejected even if it includes the marker");
+        wsprintfW(input, L"%s/redirect", base);
+        check(!cx_adapter_script_address_check(input, error, 512), "diagnostic HEAD never follows redirects");
+    } else if (!lstrcmpW(scenario, L"account")) {
         static CX_ADAPTER_AUTH_SETTINGS settings;
         check(cx_adapter_auth_settings(base, &settings, error, 512), "public captcha settings request");
         check(!lstrcmpW(settings.captchaProvider, L"local"), "local captcha provider parsed");

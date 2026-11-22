@@ -18,6 +18,7 @@ typedef struct CX_HOME_CONFIG {
     WCHAR scriptIdentity[CX_HOME_SCRIPT_IDENTITY_CAP];
     CX_OWNED_RUN_GRANT verifiedExam; /* only a successful exchange can set this; not serialized */
     WCHAR settingsJson[CX_HOME_SETTINGS_CAP];
+    WCHAR diagnosticScriptInput[CX_HOME_ADAPTER_URL_CAP]; /* in memory only */
 } CX_HOME_CONFIG;
 
 typedef BOOL (*CX_HOME_EXAM_RUN)(CX_OPTIONS *options, WCHAR *error, DWORD errorCap);
@@ -29,8 +30,7 @@ void cx_home_config_clear(CX_HOME_CONFIG *config);
 BOOL cx_home_config_apply_session(const CX_HOME_CONFIG *config, CX_OPTIONS *options,
     WCHAR *error, DWORD errorCap);
 
-/* Runs the first-level native page. The existing examination client flow is
-   invoked only after the user selects the second-level page. */
+/* A NULL examRun opens only the script address diagnostics window. */
 BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
                  CX_HOME_EXAM_RUN examRun, WCHAR *error, DWORD errorCap);
 

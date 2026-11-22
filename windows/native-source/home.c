@@ -29,6 +29,8 @@
 #define HOME_ACCOUNT 1412
 #define HOME_UPDATE 1413
 #define HOME_DEVICE 1414
+#define HOME_SCRIPT_URL 1415
+#define HOME_SCRIPT_CHECK 1416
 #define HOME_OPERATION_DONE (WM_APP + 24)
 /* 设备线程完成一次配额查询/会话上报后回到 UI 线程的唯一通道：
    所有 state->quota 的读取都发生在 UI 线程，与设备线程之间只经这条消息交接。 */
@@ -91,6 +93,7 @@ typedef struct HOME_STATE {
     HANDLE worker;
     DWORD operation;
     WCHAR pendingBrowser[16];
+    WCHAR pendingScriptUrl[CX_HOME_ADAPTER_URL_CAP];
     CX_HOME_CONFIG pendingConfig;
     CX_BROWSER_SESSION *pendingSession;
     DWORD pendingSlot;
@@ -939,6 +942,12 @@ static DWORD WINAPI home_work(LPVOID context) {
     CX_BROWSER_OPTIONS options;
     BOOL forceRefresh;
     state->operationOK = FALSE; state->error[0] = 0;
+    if (state->operation == HOME_SCRIPT_CHECK) {
+        state->operationOK = cx_adapter_script_address_check(state->pendingScriptUrl, state->error, 512);
+        SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
+        PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0);
+        return 0;
+    }
     if (state->operation == HOME_CLOSE_SESSION || state->operation == HOME_EXIT) {
         state->operationOK = TRUE;
         for (i = 0; i < HOME_MAX_SESSIONS; ++i) {
@@ -1010,7 +1019,7 @@ done:
 }
 
 static void home_buttons(HOME_STATE *state, BOOL enabled) {
-    static const int ids[] = { HOME_EDGE, HOME_CHROME, HOME_SEPARATE, HOME_CLOSE_SESSION, HOME_SETTINGS, HOME_ACCOUNT, HOME_EXAM, HOME_UPDATE };
+    static const int ids[] = { HOME_EDGE, HOME_CHROME, HOME_SEPARATE, HOME_CLOSE_SESSION, HOME_SETTINGS, HOME_ACCOUNT, HOME_EXAM, HOME_UPDATE, HOME_SCRIPT_URL, HOME_SCRIPT_CHECK };
     DWORD i;
     for (i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) EnableWindow(GetDlgItem(state->window, ids[i]), enabled);
 }
@@ -1043,7 +1052,8 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     if (config) CopyMemory(&state->pendingConfig, config, sizeof(*config));
     home_copy(state->pendingBrowser, 16, browser); state->operation = operation;
     home_buttons(state, FALSE);
-    home_status(state, operation == HOME_EXIT || operation == HOME_CLOSE_SESSION ? L"正在关闭并清理临时会话..." : L"正在从 tikuAdapter 获取扩展，请稍候...");
+    home_status(state, operation == HOME_SCRIPT_CHECK ? L"正在检查脚本地址…"
+        : operation == HOME_EXIT || operation == HOME_CLOSE_SESSION ? L"正在关闭并清理临时会话..." : L"正在从 tikuAdapter 获取扩展，请稍候...");
     state->worker = CreateThread(NULL, 0, home_work, state, 0, NULL);
     if (!state->worker) { home_buttons(state, TRUE); state->closing = FALSE; home_status(state, L"无法创建工作线程"); }
 }
@@ -1516,7 +1526,8 @@ static void home_exam(HOME_STATE *state) {
     if (!state || !state->config || !state->examRun) return;
     if (!cx_grant_dispatch(&state->config->verifiedExam, state->config->adapterBaseUrl, state->config->apiKey, state->config->scriptIdentity,
                            home_authorized_exam, state)) {
-        home_status(state, L"考试模式仅限已激活且未过期的专属脚本会话。普通题库令牌不能启动。");
+        home_status(state, L"可先填写脚本 URL 测试。正式启动考试客户端仍需通过已授权的脚本命令。");
+        SetFocus(GetDlgItem(state->window, HOME_SCRIPT_URL));
     }
 }
 
@@ -1529,6 +1540,13 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
     if (!state) return DefWindowProcW(window, message, wParam, lParam);
     if (message == HOME_OPERATION_DONE) {
         if (state->worker) { WaitForSingleObject(state->worker, INFINITE); CloseHandle(state->worker); state->worker = NULL; }
+        if (state->operation == HOME_SCRIPT_CHECK) {
+            if (state->closing && !state->examRun) { DestroyWindow(window); return 0; }
+            home_buttons(state, TRUE);
+            home_status(state, state->operationOK ? L"脚本地址可用。只读测试已完成。" : state->error);
+            if (state->closing) home_begin(state, HOME_EXIT, NULL, NULL);
+            return 0;
+        }
         if (state->pendingSession) {
             state->sessions[state->pendingSlot].session = state->pendingSession;
             home_copy(state->sessions[state->pendingSlot].browser, 16, state->pendingBrowser); state->pendingSession = NULL;
@@ -1565,6 +1583,12 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         CX_HOME_CONFIG *separate; WCHAR browser[16];
         if (state->worker && LOWORD(wParam) != HOME_EXIT) return 0;
         switch (LOWORD(wParam)) {
+        case HOME_SCRIPT_CHECK:
+            GetDlgItemTextW(window, HOME_SCRIPT_URL, state->pendingScriptUrl, CX_HOME_ADAPTER_URL_CAP);
+            if (!state->pendingScriptUrl[0]) { home_status(state, L"请填写脚本 URL 或粘贴生成的命令。"); SetFocus(GetDlgItem(window, HOME_SCRIPT_URL)); return 0; }
+            home_begin(state, HOME_SCRIPT_CHECK, NULL, NULL);
+            if (!state->worker) SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
+            return 0;
         case HOME_EDGE: home_begin(state, HOME_EDGE, L"auto", state->config); return 0;
         case HOME_CHROME: home_begin(state, HOME_CHROME, L"chrome", state->config); return 0;
         case HOME_UPDATE: home_begin(state, HOME_UPDATE, NULL, state->config); return 0;
@@ -1586,6 +1610,12 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         }
     }
     if (message == WM_CLOSE) {
+        if (!state->examRun) {
+            state->closing = TRUE;
+            if (state->worker) home_status(state, L"检查结束后将关闭窗口…");
+            else DestroyWindow(window);
+            return 0;
+        }
         cx_script_lease_cancel();
         state->closing = TRUE;
         if (state->worker) home_status(state, L"正在等待当前操作结束，随后关闭并清理所有临时会话...");
@@ -1601,6 +1631,15 @@ static BOOL home_register_class(void) {
     klass.hIcon = home_icon();
     klass.hCursor = LoadCursorW(NULL, IDC_ARROW); klass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); klass.lpszClassName = HOME_CLASS;
     return RegisterClassW(&klass) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+static void home_script_controls(HWND window, int y) {
+    HWND url;
+    home_control(0, L"STATIC", L"脚本 URL / 命令", WS_CHILD | WS_VISIBLE, 24, y + 5, 131, 25, window, 0);
+    url = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
+        158, y, 512, 30, window, HOME_SCRIPT_URL);
+    SendMessageW(url, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
+    home_control(0, L"BUTTON", L"测试地址", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 680, y, 124, 30, window, HOME_SCRIPT_CHECK);
 }
 
 BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
@@ -1628,13 +1667,25 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
         if (error && errorCap) lstrcpynW(error, L"无法注册原生主页窗口", (int)errorCap);
         if (home_default_font) DeleteObject(home_default_font); HeapFree(GetProcessHeap(), 0, state); return FALSE;
     }
-    window = CreateWindowExW(0, HOME_CLASS, L"超星学习助手", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(840, home_dpi, 96), MulDiv(530, home_dpi, 96), NULL, NULL, home_instance, state);
+    window = CreateWindowExW(0, HOME_CLASS, examRun ? L"超星学习助手" : L"考试客户端 · 脚本地址测试", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(840, home_dpi, 96), MulDiv(examRun ? 572 : 220, home_dpi, 96), NULL, NULL, home_instance, state);
     if (!window) {
         if (error && errorCap) lstrcpynW(error, L"无法创建原生主页窗口", (int)errorCap);
         if (home_default_font) DeleteObject(home_default_font); HeapFree(GetProcessHeap(), 0, state); return FALSE;
     }
     state->font = home_default_font;
+    if (!examRun) {
+        home_control(0, L"STATIC", L"粘贴题库生成的脚本 URL 或 PowerShell 命令，检查地址是否可用。", WS_CHILD | WS_VISIBLE, 24, 20, 780, 28, window, 0);
+        home_script_controls(window, 56);
+        state->status = home_control(0, L"STATIC", L"测试不启动客户端，也不消耗脚本使用次数。", WS_CHILD | WS_VISIBLE, 24, 100, 780, 52, window, HOME_STATUS);
+        SetDlgItemTextW(window, HOME_SCRIPT_URL, config->diagnosticScriptInput);
+        SecureZeroMemory(config->diagnosticScriptInput, sizeof(config->diagnosticScriptInput));
+        ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window);
+        SetFocus(GetDlgItem(window, HOME_SCRIPT_URL));
+        if (GetWindowTextLengthW(GetDlgItem(window, HOME_SCRIPT_URL)))
+            PostMessageW(window, WM_COMMAND, MAKEWPARAM(HOME_SCRIPT_CHECK, BN_CLICKED), 0);
+        goto message_loop;
+    }
     home_control(0, L"STATIC", L"超星学习助手", WS_CHILD | WS_VISIBLE, 24, 20, 300, 34, window, 0);
     home_control(0, L"STATIC", L"创建互相隔离的浏览器临时会话，也可打开考试客户端。", WS_CHILD | WS_VISIBLE, 24, 52, 700, 24, window, 0);
     state->list = home_control(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 24, 88, 780, 230, window, HOME_SESSION_LIST);
@@ -1647,6 +1698,7 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     home_control(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE, 650, 395, 52, 32, window, HOME_EXIT);
     home_control(0, L"BUTTON", L"账号 / API key", WS_CHILD | WS_VISIBLE, 24, 435, 150, 30, window, HOME_ACCOUNT);
     home_control(0, L"BUTTON", L"检查扩展更新", WS_CHILD | WS_VISIBLE, 185, 435, 150, 30, window, HOME_UPDATE);
+    home_script_controls(window, 476);
     ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window); SetTimer(window, HOME_TIMER, 500, NULL);
     home_refresh_list(state);
     /*
@@ -1669,12 +1721,13 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
         home_device_kick(state, HOME_DEVICE_FETCH | (state->deviceId[0] ? HOME_DEVICE_REPORT : 0),
             home_open_sessions(state));
     }
+message_loop:
     while ((got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
     if (state->worker) { WaitForSingleObject(state->worker, INFINITE); CloseHandle(state->worker); state->worker = NULL; }
     /* 退出路径兜底：把 count=0 发出去（R7），再收设备线程与句柄。 */
-    home_device_flush_exit(state);
+    if (examRun) home_device_flush_exit(state);
     if (state->deviceWorker) { WaitForSingleObject(state->deviceWorker, INFINITE); CloseHandle(state->deviceWorker); state->deviceWorker = NULL; }
     if (state->deviceJob) { SecureZeroMemory(state->deviceJob, sizeof(*state->deviceJob)); HeapFree(GetProcessHeap(), 0, state->deviceJob); state->deviceJob = NULL; }
     for (i = 0; i < HOME_MAX_SESSIONS; ++i) if (state->sessions[i].session) cx_browser_destroy(state->sessions[i].session);
@@ -1682,7 +1735,7 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     if (IsWindow(window)) DestroyWindow(window);
     if (home_default_font) DeleteObject(home_default_font); home_default_font = NULL;
     SecureZeroMemory(state, sizeof(*state)); HeapFree(GetProcessHeap(), 0, state);
-    cx_script_lease_stop();
+    if (examRun) cx_script_lease_stop();
     cx_home_config_clear(config);
     if (got < 0) { if (error && errorCap) lstrcpynW(error, L"主页消息循环失败", (int)errorCap); return FALSE; }
     return TRUE;

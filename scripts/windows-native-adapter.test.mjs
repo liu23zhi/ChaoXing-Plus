@@ -52,6 +52,20 @@ test('native adapter uses complete captcha login, token authentication and verif
       requests.push({ method: req.method, url: req.url, auth: req.headers.authorization, payload });
       assert.equal(req.headers.cookie, undefined, 'native requests must not reuse web cookies');
       const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+      if (scenario === 'script-address') {
+        assert.equal(req.method, 'HEAD');
+        assert.equal(payload, undefined);
+        assert.equal(req.headers.authorization, undefined);
+        assert.equal(req.headers['x-script-identity'], undefined);
+        assert.equal(req.headers['x-script-launcher'], undefined);
+        const marker = { 'X-Tiku-Script-Address': 'available' };
+        if (['/', '/available'].includes(req.url)) res.writeHead(204, marker);
+        else if (req.url === '/no-marker') res.writeHead(204);
+        else if (req.url === '/web-ui') res.writeHead(200, marker);
+        else if (req.url === '/redirect') res.writeHead(302, { Location: '/redirect-target' });
+        else throw new Error(`unexpected probe path ${req.url}`);
+        return res.end();
+      }
       if (req.url === '/api/public/register-status') {
         assert.equal(req.method, 'GET');
         const remote = ['remote-settings', 'remote-captcha'].includes(scenario);
@@ -100,15 +114,18 @@ test('native adapter uses complete captcha login, token authentication and verif
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    for (scenario of ['account', 'create', 'remote-settings', 'missing-provider', 'missing-token', 'unauthorized', 'extension', 'hash', 'size', 'version', 'source', 'url', 'redirect']) {
+    for (scenario of ['script-address', 'account', 'create', 'remote-settings', 'missing-provider', 'missing-token', 'unauthorized', 'extension', 'hash', 'size', 'version', 'source', 'url', 'redirect']) {
       requests = []; handlerError = undefined;
       const result = await run(process.env.CX_NATIVE_ADAPTER_EXE, {
-        CX_ADAPTER_TEST_BASE: `http://127.0.0.1:${server.address().port}/adapter-service`,
+        CX_ADAPTER_TEST_BASE: `http://127.0.0.1:${server.address().port}${scenario === 'script-address' ? '' : '/adapter-service'}`,
         CX_ADAPTER_TEST_SCENARIO: scenario
       });
       if (handlerError) throw handlerError;
       assert.equal(result.code, 0, `${scenario}: ${result.stdout}${result.stderr}`);
       assert.match(result.stdout, /NATIVE ADAPTER TESTS PASS/);
+      if (scenario === 'script-address') {
+        assert.deepEqual(requests.map(request => request.url), ['/available', '/', '/available', '/available', '/available', '/no-marker', '/web-ui', '/redirect']);
+      }
       if (scenario === 'account') assert.equal(requests.length, 9);
       if (scenario === 'remote-settings') {
         assert.equal(requests.length, 1);

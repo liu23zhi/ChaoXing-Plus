@@ -58,6 +58,7 @@ static WCHAR homeExpectedCarrier[16];
 static const WCHAR *selectionModes[4], *selectionCarriers[4], *selectionPaths[4];
 static DWORD modeGetterCalls, carrierGetterCalls, portLaunches, proxyLaunches;
 static BOOL launchProxy[8], launchEnvironmentOK, homeFreshOptions, homeSelectedOptions;
+static const WCHAR *expectedDiagnosticScriptInput;
 static WCHAR launchCarriers[8][16], handoffModes[8][16], handoffCarriers[8][16], handoffPaths[8][CX_OPTIONS_PATH_CAP];
 
 static const WCHAR *selected_mode_value(void) {
@@ -72,6 +73,8 @@ BOOL test_home(CX_OPTIONS *options, CX_HOME_CONFIG *config, CX_HOME_EXAM_RUN exa
     BOOL first;
     (void)config; ++homeCalls;
     homeNoPreScan = !scans && !selections && !launches && !restartCalls;
+    if (!examRun) return !lstrcmpW(config->diagnosticScriptInput,
+        expectedDiagnosticScriptInput ? expectedDiagnosticScriptInput : L"");
     homeInside = TRUE;
     if (homeSettingsFixture && !cx_options_apply_json_utf8(options, homeSettingsFixture,
         h_len(homeSettingsFixture), error, cap)) ExitProcess(4);
@@ -273,6 +276,7 @@ static void reset(void) {
     h_default_gui = FALSE;
     earlyRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
     homeCalls = homeExamCalls = 0; homeInside = homeRepeatExam = FALSE; homeInvokesExam = TRUE;
+    expectedDiagnosticScriptInput = NULL;
     homeNoPreScan = homeNoPendingElevation = homeExamResult = homeSettingsPreserved = FALSE; homeSettingsFixture = NULL;
     h_copy(homeExpectedMode, CX_OPTIONS_SHORT_CAP, L"cdp-port"); h_copy(homeExpectedCarrier, 16, L"auto");
     for (i = 0; i < 4; ++i) { selectionModes[i] = NULL; selectionCarriers[i] = NULL; selectionPaths[i] = NULL; }
@@ -346,11 +350,8 @@ void __stdcall ElevationHostTestMain(void) {
     check(HostWinMain(NULL, NULL, NULL, 0) == 2 && !scans && !launches && !restartCalls,
         "forged internal restart marker with ordinary token is rejected before discovery");
     reset(); commandLineFixture = L"host.exe --select-client --no-log --quiet --report child-report.json";
-    check(HostWinMain(NULL, NULL, NULL, 0) == 37 && scans == 1 && selections == 1
-        && launches == 1 && restartCalls == 1 && !reports, "actual WinMain waits for handoff result and returns child exit code");
-    reset(); restartCancelled = TRUE;
-    check(HostWinMain(NULL, NULL, NULL, 0) == 3 && restartCalls == 1 && !reports,
-        "actual WinMain keeps UAC cancellation distinct from successful launch");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeNoPreScan && !homeExamCalls && !reports,
+        "legacy selection opens diagnostics without scanning, UAC or a launch report");
     reset(); testOptions.dpiAware = TRUE; result = h_run(&testOptions, h_main_error, HOST_ERROR_CAP);
     check(result && h_needs_elevation && dpiBegins == 1 && dpiRestores == 1
         && dpiAt < launchAt && launchAt < restoreAt, "DPI original state is restored before 740 handoff decision");
@@ -423,14 +424,16 @@ void __stdcall ElevationHostTestMain(void) {
         "secondary selection allows browsing with no candidates and cancellation returns to the homepage");
     reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe --quiet"; launchFailure = ERROR_ACCESS_DENIED;
-    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !homeCalls && scans == 1 && !selections && launches == 1
-        && !lstrcmpW(launchedPath, L"C:\\Configured\\CXExam.exe"),
-        "any user argument preserves configured direct-client selection semantics");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeNoPreScan && !homeExamCalls && !launches && !tokenQueries,
+        "legacy direct arguments open diagnostics without an exam callback");
     reset(); defaultJson = "{\"clientPath\":\"C:\\\\Configured\\\\CXExam.exe\",\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe --client D:\\Explicit\\CXExam.exe --quiet"; launchFailure = ERROR_ACCESS_DENIED;
-    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !homeCalls && scans == 1 && !selections && launches == 1
-        && !lstrcmpW(launchedPath, L"D:\\Explicit\\CXExam.exe"),
-        "explicit client arguments retain direct launch without GUI");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeNoPreScan && !homeExamCalls && !launches && !tokenQueries,
+        "explicit client path alone never starts the exam client and opens diagnostics");
+    reset(); commandLineFixture = L"host.exe --script-url https://fixture.invalid/script";
+    expectedDiagnosticScriptInput = L"https://fixture.invalid/script";
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeNoPreScan && !homeExamCalls && !scans && !launches && !tokenQueries,
+        "a script URL launch parameter only pre-fills the diagnostic window");
     reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe";
     homeSettingsFixture = "{\"injectMode\":\"cdp-port\",\"settings\":{\"common.settings.tikuAdapterApiKey\":\"tk_quote\\\"slash\\\\中文\",\"cx.new.work.answer-retry\":7}}";

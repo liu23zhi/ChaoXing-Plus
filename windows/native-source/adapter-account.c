@@ -247,6 +247,68 @@ static BOOL cx_http_remaining(HINTERNET request, DWORD started, DWORD timeout) {
     return g_http.setTimeouts(request, (int)remaining, (int)remaining, (int)remaining, (int)remaining);
 }
 
+static BOOL cx_address_space(WCHAR ch) {
+    return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n';
+}
+
+/* Treat the compact command strictly as a container for one URL. Only the
+   generated fixed timeout/redirect suffix is recognized; arbitrary options,
+   headers, expressions and escapes are not part of this input grammar. */
+static BOOL cx_script_address_url(const WCHAR *input, WCHAR *out, DWORD cap) {
+    static const WCHAR command[] = L"powershell -c \"iex(irm ";
+    static const WCHAR fixedOptions[] = L" -MaximumRedirection 0 -TimeoutSec 15";
+    static const WCHAR https[] = L"https://";
+    DWORD length, first = 0, prefix, offset, k, optionsLength, segment;
+    if (!input || !out) return FALSE;
+    length = cx_wlen(input);
+    if (!length || length >= cap) return FALSE;
+    while (first < length && cx_address_space(input[first])) ++first;
+    while (length > first && cx_address_space(input[length - 1])) --length;
+    prefix = cx_wlen(command);
+    if (length - first > prefix + 2
+        && CompareStringOrdinal(input + first, (int)prefix, command, (int)prefix, TRUE) == CSTR_EQUAL) {
+        if (input[length - 2] != L')' || input[length - 1] != L'"') return FALSE;
+        first += prefix; length -= 2;
+        optionsLength = cx_wlen(fixedOptions);
+        if (length - first > optionsLength && CompareStringOrdinal(input + length - optionsLength,
+            (int)optionsLength, fixedOptions, (int)optionsLength, TRUE) == CSTR_EQUAL) length -= optionsLength;
+        if (length - first > 2 && input[first] == L'\'' && input[length - 1] == L'\'') {
+            ++first; --length;
+        }
+    }
+    if (length <= first) return FALSE;
+    for (k = first; k < length; ++k) {
+        WCHAR ch = input[k];
+        if (!((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9')
+            || ch == L'.' || ch == L'-' || ch == L'_' || ch == L'~' || ch == L'/' || ch == L':'
+            || ch == L'[' || ch == L']')) return FALSE;
+    }
+    offset = 0;
+    if (length - first >= 8 && CompareStringOrdinal(input + first, 8, https, 8, TRUE) == CSTR_EQUAL)
+        k = first + 8;
+    else if (length - first >= 7 && CompareStringOrdinal(input + first, 7, L"http://", 7, TRUE) == CSTR_EQUAL)
+        k = first + 7;
+    else { k = first; offset = 8; }
+    if (k == length || input[k] == L'/') return FALSE;
+    /* Allow one scheme separator only; WinHTTP must never reinterpret an
+       unsupported scheme as the authority of a guessed HTTPS URL. */
+    for (segment = k; k + 2 < length; ++k)
+        if (input[k] == L':' && input[k + 1] == L'/' && input[k + 2] == L'/') return FALSE;
+    /* Avoid WinHTTP path normalization changing the address being tested. */
+    while (segment < length && input[segment] != L'/') ++segment;
+    while (segment < length) {
+        k = ++segment;
+        while (segment < length && input[segment] != L'/') ++segment;
+        if ((segment == k && segment < length) || (segment - k == 1 && input[k] == L'.')
+            || (segment - k == 2 && input[k] == L'.' && input[k + 1] == L'.')) return FALSE;
+    }
+    if (length - first + offset >= cap) return FALSE;
+    if (offset) CopyMemory(out, https, offset * sizeof(WCHAR));
+    CopyMemory(out + offset, input + first, (length - first) * sizeof(WCHAR));
+    out[length - first + offset] = 0;
+    return TRUE;
+}
+
 typedef struct CX_HTTP_DEADLINE {
     HANDLE done;
     HINTERNET request;
@@ -265,7 +327,7 @@ static DWORD WINAPI cx_http_deadline_work(LPVOID context) {
     return 0;
 }
 
-static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
+static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, BOOL scriptAddressProbe) {
     WCHAR *buffers = NULL, *url, *host, *object, *extra, *headers, *authHeader; URL_COMPONENTS parts; HINTERNET session = NULL, conn = NULL, req = NULL; DWORD status = 0, statusSize = sizeof(status), used = 0, got, cap, flags = 0, disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION; BYTE *body = NULL; BOOL ok = FALSE;
     DWORD started = GetTickCount();
     CX_HTTP_DEADLINE deadline; HANDLE watchdog = NULL;
@@ -276,11 +338,18 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     buffers = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR));
     if (!buffers) { cx_error(error, errorCap, L"内存不足。"); return FALSE; }
     url = buffers; host = url + 8192; object = host + 512; extra = object + 8192; headers = extra + 2048; authHeader = headers + 4608;
-    if (!cx_build_url(base, path, url, 8192)) { cx_error(error, errorCap, L"扩展服务地址或请求参数无效。"); goto done; }
+    if (scriptAddressProbe) {
+        if (!cx_script_address_url(base, url, 8192)) { cx_error(error, errorCap, L"请填写脚本 URL 或系统生成的简短 PowerShell 指令。"); goto done; }
+    } else if (!cx_build_url(base, path, url, 8192)) { cx_error(error, errorCap, L"扩展服务地址或请求参数无效。"); goto done; }
     ZeroMemory(&parts, sizeof(parts)); parts.dwStructSize = sizeof(parts); parts.dwSchemeLength = (DWORD)-1; parts.dwHostNameLength = (DWORD)-1; parts.dwUrlPathLength = (DWORD)-1; parts.lpszHostName = host; parts.dwHostNameLength = 512; parts.lpszUrlPath = object; parts.dwUrlPathLength = 8192; parts.lpszExtraInfo = extra; parts.dwExtraInfoLength = 2048;
-    if (!g_http.crack(url, 0, 0, &parts) || !parts.dwHostNameLength || !parts.dwUrlPathLength || parts.dwUserNameLength || parts.dwPasswordLength) { cx_error(error, errorCap, L"扩展服务地址解析失败。"); goto done; }
+    if (!g_http.crack(url, 0, 0, &parts) || !parts.dwHostNameLength || (!scriptAddressProbe && !parts.dwUrlPathLength) || parts.dwUserNameLength || parts.dwPasswordLength) { cx_error(error, errorCap, L"扩展服务地址解析失败。"); goto done; }
+    if (scriptAddressProbe && !parts.dwUrlPathLength) { lstrcpyW(object, L"/"); parts.dwUrlPathLength = 1; }
     used = parts.dwUrlPathLength; if (parts.dwExtraInfoLength && !cx_append_w(object, 8192, &used, extra)) { cx_error(error, errorCap, L"扩展服务查询参数过长。"); goto done; }
     if (parts.nScheme == INTERNET_SCHEME_HTTPS) flags = WINHTTP_FLAG_SECURE; else if (parts.nScheme != INTERNET_SCHEME_HTTP) { cx_error(error, errorCap, L"只支持 HTTP 或 HTTPS 扩展服务。"); goto done; }
+    if (scriptAddressProbe && parts.nScheme == INTERNET_SCHEME_HTTP && lstrcmpiW(host, L"localhost")
+        && lstrcmpW(host, L"127.0.0.1") && lstrcmpW(host, L"[::1]") && lstrcmpW(host, L"::1")) {
+        cx_error(error, errorCap, L"脚本地址必须使用 HTTPS，本机回环地址可使用 HTTP。"); goto done;
+    }
     if (runIdentity && parts.nScheme != INTERNET_SCHEME_HTTPS && lstrcmpiW(host,L"localhost")
         && lstrcmpW(host,L"127.0.0.1") && lstrcmpW(host,L"[::1]") && lstrcmpW(host,L"::1")) goto done;
     session = g_http.open(L"超星学习助手/0.1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -301,6 +370,13 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     if (!cx_http_remaining(req, started, timeout) || !g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0)
         || !cx_http_remaining(req, started, timeout) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
     if (!g_http.query(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &statusSize, NULL)) { cx_error(error, errorCap, L"扩展服务返回状态未知。"); goto done; }
+    if (scriptAddressProbe) {
+        WCHAR marker[32] = {0}; DWORD markerSize = sizeof(marker);
+        ok = status == 204 && g_http.query(req, WINHTTP_QUERY_CUSTOM, L"X-Tiku-Script-Address", marker, &markerSize, NULL)
+            && !lstrcmpW(marker, L"available");
+        if (!ok) cx_error(error, errorCap, L"此脚本地址当前不可用，或题库服务尚未支持地址检测。");
+        goto done;
+    }
     cap = bodyLimit ? bodyLimit : (8UL * 1024UL * 1024UL); body = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)cap + 1); if (!body) { cx_error(error, errorCap, L"内存不足。"); goto done; }
     used = 0;
     for (;;) { if (!cx_http_remaining(req, started, timeout) || !g_http.read(req, body + used, cap + 1 - used, &got)) { cx_error(error, errorCap, L"读取扩展服务响应失败或超时。"); goto done; } if (!got) break; used += got; if (used > cap) { cx_error(error, errorCap, L"扩展服务响应过大。"); goto done; } }
@@ -315,6 +391,13 @@ done:
     if (deadline.done) CloseHandle(deadline.done);
     if (conn) g_http.close(conn); if (session) g_http.close(session);
     if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
+}
+static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
+    return cx_http_url_internal(base, path, method, auth, runIdentity, json, timeout, bodyLimit, reply, error, errorCap, FALSE);
+}
+BOOL cx_adapter_script_address_check(const WCHAR *address, WCHAR *error, DWORD errorCap) {
+    CX_ADAPTER_REPLY unusedReply;
+    return cx_http_url_internal(address, NULL, L"HEAD", NULL, NULL, NULL, 5000, 0, &unusedReply, error, errorCap, TRUE);
 }
 BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, NULL, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
 BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const WCHAR *identity, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, identity, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }

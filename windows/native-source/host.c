@@ -3456,6 +3456,23 @@ done:
     if (jsonWide) { SecureZeroMemory(jsonWide, (CX_OPTIONS_JSON_CAP + 256) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, jsonWide); }
     h_exit_code = 0; return ok;
 }
+static int h_script_address_diagnostics(const WCHAR *input) {
+    CX_HOME_CONFIG *config;
+    BOOL ok;
+    if (input && lstrlenW(input) >= CX_HOME_ADAPTER_URL_CAP) {
+        h_print(L"脚本 URL 或命令过长。"); return 2;
+    }
+    config = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*config));
+    if (!config) return 1;
+    cx_home_config_init(config);
+    if (input) lstrcpyW(config->diagnosticScriptInput, input);
+    ok = cx_home_run(&h_base_options, config, NULL, h_main_error, HOST_ERROR_CAP);
+    cx_home_config_clear(config);
+    HeapFree(GetProcessHeap(), 0, config);
+    if (!ok && !h_base_options.quiet) h_print(h_main_error);
+    return ok ? 0 : 1;
+}
+
 /* 命令行里是否带 --console（选项尚未解析，先按原始命令行判断）。 */
 static BOOL h_wants_console(void) {
     const WCHAR *cmd = GetCommandLineW();
@@ -3498,8 +3515,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     LPWSTR *argv; int argc, argument; BOOL ok, elevated = FALSE; WSADATA data; (void)instance; (void)previous; (void)commandLine; (void)show;
     h_zero(h_main_error, sizeof(h_main_error)); h_zero(h_exe_path, sizeof(h_exe_path)); GetModuleFileNameW(NULL, h_exe_path, HOST_PATH_CAP);
     cx_options_init(&h_base_options); cx_options_init(&h_cli_options); cx_options_init(&h_config_options); cx_options_init(&h_json_options);
-    if (!cx_options_load_default(&h_base_options, h_exe_path, h_main_error, HOST_ERROR_CAP)) return 2;
     argv = CommandLineToArgvW(GetCommandLineW(), &argc); if (!argv) return 2;
+    if ((argc == 2 || argc == 3) && h_equal(argv[1], L"--script-url")) {
+        int result = h_script_address_diagnostics(argc == 3 ? argv[2] : NULL);
+        LocalFree(argv);
+        return result;
+    }
+    if (!cx_options_load_default(&h_base_options, h_exe_path, h_main_error, HOST_ERROR_CAP)) { LocalFree(argv); return 2; }
     ok = cx_options_parse_cli(&h_cli_options, argc - 1, argv + 1, h_main_error, HOST_ERROR_CAP);
     if (!ok) { if (!h_cli_options.quiet) h_print(h_main_error); LocalFree(argv); return 2; }
     /* A double-click must allow choosing a client even when defaults name one. */
@@ -3577,6 +3599,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "      --wipe-retries <1-20>（默认 5） --wipe-retry-delay <50-5000 ms>（默认 200）\n"
     "      --wipe-runtime-retry|--no-wipe-runtime-retry --wipe-runtime-interval <1-86400 秒>（默认 30）\n"
             "  无参数启动显示首页，可创建 Edge/Chrome 临时会话，或进入考试客户端选择窗口。\n"
+            "  直接启动参数会打开脚本地址测试窗口，可粘贴 URL 或简短 PowerShell 命令。\n"
+            "  --script-url [URL]（打开测试窗口；提供地址时自动检测，不启动客户端）\n"
             "  浏览器扩展仅从 tikuAdapter 在线获取；关闭临时会话后清理资料。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
@@ -3692,11 +3716,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     /* 静默场景启动后会把自身改名为 .cxdel；提权重启必须指向仍然存在的镜像。 */
     const WCHAR *h_restart_path = h_silent_parked[0] ? h_silent_parked : h_exe_path;
-    /* This legacy direct path has no grant from the authenticated home session. Read-only tools remain available. */
-    if ((!h_default_gui || h_base_options.attachPortSet) && (!h_base_options.listClients || h_base_options.attachPortSet)) {
-        if (!h_base_options.quiet) h_print(L"Direct exam launch requires a verified, active script session in the owned launcher.");
+    if (h_base_options.attachPortSet) {
+        if (!h_base_options.quiet) h_print(L"附加启动需要经正式脚本授权的客户端流程。");
         return 1;
     }
+    /* A direct invocation stays open for diagnostics. It never consumes a
+       bootstrap ticket or reaches h_run's client-launch path. */
+    if (!h_default_gui && !h_base_options.listClients) return h_script_address_diagnostics(NULL);
     if (h_base_options.elevateOnStart && !h_base_options.listClients && !h_base_options.attachPortSet) {
         DWORD childCode = 1;
         if (!h_base_options.elevated && !cx_elevation_query(&elevated)) {
