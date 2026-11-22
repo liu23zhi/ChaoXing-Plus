@@ -88,9 +88,11 @@ async function createVideoMonitor(mod) {
   runInNewContext(script, {
     ...mod,
     doc,
+    setting: { enableAnswer: false, videoQuizStrategy: 'ignore' },
     attachment: { jobid: 'video-1', property: { name: '木雕' } },
     CXAnalyses: { getCurrentChapterStayKey: () => 'chapter-1' },
     buildChapterCorrelationId: () => 'chapter-1:video-1',
+    mediaCorrelationId: 'chapter-1:video-1',
     Date: { now: () => now },
     shouldWaitAfterVideoRouteSwitch: (switchedAt) => mod.shouldWaitAfterVideoRouteSwitch(switchedAt, now),
     logDebug: (level, title, details) => logs.push({ level, title, details }),

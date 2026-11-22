@@ -34,7 +34,7 @@ const THEME = {
 };
 
 /** 摘要端点（`/api/service-status/summary`）的真实响应形状 —— 无 points。 */
-function summaryResponse({ available = true, successRate = 0.98, retained = 120, totalRequests = 1200, failedRequests = 24, avgLatencyMs = 210, restartedAt = '2026-11-14T01:00:00+08:00' } = {}) {
+function summaryResponse({ available = true, successRate = 0.98, retained = 120, totalRequests = 1200, failedRequests = 24, avgLatencyMs = 210, restartedAt = '2026-11-14T01:00:00+08:00', searchTotalRequests = 100, searchSuccessRequests = 98, searchAvgLatencyMs = 210, searchSamples = 5 } = {}) {
   return {
     schemaVersion: 1,
     status: available ? 'healthy' : 'unknown',
@@ -47,7 +47,16 @@ function summaryResponse({ available = true, successRate = 0.98, retained = 120,
     windowMinutes: 5,
     retained,
     capacity: 1440,
-    restartedAt
+    restartedAt,
+    endpoints: {
+      search: {
+        totalRequests: searchTotalRequests,
+        successRequests: searchSuccessRequests,
+        avgLatencyMs: searchAvgLatencyMs,
+        samples: searchSamples
+      },
+      other: { totalRequests: 1100, successRequests: 1098, avgLatencyMs: 120, samples: 5 }
+    }
   };
 }
 
@@ -118,7 +127,7 @@ test('判据③ 空 points 归一化成 kind=empty，且 buckets 是空数组（
     '绝不能出现 successRate === 0（那会渲染成「全部失败」暗红）');
 });
 
-test('判据③ 渲染层：empty 不建任何格子，显示「暂无采样数据」', async () => {
+test('判据③ 渲染层：无搜题分桶时显示暂无搜题状态，不拿全站状态顶替', async () => {
   const { panel } = await loadModules();
   const snapshot = panel.normalizeServiceStatusSnapshot(backendResponse({ points: [], retained: 0 }));
 
@@ -128,15 +137,12 @@ test('判据③ 渲染层：empty 不建任何格子，显示「暂无采样数�
     assert.equal(section.dataset.cxStatusKind, 'empty');
     assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0,
       'empty 必须渲染 0 个格子，不是 288 也不是 1440');
-    assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 0, 'empty 不建色带');
+    assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 0, '没有搜题摘要时不伪造色带');
     assert.equal(section.querySelectorAll('[data-cx-status-minutes]').length, 0, 'empty 不建逐分钟列表');
-    assert.ok(section.querySelector('[data-cx-status-notice="empty"]'), '必须有 empty 说明卡片');
-    assert.match(section.textContentAll, /暂无采样数据/);
-    // 不能断言具体时刻：fixture 用 2026-11-14T01:00:00+08:00，渲染成本地时刻后
-    // 在 UTC+8 是 01:00、在 UTC 是前一天 17:00 —— 硬编码 /01:00/ 会让这条用例
-    // 「本地绿 CI 红」（CI run 43582035077 实测：actual 里是「服务自 17:00 起」）。
-    // 断言「有时间」这件事本身，而不是某个具体时刻。
-    assert.match(section.textContentAll, /\d{1,2}:\d{2}/, '必须显示「自某时刻起」的时间');
+    assert.equal(section.dataset.cxStatusMode, 'search');
+    assert.match(section.textContentAll, /搜题接口/);
+    assert.match(section.textContentAll, /未提供搜题接口统计/);
+    assert.doesNotMatch(section.textContentAll, /服务自 .*起开始采样/);
   });
 });
 
@@ -164,7 +170,6 @@ test('判据② 403 归一化成 kind=rejected，渲染「无权查看」且不�
     assert.equal(section.dataset.cxStatusKind, 'rejected');
     assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0, '403 不得渲染任何格子');
     assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 0, '403 不得渲染色带');
-    assert.ok(section.querySelector('[data-cx-status-notice="forbidden"]'));
     assert.match(section.textContentAll, /无权查看/);
     // 反向断言：403 不能被说成「异常」或「全部失败」，否则用户以为服务挂了。
     assert.equal(/全部失败/.test(section.textContentAll), false, '403 不得出现「全部失败」');
@@ -261,7 +266,7 @@ test('★(b) 没配 key → kind=no-token，且**不发请求**', async () => {
   await withMinimalDom(() => {
     const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: Date.now() });
     assert.equal(section.dataset.cxStatusKind, 'no-token');
-    assert.ok(section.querySelector('[data-cx-status-notice="no-token"]'));
+    assert.ok(section.querySelector('[data-cx-status-dot="未配置访问令牌"]'));
     assert.match(section.textContentAll, /未配置访问令牌/);
     assert.match(section.textContentAll, /题库配置/, '必须指向具体去哪填');
   });
@@ -392,7 +397,7 @@ test('判据④ 取数失败保留旧快照；下一次成功能回到正常', a
 // 判据⑤：正常数据 → 288 格（既有 11 档配色不回归）
 // ---------------------------------------------------------------------------
 
-test('判据⑤ 正常 1440 点 → 288 格，且分档仍走 11 档配色', async () => {
+test('普通状态页面不展示管理员逐分钟曲线或全站请求数据', async () => {
   const { panel, http } = await loadModules();
 
   const nowMs = Date.parse('2026-11-14T01:30:00+08:00');
@@ -409,29 +414,11 @@ test('判据⑤ 正常 1440 点 → 288 格，且分档仍走 11 档配色', asy
 
   await withMinimalDom(() => {
     const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: nowMs });
-    const cells = section.querySelectorAll('[data-cx-status-cell]');
-    assert.equal(cells.length, 288, `正常数据必须渲染 288 格，实际 ${cells.length}`);
-
-    // 每一格的 tier 必须是 11 档 + none 里的一个（既有配色不回归）。
-    const allowed = new Set([
-      't100', 't99', 't97', 't95', 't90', 't80', 't70', 't50', 't30', 't10', 't0', 'none'
-    ]);
-    for (const cell of cells) {
-      assert.equal(allowed.has(cell.dataset.cxStatusTier), true,
-        `未知档位 ${cell.dataset.cxStatusTier}（11 档配色被破坏）`);
-    }
-    // 数据全是「全成功」→ 覆盖到样本的格子必须落在绿色系的档位（t100/t99/t97）。
-    // 这条同时证明「tier 是真算出来的」而不是统一写死某个值。
-    const greenTiers = new Set(['t100', 't99', 't97']);
-    const dataCells = cells.filter((cell) => cell.dataset.cxStatusTier !== 'none');
-    assert.equal(dataCells.length > 0, true, '1440 点必须覆盖到格子');
-    for (const cell of dataCells) {
-      assert.equal(greenTiers.has(cell.dataset.cxStatusTier), true,
-        `全成功数据应落绿色系档位，实际 ${cell.dataset.cxStatusTier}`);
-    }
-    // 反向：不能出现任何「全部失败」暗红格（那说明 0 被当成了有数据）。
-    assert.equal(cells.filter((cell) => cell.dataset.cxStatusTier === 't0').length, 0,
-      '全成功数据下不得出现 t0（全失败）');
+    assert.equal(section.dataset.cxStatusMode, 'search');
+    assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0);
+    assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 0, '管理员响应缺搜题摘要时不伪造色带');
+    assert.match(section.textContentAll, /未提供搜题接口统计/);
+    assert.doesNotMatch(section.textContentAll, /1440|最近每分钟|24 小时预览/);
   });
 });
 
@@ -485,6 +472,105 @@ test('fetcher 在 baseurl 为空时静默返回 null（未配置题库地址不�
   assert.equal(called, false, '没 baseurl 时不应发请求');
 });
 
+test('搜题历史取自独立searchPoints，当前窗口无请求仍保留24小时历史', async () => {
+  const { panel, http } = await loadModules();
+  const now = Date.parse('2026-11-20T13:17:00+08:00');
+  const searchPoints = [{ minute: Math.floor((now - 3600000) / 60000), totalRequests: 10, successRequests: 7 }];
+  const seen = [];
+  const fetcher = http.createServiceStatusHttpFetcher({
+    baseurl: 'https://tiku.example.com', accessKey: 'tk-test', includeSearchHistory: true,
+    requester: async (url, init) => {
+      seen.push({ url, init });
+      return url.endsWith('/series') ? { searchPoints, points: [{ minute: searchPoints[0].minute, totalRequests: 999, successRequests: 999 }] }
+        : summaryResponse({ available: false, searchTotalRequests: 0, searchSuccessRequests: 0 });
+    }
+  });
+  const snapshot = await fetcher({ now });
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen.map(item => item.url).sort(), ['https://tiku.example.com/api/service-status/series', 'https://tiku.example.com/api/service-status/summary']);
+  assert.ok(seen.every(item => item.init.headers.Authorization === 'Bearer tk-test'));
+  assert.equal(snapshot.search.totalRequests, 0);
+  assert.equal(snapshot.searchHistory[0].requests, 10);
+  assert.equal(snapshot.searchHistory[0].succeeded, 7);
+  const totals = panel.buildServiceStatusBuckets(snapshot.searchHistory, now + panel.STATUS_BUCKET_MS).reduce((n, bucket) => n + bucket.requests, 0);
+  assert.equal(totals, 10, '全站999次请求不得进入搜题色带');
+});
+
+test('搜题历史失败或旧接口缺字段时不伪造；摘要和历史网络失败独立处理', async () => {
+  const { http } = await loadModules();
+  const now = Date.now();
+  for (const series of [null, { points: [{ minute: Math.floor(now / 60000), totalRequests: 999, successRequests: 0 }] }]) {
+    const fetcher = http.createServiceStatusHttpFetcher({
+      baseurl: 'https://tiku.example.com', accessKey: 'tk-test', includeSearchHistory: true,
+      requester: async url => {
+        if (url.endsWith('/series')) {
+          if (series === null) throw new Error('series offline');
+          return series;
+        }
+        return summaryResponse();
+      }
+    });
+    const snapshot = await fetcher({ now });
+    assert.equal(snapshot.search.totalRequests > 0, true);
+    assert.equal(snapshot.searchHistory, null);
+  }
+  const fetcher = http.createServiceStatusHttpFetcher({
+    baseurl: 'https://tiku.example.com', accessKey: 'tk-test', includeSearchHistory: true,
+    requester: async url => {
+      if (url.endsWith('/summary')) throw new Error('summary offline');
+      return { searchPoints: [{ minute: Math.floor(now / 60000), totalRequests: 5, successRequests: 5 }] };
+    }
+  });
+  const snapshot = await fetcher({ now });
+  assert.equal(snapshot.search, null);
+  assert.equal(snapshot.searchHistory[0].requests, 5);
+});
+
+test('搜题24小时色带为单行288格，当前5分钟立即显色，无请求与不可用均用灰色但有不同说明', async () => {
+  const { panel } = await loadModules();
+  const now = Date.parse('2026-11-20T13:17:00+08:00');
+  const minute = Math.floor(now / 60000);
+  const history = [
+    { minute: minute - 1, totalRequests: 2, successRequests: 2 },
+    { minute: minute - 2, totalRequests: 8, successRequests: 0 },
+    { minute: minute - 6, totalRequests: 3, successRequests: 0 },
+    { minute: minute - 11, totalRequests: 4, successRequests: 4 },
+    { minute: minute - 1441, totalRequests: 999, successRequests: 999 }
+  ];
+  await withMinimalDom(async () => {
+    const snapshot = panel.normalizeServiceStatusSnapshot({ ...summaryResponse({ searchTotalRequests: 0 }), searchPoints: history });
+    const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now, onRequestRefresh() {} });
+    const band = section.querySelector('[data-cx-status-band]');
+    assert.ok(band);
+    assert.equal(band.style.flexWrap, 'nowrap');
+    const cells = band.querySelectorAll('[data-cx-status-bucket]');
+    assert.equal(cells.length, 288);
+    assert.equal(cells.at(-1).style.background, panel.resolveServiceStatusTier(0.2).color, '当前部分窗口按成功总数/请求总数加权');
+    assert.equal(cells.at(-2).style.background, '#7f1d1d');
+    assert.equal(cells.at(-3).style.background, panel.resolveServiceStatusTier(1).color);
+    assert.equal(cells.at(-4).style.background, '#d1d5db');
+    assert.match(section.textContentAll, /最近 24 小时/);
+    assert.doesNotMatch(section.textContentAll, /999/);
+    band.onkeydown({ key: 'Home', preventDefault() {} });
+    assert.match(section.querySelector('[data-cx-status-bucket-detail]').textContent, /没有搜题请求/);
+    band.onkeydown({ key: 'End', preventDefault() {} });
+    assert.match(section.querySelector('[data-cx-status-bucket-detail]').textContent, /20.*10 次/);
+    const missing = panel.createStatusPanelSection({ theme: THEME, snapshot: panel.normalizeServiceStatusSnapshot(summaryResponse()), now });
+    assert.equal(missing.querySelectorAll('[data-cx-status-band]').length, 1);
+    const missingCells = missing.querySelectorAll('[data-cx-status-bucket]');
+    assert.equal(missingCells.length, 288);
+    assert.equal([...missingCells].every(cell => cell.style.background === '#d1d5db'), true,
+      '历史暂不可用时所有格子必须是灰色');
+    assert.match(missing.textContentAll, /历史暂不可用/);
+    const empty = panel.createStatusPanelSection({ theme: THEME, snapshot: panel.normalizeServiceStatusSnapshot({ ...summaryResponse(), searchPoints: [] }), now });
+    const emptyCells = empty.querySelectorAll('[data-cx-status-bucket]');
+    assert.equal(emptyCells.length, 288);
+    assert.equal([...emptyCells].every(cell => cell.style.background === '#d1d5db'), true,
+      '没有搜题请求时所有格子必须是灰色');
+    assert.match(empty.textContentAll, /尚未采集/);
+  });
+});
+
 test('fetcher 把 endpoint 拼成绝对 URL，且不依赖默认常量', async () => {
   const { http } = await loadModules();
   const seen = [];
@@ -503,14 +589,14 @@ test('fetcher 把 endpoint 拼成绝对 URL，且不依赖默认常量', async (
 // successRateAvailable：区分「全失败」与「没请求」（服务端权威字段）
 // ---------------------------------------------------------------------------
 
-test('★ successRateAvailable=false（没请求）→ kind=empty；不画格子', async () => {
+test('★ 无搜题请求样本时只显示搜题接口暂无采样', async () => {
   const { panel, http } = await loadModules();
 
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
     endpoint: '/api/service-status/summary',
-    requester: async () => summaryResponse({ available: false, successRate: 0, retained: 0, totalRequests: 0, failedRequests: 0 })
+    requester: async () => summaryResponse({ available: false, successRate: 0, retained: 0, totalRequests: 0, failedRequests: 0, searchTotalRequests: 0, searchSuccessRequests: 0, searchSamples: 0 })
   });
   const snapshot = await fetcher({ now: Date.now() });
 
@@ -520,7 +606,7 @@ test('★ successRateAvailable=false（没请求）→ kind=empty；不画格子
   await withMinimalDom(() => {
     const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: Date.now() });
     assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0);
-    assert.match(section.textContentAll, /暂无采样数据/);
+    assert.match(section.textContentAll, /尚未采集到搜题接口状态数据/);
   });
 });
 
@@ -532,7 +618,7 @@ test('★ successRateAvailable=true 且 successRate=0（全失败）→ kind=ok�
     baseurl: 'https://tiku.example.com',
     endpoint: '/api/service-status/summary',
     // 100 请求 0 成功 —— 这是「全失败」，必须报警感，不能当成「没数据」。
-    requester: async () => summaryResponse({ available: true, successRate: 0, retained: 5, totalRequests: 100, failedRequests: 100 })
+    requester: async () => summaryResponse({ available: true, successRate: 0, retained: 5, totalRequests: 100, failedRequests: 100, searchTotalRequests: 10, searchSuccessRequests: 0 })
   });
   const snapshot = await fetcher({ now: Date.now() });
 
@@ -547,7 +633,8 @@ test('★ successRateAvailable=true 且 successRate=0（全失败）→ kind=ok�
     assert.match(section.textContentAll, /0%/);
     assert.equal(/窗口内无请求/.test(section.textContentAll), false,
       '全失败不能被说成「窗口内无请求」');
-    assert.match(section.textContentAll, /100/, '失败数必须显示出来');
+    assert.match(section.textContentAll, /0 次成功 \/ 10 次请求/);
+    assert.doesNotMatch(section.textContentAll, /100 次请求/, '不显示其他接口或全站请求数量');
   });
 });
 
@@ -556,10 +643,10 @@ test('★ 两个语义在界面上必须可区分（全失败 vs 没请求，文
   const nowMs = Date.now();
 
   const allFailed = panel.normalizeServiceStatusSnapshot(summaryResponse({
-    available: true, successRate: 0, retained: 5, totalRequests: 100, failedRequests: 100
+    available: true, successRate: 0, retained: 5, totalRequests: 100, failedRequests: 100, searchTotalRequests: 10, searchSuccessRequests: 0
   }));
   const noTraffic = panel.normalizeServiceStatusSnapshot(summaryResponse({
-    available: false, successRate: 0, retained: 0, totalRequests: 0, failedRequests: 0
+    available: false, successRate: 0, retained: 0, totalRequests: 0, failedRequests: 0, searchTotalRequests: 0, searchSuccessRequests: 0, searchSamples: 0
   }));
 
   assert.equal(allFailed.kind, 'ok');
@@ -577,14 +664,14 @@ test('★ 两个语义在界面上必须可区分（全失败 vs 没请求，文
 // summary 端点无 points → 摘要模式，不画曲线
 // ---------------------------------------------------------------------------
 
-test('★ summary 端点（无 points）→ 摘要模式：不渲染 288 格，改渲染聚合指标', async () => {
+test('★ 普通状态页只展示搜题接口统计，不渲染全站指标或时间曲线', async () => {
   const { panel, http } = await loadModules();
 
   const fetcher = http.createServiceStatusHttpFetcher({
     accessKey: 'tk-test',
     baseurl: 'https://tiku.example.com',
     endpoint: '/api/service-status/summary',
-    requester: async () => summaryResponse({ available: true, successRate: 0.98, retained: 120, totalRequests: 1200, failedRequests: 24, avgLatencyMs: 210 })
+    requester: async () => summaryResponse({ available: true, successRate: 0.98, retained: 120, totalRequests: 1200, failedRequests: 24, avgLatencyMs: 210, searchTotalRequests: 10, searchSuccessRequests: 8, searchAvgLatencyMs: 345 })
   });
   const snapshot = await fetcher({ now: Date.now() });
   assert.equal(snapshot.kind, 'ok');
@@ -592,24 +679,23 @@ test('★ summary 端点（无 points）→ 摘要模式：不渲染 288 格，�
 
   await withMinimalDom(() => {
     const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: Date.now() });
-    assert.equal(section.dataset.cxStatusMode, 'summary', '无 points 时必须标明 summary 模式');
+    assert.equal(section.dataset.cxStatusMode, 'search', '普通用户视图必须明确标为搜题接口状态');
     assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0,
       'summary 模式不得渲染任何色带格子（不能伪造曲线）');
-    assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 0);
+    assert.equal(section.querySelectorAll('[data-cx-status-band]').length, 1, '摘要接口缺历史时显示灰色搜题色带');
 
-    // 聚合指标必须真的渲染出来，且带口径说明（窗口内，不是累计）。
-    const metrics = section.querySelectorAll('[data-cx-status-metric]');
-    assert.ok(metrics.length >= 4, `摘要模式必须渲染聚合指标，实际 ${metrics.length} 项`);
-    assert.match(section.textContentAll, /成功率/);
-    assert.match(section.textContentAll, /98\.0%/);
-    assert.match(section.textContentAll, /210ms/);
-    assert.match(section.textContentAll, /1200/);
-    assert.match(section.textContentAll, /最近 5 分钟窗口/, '必须说明这是窗口内数字');
-    assert.match(section.textContentAll, /摘要视图/, '必须让用户知道这是摘要，不是曲线');
+    assert.match(section.textContentAll, /搜题接口/);
+    assert.ok(section.querySelector('[data-cx-status-dot="降级"]'), '状态应按搜题分桶计算，而不是按全站成功率');
+    assert.match(section.textContentAll, /80\.0%/);
+    assert.match(section.textContentAll, /345ms/);
+    assert.match(section.textContentAll, /8 次成功/);
+    assert.match(section.textContentAll, /10 次请求/);
+    assert.doesNotMatch(section.textContentAll, /1200|全站|当前窗口摘要|失败请求/);
+    assert.doesNotMatch(section.textContentAll, /98\.0%/, '全站 98% 不得替代搜题接口 80%');
   });
 });
 
-test('★ admin 端点（带 points）→ detail 模式，仍渲染 288 格（既有配色不回归）', async () => {
+test('★ 缺少搜题接口分桶时明确显示无数据，不回退到全站状态', async () => {
   const { panel } = await loadModules();
   const nowMs = Date.parse('2026-11-14T01:30:00+08:00');
   const snapshot = panel.normalizeServiceStatusSnapshot(
@@ -619,8 +705,9 @@ test('★ admin 端点（带 points）→ detail 模式，仍渲染 288 格（�
 
   await withMinimalDom(() => {
     const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: nowMs });
-    assert.equal(section.dataset.cxStatusMode, 'detail', '有 points 时必须标明 detail 模式');
-    assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 288);
+    assert.equal(section.dataset.cxStatusMode, 'search');
+    assert.equal(section.querySelectorAll('[data-cx-status-cell]').length, 0);
+    assert.match(section.textContentAll, /未提供搜题接口统计/);
   });
 });
 
@@ -631,6 +718,7 @@ test('fetcher 带 Authorization: Bearer <key>（AuthOrAccessToken 需要它才�
     baseurl: 'https://tiku.example.com',
     endpoint: '/api/service-status/summary',
     accessKey: 'tk-abc123',
+    scriptIdentity: 'fixture-session',
     requester: async (url, init) => { seen.push({ url, init }); return summaryResponse(); }
   });
   await fetcher({ now: Date.now() });
@@ -638,6 +726,7 @@ test('fetcher 带 Authorization: Bearer <key>（AuthOrAccessToken 需要它才�
   assert.equal(seen.length, 1);
   assert.equal(seen[0].init.headers.Authorization, 'Bearer tk-abc123',
     '必须带 Bearer，否则 AuthOrAccessToken 会回退到登录 JWT 分支 → 401');
+  assert.equal(seen[0].init.headers['X-Script-Identity'], 'fixture-session');
 });
 
 test('fetcher 在没配 key 时不发请求（所以也不会伪造空 Bearer）', async () => {

@@ -34,11 +34,8 @@ import {
   setServiceStatusFetcher
 } from './status-panel.js';
 import {
-  buildServiceStatusUrl,
   createServiceStatusHttpFetcher,
-  fetchServiceStatusRequester,
-  readHttpStatus,
-  SERVICE_STATUS_REQUEST_TIMEOUT_MS
+  fetchServiceStatusRequester
 } from './status-panel-http.js';
 import {
   DEFAULT_TIKU_BASE_URL,
@@ -47,7 +44,9 @@ import {
   createTikuAdapterAnswererWrapper,
   getTikuAdapterConfigProblem,
   isValidTikuAdapterBaseUrl,
-  resolveTikuAdapterBaseUrl
+  resolveTikuAdapterBaseUrl,
+  testTikuAdapterConfig,
+  type TikuAdapterConfig
 } from './tiku-adapter-config.js';
 
 export interface CommonWorkOptions {
@@ -807,76 +806,6 @@ export function getStoredTikuAdapterConfig() {
  * ⚠️ 失败与 403 都**不弹全局错误**：状态页是旁路展示，取数失败不能干扰答题。
  * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
  */
-/**
- * 探测题库地址与令牌是否可用（138 §5.3 的 P3）。
- *
- * # 为什么探测摘要端点而不是搜题接口
- *
- * `/api/service-status/summary` 是 AuthOrAccessToken 鉴权、只返回聚合数字，
- * **不消耗搜题额度**。用 `/search` 探测会真的走一次计费链路 —— 用户点一次「保存」
- * 就被扣一次钱，不可接受。
- *
- * 代价（如实记录）：探测通过只代表「地址通 + 令牌有效」，
- * **不代表搜题真的能出答案**（上游题库可能全挂）。要覆盖后者需要换端点并接受扣费。
- *
- * # 三态必须分开，不能糊成「成功/失败」
- *
- *   200        → 连接正常（附延迟）
- *   401 / 403  → 地址是通的，但**令牌不被接受** —— 用户动作是「换令牌」
- *   其它/网络   → 地址本身不可达 —— 用户动作是「检查地址、网络、服务是否启动」
- *
- * 这两种失败的用户动作完全相反，糊成一个「连接失败」等于让用户两个都要试。
- *
- * # 永不抛异常、永不阻断保存
- *
- * 本函数只返回一句给人看的话。任何异常都吞掉并转成文案 ——
- * 探测是**附加提示**，它失败不该影响「配置已保存」这个主结果。
- */
-async function probeTikuAdapter(baseurl: string, accessKey: string): Promise<string> {
-  const normalized = resolveTikuAdapterBaseUrl(baseurl, DEFAULT_TIKU_BASE_URL);
-  const url = buildServiceStatusUrl(normalized, '/api/service-status/summary');
-  if (!url) {
-    return '⚠️ 未填写题库地址，未做连通性检测。';
-  }
-  if (!String(accessKey ?? '').trim()) {
-    return '⚠️ 未填写令牌，未做连通性检测。';
-  }
-
-  const startedAt = Date.now();
-  const controller = typeof AbortController === 'function' ? new AbortController() : undefined;
-  const timer = controller ? setTimeout(() => controller.abort(), SERVICE_STATUS_REQUEST_TIMEOUT_MS) : undefined;
-  try {
-    // ⚠️ fetchServiceStatusRequester 在 `!response.ok` 时**抛异常**（不是返回 response），
-    // 且异常上带 status/serverMessage。所以成功路径只能到 2xx，
-    // 4xx/5xx 必须走 catch + readHttpStatus(error) 判定 —— 见 status-panel-http.ts:238。
-    // 第一版按「返回 response 再读 status」写，编译能过但 401 会被当成「网络不可达」，
-    // 用户会被引向「检查地址」而不是「换令牌」。
-    await fetchServiceStatusRequester(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${String(accessKey).trim()}` },
-      signal: controller?.signal
-    } as RequestInit);
-    return `✅ 连接正常（${Date.now() - startedAt}ms）。`;
-  } catch (error) {
-    const status = readHttpStatus(error);
-    if (status === 401) {
-      return '⚠️ 地址可达，但令牌未被接受（HTTP 401）。请到题库后台确认令牌是否有效或已被停用。';
-    }
-    if (status === 403) {
-      return '⚠️ 地址可达，但该令牌无权访问状态接口（HTTP 403）。';
-    }
-    if (status !== null && status >= 400) {
-      return `⚠️ 地址可达但返回异常（HTTP ${status}）。配置已保存，状态页可能显示旧数据。`;
-    }
-    const reason = error instanceof Error ? error.message : String(error);
-    return `⚠️ 无法连接题库地址（${reason}）。配置已保存，但搜题与状态页都会失败 —— 请检查地址、网络与服务是否启动。`;
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
-}
-
 function mountServiceStatusHttpFetcher() {
   const config = getStoredTikuAdapterConfig();
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL);
@@ -897,8 +826,10 @@ function mountServiceStatusHttpFetcher() {
       resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
+    includeSearchHistory: true,
     // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
-    accessKey: config.key
+    accessKey: config.key,
+    scriptIdentity: config.scriptIdentity
   }));
 }
 
@@ -2548,7 +2479,13 @@ function createTikuAdapterConfigSection() {
   });
   applyHintTextStyle(description);
 
-  header.append(title, description);
+  const guide = createElement('div', {
+    text: '题库地址留空会恢复默认地址；令牌必须填写。没有令牌时，请登录题库服务并在“访问令牌”页面创建或获取。'
+  });
+  applyHintTextStyle(guide);
+  guide.style.color = panelPinkTheme.subtle;
+
+  header.append(title, description, guide);
 
   const baseurlWrap = createElement('div');
   baseurlWrap.style.display = 'grid';
@@ -2573,26 +2510,143 @@ function createTikuAdapterConfigSection() {
   // 输入框统一外观：与设置区控件一致，触控目标 ≥ 32px。
   applyControlChrome(baseurlInput);
 
+  const readConfig = (): TikuAdapterConfig => {
+    const enteredBaseurl = baseurlInput.value.trim();
+    return {
+      // 空地址代表恢复默认题库地址；无效的非空地址保留给测试函数返回明确错误。
+      baseurl: resolveTikuAdapterBaseUrl(enteredBaseurl, DEFAULT_TIKU_BASE_URL) || enteredBaseurl,
+      key: keyInput.value.trim(),
+      scriptIdentity: getStoredTikuAdapterConfig().scriptIdentity
+    };
+  };
+
+  const getTokenManagementUrl = (baseurl: string): string => {
+    const normalized = resolveTikuAdapterBaseUrl(baseurl, DEFAULT_TIKU_BASE_URL);
+    return normalized ? `${normalized}/adapter/access-tokens` : '';
+  };
+
   const saveButton = createElement('button', { text: '保存' });
   applyActionButtonStyle(saveButton, 'primary');
   saveButton.onclick = async () => {
-    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, baseurlInput.value.trim());
-    setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, keyInput.value.trim());
-    // 保存后立刻重建状态页 fetcher（138 §5.2 的 P1）：
-    // mountServiceStatusHttpFetcher 读的是「调用那一刻」的配置，不重建的话
-    // 状态 Tab 会一直请求保存前的旧地址 —— 这正是用户报的那个缺陷。
-    // 放在两次 set 之后：先落盘再重建，避免 fetcher 读到半截配置。
-    // try/catch 与 onrender 里那处一致：重建失败只该让状态页停在旧快照，
-    // 不能把「保存成功」这个结果带塌。
+    if (saveButton.disabled) return;
+    saveButton.disabled = true;
+    const enteredBaseurl = baseurlInput.value.trim();
+    const config = readConfig();
+    const missingKey = !config.key;
+    const tokenUrl = getTokenManagementUrl(config.baseurl);
     try {
-      mountServiceStatusHttpFetcher();
-    } catch {
-      // ignore: 状态页降级，配置已保存。
+      if (!enteredBaseurl && config.baseurl) baseurlInput.value = config.baseurl;
+      setRuntimeStoreValueFromPanel(TIKU_ADAPTER_BASEURL_KEY, config.baseurl);
+      setRuntimeStoreValueFromPanel(TIKU_ADAPTER_KEY_KEY, config.key);
+      // 两项配置落盘后再重建状态页 fetcher，避免继续请求旧地址。
+      try {
+        mountServiceStatusHttpFetcher();
+      } catch {
+        // 状态页降级不影响配置保存和连接测试。
+      }
+      // 令牌为空时保存配置但不发起测试请求；默认地址仍可用于后续获取令牌。
+      const tested = config.key ? await runConfigTest(config) : undefined;
+      const defaultBaseurlNotice = !enteredBaseurl && config.baseurl
+        ? `\n\n已恢复默认题库地址：${config.baseurl}` : '';
+      const missingKeyNotice = missingKey
+        ? `\n\n⚠️ 未填写访问令牌，题库搜题可能无法正常使用。${tokenUrl
+          ? `\n请登录题库服务并前往以下地址获取令牌：\n${tokenUrl}`
+          : '\n请先配置有效的题库地址，再获取令牌。'}` : '';
+      await $modal.alert({
+        content: `题库配置已保存。${defaultBaseurlNotice}${missingKeyNotice}${tested
+          ? `\n\n连接测试结果\n${tested.content}` : ''}`,
+        icon: tested?.icon ?? (missingKey ? 'warning' : 'success')
+      });
+    } finally {
+      saveButton.disabled = false;
     }
-    // 连通性探测（P3）：只提示，不阻断保存 —— 用户可能正在换服务器，
-    // 地址暂时不可达是正常的，阻断会让他没法保存。
-    const probe = await probeTikuAdapter(baseurlInput.value.trim(), keyInput.value.trim());
-    await $modal.alert(`题库配置已保存。\n\n${probe}`);
+  };
+
+  const testButton = createElement('button', { text: '测试' });
+  applyActionButtonStyle(testButton, 'default');
+  const testResult = createElement('div');
+  testResult.dataset.cxTikuTestResult = 'true';
+  testResult.setAttribute('role', 'status');
+  testResult.setAttribute('aria-live', 'polite');
+  testResult.hidden = true;
+  applyHintTextStyle(testResult);
+  testResult.style.padding = '10px 12px';
+  testResult.style.borderRadius = '9px';
+  testResult.style.whiteSpace = 'pre-line';
+  testResult.style.overflowWrap = 'anywhere';
+  let testRevision = 0;
+  const clearTestResult = () => {
+    testRevision += 1;
+    testResult.hidden = true;
+    testResult.textContent = '';
+  };
+  async function runConfigTest(config: TikuAdapterConfig) {
+    const revision = ++testRevision;
+    saveButton.disabled = true;
+    testButton.disabled = true;
+    testButton.textContent = '测试中…';
+    testResult.hidden = false;
+    testResult.textContent = '正在测试当前填写的题库地址与令牌…';
+    testResult.style.color = panelPinkTheme.infoFg;
+    testResult.style.background = panelPinkTheme.infoBg;
+    try {
+      // 令牌为空时只更新本地提示，不发出没有鉴权意义的请求。
+      const result = config.key
+        ? await testTikuAdapterConfig({ ...config })
+        : { state: 'invalid-config' as const, problem: 'missing-key' as const };
+      const existingDevicesOverLimit = result.state === 'ok'
+        && result.deviceLimit !== undefined && result.deviceLimit > 0
+        && result.deviceUsed !== undefined && result.deviceUsed > result.deviceLimit;
+      const content = result.state === 'ok'
+        ? `✅ 服务器正常，访问令牌有效（${result.latencyMs ?? 0}ms）。${existingDevicesOverLimit
+          ? `\n⚠️ 当前已绑定 ${result.deviceUsed} 台，超过设备上限 ${result.deviceLimit} 台。本机可继续使用，新设备将受限；请在个人中心移除不用的设备。` : ''}`
+        : result.state === 'invalid-key'
+          ? `⚠️ 服务器正常，但访问令牌无效或无权使用（HTTP ${result.httpStatus}）。`
+          : result.state === 'device-limit-exceeded'
+            ? `⚠️ 服务器正常，但设备数量已达上限${result.deviceUsed !== undefined && result.deviceLimit !== undefined
+              ? `（已用 ${result.deviceUsed} 台，上限 ${result.deviceLimit} 台）` : ''}。请在个人中心移除不用的设备后重试。`
+            : result.state === 'rate-limited'
+              ? '⚠️ 服务器正常，但校验过于频繁，暂时无法确认令牌状态（HTTP 429）。请稍后再试。'
+              : result.state === 'invalid-config'
+                ? result.problem === 'missing-key'
+                  ? '请先填写访问令牌。'
+                  : '请先填写有效的题库地址。'
+                : result.httpStatus
+                  ? `❌ 服务器异常或接口不可用（HTTP ${result.httpStatus}）。`
+                  : '❌ 无法连接服务器，或连接被浏览器网络策略拦截。请检查地址、网络、服务状态和 CORS 配置。';
+      const tone = result.state === 'ok' && !existingDevicesOverLimit ? 'success'
+        : result.state === 'server-error' ? 'danger' : 'warning';
+      if (revision === testRevision) {
+        testResult.textContent = content;
+        testResult.style.color = panelPinkTheme[`${tone}Fg`];
+        testResult.style.background = panelPinkTheme[`${tone}Bg`];
+      }
+      return { content, icon: tone === 'success' ? 'success' as const : 'warning' as const };
+    } catch {
+      const content = '测试未完成，请稍后重试。';
+      if (revision === testRevision) {
+        testResult.textContent = content;
+        testResult.style.color = panelPinkTheme.dangerFg;
+        testResult.style.background = panelPinkTheme.dangerBg;
+      }
+      return { content, icon: 'warning' as const };
+    } finally {
+      saveButton.disabled = false;
+      testButton.disabled = false;
+      testButton.textContent = '测试';
+    }
+  }
+  testButton.onclick = async () => {
+    if (testButton.disabled || saveButton.disabled) return;
+    const config = readConfig();
+    await runConfigTest(config);
+    if (!config.key) {
+      const tokenUrl = getTokenManagementUrl(config.baseurl);
+      await $modal.alert({
+        content: `当前未填写访问令牌，无法验证题库权限。\n\n请登录题库服务并前往以下地址创建或获取令牌：\n${tokenUrl || '请先填写有效的题库地址。'}\n\n获取令牌后粘贴回“令牌”输入框，再点击“测试”。`,
+        icon: 'warning'
+      });
+    }
   };
 
   const jumpButton = createElement('button', { text: '跳转' });
@@ -2624,15 +2678,17 @@ function createTikuAdapterConfigSection() {
   keyInput.value = stored.key;
   keyInput.placeholder = '请输入访问令牌';
   applyControlChrome(keyInput);
+  baseurlInput.oninput = clearTestResult;
+  keyInput.oninput = clearTestResult;
 
   const actionsRow = createElement('div');
   actionsRow.style.display = 'flex';
   actionsRow.style.gap = '8px';
   actionsRow.style.flexWrap = 'wrap';
-  actionsRow.append(saveButton, jumpButton);
+  actionsRow.append(saveButton, testButton, jumpButton);
 
   keyWrap.append(keyLabel, keyInput);
-  container.append(header, baseurlWrap, keyWrap, actionsRow);
+  container.append(header, baseurlWrap, keyWrap, actionsRow, testResult);
   return container;
 }
 
@@ -3245,7 +3301,7 @@ function createWorkResultsPanel() {
   const tabLabels: Record<WorkResultsPanelTab, string> = {
     overview: '结果',
     tiku: '题库配置',
-    status: '状态',
+    status: '题库状态',
     cache: '缓存',
     study: '学习设置'
   };

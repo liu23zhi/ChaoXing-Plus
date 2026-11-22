@@ -19,13 +19,53 @@ trap on_error ERR
 
 if ! command -v node >/dev/null 2>&1; then
   echo "错误：未安装 Node.js，或 Node.js 不在 PATH 中。" >&2
-  echo "请安装 Node.js 12 或更高版本后重新运行此脚本。" >&2
+  echo "请在当前环境安装 Node.js 20.19+ 或 22.12+ 后重新运行此脚本。" >&2
   exit 1
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "错误：未安装 npm，或 npm 不在 PATH 中。" >&2
   echo "请随 Node.js 一起安装 npm 后重新运行此脚本。" >&2
+  exit 1
+fi
+
+NODE_PLATFORM="$(node -p 'process.platform')"
+NODE_VERSION="$(node -p 'process.versions.node')"
+if ! node -e '
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  const supported = major > 22 || (major === 22 && minor >= 12) || (major === 20 && minor >= 19);
+  process.exit(supported ? 0 : 1);
+'; then
+  echo "错误：当前 Node.js 为 ${NODE_VERSION}。Vite 8 需要 Node.js 20.19+ 或 22.12+。" >&2
+  echo "请在 WSL 中执行以下命令升级，并确保 node/npm 都来自 WSL：" >&2
+  echo "  # 也可以使用 apt（Ubuntu/Debian）：" >&2
+  echo "  sudo apt update && sudo apt install -y curl ca-certificates" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+  echo "  sudo apt install -y nodejs" >&2
+  echo "  hash -r && node --version && npm --version && command -v node && command -v npm" >&2
+  echo "  # 或使用 nvm：" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash" >&2
+  echo "  source \"\$HOME/.nvm/nvm.sh\"" >&2
+  echo "  nvm install 22 && nvm alias default 22 && nvm use 22" >&2
+  echo "  hash -r && node --version && npm --version && command -v npm" >&2
+  echo "确认 command -v npm 不再输出 /mnt/c/.../nodejs/npm 后，重新执行：" >&2
+  echo "  ./build-browser.sh" >&2
+  exit 1
+fi
+
+NPM_PATH="$(command -v npm)"
+if [[ "$NODE_PLATFORM" == "linux" && "$NPM_PATH" == /mnt/* ]]; then
+  echo "错误：当前使用的是 WSL/Linux Node.js ${NODE_VERSION}，但 npm 来自 Windows：${NPM_PATH}" >&2
+  echo "请先执行：" >&2
+  echo "  sudo apt update && sudo apt install -y curl ca-certificates" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+  echo "  sudo apt install -y nodejs" >&2
+  echo "  hash -r && command -v node && command -v npm" >&2
+  echo "也可以使用 nvm：" >&2
+  echo "  source \"\$HOME/.nvm/nvm.sh\" && nvm install 22 && nvm use 22" >&2
+  echo "  hash -r && command -v node && command -v npm" >&2
+  echo "确认 node/npm 都来自 \$HOME/.nvm 后，重新执行：" >&2
+  echo "  ./build-browser.sh" >&2
   exit 1
 fi
 

@@ -1,5 +1,5 @@
 import md5 from 'md5';
-import Typr from 'typr.js';
+import { Font } from '@fredli74/typr';
 import {
   createDefaultQuestionResolver,
   DEFAULT_WORKER_THREAD_COUNT,
@@ -509,7 +509,60 @@ export type Job = {
   func: ((finalAttempt?: boolean) => Promise<JobExecutionResult | void>) | undefined;
   expired?: boolean;
   terminalExpired?: boolean;
+  executionState?: 'queued' | 'running' | 'returned' | 'threw';
+  executionStartedAt?: number;
+  executionEndedAt?: number;
+  executionErrorName?: string;
+  mediaExecution?: MediaExecutionDiagnostics;
 };
+
+type MediaExecutionDiagnostics = ReturnType<typeof getStudyAttachmentDiagnostics> & ReturnType<typeof getStudyMediaDiagnostics> & {
+  outcome: 'ended' | 'media-not-found' | 'media-wait-failed' | 'load-failed';
+  attachmentWaitResult: boolean | null;
+  chapterWaitResult: boolean | null;
+  completionConfirmed: boolean;
+  completionSource: 'attachment-passed' | 'attachment-no-longer-job' | 'chapter-icon' | 'none';
+  completionWaitTimedOut: boolean;
+  completionWaitDurationMs: number;
+  executionDurationMs: number;
+  attemptedRouteCount: number;
+};
+
+function getStudyAttachmentDiagnostics(attachment: Attachment | undefined) {
+  return {
+    attachmentJob: typeof attachment?.job === 'boolean' ? attachment.job : null,
+    attachmentPassed: typeof attachment?.isPassed === 'boolean' ? attachment.isPassed : null,
+    attachmentCompletionConfirmed: attachment?.isPassed === true || attachment?.job === false
+  };
+}
+
+function getStudyMediaDiagnostics(doc: Document) {
+  const media = doc.querySelector<HTMLMediaElement>('video, audio');
+  const finite = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return {
+    mediaPresent: Boolean(media),
+    mediaCurrentTime: finite(media?.currentTime),
+    mediaDuration: finite(media?.duration),
+    mediaEnded: typeof media?.ended === 'boolean' ? media.ended : null,
+    mediaPaused: typeof media?.paused === 'boolean' ? media.paused : null,
+    mediaReadyState: finite(media?.readyState),
+    mediaNetworkState: finite(media?.networkState),
+    mediaErrorCode: finite(media?.error?.code)
+  };
+}
+
+function getStudyJobDiagnostics(attachment: Attachment | undefined, job?: Job) {
+  return {
+    ...getStudyAttachmentDiagnostics(attachment),
+    executionState: job?.executionState ?? (job ? 'queued' : 'not-enqueued'),
+    executionStartedAt: job?.executionStartedAt ?? null,
+    executionEndedAt: job?.executionEndedAt ?? null,
+    executionDurationMs: job?.executionStartedAt === undefined ? null
+      : Math.max(0, (job.executionEndedAt ?? Date.now()) - job.executionStartedAt),
+    mediaExecution: job?.mediaExecution ?? null,
+    errorName: job?.executionErrorName ?? null
+  };
+}
 
 type ChapterDisposition = 'completed' | 'saved' | 'deferred' | 'manual' | 'disabled' | 'not-ready' | 'missing' | 'retryable-failure' | 'terminal-expired';
 
@@ -1034,7 +1087,14 @@ const rateHackPluginGuardKey = '__chaoxing_plus_rate_hack_plugin__';
 type DebugLogThrottleStoreOwner = Window & Record<string, unknown>;
 
 function nextDebugSequence() {
-  debugSequence += 1;
+  try {
+    const owner = (window.top ?? window) as Window & Record<string, unknown>;
+    const previous = owner.__chaoxing_plus_debug_sequence__;
+    debugSequence = (typeof previous === 'number' && Number.isSafeInteger(previous) ? previous : 0) + 1;
+    owner.__chaoxing_plus_debug_sequence__ = debugSequence;
+  } catch {
+    debugSequence += 1;
+  }
   return String(debugSequence).padStart(4, '0');
 }
 
@@ -1661,8 +1721,8 @@ function createDebugLogPanelController(targetDocument: Document): DebugLogPanelC
       const panelBody = ensureBody();
       if (!panelBody) return;
       const lines = [
-        textDetail?.slice(0, debugLogPanelMaxEntryTextLength),
         formatDebugLogPanelValue(detail),
+        textDetail?.slice(0, debugLogPanelMaxEntryTextLength),
         meta?.correlationId ? `correlationId=${meta.correlationId.slice(0, debugLogPanelMaxEntryTextLength)}` : ''
       ].filter(Boolean);
       enqueueDebugLogPanelEntry(panelBody, targetDocument, {
@@ -1951,7 +2011,7 @@ function logDebug(
   appendDebugLogPanelEntry(level, prefix, enrichedDetail, textDetail, meta);
   if (textDetail) {
     const withCorrelation = meta?.correlationId ? `${textDetail} correlationId=${meta.correlationId}` : textDetail;
-    $console[level](`[Chaoxing Plus][${nextDebugSequence()}] ${withCorrelation}`);
+    $console[level](`${prefix} ${withCorrelation}`);
   }
 }
 
@@ -3232,29 +3292,44 @@ export const CXAnalyses = {
   },
   trySwitchToNextUnvisitedSubTask() {
     const chapterKey = this.getCurrentChapterKey();
-    if (!chapterKey) {
-      return { switched: false, paused: false };
-    }
-
     const tabs = getSiblingSubTaskTabs();
-    if (tabs.length <= 1) {
-      return { switched: false, paused: false };
-    }
-
     const activeIndex = tabs.findIndex((tab) => tab.classList.contains('active'));
-    if (activeIndex === -1) {
+    const activeTabKey = activeIndex < 0 ? null
+      : tabs[activeIndex].getAttribute('id') || tabs[activeIndex].getAttribute('cardid') || String(activeIndex + 1);
+    const navigationId = `navigation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let attempt = 0;
+    let targetTabKey: string | null = null;
+    const report = (phase: string, reason: string, detail: Record<string, unknown> = {}) => {
+      logDebug('info', '课程任务跳转诊断', {
+        navigationId, entryPoint: 'sibling-subtask', sourceChapterId: chapterKey || null, sourceTabKey: activeTabKey,
+        targetChapterId: chapterKey || null, targetTabKey, mode: 'sibling-scan',
+        phase, reason, attempt, clicked: false, reached: null, ...detail
+      });
+    };
+    if (!chapterKey) {
+      report('guard', 'missing-chapter');
       return { switched: false, paused: false };
     }
 
-    const activeTab = tabs[activeIndex];
-    const activeTabKey = activeTab.getAttribute('id') || activeTab.getAttribute('cardid') || String(activeIndex + 1);
+    if (tabs.length <= 1) {
+      report('guard', 'no-sibling-tabs');
+      return { switched: false, paused: false };
+    }
+
+    if (activeIndex === -1) {
+      report('guard', 'active-tab-not-found');
+      return { switched: false, paused: false };
+    }
+
     const progress = this.getChapterSubTaskProgress();
     // Count every inspection so a refresh that restores an earlier tab cannot reset the sibling loop.
     const attempts = progress.attempts + 1;
+    attempt = attempts;
     const maxAttempts = tabs.length * 3;
 
     if (attempts >= maxAttempts) {
-      this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: activeTabKey });
+      this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: activeTabKey || '' });
+      report('guard', 'retry-limit', { maxAttempts });
       return { switched: false, paused: true };
     }
 
@@ -3270,15 +3345,22 @@ export const CXAnalyses = {
         continue;
       }
 
+      targetTabKey = nextTabKey;
       this.setChapterSubTaskProgress({ attempts, lastActiveTabKey: nextTabKey });
+      report('before-click', 'click-ready');
       const switched = triggerSyntheticClick(nextTab);
       if (!switched) {
         nextTab.click();
       }
+      const reached = nextTab.classList.contains('active') && this.getCurrentChapterKey() === chapterKey;
+      report('after-click', reached ? 'target-reached' : 'target-not-reached', {
+        clicked: true, reached, clickMethod: switched ? 'synthetic' : 'native-fallback'
+      });
 
       return { switched: true, paused: false };
     }
 
+    report('guard', 'no-distinct-target');
     return { switched: false, paused: false };
   },
   trackChapterStayState() {
@@ -3583,21 +3665,41 @@ async function navigateStudyTarget(
   context: DeferredChapterContext,
   target: { chapterId: string } | { tabKey: string },
   opts: StudyOptions,
-  delayMs = 5000
+  delayMs = 5000,
+  navigationReason = 'deferred-task-routing'
 ): Promise<'navigated' | 'paused' | 'stale'> {
+  const sourceChapterId = (JSON.parse(context.scope) as string[])[2];
+  const navigationId = `navigation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let attempt = 0;
+  const report = (phase: string, reason: string, detail: Record<string, unknown> = {}) => {
+    logDebug('info', '课程任务跳转诊断', {
+      navigationId, entryPoint: 'navigate-study-target', sourceChapterId, sourceTabKey: context.tabKey,
+      targetChapterId: 'chapterId' in target ? target.chapterId : sourceChapterId,
+      targetTabKey: 'tabKey' in target ? target.tabKey : null,
+      mode: opts.mode, navigationReason, phase, reason, attempt, clicked: false, reached: null, ...detail
+    });
+  };
   if (opts.mode === 'manually') {
     $message.info('当前页面已处理，请手动切换至待处理任务。');
+    report('guard', 'manual-mode', { outcome: 'paused' });
     return 'paused';
   }
-  if (!isDeferredChapterContextCurrent(context)) return 'stale';
+  if (!isDeferredChapterContextCurrent(context)) {
+    report('guard', 'stale-context', { outcome: 'stale' });
+    return 'stale';
+  }
   const ownerDocument = topWindow.document;
   const stay = CXAnalyses.getChapterStayState();
-  if (('chapterId' in target && await CXAnalyses.isStuckInBreakingMode())
-    || (stay.returnedToSameChapter && stay.repeatCount >= 3)) {
+  const breakingBlocked = 'chapterId' in target && await CXAnalyses.isStuckInBreakingMode();
+  if (breakingBlocked || (stay.returnedToSameChapter && stay.repeatCount >= 3)) {
     $console.warn('连续跳转未能离开当前页面，已暂停，请手动检查课程任务。');
+    report('guard', breakingBlocked ? 'breaking-mode' : 'repeated-stay', { outcome: 'paused', repeatCount: stay.repeatCount });
     return 'paused';
   }
-  if (!isDeferredChapterContextCurrent(context) || topWindow.document !== ownerDocument) return 'stale';
+  if (!isDeferredChapterContextCurrent(context) || topWindow.document !== ownerDocument) {
+    report('guard', 'context-changed-during-guard', { outcome: 'stale' });
+    return 'stale';
+  }
   const root = ownerDocument.documentElement;
   const key = JSON.stringify([context.scope, context.tabKey, target]);
   let attempts: Record<string, number> = {};
@@ -3605,31 +3707,44 @@ async function navigateStudyTarget(
     const stored = JSON.parse(root.getAttribute('data-chaoxing-plus-navigation-attempts') || '{}');
     if (stored && typeof stored === 'object' && !Array.isArray(stored)) attempts = stored;
   } catch { /* Ignore malformed navigation state. */ }
-  if ((attempts[key] || 0) >= 3) return 'paused';
+  attempt = attempts[key] || 0;
+  if (attempt >= 3) {
+    report('guard', 'retry-limit', { outcome: 'paused' });
+    return 'paused';
+  }
+  attempt += 1;
+  report('before-wait', 'navigation-requested', { delayMs });
   showTopCenterNotice('页面任务点已处理，即将跳转。', { duration: delayMs, tone: 'info' });
   await sleep(delayMs);
   if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue(ownerDocument);
   if (!isDeferredChapterContextCurrent(context) || topWindow.document !== ownerDocument) {
     $console.warn('检测到你已手动切换任务点，本次自动跳转已取消。');
+    report('after-wait', 'context-changed-during-wait', { outcome: 'stale' });
     return 'stale';
   }
   attempts[key] = (attempts[key] || 0) + 1;
   root.setAttribute('data-chaoxing-plus-navigation-attempts', JSON.stringify(attempts));
+  report('before-click', 'click-ready');
   const clicked = 'chapterId' in target
     ? switchDeferredCourseChapter(context, target.chapterId)
     : switchDeferredChapterTab(context, target.tabKey);
   await sleep(200);
-  if (topWindow.document !== ownerDocument) return 'navigated';
+  if (topWindow.document !== ownerDocument) {
+    report('after-click', 'document-changed-after-click', { clicked, outcome: 'navigated' });
+    return 'navigated';
+  }
   const latest = getDeferredChapterContext();
   const reached = 'chapterId' in target
     ? JSON.parse(latest.scope)[2] === target.chapterId
     : latest.scope === context.scope && latest.tabKey === target.tabKey;
   if (!clicked || !reached) {
     if (attempts[key] === 3) $console.warn('连续 3 次跳转后仍停留在同一页面，已暂停自动跳转。');
+    report('after-click', clicked ? 'target-not-reached' : 'click-not-triggered', { clicked, reached, outcome: 'paused' });
     return 'paused';
   }
   delete attempts[key];
   root.setAttribute('data-chaoxing-plus-navigation-attempts', JSON.stringify(attempts));
+  report('after-click', 'target-reached', { clicked, reached, outcome: 'navigated' });
   return 'navigated';
 }
 
@@ -3666,13 +3781,13 @@ async function routeDeferredCourse(context: DeferredChapterContext, opts: StudyO
       } else if (abandoned) $message.warn('其它任务已处理，无法提交的章节测试已放弃。');
       else $message.success('延期的章节测试已处理完成。');
       if (opts.backToFirstWhenFinish && course.chapters[0] && course.chapters[0].id !== course.chapterId) {
-        await navigateStudyTarget(context, { chapterId: course.chapters[0].id }, opts, 10000);
+        await navigateStudyTarget(context, { chapterId: course.chapters[0].id }, opts, 10000, 'return-first-chapter');
       }
     }
     return 'settled';
   }
   if (action.chapterId !== course.chapterId) {
-    const navigation = await navigateStudyTarget(context, { chapterId: action.chapterId }, opts);
+    const navigation = await navigateStudyTarget(context, { chapterId: action.chapterId }, opts, 5000, `course-${action.type}`);
     return navigation === 'navigated' ? 'scan' : 'paused';
   }
   return action.type;
@@ -3685,8 +3800,18 @@ function buildVisibleContentRecoverySignature() {
 
 export async function study(opts: StudyOptions) {
   const finishStudyTurn = typeof trackStudyTurn === 'function' ? trackStudyTurn(opts) : () => {};
+  const studyStartedAt = Date.now();
+  const studyRunId = `study-${studyStartedAt}-${Math.random().toString(36).slice(2, 8)}`;
+  let exitReason = 'flow-returned';
+  const getPagePosition = () => ({
+    chapterId: CXAnalyses.getCurrentChapterKey(),
+    tabKey: getDeferredChapterContext().tabKey,
+    cardIndex: CXAnalyses.getCurrentChapterStayKey().match(/[?&]num=(\d+)/)?.[1] ?? null
+  });
+  let sourcePosition: ReturnType<typeof getPagePosition> | undefined;
   try {
   if (typeof courseSession !== 'undefined' && courseSession && !await courseSession.ready()) {
+    exitReason = 'session-not-ready';
     $message.warn('课程会话尚未就绪，已暂停自动处理。');
     return;
   }
@@ -3709,6 +3834,14 @@ export async function study(opts: StudyOptions) {
   const completedOrdinaryJobIds = new Set<string>();
   const studyContext = getDeferredChapterContext();
   const initialCourseContext = getDeferredCourseContext(studyContext);
+  sourcePosition = getPagePosition();
+  logDebug('info', '学习页面进入诊断', {
+    studyRunId,
+    mode: opts.mode,
+    sourcePosition,
+    deferredTaskCount: Object.keys(studyContext.state.tasks).length,
+    attachmentCount: (($gm.unsafeWindow as any).attachments?.length as number) || 0
+  }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
   const initialMetadata = initialCourseContext.chapters.find((chapter) => chapter.id === initialCourseContext.chapterId);
   const inspectedSnapshot = initialCourseContext.state.inspectedSnapshots?.[initialCourseContext.chapterId];
   if (initialMetadata && inspectedSnapshot && (initialMetadata.normalSignature !== inspectedSnapshot.signature
@@ -3741,14 +3874,22 @@ export async function study(opts: StudyOptions) {
     const result = searchJob(opts, searchedJobs);
     visibleContentState = result.visibleContentState;
     const scanCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey());
+    const pageAttachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
     logDebug('info', '课程学习扫描诊断', {
+      studyRunId,
       scanRound,
       visibleContentState,
       resultVisibleContentState: result.visibleContentState,
       attachmentCount,
       searching,
       hasJob: Boolean(result.job),
-      searchedJobCount: searchedJobs.length
+      searchedJobCount: searchedJobs.length,
+      attachmentScanBudgetRemaining: attachmentCount,
+      pageAttachmentCount: pageAttachments.length,
+      pendingAttachmentCount: pageAttachments.filter((item) => item.job === true && item.isPassed !== true).length,
+      confirmedAttachmentCount: pageAttachments.filter((item) => item.isPassed === true || item.job === false).length,
+      returnedJobCount: searchedJobs.filter((item) => item.executionState === 'returned').length,
+      failedExecutionCount: searchedJobs.filter((item) => item.executionState === 'threw' || item.mediaExecution?.outcome === 'load-failed' || item.mediaExecution?.outcome === 'media-not-found').length
     }, `课程学习扫描诊断详情：visibleContentState=${visibleContentState} resultVisibleContentState=${result.visibleContentState} scanRound=${scanRound} attachmentCount=${attachmentCount} searching=${String(searching)} hasJob=${String(Boolean(result.job))} searchedJobCount=${searchedJobs.length}`, {
       correlationId: scanCorrelationId,
       throttleKey: `study-scan:${scanCorrelationId}:${visibleContentState}:${result.visibleContentState}:${String(Boolean(result.job))}:${String(searching)}`
@@ -3824,7 +3965,26 @@ export async function study(opts: StudyOptions) {
   };
 
   await runJobs();
+  logDebug('info', '课程学习扫描结束诊断', {
+    studyRunId,
+    sourcePosition,
+    currentPosition: getPagePosition(),
+    scanRound,
+    searching,
+    attachmentScanBudgetRemaining: attachmentCount,
+    visibleContentState,
+    manualAnswerPaused,
+    contextCurrent: isDeferredChapterContextCurrent(studyContext),
+    jobExecutions: searchedJobs.slice(0, 5).map((job) => ({
+      jobId: job.jobId,
+      executionState: job.executionState ?? 'unknown',
+      mediaOutcome: job.mediaExecution?.outcome ?? null,
+      completionConfirmed: job.mediaExecution?.completionConfirmed ?? null,
+      attachmentPassed: job.attachment?.isPassed ?? null
+    }))
+  }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
   if (manualAnswerPaused || !isDeferredChapterContextCurrent(studyContext)) {
+    exitReason = manualAnswerPaused ? 'manual-answer-paused' : 'page-changed';
     return;
   }
   if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
@@ -3841,6 +4001,18 @@ export async function study(opts: StudyOptions) {
     });
     if (unresolvedAttachments || (!shouldCheckSiblingSubTasksForState(visibleContentState)
       && !Object.values(deferredContext.state.tasks).some((task) => task.tabKey === deferredContext.tabKey))) {
+      exitReason = 'unresolved-current-page';
+      logDebug('warn', '学习跳转阻断诊断', {
+        studyRunId,
+        reason: exitReason,
+        visibleContentState,
+        unresolvedAttachments,
+        currentChapterFinished: false,
+        sourcePosition,
+        pendingJobs: ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || [])
+          .filter((item) => item.job === true && item.isPassed !== true).slice(0, 5)
+          .map((item) => ({ jobId: String(item.jobid || item.property._jobid || ''), attachmentJob: item.job, attachmentPassed: item.isPassed ?? null }))
+      }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
       const msg = '当前页面仍有未处理任务，已暂停跳转和截止任务回访，请检查页面加载或学习设置。';
       showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
       $message.warn({ content: msg, duration: 0 });
@@ -3858,7 +4030,8 @@ export async function study(opts: StudyOptions) {
         $message.info('当前页面已处理，截止任务已延期，请手动切换子任务。');
         return;
       }
-      await navigateStudyTarget(deferredContext, { tabKey: uninspectedTab }, opts);
+      exitReason = 'inspect-unvisited-tab';
+      await navigateStudyTarget(deferredContext, { tabKey: uninspectedTab }, opts, 5000, exitReason);
       return;
     }
   }
@@ -3875,7 +4048,8 @@ export async function study(opts: StudyOptions) {
           $message.info('请手动切换至待回访的子任务。');
           return;
         }
-        await navigateStudyTarget(deferredContext, { tabKey: target.tabKey }, opts);
+        exitReason = 'revisit-deferred-task';
+        await navigateStudyTarget(deferredContext, { tabKey: target.tabKey }, opts, 5000, exitReason);
         return;
       }
 
@@ -3925,7 +4099,8 @@ export async function study(opts: StudyOptions) {
   if (opts.mode === 'next') {
     const forwardTab = getNextUninspectedChapterTab(deferredContext.state, deferredContext.tabKeys, deferredContext.tabKey);
     if (forwardTab) {
-      await navigateStudyTarget(deferredContext, { tabKey: forwardTab }, opts);
+      exitReason = 'advance-forward-tab';
+      await navigateStudyTarget(deferredContext, { tabKey: forwardTab }, opts, 5000, exitReason);
       return;
     }
   }
@@ -3943,6 +4118,13 @@ export async function study(opts: StudyOptions) {
     getSiblingSubTaskTabs().length > 1 &&
     (shouldCheckSiblingSubTasksForState(visibleContentState) || canCheckSiblingSubTasksAfterProcessedJobs);
   if (shouldWaitBeforeSiblingSubTaskCheck) {
+    logDebug('info', '同章节子任务刷新等待诊断', {
+      studyRunId,
+      sourcePosition,
+      delayMs: siblingSubTaskRefreshDelayMs,
+      visibleContentState,
+      hasPendingJobAttachments
+    }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
     await sleep(siblingSubTaskRefreshDelayMs);
   }
 
@@ -3975,6 +4157,37 @@ export async function study(opts: StudyOptions) {
     ...siblingSubTaskDiagnostics
   }, `同章节子任务诊断详情：hasSiblingSubTasks=${String(siblingSubTaskDiagnostics.hasSiblingSubTasks)} siblingSubTaskCount=${siblingSubTaskDiagnostics.siblingSubTaskCount} activeSubTaskIndex=${siblingSubTaskDiagnostics.activeSubTaskIndex} activeSubTaskKey=${siblingSubTaskDiagnostics.activeSubTaskKey} siblingSubTaskAttempts=${siblingSubTaskProgress.attempts} tabRootExists=${String(siblingSubTaskDiagnostics.tabRootExists)} shouldCheckSiblingSubTasks=${String(shouldCheckSiblingSubTasks)} canCheckSiblingSubTasksAfterProcessedJobs=${String(canCheckSiblingSubTasksAfterProcessedJobs)} hasPendingJobAttachments=${String(hasPendingJobAttachments)} attachmentCount=${attachmentCount} searching=${String(searching)} currentChapterFinished=${String(currentChapterFinished)} visibleContentState=${visibleContentState} searchedJobCount=${searchedJobs.length}`, { correlationId: chapterCorrelationId });
 
+  const scheduleChapterClick = (targetOrResolver: HTMLElement | null | undefined | (() => HTMLElement | null | undefined), reason: string, delayMs: number) => {
+    const resolveTarget = () => typeof targetOrResolver === 'function' ? targetOrResolver() : targetOrResolver;
+    const guardKey = CXAnalyses.getCurrentChapterStayKey();
+    const sourcePosition = getPagePosition();
+    const targetChapterId = resolveTarget()?.parentElement?.getAttribute('id') || null;
+    const report = (phase: string) => {
+      try {
+        logDebug('info', '课程目录跳转诊断', {
+          studyRunId, reason, phase, delayMs, sourcePosition, targetChapterId, currentPosition: getPagePosition()
+        }, undefined, { correlationId: buildChapterCorrelationId(guardKey) });
+      } catch {
+        // A click can replace the document before its diagnostic snapshot is read.
+      }
+    };
+    report('scheduled');
+    setTimeout(() => {
+      if (guardKey !== CXAnalyses.getCurrentChapterStayKey()) {
+        report('cancelled-page-changed');
+        return;
+      }
+      const target = resolveTarget();
+      if (!target || target.isConnected === false) {
+        report('target-unavailable');
+        return;
+      }
+      report('before-click');
+      target.click();
+      report('click-dispatched');
+    }, delayMs);
+  };
+
   const next = async () => {
     resetWorkResults();
     const allSubTasksInspected = CXAnalyses.isInFinalTab() || hasDeferredChapterTasks;
@@ -3993,9 +4206,7 @@ export async function study(opts: StudyOptions) {
       if (opts.backToFirstWhenFinish) {
         content = '已经抵达最后一个章节，10秒后返回第一个章节重新开始。';
         showTopCenterNotice(content, { duration: 10000, tone: 'info' });
-        setTimeout(() => {
-          topWindow.document.querySelector<HTMLElement>('.posCatalog_name')?.click();
-        }, 10 * 1000);
+        scheduleChapterClick(() => topWindow.document.querySelector<HTMLElement>('.posCatalog_name'), 'return-first-chapter', 10000);
         $message.info({ content, duration: 30000 });
       } else if (opts.mode === 'job' && !CXAnalyses.isFinishedAllChapters() && firstUnfinishedChapter) {
         content = '当前章节已完成，正在返回前面的未完成章节继续学习。';
@@ -4003,9 +4214,7 @@ export async function study(opts: StudyOptions) {
         $message.info(content);
         settingsMethods().notificationBySetting?.(content);
         CXAnalyses.scrollToActiveChapter();
-        setTimeout(() => {
-          firstUnfinishedChapter?.querySelector<HTMLElement>('.posCatalog_name')?.click();
-        }, 1000);
+        scheduleChapterClick(firstUnfinishedChapter?.querySelector<HTMLElement>('.posCatalog_name'), 'return-unfinished-chapter', 1000);
         return;
       } else {
         content = CXAnalyses.isFinishedAllChapters()
@@ -4051,9 +4260,7 @@ export async function study(opts: StudyOptions) {
         if (currentIndex !== -1 && currentIndex + 1 < elements.length) {
           nextChapter = elements[currentIndex + 1];
           CXAnalyses.scrollToActiveChapter();
-          setTimeout(() => {
-            nextChapter.querySelector<HTMLElement>('.posCatalog_name')?.click();
-          }, 1000);
+          scheduleChapterClick(nextChapter.querySelector<HTMLElement>('.posCatalog_name'), 'advance-unfinished-chapter', 1000);
         }
       }
     } else if (opts.mode === 'next') {
@@ -4076,6 +4283,13 @@ export async function study(opts: StudyOptions) {
             curClazzId: curClazzId.value
           }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
           nextFn(count.length.toString(), curChapterId.value, curCourseId.value, curClazzId.value, '');
+          logDebug('info', '动作节点诊断：下一章跳转已调用', {
+            studyRunId,
+            mode: opts.mode,
+            sourcePosition,
+            requestedChapterId: curChapterId.value,
+            phase: 'call-dispatched'
+          }, undefined, { correlationId: chapterCorrelationId });
         } else {
           $console.warn('参数错误，无法跳转下一章，请尝试手动切换。');
         }
@@ -4088,6 +4302,7 @@ export async function study(opts: StudyOptions) {
   };
 
   if (shouldCheckSiblingSubTasks) {
+    exitReason = 'inspect-sibling-subtask';
     const switchedSubTask = CXAnalyses.trySwitchToNextUnvisitedSubTask();
     if (switchedSubTask.switched) {
       const msg = '当前章节仍未完成，正在尝试切换到同章节的其他子任务继续检查。';
@@ -4184,6 +4399,7 @@ export async function study(opts: StudyOptions) {
   }
 
   if (opts.mode !== 'manually') {
+    exitReason = 'automatic-navigation';
     const msg = '页面任务点已完成，即将跳转。';
     const jumpGuardKey = CXAnalyses.getCurrentChapterStayKey();
     const jumpCorrelationId = buildChapterCorrelationId(jumpGuardKey || chapterStayState.chapterStayKey);
@@ -4207,6 +4423,7 @@ export async function study(opts: StudyOptions) {
     $console.info(msg);
     await sleep(5000);
     if (jumpGuardKey && CXAnalyses.getCurrentChapterStayKey() !== jumpGuardKey) {
+      exitReason = 'navigation-cancelled-page-changed';
       const cancelMsg = '检测到你已手动切换任务点，本次自动跳转已取消。';
       logDebug('warn', '自动跳转取消诊断', {
         jumpGuardKey,
@@ -4222,13 +4439,29 @@ export async function study(opts: StudyOptions) {
     }
     await next();
   } else {
+    exitReason = 'manual-navigation';
     const msg = '页面任务点已完成，自动跳转已关闭，请手动跳转。';
     showTopCenterNotice(msg, { duration: 0, tone: 'warning' });
     $message.warn({ content: msg, duration: 0 });
     $console.warn(msg);
   }
+  } catch (error) {
+    exitReason = 'execution-threw';
+    throw error;
   } finally {
-    finishStudyTurn();
+    try {
+      if (sourcePosition) logDebug('info', '学习流程退出诊断', {
+        studyRunId,
+        reason: exitReason,
+        durationMs: Math.max(0, Date.now() - studyStartedAt),
+        sourcePosition,
+        currentPosition: getPagePosition()
+      }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
+    } catch {
+      // Navigation may destroy access to the document; diagnostics must not mask task results.
+    } finally {
+      finishStudyTurn();
+    }
   }
 }
 
@@ -4283,18 +4516,65 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
         win.frameElement?.getAttribute('data') ||
         (win.frameElement as HTMLIFrameElement | null)?.contentWindow?.parent.frameElement?.getAttribute('data') ||
         '{}';
-      const frameData = JSON.parse(frameDataStr);
+      let frameData: Record<string, any> = {};
+      let frameDataIssue: 'invalid-json' | 'non-object' | undefined;
+      try {
+        const parsed = JSON.parse(frameDataStr);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) frameData = parsed;
+        else frameDataIssue = 'non-object';
+      } catch {
+        frameDataIssue = 'invalid-json';
+      }
       const targetJobId = frameData.jobid || frameData._jobid || root.getAttribute('jobid') || root.getAttribute('_jobid')
         || win.document.querySelector<HTMLInputElement>('form #jobid')?.value;
+      const searchCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
+        targetJobId: targetJobId ? String(targetJobId) : undefined
+      });
+      const logSearchSkip = (reason: string, visibleContentState: VisibleContentState, detail: Record<string, unknown> = {}) => {
+        logDebug('info', '任务点搜索跳过诊断', {
+          reason,
+          visibleContentState,
+          targetJobId: targetJobId ? String(targetJobId) : null,
+          frameSrc: workIframeSrc,
+          ...detail
+        }, undefined, {
+          correlationId: searchCorrelationId,
+          throttleKey: `job-search-skip:${searchCorrelationId}:${reason}:${JSON.stringify(detail)}`
+        });
+      };
+      if (frameDataIssue) {
+        logDebug('warn', '任务点映射诊断', {
+          reason: 'invalid-frame-data',
+          frameDataIssue,
+          targetJobId: targetJobId ? String(targetJobId) : null,
+          frameSrc: workIframeSrc
+        }, undefined, { correlationId: searchCorrelationId });
+      }
       if (!targetJobId) {
+        logSearchSkip('missing-job-id', 'visible-unmapped', {
+          frameDataIssue: frameDataIssue ?? null,
+          hasVisibleWorkFrame,
+          hasVideojs: Boolean(videojs),
+          hasChapterTest: Boolean(chapterTest)
+        });
         return { visibleContentState: 'visible-unmapped' };
       }
       if (retryTarget && (retryTarget.tabKey !== deferredContext.tabKey || retryTarget.jobId !== String(targetJobId))) {
+        logSearchSkip('retry-target-mismatch', 'finished-job', {
+          currentTabKey: deferredContext.tabKey,
+          retryTabKey: retryTarget.tabKey,
+          retryJobId: retryTarget.jobId
+        });
         return { visibleContentState: 'finished-job' };
       }
       const deferredTask = Object.values(deferredContext.state.tasks)
         .find((task) => task.tabKey === deferredContext.tabKey && task.jobId === String(targetJobId));
       if (deferredTask && (!retryTarget || deferredTask.state !== 'deferred')) {
+        logSearchSkip('deferred-task', 'finished-job', {
+          deferredState: deferredTask.state,
+          pauseReason: deferredTask.pauseReason ?? null,
+          isRetry: Boolean(retryTarget)
+        });
         return { visibleContentState: 'finished-job' };
       }
 
@@ -4307,11 +4587,18 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
       });
 
       if (!attachment) {
+        logSearchSkip('missing-attachment', 'visible-unmapped', {
+          attachmentCount: knowCardWin.attachments?.length ?? 0
+        });
         return { visibleContentState: 'visible-unmapped' };
       }
 
       const alreadySearchedJob = searchedJobs.find((job) => job.jobId === String(targetJobId));
       if (alreadySearchedJob?.expired) {
+        logSearchSkip('expired-job', 'finished-job', {
+          taskDiagnostics: getStudyJobDiagnostics(attachment, alreadySearchedJob),
+          terminalExpired: alreadySearchedJob.terminalExpired === true
+        });
         return { visibleContentState: 'finished-job' };
       }
 
@@ -4382,8 +4669,30 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
             : workType === 'finished'
               ? 'finished-job'
               : 'visible-nonjob';
+      const visibleContentStateReason = chapterStatusComplete ? 'chapter-test-complete'
+        : alreadyProcessedMediaJob ? 'already-searched-media'
+          : workType === 'job' ? 'attachment-job'
+            : workType === 'finished' ? 'attachment-passed' : 'non-job';
+      const taskDiagnostics = {
+        ...getStudyJobDiagnostics(attachment, alreadySearchedJob),
+        ...getStudyMediaDiagnostics(win.document),
+        visibleContentStateReason,
+        chapterStatusApplicable: Boolean(chapterTest),
+        currentChapterFinished: CXAnalyses.isCurrentChapterFinished()
+      };
+      const executionDiagnosticKey = JSON.stringify([
+        taskDiagnostics.executionState,
+        taskDiagnostics.errorName,
+        taskDiagnostics.mediaExecution?.outcome,
+        taskDiagnostics.mediaExecution?.completionConfirmed,
+        taskDiagnostics.mediaExecution?.completionWaitTimedOut,
+        taskDiagnostics.attachmentJob,
+        taskDiagnostics.attachmentPassed,
+        taskDiagnostics.mediaErrorCode
+      ]);
 
       logDebug('info', '任务点搜索诊断', {
+        taskDiagnostics,
         frameSrc,
         targetJobId,
         jobName,
@@ -4400,21 +4709,24 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
         hasVisibleWorkFrame
       }, `任务点搜索诊断详情：frameSrc=${frameSrc} targetJobId=${String(targetJobId)} jobName=${jobName} workType=${workType} chapterStatusComplete=${String(chapterStatusComplete)} alreadySearched=${String(alreadySearched)} visibleContentState=${visibleContentState} hasVideojs=${String(Boolean(videojs))} hasChapterTest=${String(Boolean(chapterTest))} hasRead=${String(Boolean(read))} hasHyperlink=${String(Boolean(hyperlink))} hasPptWithAudio=${String(Boolean(pptWithAudio))} hasTimereader=${String(Boolean(timereader))} hasVisibleWorkFrame=${String(hasVisibleWorkFrame)}`, {
         correlationId: jobCorrelationId,
-        throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}`
+        throttleKey: `job-search:${jobCorrelationId}:${visibleContentState}:${workType}:${String(alreadySearched)}:${executionDiagnosticKey}`
       });
 
 
       if (alreadySearched) {
         logDebug('info', '任务点已处理跳过诊断', {
+          taskDiagnostics,
           frameSrc,
           targetJobId,
           jobName,
           visibleContentState,
           hasFunc: false,
+          hasPreviousHandler: Boolean(alreadySearchedJob.func),
+          handlerScheduled: false,
           reason: 'already-searched'
         }, undefined, {
           correlationId: jobCorrelationId,
-          throttleKey: `job-skip:${jobCorrelationId}:already-searched`
+          throttleKey: `job-skip:${jobCorrelationId}:already-searched:${executionDiagnosticKey}`
         });
 
         return { visibleContentState };
@@ -4441,7 +4753,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
             const msg = `即将${workType === 'finished' && opts.restudy ? '重新' : workType === 'not-job' && opts.forceLearn ? '强制' : ''}播放 : ${jobName}`;
             $message.info(msg);
             $console.log(msg);
-            await JobRunner.media(opts, win.document, attachment);
+            job.mediaExecution = await JobRunner.media(opts, win.document, attachment);
           };
         }
       } else if (chapterTest) {
@@ -4599,6 +4911,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
 
       if (!func) {
         logDebug('info', '任务点已处理跳过诊断', {
+          taskDiagnostics,
           frameSrc,
           targetJobId,
           jobName,
@@ -4620,10 +4933,49 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
         jobId: String(targetJobId),
         chapterTest: Boolean(chapterTest),
         attachment,
-        func
+        executionState: 'queued',
+        func: async (finalAttempt = false) => {
+          job.executionState = 'running';
+          job.executionStartedAt = Date.now();
+          job.executionEndedAt = undefined;
+          job.executionErrorName = undefined;
+          job.mediaExecution = undefined;
+          try {
+            const result = await func(finalAttempt);
+            job.executionState = 'returned';
+            return result;
+          } catch (error) {
+            job.executionState = 'threw';
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : undefined;
+            job.executionErrorName = typeof name === 'string'
+              && ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'DOMException', 'AbortError'].includes(name)
+              ? name : 'UnknownError';
+            throw error;
+          } finally {
+            job.executionEndedAt = Date.now();
+            try {
+              logDebug(job.executionState === 'threw' ? 'error' : 'info', '任务执行结果诊断', {
+                targetJobId,
+                jobName,
+                finalAttempt,
+                taskDiagnostics: {
+                  ...getStudyJobDiagnostics(attachment, job),
+                  ...getStudyMediaDiagnostics(win.document)
+                },
+                currentChapterFinished: CXAnalyses.isCurrentChapterFinished()
+              }, undefined, { correlationId: jobCorrelationId });
+            } catch {
+              // Frame navigation and diagnostics must not replace the task result.
+            }
+          }
+        }
       };
 
-      logDebug('info', '任务点已处理跳过诊断', {
+      logDebug('info', '任务点入队诊断', {
+        taskDiagnostics: {
+          ...taskDiagnostics,
+          ...getStudyJobDiagnostics(attachment, job)
+        },
         frameSrc,
         targetJobId,
         jobName,
@@ -4662,50 +5014,161 @@ export function fixedVideoProgress() {
 }
 
 const JobRunner = {
-  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment) {
+  async media(setting: Pick<StudyOptions, 'playbackRate' | 'volume' | 'muteMedia' | 'videoQuizStrategy' | 'enableAnswer'>, doc: Document, attachment?: Attachment): Promise<MediaExecutionDiagnostics> {
     const { playbackRate = 1, volume = 0, muteMedia = true } = setting;
-    const media = await waitForMedia({ root: doc });
-    const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
+    const startedAt = Date.now();
+    const ownerChapterStayKey = CXAnalyses.getCurrentChapterStayKey();
+    const mediaCorrelationId = buildChapterCorrelationId(ownerChapterStayKey, {
+      targetJobId: attachment?.jobid || attachment?.property?._jobid,
+      jobName: attachment?.property?.name || attachment?.property?.title
+    });
+    const logMediaPhase = (phase: string, detail: Record<string, unknown> = {}, level: 'info' | 'warn' | 'error' = 'info') => {
+      logDebug(level, '媒体任务阶段诊断', {
+        targetJobId: attachment?.jobid || attachment?.property?._jobid || '',
+        phase,
+        ...detail,
+        media: getStudyMediaDiagnostics(doc),
+        attachment: getStudyAttachmentDiagnostics(attachment),
+        elapsedMs: Math.max(0, Date.now() - startedAt)
+      }, undefined, { correlationId: mediaCorrelationId });
+    };
+    const reportResult = (
+      outcome: MediaExecutionDiagnostics['outcome'],
+      attachmentWaitResult: boolean | null = null,
+      chapterWaitResult: boolean | null = null,
+      attemptedRouteCount = 0,
+      completionWaitDurationMs = 0,
+      errorName?: string
+    ): MediaExecutionDiagnostics => {
+      const attachmentDiagnostics = getStudyAttachmentDiagnostics(attachment);
+      const completionSource = attachmentDiagnostics.attachmentPassed === true ? 'attachment-passed'
+        : attachmentDiagnostics.attachmentJob === false ? 'attachment-no-longer-job'
+          : chapterWaitResult === true ? 'chapter-icon' : 'none';
+      const mediaDiagnostics = getStudyMediaDiagnostics(doc);
+      const result: MediaExecutionDiagnostics = {
+        outcome,
+        completionConfirmed: completionSource !== 'none',
+        completionSource,
+        completionWaitTimedOut: attachmentWaitResult === false && chapterWaitResult === false,
+        completionWaitDurationMs,
+        executionDurationMs: Math.max(0, Date.now() - startedAt),
+        attemptedRouteCount,
+        attachmentWaitResult,
+        chapterWaitResult,
+        ...attachmentDiagnostics,
+        ...mediaDiagnostics
+      };
+      const level = outcome !== 'ended' ? 'error' : result.completionConfirmed ? 'info' : 'warn';
+      logDebug(level, '媒体任务执行结果诊断', {
+        targetJobId: attachment?.jobid || attachment?.property?._jobid || '',
+        jobName: attachment?.property?.name || attachment?.property?.title || '',
+        outcome,
+        completionConfirmed: result.completionConfirmed,
+        completionSource,
+        mediaExecution: {
+          outcome,
+          completionConfirmed: result.completionConfirmed,
+          completionSource,
+          completionWaitTimedOut: result.completionWaitTimedOut,
+          completionWaitDurationMs,
+          executionDurationMs: result.executionDurationMs,
+          attemptedRouteCount,
+          attachmentWaitResult,
+          chapterWaitResult,
+          attachment: attachmentDiagnostics,
+          media: mediaDiagnostics
+        },
+        ...(errorName ? { errorName } : {})
+      }, `媒体执行结果：outcome=${outcome} completionConfirmed=${String(result.completionConfirmed)} source=${completionSource} waitTimedOut=${String(result.completionWaitTimedOut)}`, {
+        correlationId: mediaCorrelationId
+      });
+      return result;
+    };
 
+    logMediaPhase('media-wait-start');
+    let media: HTMLVideoElement | HTMLAudioElement | undefined;
+    try {
+      media = await waitForMedia({ root: doc });
+    } catch (error) {
+      const name = error && typeof error === 'object' && 'name' in error ? error.name : undefined;
+      const errorName = typeof name === 'string'
+        && ['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'DOMException', 'AbortError'].includes(name)
+        ? name : 'UnknownError';
+      try {
+        reportResult('media-wait-failed', null, null, 0, 0, errorName);
+      } catch {
+        // A diagnostic failure must not replace the original media wait error.
+      }
+      throw error;
+    }
+    const { videojs } = domSearch({ videojs: '#video,#audio' }, doc);
+    logMediaPhase('player-detected', { playerPresent: Boolean(videojs) });
     if (!videojs || !media) {
       $console.error('视频检测不到，请尝试刷新或者手动切换下一章。');
-      return;
+      return reportResult('media-not-found');
     }
 
     state.study.videojs = videojs as HTMLElement;
     (topWindow as Record<string, any>).currentMedia = media;
     fixedVideoProgress();
 
-    if (setting.enableAnswer && setting.videoQuizStrategy === 'random') {
-      const loop = async (): Promise<void> => {
-        const submitBtn = () => doc.querySelector<HTMLElement>('#videoquiz-submit');
-        if (submitBtn()) {
-          const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'));
-          const answer = list[Math.floor(Math.random() * list.length)];
-          answer?.click();
-          submitBtn()?.click();
-          await sleep(3000);
-          doc.querySelector<HTMLElement>('#video .ans-videoquiz')?.remove();
-          Array.from(doc.querySelectorAll<HTMLElement>('.x-component-default')).forEach((com) => {
-            com.style.display = 'none';
-          });
-        }
-        await sleep(3000);
-        await loop();
-      };
-      void loop();
-    }
-
-    return new Promise<void>((resolve) => {
+    return new Promise<MediaExecutionDiagnostics>((resolve) => {
       const attemptedVideoRoutes = new Set<unknown>();
+      let settled = false;
+      let ending = false;
+      let reloadInterval: ReturnType<typeof setInterval> | undefined;
+      let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+      let startTimeout: ReturnType<typeof setTimeout> | undefined;
+      let failureTimeout: ReturnType<typeof setTimeout> | undefined;
+      const listeners = new Map<string, EventListener>();
+      const cleanup = () => {
+        clearInterval(reloadInterval);
+        clearInterval(heartbeatInterval);
+        clearTimeout(startTimeout);
+        clearTimeout(failureTimeout);
+        listeners.forEach((listener, event) => media.removeEventListener(event, listener));
+        listeners.clear();
+        if ((topWindow as Record<string, any>).currentMedia === media) {
+          (topWindow as Record<string, any>).currentMedia = undefined;
+          if (state.study.videojs === videojs) state.study.videojs = undefined;
+        }
+      };
+      const finishMedia = (
+        outcome: MediaExecutionDiagnostics['outcome'],
+        attachmentWaitResult: boolean | null = null,
+        chapterWaitResult: boolean | null = null,
+        completionWaitDurationMs = 0
+      ) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(reportResult(outcome, attachmentWaitResult, chapterWaitResult, attemptedVideoRoutes.size, completionWaitDurationMs));
+      };
+      if (setting.enableAnswer && setting.videoQuizStrategy === 'random') {
+        const loop = async (): Promise<void> => {
+          while (!settled && !ending) {
+            const submitBtn = () => doc.querySelector<HTMLElement>('#videoquiz-submit');
+            if (submitBtn()) {
+              const list = Array.from(doc.querySelectorAll<HTMLElement>('.ans-videoquiz-opt label'));
+              list[Math.floor(Math.random() * list.length)]?.click();
+              submitBtn()?.click();
+              await sleep(3000);
+              if (settled || ending) return;
+              doc.querySelector<HTMLElement>('#video .ans-videoquiz')?.remove();
+              Array.from(doc.querySelectorAll<HTMLElement>('.x-component-default')).forEach((com) => {
+                com.style.display = 'none';
+              });
+            }
+            await sleep(3000);
+          }
+        };
+        void loop().catch(() => logMediaPhase('quiz-loop-failed', {}, 'warn'));
+      }
       let lastVideoRouteSwitchAt: number | undefined;
       let lastVideoRouteWaitLoggedAt: number | undefined;
       let lastVideoRouteStateKey: string | undefined;
-      const mediaCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
-        targetJobId: attachment?.jobid || attachment?.property?._jobid,
-        jobName: attachment?.property?.name || attachment?.property?.title
-      });
-      const reloadInterval = setInterval(() => {
+      reloadInterval = setInterval(() => {
+        if (settled || ending) return;
         const videoDiagnostics = inspectVideoLoadState(doc);
         const videoRouteStateKey = JSON.stringify({
           failureTextDetected: videoDiagnostics.failureTextDetected,
@@ -4764,7 +5227,7 @@ const JobRunner = {
           $console.error('检测到视频加载失败，即将跳过视频。');
           $message.error('检测到视频加载失败，即将跳过视频。');
           clearInterval(reloadInterval);
-          setTimeout(resolve, 3000);
+          failureTimeout = setTimeout(() => finishMedia('load-failed'), 3000);
         }
 
         if (!shouldWaitAfterVideoRouteSwitch(lastVideoRouteSwitchAt)) {
@@ -4772,44 +5235,91 @@ const JobRunner = {
         }
       }, 3000);
 
+      const requestPlay = async (reason: 'startup' | 'pause') => {
+        if (settled || ending || media.ended) return;
+        logMediaPhase('play-request', { reason });
+        const played = await playMedia(() => {
+          if (settled || ending || media.ended) return;
+          return media.play();
+        });
+        if (settled || ending) return;
+        if (played) media.playbackRate = playbackRate;
+        logMediaPhase('play-result', { reason, played }, played ? 'info' : 'warn');
+      };
+      let recoveringPause = false;
       const playFunction = async () => {
-        if (hasFaceRecognition()) await waitForFaceRecognition();
-        if (hasNewFaceRecognition()) await waitForNewFaceRecognition();
-        if (media.ended === false) {
+        if (settled || ending || recoveringPause) return;
+        recoveringPause = true;
+        try {
+          if (hasFaceRecognition()) await waitForFaceRecognition();
+          if (settled || ending) return;
+          if (hasNewFaceRecognition()) await waitForNewFaceRecognition();
+          if (settled || ending || media.ended) return;
           await sleep(1000);
-          void media.play();
-          media.playbackRate = playbackRate;
+          await requestPlay('pause');
+        } finally {
+          recoveringPause = false;
         }
       };
-
+      let lastEventState = '';
+      const logEvent = (event: string) => {
+        const { mediaCurrentTime: _time, mediaDuration: _duration, ...snapshot } = getStudyMediaDiagnostics(doc);
+        const key = JSON.stringify({ event, ...snapshot });
+        if (key === lastEventState) return;
+        lastEventState = key;
+        logMediaPhase('media-event', { event }, event === 'error' ? 'warn' : 'info');
+      };
+      const listen = (event: string, listener: EventListener) => {
+        listeners.set(event, listener);
+        media.addEventListener(event, listener);
+      };
       const onPause = () => {
-        void playFunction();
+        if (settled || ending) return;
+        logEvent('pause');
+        void playFunction().catch(() => logMediaPhase('pause-recovery-failed', {}, 'warn'));
       };
 
-      media.addEventListener('pause', onPause);
-      media.addEventListener('ended', async () => {
+      listen('pause', onPause);
+      for (const event of ['playing', 'waiting', 'error']) listen(event, () => {
+        if (!settled && !ending) logEvent(event);
+      });
+      listen('ended', async () => {
+        if (settled || ending) return;
+        ending = true;
+        logEvent('ended');
         media.removeEventListener('pause', onPause);
         $console.log('视频播放完毕');
         clearInterval(reloadInterval);
+        clearTimeout(startTimeout);
+        const completionWaitStartedAt = Date.now();
+        logMediaPhase('attachment-wait-start', { timeoutMs: 15000 });
         const finished = await waitForAttachmentComplete(attachment, 15000);
-        if (!finished) {
-          await waitForCurrentChapterFinished(10000);
+        if (settled) return;
+        logMediaPhase('attachment-wait-result', { waitResult: finished });
+        let chapterFinished: boolean | null = null;
+        const isOwnerChapterCurrent = () => Boolean(ownerChapterStayKey && CXAnalyses.getCurrentChapterStayKey() === ownerChapterStayKey);
+        if (!finished && isOwnerChapterCurrent()) {
+          logMediaPhase('chapter-wait-start', { timeoutMs: 10000 });
+          chapterFinished = await waitForCurrentChapterFinished(10000);
+          if (settled) return;
+          const ownerChapterCurrent = isOwnerChapterCurrent();
+          if (!ownerChapterCurrent) chapterFinished = null;
+          logMediaPhase('chapter-wait-result', { confirmed: chapterFinished, ownerChapterCurrent });
+        } else if (!finished) {
+          logMediaPhase('chapter-wait-skipped', { reason: 'owner-chapter-changed-or-unknown' }, 'warn');
         }
-        resolve();
+        finishMedia('ended', finished, chapterFinished, Math.max(0, Date.now() - completionWaitStartedAt));
       });
+      heartbeatInterval = setInterval(() => {
+        if (!settled) logMediaPhase('heartbeat', { awaitingCompletion: ending });
+      }, 30000);
 
       $console.log('视频开始播放');
       media.muted = muteMedia;
       media.volume = volume;
       media.currentTime = 0;
 
-      setTimeout(() => {
-        void playMedia(() => media.play()).then((played) => {
-          if (played) {
-            media.playbackRate = playbackRate;
-          }
-        });
-      }, 200);
+      startTimeout = setTimeout(() => requestPlay('startup'), 200);
     });
   },
   async read(win: Window & { finishJob?: () => void }, attachment?: Attachment) {
@@ -7276,12 +7786,13 @@ async function mappingRecognize(doc: Document = document) {
     const font = fontFaceEl.textContent?.match(/base64,([\w\W]+?)'/)?.[1];
     if (font) {
       $console.log('正在识别繁体字');
-      const code = Typr.parse(base64ToUint8Array(font));
+      const bytes = base64ToUint8Array(font);
+      const code = new Font(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
       const match: Record<string, number> = {};
       for (let i = 19968; i < 40870; i++) {
-        const glyph = Typr.U.codeToGlyph(code, i);
+        const glyph = code.codeToGlyph(i);
         if (!glyph) continue;
-        const path = Typr.U.glyphToPath(code, glyph);
+        const path = code.glyphToPath(glyph);
         const hex = md5(JSON.stringify(path)).slice(24);
         match[i.toString()] = typrMapping[hex];
       }

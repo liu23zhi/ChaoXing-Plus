@@ -178,6 +178,9 @@ test('扩展构建脚本已改名为 build-browser.sh，Windows 入口保持独�
   assert.match(browser, /^#!\/usr\/bin\/env bash\n/u);
   assert.match(browser, /npm run build/u);
   assert.match(browser, /dist/u);
+  assert.match(browser, /Vite 8 需要 Node\.js 20\.19\+ 或 22\.12\+/u);
+  assert.match(browser, /WSL\/Linux Node\.js/u);
+  assert.match(browser, /NPM_PATH=/u);
   const entries = await readdir(root);
   assert.equal(entries.includes('build.sh'), false, 'build.sh 应改名为 build-browser.sh');
   assert.equal(entries.includes('build-browser.sh'), true);

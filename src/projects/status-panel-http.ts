@@ -12,6 +12,7 @@
 
 import {
   SERVICE_STATUS_ENDPOINT,
+  SERVICE_STATUS_SERIES_ENDPOINT,
   createNoTokenServiceStatusSnapshot,
   createRejectedServiceStatusSnapshot,
   normalizeServiceStatusSnapshot,
@@ -94,6 +95,10 @@ export type ServiceStatusHttpFetcherOptions = {
    * 不带会回退到登录 JWT 分支 → 401。
    */
   accessKey?: string;
+  /** Short-lived script session identity, when the server requires it for adapter keys. */
+  scriptIdentity?: string;
+  /** 同时读取公开的搜题分钟序列，摘要与历史各自降级。 */
+  includeSearchHistory?: boolean;
   /**
    * 只在 `kind === 'forbidden'` 时被调用（用于界面提示或埋点）。
    * **不用于弹全局错误** —— 状态页取数失败不能干扰答题。
@@ -147,7 +152,8 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
 
   return async (): Promise<ServiceStatusSnapshot | null> => {
     // 每次取数都重新解析（getBaseurl 存在时），这样用户改了题库地址立即生效。
-    const url = buildServiceStatusUrl(resolveOptionsBaseUrl(options), endpoint);
+    const baseurl = resolveOptionsBaseUrl(options);
+    const url = buildServiceStatusUrl(baseurl, endpoint);
     if (!url) {
       // 没配置 baseurl：不是错误，是「还没设置题库地址」。静默返回 null。
       return null;
@@ -166,17 +172,37 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
       : undefined;
 
     try {
-      const raw = await options.requester(url, {
+      const requestInit: RequestInit = {
         method: 'GET',
         // 状态接口是 `Cache-Control: no-store`；这里显式声明避免中间层缓存。
         cache: 'no-store',
         // AuthOrAccessToken 只在带 Authorization 时才走 access-token 分支；
         // 不带会回退到登录 JWT 分支 → 401「请重新登录」。
-        headers: { Authorization: `Bearer ${accessKey}` },
+        headers: {
+          Authorization: `Bearer ${accessKey}`,
+          ...(String(options.scriptIdentity ?? '').trim()
+            ? { 'X-Script-Identity': String(options.scriptIdentity).trim() }
+            : {})
+        },
         signal: controller?.signal
-      });
-      const snapshot = normalizeServiceStatusSnapshot(raw);
-      return snapshot;
+      };
+      if (!options.includeSearchHistory) {
+        return normalizeServiceStatusSnapshot(await options.requester(url, requestInit));
+      }
+      const [summary, history] = await Promise.allSettled([
+        options.requester(url, requestInit),
+        options.requester(buildServiceStatusUrl(baseurl, SERVICE_STATUS_SERIES_ENDPOINT), requestInit)
+      ]);
+      // 主摘要被拒绝时不展示任何图；网络故障则允许独立历史请求继续提供真实数据。
+      if (summary.status === 'rejected' && [401, 403].includes(readHttpStatus(summary.reason) ?? 0)) {
+        throw summary.reason;
+      }
+      if (summary.status === 'rejected') options.onError?.(summary.reason);
+      if (history.status === 'rejected') options.onError?.(history.reason);
+      const historySnapshot = history.status === 'fulfilled' ? normalizeServiceStatusSnapshot(history.value) : null;
+      const snapshot = summary.status === 'fulfilled' ? normalizeServiceStatusSnapshot(summary.value) : null;
+      const result = snapshot ?? (historySnapshot?.searchHistory !== null ? historySnapshot : null);
+      return result ? { ...result, searchHistory: historySnapshot?.searchHistory ?? null } : null;
     } catch (error) {
       // 401 与 403 必须分开：两者用户要做的事完全不同。
       //   401 = key 无效/被禁用/是脚本令牌 → 看服务端原因，可能要换令牌
