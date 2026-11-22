@@ -4,6 +4,24 @@
     return;
   }
 
+  // Extension-owned events only: no URL, page payload, console arguments or credentials.
+  const diagnostic = (event, duration_ms) => {
+    if (!chrome.runtime?.id || !chrome.runtime.sendMessage || window !== window.top) return;
+    try {
+      chrome.runtime.sendMessage({ kind: 'chaoxing-plus:extension-diagnostics', op: 'record', event, duration_ms },
+        () => { void chrome.runtime.lastError; });
+    } catch { /* A suspended/reloaded extension must not interrupt normal use. */ }
+  };
+  window.addEventListener('offline', () => diagnostic('network.offline'));
+  window.addEventListener('online', () => {
+    if (window !== window.top) return;
+    try { chrome.runtime.sendMessage({ kind:'chaoxing-plus:extension-diagnostics', op:'online' }, () => { void chrome.runtime.lastError; }); } catch { /* extension unloaded */ }
+  });
+  const extensionScript = chrome.runtime?.getURL?.('chaoxing-plus.js');
+  window.addEventListener('error', e => {
+    if (extensionScript && e.filename === extensionScript) diagnostic('runtime.error');
+  });
+
   const panelSelectors = [
     '[id="panel-cx-new-study"]',
     '[id="panel-cx-new-study-dispatcher"]',
@@ -117,6 +135,7 @@
   };
 
   const applySharedStoreValues = (values) => {
+    const shared = {};
     Object.entries(values ?? {}).forEach(([key, value]) => {
       if (!shouldShareStoreKey(key)) {
         return;
@@ -129,9 +148,10 @@
 
       root.setAttribute(getSharedAttributeName(key), serialized);
       localStorage.setItem(key, serialized);
+      shared[key] = value;
     });
 
-    document.dispatchEvent(new CustomEvent(sharedStoreHydrateEvent, { detail: values }));
+    document.dispatchEvent(new CustomEvent(sharedStoreHydrateEvent, { detail: shared }));
   };
 
   const syncSharedStoreToExtension = (detail) => {
@@ -141,7 +161,10 @@
 
     const nextValues = {};
     Object.entries(detail).forEach(([key, value]) => {
-      if (!shouldShareStoreKey(key)) {
+      // Native-owned browser sessions write this UUID in the extension's own storage before opening the site.
+      // Page settings must not manufacture/change the host's browser identity or script authorization.
+      if (['common.settings.device-instance','common.settings.tiku-adapter.script-identity',
+        'common.settings.tiku-adapter.script-session-token'].includes(key) || !shouldShareStoreKey(key)) {
         return;
       }
 
@@ -155,7 +178,12 @@
     });
 
     if (Object.keys(nextValues).length > 0) {
-      chrome.storage.local.set(nextValues);
+      const started = Date.now();
+      try {
+        chrome.storage.local.set(nextValues, () => {
+          diagnostic(chrome.runtime.lastError ? 'sync.failed' : 'sync.success', Date.now() - started);
+        });
+      } catch { diagnostic('sync.failed'); }
     }
   };
 
@@ -330,6 +358,7 @@
       return;
     }
 
+    diagnostic('extension.ready');
     await hydrateTabPause();
 
     root.dataset[injectedMarkerKey] = frameMarker;

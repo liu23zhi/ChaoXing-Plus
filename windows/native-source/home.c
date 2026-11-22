@@ -97,6 +97,7 @@ typedef struct HOME_STATE {
     BOOL operationOK;
     /* ---- 设备槽位（141 §5/§8） ---- */
     WCHAR deviceId[CX_DEVICE_ID_CAP];
+    WCHAR diagnosticLaunchId[CX_DEVICE_ID_CAP];
     /* 会话注入上下文：只在「启动临时浏览器会话」那一次调用前由 home_work 填好。
        injectDeviceKeys 为 FALSE 时 home_build_settings 不写设备两键 ——
        考试模式与设置对话框的预览/校验路径因此天然不参与设备判定（红线 2）。 */
@@ -232,7 +233,7 @@ static BOOL home_response_string(const CX_ADAPTER_REPLY *reply, const char *key,
 static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activationToken,
                                  const WCHAR *sessionUrl, WCHAR *error, DWORD errorCap) {
     WCHAR path[CX_OPTIONS_PATH_CAP], identity[CX_HOME_SCRIPT_IDENTITY_CAP];
-    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512];
+    WCHAR sessionToken[CX_HOME_API_KEY_CAP], message[512], expiresAt[64];
     char *json = NULL;
     DWORD jsonLength = 0, used = 0, i;
     BOOL ok = FALSE;
@@ -275,6 +276,9 @@ static BOOL home_activate_script(CX_HOME_CONFIG *config, const WCHAR *activation
     }
     home_copy(config->apiKey, CX_HOME_API_KEY_CAP, sessionToken);
     home_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+    expiresAt[0]=0;
+    (void)home_response_string(&reply, "expiresAt", expiresAt, 64);
+    (void)cx_grant_capture(&config->verifiedExam, config->adapterBaseUrl, sessionToken, identity, expiresAt);
     ok = TRUE;
 done:
     cx_adapter_reply_free(&reply);
@@ -1469,7 +1473,29 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     return accepted;
 }
 
-static void home_exam(HOME_STATE *state) {
+typedef struct HOME_DIAGNOSTIC_JOB {
+    CX_OWNED_RUN_GRANT grant; WCHAR device[CX_DEVICE_ID_CAP], launch[CX_DEVICE_ID_CAP];
+} HOME_DIAGNOSTIC_JOB;
+static volatile LONG home_diag_running;
+static DWORD WINAPI home_run_owned_diagnostic(void *arg) {
+    HOME_DIAGNOSTIC_JOB *j=(HOME_DIAGNOSTIC_JOB*)arg;
+    (void)cx_adapter_report_owned_exam_ready(&j->grant,j->device,j->launch);
+    SecureZeroMemory(j,sizeof(*j));HeapFree(GetProcessHeap(),0,j);InterlockedExchange(&home_diag_running,0);return 0;
+}
+static void home_owned_launcher_ready(HOME_STATE *state) {
+    HOME_DIAGNOSTIC_JOB *j; HANDLE thread;
+    if (!state->deviceId[0] || InterlockedCompareExchange(&home_diag_running,1,0))return;
+    if (!state->diagnosticLaunchId[0] && !cx_device_uuid_v4(state->diagnosticLaunchId,CX_DEVICE_ID_CAP)) goto failed;
+    j=(HOME_DIAGNOSTIC_JOB*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*j));if(!j)goto failed;
+    CopyMemory(&j->grant,&state->config->verifiedExam,sizeof(j->grant));lstrcpynW(j->device,state->deviceId,CX_DEVICE_ID_CAP);
+    lstrcpynW(j->launch,state->diagnosticLaunchId,CX_DEVICE_ID_CAP);
+    thread=CreateThread(NULL,0,home_run_owned_diagnostic,j,0,NULL);
+    if(thread){CloseHandle(thread);return;}
+    SecureZeroMemory(j,sizeof(*j));HeapFree(GetProcessHeap(),0,j);
+failed: InterlockedExchange(&home_diag_running,0);
+}
+static void home_authorized_exam(void *context) {
+    HOME_STATE *state=(HOME_STATE *)context;
     CX_OPTIONS *options; char *settings; DWORD length = 0;
     if (!state->examRun) return;
     options = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*options));
@@ -1485,12 +1511,21 @@ static void home_exam(HOME_STATE *state) {
             state->error, 512)) { home_status(state, state->error); goto done; }
     }
     ShowWindow(state->window, SW_HIDE);
+    home_owned_launcher_ready(state); /* first-party UI dispatch only; delivery cannot gate execution */
     state->examRun(options, state->error, 512);
     home_status(state, state->error[0] ? state->error : L"考试客户端流程已返回");
     ShowWindow(state->window, SW_SHOW); SetForegroundWindow(state->window);
 done:
     if (settings) { SecureZeroMemory(settings, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, settings); }
     if (options) { SecureZeroMemory(options, sizeof(*options)); HeapFree(GetProcessHeap(), 0, options); }
+}
+
+static void home_exam(HOME_STATE *state) {
+    if (!state || !state->config || !state->examRun) return;
+    if (!cx_grant_dispatch(&state->config->verifiedExam, state->config->adapterBaseUrl, state->config->apiKey, state->config->scriptIdentity,
+                           home_authorized_exam, state)) {
+        home_status(state, L"考试模式仅限已激活且未过期的专属脚本会话。普通题库令牌不能启动。");
+    }
 }
 
 static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {

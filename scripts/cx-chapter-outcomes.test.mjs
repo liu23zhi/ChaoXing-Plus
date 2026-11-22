@@ -7,7 +7,8 @@ import ts from '@typescript/typescript6';
 async function searchFixture(outcome, overrides = {}) {
   const source = await readFile('src/projects/cx.ts', 'utf8');
   const ast = ts.createSourceFile('cx.ts', source, ts.ScriptTarget.Latest, true);
-  const names = new Set(['searchJob', 'mergeVisibleContentState', 'isVisibleQuestionFallbackState']);
+  const names = new Set(['searchJob', 'mergeVisibleContentState', 'isVisibleQuestionFallbackState',
+    'getStudyAttachmentDiagnostics', 'getStudyMediaDiagnostics', 'getStudyJobDiagnostics']);
   const declarations = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
   const attachment = { jobid: 'job-1', job: true, isPassed: false, property: { mid: 'mid-1', name: 'chapter' } };
   const frameDocument = { querySelector: () => null, querySelectorAll: () => [] };

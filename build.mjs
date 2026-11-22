@@ -28,7 +28,7 @@ function copyStaticFiles() {
       '512': 'icon_512X512.png'
     },
     permissions: ['storage'],
-    background: { service_worker: 'extension-tab-pause.js' },
+    background: { service_worker: 'extension-worker.js', type: 'module' },
     host_permissions: chaoxingHosts,
     action: {
       default_popup: 'popup.html'
@@ -58,7 +58,11 @@ function copyStaticFiles() {
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
-  copyFileSync('src/extension-tab-pause.js', 'dist/extension-tab-pause.js');
+  for (const file of ['extension-tab-pause.js', 'extension-worker.js']) {
+    copyFileSync('src/' + file, 'dist/' + file);
+  }
+
+  copyFileSync('windows/node-source/extension-log-core.mjs', 'dist/extension-diagnostics.js');
 
   if (existsSync('icon/icon_512X512.png')) {
     copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');

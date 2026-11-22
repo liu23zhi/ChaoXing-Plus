@@ -223,6 +223,11 @@
         </span>
       </label>
       <div class="note">关闭后超星页面不再运行自动学习与答题；切换后已打开的页面会自动刷新。</div>
+      <section aria-labelledby="diagnostics-title">
+        <span class="switch-label" id="diagnostics-title">扩展诊断日志</span>
+        <div class="switch-state" id="diagnostics-state" aria-live="polite">正在读取服务状态…</div>
+        <div class="note">默认回传至已配置的题库服务，仅管理员可关闭和查看。日志按扩展设备和每次启动分开；只含版本、事件、时间、次数及耗时，不含页面地址、题目、答案、访问密钥或控制台原文。如有疑问请联系服务管理员。</div>
+      </section>
       <button id="open-chaoxing" class="button" type="button">打开超星官网</button>
     </section>
     <script type="module" src="./popup.js"></script>

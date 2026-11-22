@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "options.h"
+#include "owned-script-authority.h"
 
 #define CX_HOME_EXTENSION_PATH_CAP CX_OPTIONS_PATH_CAP
 #define CX_HOME_ADAPTER_URL_CAP CX_OPTIONS_PATH_CAP
@@ -15,6 +16,7 @@ typedef struct CX_HOME_CONFIG {
     WCHAR adapterBaseUrl[CX_HOME_ADAPTER_URL_CAP];
     WCHAR apiKey[CX_HOME_API_KEY_CAP];
     WCHAR scriptIdentity[CX_HOME_SCRIPT_IDENTITY_CAP];
+    CX_OWNED_RUN_GRANT verifiedExam; /* only a successful exchange can set this; not serialized */
     WCHAR settingsJson[CX_HOME_SETTINGS_CAP];
 } CX_HOME_CONFIG;
 

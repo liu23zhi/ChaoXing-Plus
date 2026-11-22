@@ -42,3 +42,22 @@ if (enabledToggle) {
 }
 
 readExtensionEnabled();
+
+// Read-only: operational policy belongs to the configured TiKuHelper administrator.
+const diagnosticState = document.getElementById('diagnostics-state');
+if (diagnosticState) {
+  let revision = 0;
+  async function refreshDiagnosticState() {
+    const current = ++revision;
+    const statusText = { enabled:'管理员已启用', disabled:'管理员已关闭', unconfigured:'请先配置自己的题库地址和访问密钥',
+      'waiting-device':'等待扩展设备初始化', 'no-script-session':'等待宿主的合法脚本会话', 'changed-service':'服务地址已更换，请配置新服务的访问密钥', unavailable:'服务暂不可用', pending:'正在读取服务状态…' };
+    try {
+      const s = await chrome.runtime.sendMessage({ kind:'chaoxing-plus:extension-diagnostics', op:'inspect' });
+      if (current === revision) diagnosticState.textContent = (statusText[s?.state] || statusText.unavailable) + (s?.service ? ' · ' + s.service : '');
+    } catch { if (current === revision) diagnosticState.textContent = statusText.unavailable; }
+  }
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area === 'local' && ['common.settings.tiku-adapter.key','common.settings.tiku-adapter.baseurl','common.settings.device-id'].some(k => Object.hasOwn(changes,k))) void refreshDiagnosticState();
+  });
+  void refreshDiagnosticState();
+}

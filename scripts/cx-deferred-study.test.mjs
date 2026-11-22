@@ -37,7 +37,7 @@ function task(jobId, retryResults = [{ finished: true }], extra = {}) {
 function fixture(tabTasks, options = {}) {
   const shared = {
     tabTasks, activeTab: 0, chapterId: 'chapter-1', courseId: 'course-1', classId: 'class-1',
-    attributes: new Map(), events: [], warnings: [], retryCount: new Map(), normalCount: new Map(),
+    attributes: new Map(), events: [], warnings: [], diagnostics: [], retryCount: new Map(), normalCount: new Map(),
     runtimeCount: 0, ...options
   };
   if (options.chapters && !options.chapterId) shared.chapterId = options.chapters[0].id;
@@ -155,7 +155,8 @@ function fixture(tabTasks, options = {}) {
       },
       getSiblingSubTaskTabs: tabs,
       triggerSyntheticClick(element) { element.click(); return true; },
-      buildChapterCorrelationId: () => 'correlation', logDebug: noop,
+      buildChapterCorrelationId: () => 'correlation',
+      logDebug(level, label, detail) { shared.diagnostics.push({ level, label, detail: JSON.parse(JSON.stringify(detail)) }); },
       $console: log, $message: { ...log, success: noop },
       $modal: { alert: async () => {}, notice: async () => {} },
       showTopCenterNotice: noop, settingsMethods: () => ({}), workResultsMethods: () => ({}),
@@ -307,6 +308,17 @@ test('a nonchapter task returning void without attachment completion cannot insp
   assert.equal(f.shared.retryCount.size, 0);
   assert.deepEqual(f.state('chapter-1')?.inspectedTabs || [], []);
   assert.equal(f.courseState()?.inspectedChapters?.includes('chapter-1') || false, false);
+  const entry = f.shared.diagnostics.find((log) => log.label === '学习页面进入诊断').detail;
+  const scan = f.shared.diagnostics.find((log) => log.label === '课程学习扫描结束诊断').detail;
+  const blocked = f.shared.diagnostics.find((log) => log.label === '学习跳转阻断诊断').detail;
+  const exit = f.shared.diagnostics.find((log) => log.label === '学习流程退出诊断').detail;
+  assert.equal(entry.studyRunId, scan.studyRunId);
+  assert.equal(entry.studyRunId, blocked.studyRunId);
+  assert.equal(entry.studyRunId, exit.studyRunId);
+  assert.equal(blocked.reason, 'unresolved-current-page');
+  assert.ok(blocked.pendingJobs.some((job) => job.jobId === 'media' && job.attachmentPassed !== true));
+  assert.equal(exit.reason, 'unresolved-current-page');
+  assert.deepEqual(exit.sourcePosition, entry.sourcePosition);
 });
 
 test('a void nonchapter task remains uninspected even before the first expiry was discovered', async () => {

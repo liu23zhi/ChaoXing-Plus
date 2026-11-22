@@ -186,7 +186,7 @@ test('抽取式运行时下，五个页签都渲染出来（allTabs 必须是字
 
   assert.deepEqual(tabs.tabIds, ['overview', 'tiku', 'status', 'cache', 'study'],
     `扩展端必须有五个页签且顺序固定，实际 ${JSON.stringify(tabs.tabIds)}`);
-  assert.deepEqual(tabs.labels, ['结果', '题库配置', '状态', '缓存', '学习设置'],
+  assert.deepEqual(tabs.labels, ['结果', '题库配置', '题库状态', '缓存', '学习设置'],
     `中文标签必须完整，实际 ${JSON.stringify(tabs.labels)}`);
   assert.deepEqual(tabs.activeIds, ['overview'], '默认只激活第一个页签');
 });
@@ -202,7 +202,7 @@ test('Windows 端保留 status，裁掉 cache / study', async () => {
     `Windows 端必须保留 status，实际 ${JSON.stringify(tabs.tabIds)}`);
   assert.equal(tabs.tabIds.includes('cache'), false);
   assert.equal(tabs.tabIds.includes('study'), false);
-  assert.deepEqual(tabs.labels, ['结果', '题库配置', '状态']);
+  assert.deepEqual(tabs.labels, ['结果', '题库配置', '题库状态']);
 });
 
 test('页签互斥：同一时刻只有一个 panel 可见，且切走后仍保留其余 panel（滚动位置靠它）', async () => {

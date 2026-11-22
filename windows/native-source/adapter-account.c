@@ -213,7 +213,7 @@ static BOOL cx_json_token_create(char **out, DWORD *length) {
     { static const char tail[] = ",\"totalQuotaLimit\":0}"; DWORD tailLength = (DWORD)sizeof(tail) - 1; CopyMemory(json + used, tail, tailLength); used += tailLength; json[used] = 0; }
     *out = json; *length = used; return TRUE;
 }
-static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
+static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
     WCHAR *buffers = NULL, *url, *host, *object, *extra, *headers, *authHeader; URL_COMPONENTS parts; HINTERNET session = NULL, conn = NULL, req = NULL; DWORD status = 0, statusSize = sizeof(status), used = 0, got, cap, flags = 0, disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION; BYTE *body = NULL; BOOL ok = FALSE;
     if (reply) { reply->status = 0; reply->body = NULL; reply->length = 0; }
     if (error && errorCap) error[0] = 0;
@@ -226,6 +226,8 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     if (!g_http.crack(url, 0, 0, &parts) || !parts.dwHostNameLength || !parts.dwUrlPathLength || parts.dwUserNameLength || parts.dwPasswordLength) { cx_error(error, errorCap, L"扩展服务地址解析失败。"); goto done; }
     used = parts.dwUrlPathLength; if (parts.dwExtraInfoLength && !cx_append_w(object, 8192, &used, extra)) { cx_error(error, errorCap, L"扩展服务查询参数过长。"); goto done; }
     if (parts.nScheme == INTERNET_SCHEME_HTTPS) flags = WINHTTP_FLAG_SECURE; else if (parts.nScheme != INTERNET_SCHEME_HTTP) { cx_error(error, errorCap, L"只支持 HTTP 或 HTTPS 扩展服务。"); goto done; }
+    if (runIdentity && parts.nScheme != INTERNET_SCHEME_HTTPS && lstrcmpiW(host,L"localhost")
+        && lstrcmpW(host,L"127.0.0.1") && lstrcmpW(host,L"[::1]") && lstrcmpW(host,L"::1")) goto done;
     session = g_http.open(L"超星学习助手/0.1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     conn = session ? g_http.connect(session, host, parts.nPort, 0) : NULL;
     req = conn ? g_http.openRequest(conn, method, object, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags) : NULL;
@@ -233,6 +235,8 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
         || !g_http.setOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled))) { cx_error(error, errorCap, L"无法连接扩展服务。"); goto done; }
     used = 0; if (auth && *auth) { if (!cx_append_w(authHeader, 4300, &used, L"Authorization: ") || !cx_append_w(authHeader, 4300, &used, auth) || !cx_append_w(authHeader, 4300, &used, L"\r\n")) { cx_error(error, errorCap, L"鉴权信息过长。"); goto done; } }
     used = 0; headers[0] = 0; if (!cx_append_w(headers, 4608, &used, L"Accept: application/json\r\n") || !cx_append_w(headers, 4608, &used, L"Content-Type: application/json; charset=utf-8\r\n") || (auth && *auth && !cx_append_w(headers, 4608, &used, authHeader))) { cx_error(error, errorCap, L"请求头过长。"); goto done; }
+    if (runIdentity && (!cx_append_w(headers,4608,&used,L"X-Script-Identity: ")
+        || !cx_append_w(headers,4608,&used,runIdentity) || !cx_append_w(headers,4608,&used,L"\r\n"))) goto done;
     if (!g_http.addHeaders(req, headers, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) { cx_error(error, errorCap, L"设置请求头失败。"); goto done; }
     if (!g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
     if (!g_http.query(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &statusSize, NULL)) { cx_error(error, errorCap, L"扩展服务返回状态未知。"); goto done; }
@@ -243,7 +247,7 @@ static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *metho
     if (status < 200 || status >= 300) cx_error(error, errorCap, L"扩展服务拒绝请求。");
 done: if (body) HeapFree(GetProcessHeap(), 0, body); if (req) g_http.close(req); if (conn) g_http.close(conn); if (session) g_http.close(session); if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
 }
-BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
+BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, NULL, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply) { if (reply && reply->body) HeapFree(GetProcessHeap(), 0, reply->body); if (reply) { reply->body = NULL; reply->length = 0; reply->status = 0; } }
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account) { if (account) { SecureZeroMemory(account, sizeof(*account)); account->accessTokenId = 0; } }
 
@@ -662,4 +666,50 @@ done:
     if (encoded) HeapFree(GetProcessHeap(), 0, encoded);
     if (!ok) { if (bitmap) DeleteObject(bitmap); bitmap = NULL; cx_error(error, errorCap, L"验证码 PNG 图片解码失败。"); }
     return bitmap;
+}
+
+/* Narrow first-party reporter. The three fixed routes are independent of exam execution and never
+   register a device or activate/renew a script. Do not add arbitrary headers, paths, or event text. */
+static BOOL cx_log_identifier(const WCHAR *value,DWORD cap) {
+    DWORD i=0; WCHAR c;
+    if(!value||!value[0])return FALSE;
+    for(;value[i];++i) {
+        c=value[i];
+        if(i>=cap || !((c>=L'0'&&c<=L'9')||(c>=L'A'&&c<=L'Z')||(c>=L'a'&&c<=L'z')||c==L'_'||c==L'-'||c==L'.'||c==L':'))return FALSE;
+        if(c==L'.'&&value[i+1]==L'.')return FALSE;
+    }
+    return TRUE;
+}
+static BOOL cx_log_flag(const CX_ADAPTER_REPLY *reply,const char *key) {
+    JT t[24];int v;
+    if(!reply->body||jparse(reply->body,(int)reply->length,t,24)<1)return FALSE;
+    v=jkey(reply->body,t,0,key);return v>=0&&t[v].type=='p'&&jeq(reply->body,t,v,"true");
+}
+BOOL cx_adapter_report_owned_exam_ready(const CX_OWNED_RUN_GRANT *g,const WCHAR *device,const WCHAR *launch) {
+    WCHAR *auth;char d[129],id[65],start[384],events[768],at[32]; DWORD i;SYSTEMTIME st;FILETIME now;BOOL ok=FALSE;
+    CX_ADAPTER_REPLY reply={0};int attempt; const char *version="6.3.0";
+    if(!g||lstrlenW(g->token)<19||!cx_log_identifier(g->token,256)||g->token[0]!=L's'||g->token[1]!=L'r'||g->token[2]!=L'_'
+        ||!cx_log_identifier(g->identity,127)||!cx_log_identifier(device,128)||!cx_log_identifier(launch,64))return FALSE;
+    for(i=0;g->service[i];++i)if(g->service[i]<=32||g->service[i]==L'?'||g->service[i]==L'#'||g->service[i]==L'@'||g->service[i]==L'\\')return FALSE;
+    GetSystemTimeAsFileTime(&now);if(CompareFileTime(&g->expires,&now)<=0)return FALSE;
+    for(i=0;device[i];++i)d[i]=(char)device[i];d[i]=0;for(i=0;launch[i];++i)id[i]=(char)launch[i];id[i]=0;
+    auth=(WCHAR*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,272*sizeof(WCHAR));if(!auth)return FALSE;
+    lstrcpyW(auth,L"Bearer ");lstrcatW(auth,g->token);
+    wsprintfA(start,"{\"version\":\"%s\",\"mode\":\"native_exam\",\"device_id\":\"%s\",\"launch_id\":\"%s\"}",version,d,id);
+    GetSystemTime(&st);wsprintfA(at,"%04u-%02u-%02uT%02u:%02u:%02uZ",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);
+    wsprintfA(events,"{\"version\":\"%s\",\"mode\":\"native_exam\",\"device_id\":\"%s\",\"launch_id\":\"%s\",\"entries\":[{\"event\":\"sync.success\",\"level\":\"info\",\"time\":\"%s\"}]}",version,d,id,at);
+    // Reuse the exact same launch ID if the bounded retry has to repeat the start signal.
+    for(attempt=0;attempt<2;++attempt) {
+        GetSystemTimeAsFileTime(&now);if(CompareFileTime(&g->expires,&now)<=0)break;
+        if(!cx_http_url(g->service,L"/api/extension-logs/policy?mode=native_exam",L"GET",auth,g->identity,NULL,1500,2048,&reply,NULL,0))continue;
+        if(reply.status!=200||!cx_log_flag(&reply,"enabled"))break;
+        cx_adapter_reply_free(&reply);
+        if(!cx_http_url(g->service,L"/api/extension-logs/start",L"POST",auth,g->identity,start,1500,2048,&reply,NULL,0))continue;
+        if(reply.status!=200&&reply.status!=201&&reply.status!=204)break;
+        cx_adapter_reply_free(&reply);
+        if(!cx_http_url(g->service,L"/api/extension-logs",L"POST",auth,g->identity,events,1500,2048,&reply,NULL,0))break;
+        if(attempt==0&&reply.status==409&&cx_log_flag(&reply,"need_start")){cx_adapter_reply_free(&reply);continue;}
+        ok=reply.status>=200&&reply.status<300;break;
+    }
+    cx_adapter_reply_free(&reply);SecureZeroMemory(auth,272*sizeof(WCHAR));HeapFree(GetProcessHeap(),0,auth);return ok;
 }

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { needsExamGrant, hasActivationInput, captureExamGrant, dispatchWithExamGrant, EXAM_DENIED } from './owned-script-authority.mjs';
+import { startHostExamDiagnostics } from './extension-diagnostics.mjs';
+const HOST_VERSION = '6.3.0';
 import { promises as fs } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -75,6 +78,7 @@ async function activateScriptSessionFromSettings(settings) {
   const activationToken = String(settings?.['common.settings.tiku-adapter.script-activation-token'] || '').trim();
   const sessionURL = String(settings?.['common.settings.tiku-adapter.script-session-url'] || '').trim();
   if (!activationToken || !sessionURL) return null;
+  if (!hasActivationInput(settings)) throw Error(EXAM_DENIED); // never accept an exchange from another origin
   const identity = randomBytes(24).toString('hex');
   const response = await fetch(sessionURL, {
     method: 'POST',
@@ -97,7 +101,7 @@ async function activateScriptSessionFromSettings(settings) {
   settings['common.settings.tiku-adapter.script-session-expires-at'] = String(body.expiresAt || '');
   delete settings['common.settings.tiku-adapter.script-activation-token'];
   delete settings['common.settings.tiku-adapter.script-session-url'];
-  return { identity, expiresAt: body.expiresAt || '' };
+  return { key:body.token.trim(), identity, expiresAt: body.expiresAt || '' };
 }
 
 function usage() {
@@ -507,7 +511,7 @@ async function main() {
     return;
   }
   if (options.version) {
-    console.log('6.3.0');
+    console.log(HOST_VERSION);
     return;
   }
   if (options.capabilities) {
@@ -543,6 +547,9 @@ async function main() {
   // --hide-console：静默脚本已通过 wscript 隐藏初始控制台；这里兜底隐藏本进程
   // （包括 UAC 提升后的实例）附着的控制台窗口，避免出现持续可见的 Node 黑框。
   // --print-effective-config 需要把 JSON 输出到控制台，因此不隐藏。
+  if (needsExamGrant(options) && !hasActivationInput(scriptBootstrap?.settings)) {
+    console.error(EXAM_DENIED); process.exitCode = 1; return;
+  }
   if (options.hideConsole && !options.printEffectiveConfig) {
     await hideConsoleWindow();
   }
@@ -568,6 +575,8 @@ async function main() {
   let programCleanup = null;
   let selfDestructControl = null;
   let onScriptSessionExpired = null;
+  let verifiedExam = null;
+  let reportOwnedConfigDiagnostic = () => {};
   let cleanupAfterStartupFailure = null;
   let diagnosticsChanged = () => {};
   const diagnostics = createHostDiagnostics({ onChange: () => diagnosticsChanged() });
@@ -773,7 +782,8 @@ async function main() {
 			// 取舍漏在了 persistEnabled 上。两条必须一致，否则「print 不写盘」只对
 			// 注册文件成立、对配置写入不成立。
 			persistEnabled: !options.noDiskWrite && !options.printEffectiveConfig,
-      onError: recordConfigFailure
+      onPersist: () => reportOwnedConfigDiagnostic('settings.saved'),
+      onError: () => { recordConfigFailure(); reportOwnedConfigDiagnostic('sync.failed'); }
     });
     configStoreForCleanup = configStore;
     await configStore.load();
@@ -787,16 +797,24 @@ async function main() {
     configStore.replaceFromDisk(mergedConfig);
     const config = configStore.config;
     applyHostOptionsToConfig(config, options);
-    if (scriptBootstrap) {
+    if (scriptBootstrap && needsExamGrant(options)) {
       const activation = await activateScriptSessionFromSettings(config.settings);
       if (activation) {
+        verifiedExam = captureExamGrant(config.settings, activation);
         onScriptSessionExpired = createScriptSessionExpiryHandler(activation.expiresAt, () => {
           selfDestructControl?.request('script-session-expired');
         });
         logger.info('[script] 已激活内存脚本会话');
+        // Report the owned launcher's initialized session only, never read a third-party process or create authorization.
+        if (!options.printEffectiveConfig && !options.listClients && !options.selfCheck) {
+          void startHostExamDiagnostics(() => configStore.config.settings, activation, {
+            version:HOST_VERSION, attach: report => { reportOwnedConfigDiagnostic = report; }
+          });
+        }
         if (!onScriptSessionExpired) logger.warn('[script] 没有可验证的未来到期时间，未启用会话过期清理');
       }
     }
+    if (needsExamGrant(options)) dispatchWithExamGrant(verifiedExam, config.settings, () => {});
     const configuredLogging = config.settings['common.settings.windows-log-enabled'] !== false;
     const loggingEnabled = options.noDiskWrite
       ? false
@@ -868,7 +886,7 @@ async function main() {
     }
 
     const assetsDir = options.assetsDir || path.join(repositoryRoot, 'dist-windows');
-    const assets = await loadAssets(assetsDir, logger);
+    const assets = await dispatchWithExamGrant(verifiedExam, config.settings, () => loadAssets(assetsDir, logger));
     const instanceToken = `${Date.now()}-${process.pid}`;
     const diagnosticsStamp = new Date().toISOString().replace(/[:.]/g, '-');
     const diagnosticsDirectory = options.diagnosticsDir
