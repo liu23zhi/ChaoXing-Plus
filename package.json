@@ -23,7 +23,7 @@
     "@types/md5": "^2.3.5",
     "@types/node": "^26.6.6",
     "@typescript/typescript6": "^6.0.2",
-    "pe-library": "2.0.1",
+    "pe-library": "2.0.3",
     "puppeteer": "^25.17.0",
     "resedit": "3.1.0",
     "typescript": "^7.0.2",
