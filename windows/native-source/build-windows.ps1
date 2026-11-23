@@ -260,3 +260,4 @@ if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }
 
 
 
+pause

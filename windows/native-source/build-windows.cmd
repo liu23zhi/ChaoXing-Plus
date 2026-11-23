@@ -116,4 +116,5 @@ echo [build-windows] multi-file GUI EXE: %MULTI_EXE%
 echo [build-windows] multi-file command entry: %MULTI_CLI%
 echo [build-windows] extraction package: %PACKED_EXE%
 echo [build-windows] full package: %PACKAGE_DIR%
+pause
 exit /b 0
