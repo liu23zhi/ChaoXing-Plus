@@ -41,6 +41,7 @@ static BOOL edgeInstalled = TRUE, chromeInstalled = TRUE, mockCachePackage, reje
 static BOOL lastCacheNoDiskWrite, lastCachePathMatched;
 static DWORD cachedFetches, forcedFetches, verifyCalls;
 static DWORD resolveCalls, resolveExamCalls;
+static DWORD windowCreateCalls;
 static int resolveMode;
 static BOOL test_script_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
     const WCHAR *authorization, const char *json, DWORD timeout, DWORD limit,
@@ -48,6 +49,11 @@ static BOOL test_script_request(const WCHAR *base, const WCHAR *method, const WC
 
 static BOOL test_show_window(HWND window, int command) {
     return ShowWindow(window, showWindows ? command : SW_HIDE);
+}
+static HWND WINAPI test_create_window(DWORD exStyle, LPCWSTR className, LPCWSTR name, DWORD style,
+    int x, int y, int width, int height, HWND parent, HMENU menu, HINSTANCE instance, LPVOID parameter) {
+    ++windowCreateCalls;
+    return CreateWindowExW(exStyle, className, name, style, x, y, width, height, parent, menu, instance, parameter);
 }
 static BOOL test_extension_fetch(const WCHAR *base, const WCHAR *source, BYTE **data,
     DWORD *size, WCHAR *version, DWORD versionCap, WCHAR *error, DWORD errorCap) {
@@ -123,6 +129,7 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 }
 
 #define ShowWindow test_show_window
+#define CreateWindowExW test_create_window
 #define cx_adapter_extension_fetch test_extension_fetch
 #define cx_adapter_extension_fetch_cached test_extension_fetch_cached
 #define cx_browser_start test_browser_start
@@ -140,6 +147,7 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 #define cx_device_sessions_report test_device_sessions_report
 #include "../home.c"
 #undef ShowWindow
+#undef CreateWindowExW
 #undef cx_adapter_request
 
 static BOOL test_script_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
@@ -986,6 +994,42 @@ static BOOL resolve_exam(CX_OPTIONS *received, WCHAR *error, DWORD cap) {
         "resolved script input reaches the exam callback with the real in-memory lease and special token");
     return TRUE;
 }
+static void no_window_script_resolve_tests(void) {
+    static const WCHAR *inputs[] = { L"https://fixture.invalid/launch",
+        L"powershell -c \"iex(irm https://fixture.invalid/launch)\"" };
+    CX_HOME_CONFIG *config = HeapAlloc(GetProcessHeap(), 0, sizeof(*config));
+    CX_OPTIONS *received = HeapAlloc(GetProcessHeap(), 0, sizeof(*received));
+    DWORD i, before, windowsBefore = windowCreateCalls; WCHAR error[512];
+    if (!config || !received) ExitProcess(7);
+    for (i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
+        cx_home_config_init(config); cx_options_init(received); before = resolveCalls;
+        check(cx_home_config_resolve_script(config, inputs[i], error, 512)
+            && resolveCalls == before + 1 && cx_script_lease_active() && cx_script_lease_valid()
+            && !lstrcmpW(config->apiKey, L"sr_fixture_verified_session_0123456789")
+            && config->verifiedExam.token[0] && config->scriptIdentity[0],
+            "silent URL and PowerShell redemption acquires a private script grant without a home window");
+        check(cx_home_config_apply_session(config, received, error, 512)
+            && contains(received->sharedSettingsJson, "\"cx.new.work.answer-retry\":4")
+            && contains(received->sharedSettingsJson, "sr_fixture_verified_session_0123456789")
+            && contains(received->sharedSettingsJson, "common.settings.tiku-adapter.script-identity")
+            && received->noDiskWrite,
+            "silent redemption preserves script parameters and private authentication in runtime options");
+        cx_script_lease_stop();
+    }
+    for (resolveMode = 2; resolveMode <= 3; ++resolveMode) {
+        cx_home_config_init(config); home_copy(config->apiKey, CX_HOME_API_KEY_CAP, L"tk_original"); before = resolveCalls;
+        check(!cx_home_config_resolve_script(config, inputs[0], error, 512)
+            && resolveCalls == before + 1 && !cx_script_lease_active()
+            && !lstrcmpW(config->apiKey, L"tk_original") && !config->verifiedExam.token[0],
+            "silent rejected redemption leaves credentials unchanged and cannot become an unauthorized launch");
+        if (resolveMode == 3) check(!lstrcmpW(error, L"fixture denied"), "silent redemption preserves the server denial reason");
+    }
+    check(windowCreateCalls == windowsBefore && !owned_window(HOME_CLASS),
+        "silent redemption creates zero actual Win32 controls or home windows");
+    resolveMode = 0; resolveCalls = 0;
+    cx_home_config_clear(config); SecureZeroMemory(received, sizeof(*received));
+    HeapFree(GetProcessHeap(), 0, config); HeapFree(GetProcessHeap(), 0, received);
+}
 static void script_resolve_tests(void) {
     CX_HOME_CONFIG *saved = HeapAlloc(GetProcessHeap(), 0, sizeof(*saved));
     HOME_STATE *state; DWORD start, before; WCHAR text[512];
@@ -1075,6 +1119,7 @@ void HomeTestMain(void) {
     device_key_tests(); device_injection_tests(); device_report_tests();
     device_status_tests(); device_over_limit_tests(); device_config_path_tests(); device_id_tests();
     script_session_tests();
+    no_window_script_resolve_tests();
     script_resolve_tests();
     self_destruct_home_tests();
     if (!SetTimer(NULL, 0, 20, home_tick)) ExitProcess(5);

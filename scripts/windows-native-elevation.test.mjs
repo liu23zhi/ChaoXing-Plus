@@ -73,7 +73,13 @@ test('compiled host transfers a 740 launch after cleanup and keeps the selected 
     assert.match(result.stdout, /PASS closing the homepage without choosing examinations performs no discovery or launch/);
     assert.match(result.stdout, /PASS secondary common scan overrides configured recursive mode and cancellation returns to the homepage/);
     assert.match(result.stdout, /PASS secondary selection cancellation returns to the homepage without launching the configured client/);
-    assert.match(result.stdout, /PASS silent-debug no-address test reaches real discovery, selection and launch without a script lease/);
+    assert.match(result.stdout, /PASS exact silent-debug launch exits once after failure without opening an exam test or homepage window/);
+    assert.match(result.stdout, /PASS silent-debug client-exit returns without recreating an exam window or restarting the client/);
+    assert.match(result.stdout, /PASS silent-debug UAC handoff preserves every original argument without opening a home window/);
+    assert.match(result.stdout, /PASS silent-debug UAC cancellation exits without opening a fallback window/);
+    assert.match(result.stdout, /PASS silent URL resolves once before the real exam launch without opening a home window/);
+    assert.match(result.stdout, /PASS silent denied URL stops before client discovery and never opens a fallback window/);
+    assert.match(result.stdout, /PASS silent authorized UAC failure never replays its one-use script redemption in a new host/);
     assert.match(result.stdout, /PASS the actual PowerShell no-CLI bootstrap dispatches directly to the exam page and real client workflow/);
     assert.match(result.stdout, /PASS secondary 740 immediately hands off its selected path with shared settings and injection mode JSON/);
     assert.match(result.stdout, /PASS secondary UAC cancellation returns to the homepage without a pending restart flag/);

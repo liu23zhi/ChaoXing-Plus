@@ -30,12 +30,12 @@ if (-not $vs) { throw 'Visual Studio with the MSVC x86/x64 tools and Windows SDK
 if ($env:VSCMD_ARG_TGT_ARCH -ne 'x86') { throw 'Failed to initialize MSVC for x86.' }
 $cl = (Get-Command cl.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 
-function Build-OwnedFixture([string]$Name, [string[]]$Units) {
+function Build-OwnedFixture([string]$Name, [string[]]$Units, [string[]]$ExtraLink = @()) {
     $sources = @($Units | ForEach-Object { (Get-Item -LiteralPath (Join-Path $src $_)).FullName })
-    $flags = @('/nologo', '/TC', '/utf-8', '/O1', '/Gy', '/MT', "/Fe:$Name.exe")
+    $flags = @('/nologo', '/TC', '/utf-8', '/DUNICODE', '/D_UNICODE', '/O1', '/Gy', '/MT', "/Fe:$Name.exe")
     Invoke-Checked "compile $Name (x86)" $cl ($flags + $sources + @(
         '/link', '/INCREMENTAL:NO', '/OPT:REF', '/MACHINE:X86', 'user32.lib', 'gdi32.lib'
-    ))
+    ) + $ExtraLink)
 }
 
 $tempRoot = (Get-Item -LiteralPath ([IO.Path]::GetTempPath())).FullName.TrimEnd('\')
@@ -53,6 +53,21 @@ try {
 
     Build-OwnedFixture 'owned-receipt' @('tests/owned-exam-log-tests.c', 'adapter-account.c', 'json.c')
     Invoke-Checked 'WinHTTP loopback receiver' $node @($receiver, (Join-Path $scratch.FullName 'owned-receipt.exe'))
+
+    Build-OwnedFixture 'silent-entry-tests' @(
+        'tests/silent-entry-tests.c', 'net.c', 'process.c', 'discovery.c', 'options.c', 'assets.c',
+        'selection.c', 'session.c', 'audit.c', 'config-store.c', 'diagnostics.c', 'elevation.c',
+        'dpi.c', 'silent.c', 'purge.c', 'wipe.c', 'browser-extension.c', 'browser-session.c',
+        'adapter-account.c', 'account-window.c', 'device-quota.c', 'script-lease.c', 'json.c', 'memory.c'
+    ) @('/SUBSYSTEM:WINDOWS', '/ENTRY:SilentEntryTestMain', 'kernel32.lib', 'shell32.lib', 'comdlg32.lib', 'ws2_32.lib',
+        'advapi32.lib', 'iphlpapi.lib', 'version.lib')
+    $previousSilentEntry = $env:CX_NATIVE_SILENT_ENTRY_EXE
+    try {
+        $env:CX_NATIVE_SILENT_ENTRY_EXE = Join-Path $scratch.FullName 'silent-entry-tests.exe'
+        Push-Location -LiteralPath $repo
+        try { Invoke-Checked 'real silent CMD and actual HWND lifecycle' $node @('--test', 'scripts/windows-native-silent-entry.test.mjs') }
+        finally { Pop-Location }
+    } finally { $env:CX_NATIVE_SILENT_ENTRY_EXE = $previousSilentEntry }
     $passed = $true
 } finally {
     Pop-Location
@@ -76,4 +91,4 @@ try {
         [Console]::Error.WriteLine("Scratch cleanup: $_")
     }
 }
-Write-Host 'PASS: all three owned native contracts ran on Windows x86.'
+Write-Host 'PASS: owned native contracts and real silent-entry lifecycle ran on Windows x86.'

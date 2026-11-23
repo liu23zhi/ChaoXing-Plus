@@ -169,6 +169,7 @@ try {
             @{ Name = 'diagnostics-tests'; Entry = 'DiagnosticsTestMain'; Objects = @('memory','json','options','config-store','diagnostics'); Resources = @() },
             @{ Name = 'elevation-tests'; Entry = 'ElevationTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'elevation-host-tests'; Entry = 'ElevationHostTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','purge','wipe'); Resources = @($resourceObject) },
+            @{ Name = 'silent-entry-tests'; Entry = 'SilentEntryTestMain'; Objects = @('memory','json','net','process','discovery','options','assets','selection','session','audit','config-store','diagnostics','elevation','dpi','silent','purge','wipe','browser-extension','browser-session','adapter-account','account-window','device-quota','script-lease'); Resources = @($resourceObject) },
             @{ Name = 'dpi-tests'; Entry = 'DpiTestMain'; Objects = @('memory'); Resources = @() },
             @{ Name = 'dpi-child'; Entry = 'DpiChildMain'; Objects = @('memory'); Resources = @(); Manifest = 'tests\dpi-child.manifest' },
             @{ Name = 'dpi-process-tests'; Entry = 'DpiProcessTestMain'; Objects = @('memory','process','dpi'); Resources = @() },

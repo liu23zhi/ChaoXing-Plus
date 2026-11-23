@@ -3,6 +3,10 @@
 #include <windows.h>
 DWORD WINAPI test_attributes(LPCWSTR path);
 LPWSTR WINAPI test_command_line(void);
+static void WINAPI test_sleep(DWORD duration);
+static BOOL WINAPI test_alloc_console(void);
+#define Sleep test_sleep
+#define AllocConsole test_alloc_console
 #define cx_discovery_scan test_discovery_scan
 #define proc_check_instances test_check_instances
 #define proc_launch test_launch
@@ -24,6 +28,7 @@ LPWSTR WINAPI test_command_line(void);
 #define cx_selection_proxy_carrier test_selection_proxy_carrier
 #define cx_options_load_default test_load_default
 #define cx_home_run test_home
+#define cx_home_config_resolve_script test_resolve_script
 #define cx_audit_write_report test_report
 #define net_http_get_timeout test_http_get_timeout
 #define GetFileAttributesW test_attributes
@@ -33,6 +38,8 @@ LPWSTR WINAPI test_command_line(void);
 #include "../host.c"
 #undef WinMain
 #undef WinMainCRTStartup
+#undef Sleep
+#undef AllocConsole
 
 static CX_OPTIONS testOptions;
 static DWORD scans, selections, launches, reports, failures;
@@ -50,7 +57,7 @@ static BOOL selectionCancelled, scannedFullCandidates, emptyCandidates;
 static BOOL requestScanAll, failFullScan, cancelFullScan, explicitFullScanPolicies;
 static CX_DISCOVERY_SCAN_MODE firstScanMode, lastScanMode;
 static DWORD expectedRestartArgc = 5;
-static BOOL earlyRestartExpected, tokenElevated, tokenAvailable = TRUE;
+static BOOL earlyRestartExpected, silentRestartExpected, tokenElevated, tokenAvailable = TRUE;
 static DWORD tokenQueries;
 static DWORD homeCalls, homeExamCalls;
 static BOOL homeInside, homeInvokesExam = TRUE, homeRepeatExam;
@@ -71,7 +78,25 @@ static DWORD clientLogClearCalls;
 static BOOL useOwnedProcessFixture;
 static HANDLE ownedProcessFixture;
 static DWORD ownedProcessFixturePid;
+static BOOL clientExitAfterPoll, resolveDenied;
+static DWORD resolveCalls, consoleAllocCalls;
+static const WCHAR *expectedResolveInput;
 static WCHAR launchCarriers[8][16], handoffModes[8][16], handoffCarriers[8][16], handoffPaths[8][CX_OPTIONS_PATH_CAP];
+
+static void WINAPI test_sleep(DWORD duration) {
+    if (clientExitAfterPoll && duration == 20) { fixtureClientAlive = FALSE; return; }
+    Sleep(duration);
+}
+static BOOL WINAPI test_alloc_console(void) { ++consoleAllocCalls; return FALSE; }
+BOOL test_resolve_script(CX_HOME_CONFIG *config, const WCHAR *input, WCHAR *error, DWORD cap) {
+    ++resolveCalls;
+    if (!expectedResolveInput || lstrcmpW(input, expectedResolveInput)) return FALSE;
+    if (resolveDenied) { h_error(error, cap, L"fixture denied"); return FALSE; }
+    h_copy(config->apiKey, CX_HOME_API_KEY_CAP, L"sr_fixture_verified_session_0123456789");
+    h_copy(config->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, L"fixture-identity");
+    leaseFixtureActive = TRUE;
+    return TRUE;
+}
 
 static const WCHAR *selected_mode_value(void) {
     return selections && selections <= 4 && selectionModes[selections - 1] ? selectionModes[selections - 1] : L"cdp-port";
@@ -162,7 +187,9 @@ BOOL test_port_owner_ex(USHORT port, DWORD rootPid, DWORD *owner,
         if (cx_silent_hotkey(&h_silent, L"F8")) { ++destructTriggers; h_silent_begin_destruct(FALSE); }
     }
     if (expireLeaseOnProbe) { expireLeaseOnProbe = FALSE; leaseFixtureExpired = TRUE; }
-    *owner = rootPid; *reason = CX_PORT_OWNER_VERIFIED; return TRUE;
+    if (owner) *owner = rootPid;
+    if (reason) *reason = CX_PORT_OWNER_VERIFIED;
+    return TRUE;
 }
 
 LPWSTR WINAPI test_command_line(void) { return commandLineFixture; }
@@ -174,6 +201,16 @@ BOOL test_restart(const WCHAR *executable, int argc, WCHAR *const *argv,
         if (h_audit || h_config || h_diagnostics || reports || dpiActive || scans || selections || launches
             || processChecks || dpiBegins || homeCalls || client != NULL || argc != (int)expectedRestartArgc
             || (argc && lstrcmpW(argv[0], L"--elevate-on-start"))) ExitProcess(4);
+        *exitCode = restartCancelled ? 3 : 37; return !restartCancelled;
+    }
+    if (silentRestartExpected) {
+        WCHAR **original; int originalCount, i;
+        if (h_audit || h_config || h_diagnostics || reports || dpiActive || homeCalls
+            || launches != 1 || !client || lstrcmpW(client, launchedPath)) ExitProcess(4);
+        original = CommandLineToArgvW(commandLineFixture, &originalCount);
+        if (!original || argc != originalCount - 1) ExitProcess(4);
+        for (i = 1; i < originalCount; ++i) if (lstrcmpW(original[i], argv[i - 1])) ExitProcess(4);
+        LocalFree(original);
         *exitCode = restartCancelled ? 3 : 37; return !restartCancelled;
     }
     if (homeInside) {
@@ -304,6 +341,12 @@ BOOL test_report(CX_AUDIT *audit, const CX_AUDIT_REPORT *report, WCHAR *error, D
 BOOL test_http_get_timeout(USHORT port, const char *path, char **body, DWORD *length,
                            DWORD timeoutMs, WCHAR *error, DWORD cap) {
     (void)port; (void)path; (void)timeoutMs;
+    if (clientExitAfterPoll) {
+        const char *reply = lstrcmpA(path, "/json/version") == 0 ? "{\"Browser\":\"Chrome/75.0.3770.100\"}" : "[]";
+        *length = (DWORD)lstrlenA(reply); *body = HeapAlloc(GetProcessHeap(), 0, *length + 1);
+        if (!*body) return FALSE;
+        CopyMemory(*body, reply, *length + 1); return TRUE;
+    }
     *body = NULL; *length = 0; h_error(error, cap, L"fixture blocks HTTP without network I/O"); return FALSE;
 }
 static void check(BOOL ok, const char *name) {
@@ -324,13 +367,14 @@ static void reset(void) {
     requestScanAll = failFullScan = cancelFullScan = explicitFullScanPolicies = FALSE; lastSelectionNotice = NULL;
     firstScanMode = lastScanMode = CX_DISCOVERY_SCAN_FALLBACK_ALL;
     h_default_gui = FALSE;
-    earlyRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
+    earlyRestartExpected = silentRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
     homeCalls = homeExamCalls = 0; homeInside = homeRepeatExam = FALSE; homeInvokesExam = TRUE;
     expectedDiagnosticScriptInput = NULL;
     homeExamPage = FALSE;
     fixtureClientAlive = destructOnProbe = expireLeaseOnProbe = leaseFixtureActive = leaseFixtureExpired = FALSE;
     destructTriggers = clientLogClearCalls = 0;
     useOwnedProcessFixture = FALSE;
+    clientExitAfterPoll = resolveDenied = FALSE; resolveCalls = consoleAllocCalls = 0; expectedResolveInput = NULL;
     homeNoPreScan = homeNoPendingElevation = homeExamResult = homeSettingsPreserved = FALSE; homeSettingsFixture = NULL;
     h_copy(homeExpectedMode, CX_OPTIONS_SHORT_CAP, L"cdp-port"); h_copy(homeExpectedCarrier, 16, L"auto");
     for (i = 0; i < 4; ++i) { selectionModes[i] = NULL; selectionCarriers[i] = NULL; selectionPaths[i] = NULL; }
@@ -524,11 +568,48 @@ void __stdcall ElevationHostTestMain(void) {
     check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && homeNoPreScan && !homeExamCalls && !scans && !launches && !tokenQueries,
         "a script URL launch parameter opens the exam page before its asynchronous authorization");
     reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
-    commandLineFixture = L"host.exe --exam-test --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel";
+    commandLineFixture = L"host.exe --exam-test --console --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel --self-destruct-key Ctrl+Alt+Shift+E --self-destruct-key F8 --no-self-destruct-confirm";
     launchFailure = ERROR_ACCESS_DENIED;
-    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && homeExamCalls == 1
-        && scans && launches == 1 && !cx_script_lease_active(),
-        "silent-debug no-address test reaches real discovery, selection and launch without a script lease");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !homeCalls && !homeExamCalls
+        && scans == 1 && launches == 1 && consoleAllocCalls <= 1 && !cx_script_lease_active(),
+        "exact silent-debug launch exits once after failure without opening an exam test or homepage window");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --exam-test --console --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel --self-destruct-key Ctrl+Alt+Shift+E --self-destruct-key F8 --no-self-destruct-confirm";
+    launchFailure = ERROR_SUCCESS; fixtureClientAlive = clientExitAfterPoll = TRUE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !homeCalls && !homeExamCalls
+        && scans == 1 && launches == 1 && consoleAllocCalls <= 1 && !lstrcmpA(h_report.stopReason, "client-exit"),
+        "silent-debug client-exit returns without recreating an exam window or restarting the client");
+    {
+        int cancelled;
+        for (cancelled = 0; cancelled <= 1; ++cancelled) {
+            reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+            commandLineFixture = L"host.exe --exam-test --console --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel --self-destruct-key Ctrl+Alt+Shift+E --self-destruct-key F8 --no-self-destruct-confirm";
+            silentRestartExpected = TRUE; restartCancelled = cancelled != 0;
+            check(HostWinMain(NULL, NULL, NULL, 0) == (cancelled ? 3 : 37)
+                && !homeCalls && !homeExamCalls && scans == 1 && launches == 1 && restartCalls == 1, cancelled
+                ? "silent-debug UAC cancellation exits without opening a fallback window"
+                : "silent-debug UAC handoff preserves every original argument without opening a home window");
+        }
+    }
+    {
+        int denied;
+        for (denied = 0; denied <= 1; ++denied) {
+            reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+            commandLineFixture = L"host.exe --exam-test --silent-scenario --silent-delete-simulate --no-disk-write --no-log --script-url https://fixture.invalid/launch";
+            expectedResolveInput = L"https://fixture.invalid/launch"; resolveDenied = denied != 0;
+            launchFailure = ERROR_ACCESS_DENIED;
+            check(HostWinMain(NULL, NULL, NULL, 0) == 1 && resolveCalls == 1 && !homeCalls
+                && scans == (denied ? 0u : 1u) && launches == (denied ? 0u : 1u), denied
+                ? "silent denied URL stops before client discovery and never opens a fallback window"
+                : "silent URL resolves once before the real exam launch without opening a home window");
+        }
+    }
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --exam-test --silent-scenario --silent-delete-simulate --no-disk-write --no-log --script-url https://fixture.invalid/launch";
+    expectedResolveInput = L"https://fixture.invalid/launch";
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && resolveCalls == 1 && !homeCalls
+        && scans == 1 && launches == 1 && !restartCalls && !h_needs_elevation,
+        "silent authorized UAC failure never replays its one-use script redemption in a new host");
     reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --quiet --no-panel --self-destruct-key Ctrl+Alt+Shift+E --self-destruct-key F8 --no-self-destruct-confirm";
     launchFailure = ERROR_ACCESS_DENIED;

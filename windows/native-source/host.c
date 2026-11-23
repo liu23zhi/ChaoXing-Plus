@@ -976,6 +976,8 @@ static BOOL h_proxy_payload_available(const WCHAR *carrier) {
 /* 自愈是否有意义：端口被别的进程占用时不要重试（换代理也没用，还可能干扰别人）。 */
 static BOOL h_selfheal_worthwhile(void) {
     if (h_silent_done && InterlockedCompareExchange(&h_silent_destruct_requested, FALSE, FALSE)) return FALSE;
+    if (h_report.stopReason && (!lstrcmpA(h_report.stopReason, "client-exit")
+        || !lstrcmpA(h_report.stopReason, "client-exit-before-endpoint"))) return FALSE;
     if (h_report.endpointProbe.listenerSeen) return FALSE;
     if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_LISTENER_NOT_OWNED] > 0) return FALSE;
     if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_HTTP_FAILED] > 0) return FALSE;
@@ -3586,6 +3588,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     if (!cx_options_apply_pending_json(&h_json_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_merge(&h_base_options, &h_config_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_json_options, h_main_error, HOST_ERROR_CAP) || !cx_options_merge(&h_base_options, &h_cli_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
     if (!cx_options_finalize(&h_base_options, h_main_error, HOST_ERROR_CAP)) { if (!h_cli_options.quiet) h_print(h_main_error); return 2; }
+    /* A silent invocation is a one-shot exam run, even when --exam-test was
+       stripped from argv or a default configuration requested a GUI. */
+    if (h_base_options.silentScenario) h_default_gui = FALSE;
     /* 多文件版只保留暂存启动这一项拒绝；自毁与启动清理降级为"只清理运行痕迹"。 */
     if (!cx_asset_resources_embedded() && (h_base_options.stageRequest || h_base_options.stagedBoot)) {
         if (!h_base_options.quiet) h_print(L"multi-file builds do not support staged boot; use ordinary startup (package launcher cleans only its own temporary files)");
@@ -3792,18 +3797,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         CX_HOME_CONFIG *homeConfig = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*homeConfig));
         if (!homeConfig) { WSACleanup(); return 1; }
         cx_home_config_init(homeConfig);
-        if (h_exam_test || h_script_bootstrap_present) {
+        if (!h_base_options.silentScenario && (h_exam_test || h_script_bootstrap_present)) {
             homeConfig->examTestPage = TRUE; homeConfig->autoStartExam = TRUE;
             h_copy(homeConfig->diagnosticScriptInput, CX_HOME_ADAPTER_URL_CAP, h_script_test_input);
-            SecureZeroMemory(h_script_test_input, sizeof(h_script_test_input));
         }
-        ok = cx_home_config_apply_options(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP)
-            && cx_home_config_apply_session(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP);
+        ok = cx_home_config_apply_options(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP);
+        if (ok && h_base_options.silentScenario && h_script_test_input[0])
+            ok = cx_home_config_resolve_script(homeConfig, h_script_test_input, h_main_error, HOST_ERROR_CAP);
+        SecureZeroMemory(h_script_test_input, sizeof(h_script_test_input));
+        if (ok) ok = cx_home_config_apply_session(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP);
         if (ok) {
-            if ((h_default_gui || h_exam_test) && !h_base_options.attachPortSet && !h_base_options.listClients)
+            if (!h_base_options.silentScenario && (h_default_gui || h_exam_test)
+                && !h_base_options.attachPortSet && !h_base_options.listClients)
                 ok = cx_home_run(&h_base_options, homeConfig, h_home_exam, h_main_error, HOST_ERROR_CAP);
             else ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP);
-        }
+        } else if (!h_base_options.quiet) h_print(h_main_error);
         if (cx_script_lease_active() && h_needs_elevation) {
             h_needs_elevation = FALSE; ok = FALSE;
             h_error(h_main_error, HOST_ERROR_CAP, L"请以管理员权限重新运行脚本命令。");

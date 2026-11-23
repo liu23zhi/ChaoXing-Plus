@@ -455,19 +455,101 @@ static BOOL home_adapter_patch(const CX_HOME_CONFIG *config, char *patch, DWORD 
     return home_json_append_char(patch, cap, &n, '}');
 }
 
+BOOL cx_home_config_resolve_script(CX_HOME_CONFIG *config, const WCHAR *input,
+    WCHAR *error, DWORD errorCap) {
+    CX_ADAPTER_REPLY reply; CX_HOME_CONFIG *candidate = NULL;
+    JT *tokens = NULL; char *json = NULL;
+    WCHAR *buffers = NULL, *url, *origin, *returnedOrigin, *identity, *returnedIdentity, *token, *expiry, *heartbeat;
+    DWORD n = 0; BOOL first = TRUE, ok = FALSE; int count, parameters, converted;
+    if (error && errorCap) error[0] = 0;
+    ZeroMemory(&reply, sizeof(reply));
+    if (!config || !input || !input[0]) {
+        home_copy(error, errorCap, L"请填写脚本 URL 或系统生成的简短 PowerShell 指令。");
+        return FALSE;
+    }
+    candidate = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), 0, sizeof(*candidate));
+    buffers = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+        (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
+    if (!candidate || !buffers) goto done;
+    CopyMemory(candidate, config, sizeof(*candidate));
+    url = buffers; origin = url + CX_HOME_ADAPTER_URL_CAP; returnedOrigin = origin + CX_HOME_ADAPTER_URL_CAP;
+    identity = returnedOrigin + CX_HOME_ADAPTER_URL_CAP; returnedIdentity = identity + 128;
+    token = returnedIdentity + 128; expiry = token + CX_HOME_API_KEY_CAP; heartbeat = expiry + 64;
+    if (!cx_adapter_script_address_parts(input, url, CX_HOME_ADAPTER_URL_CAP,
+        origin, CX_HOME_ADAPTER_URL_CAP, error, errorCap) || !cx_script_identity(identity, 128)) goto done;
+    json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 16384);
+    tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192 * sizeof(JT));
+    if (!json || !tokens || !home_json_append_char(json, 16384, &n, '{')
+        || !home_json_append_pair(json, 16384, &n, "address", url, &first)
+        || !home_json_append_pair(json, 16384, &n, "identity", identity, &first)
+        || !home_json_append_char(json, 16384, &n, '}')) goto done;
+    if (!cx_adapter_request(origin, L"POST", L"/api/script-launch/resolve", NULL, json,
+        15000, CX_OPTIONS_JSON_CAP, &reply, error, errorCap)) goto done;
+    if (reply.status < 200 || reply.status >= 300) {
+        (void)home_response_string(&reply, "message", error, errorCap); goto done;
+    }
+    if (!home_response_string(&reply, "origin", returnedOrigin, CX_HOME_ADAPTER_URL_CAP)
+        || lstrcmpiW(returnedOrigin, origin)
+        || !home_response_string(&reply, "identity", returnedIdentity, 128) || lstrcmpW(returnedIdentity, identity)
+        || !home_response_string(&reply, "token", token, CX_HOME_API_KEY_CAP)
+        || !home_response_string(&reply, "expiresAt", expiry, 64)
+        || !home_response_string(&reply, "heartbeatUrl", heartbeat, CX_HOME_ADAPTER_URL_CAP)) goto done;
+    count = jparse(reply.body, (int)reply.length, tokens, 8192);
+    parameters = count > 0 ? jkey(reply.body, tokens, 0, "parameters") : -1;
+    if (parameters < 0 || tokens[parameters].type != '{') goto done;
+    converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reply.body + tokens[parameters].start,
+        tokens[parameters].end - tokens[parameters].start, candidate->settingsJson, CX_HOME_SETTINGS_CAP - 1);
+    if (!converted) goto done;
+    candidate->settingsJson[converted] = 0;
+    home_copy(candidate->adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP, origin);
+    home_copy(candidate->apiKey, CX_HOME_API_KEY_CAP, token);
+    home_copy(candidate->scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+    if (!cx_grant_capture(&candidate->verifiedExam, origin, token, identity, expiry)
+        || !cx_script_lease_start(origin, heartbeat, token, identity, expiry, error, errorCap)) goto done;
+    CopyMemory(config, candidate, sizeof(*config)); ok = TRUE;
+done:
+    if (!ok && error && errorCap && !error[0]) home_copy(error, errorCap, L"脚本授权响应无效，未启动客户端。");
+    cx_adapter_reply_free(&reply);
+    if (json) { SecureZeroMemory(json, 16384); HeapFree(GetProcessHeap(), 0, json); }
+    if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
+    if (candidate) { cx_home_config_clear(candidate); HeapFree(GetProcessHeap(), 0, candidate); }
+    if (buffers) {
+        SecureZeroMemory(buffers, (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
+        HeapFree(GetProcessHeap(), 0, buffers);
+    }
+    return ok;
+}
+
 BOOL cx_home_config_apply_session(const CX_HOME_CONFIG *config, CX_OPTIONS *options,
     WCHAR *error, DWORD errorCap) {
-    char *patch; DWORD n, length; BOOL ok = FALSE;
+    char *patch; CX_OPTIONS *copy; DWORD n, length; int converted; BOOL ok = FALSE;
+    if (!config || !options) return FALSE;
     if (!config->scriptIdentity[0]) return TRUE;
     patch = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, CX_OPTIONS_JSON_CAP);
-    if (!patch) return FALSE;
+    copy = (CX_OPTIONS *)HeapAlloc(GetProcessHeap(), 0, sizeof(*copy));
+    if (!patch || !copy) goto done;
+    CopyMemory(copy, options, sizeof(*copy));
+    /* URL redemption supplies the same page parameters as the GUI exam path.
+       Apply them before the private session patch so they cannot replace auth. */
+    CopyMemory(patch, "{\"settings\":", 12);
+    converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, config->settingsJson, -1,
+        patch + 12, CX_OPTIONS_JSON_CAP - 14, NULL, NULL);
+    if (!converted) goto done;
+    patch[11 + converted] = '}'; patch[12 + converted] = 0;
+    if (!cx_options_apply_json_utf8(copy, patch, converted + 12, error, errorCap)) goto done;
+    SecureZeroMemory(patch, CX_OPTIONS_JSON_CAP);
     CopyMemory(patch, "{\"settings\":", 12);
     if (home_adapter_patch(config, patch + 12, CX_OPTIONS_JSON_CAP - 64)) {
         n = (DWORD)lstrlenA(patch);
         CopyMemory(patch + n, ",\"noDiskWrite\":true}", 21); length = n + 20;
-        ok = cx_options_apply_json_utf8(options, patch, (int)length, error, errorCap);
+        ok = cx_options_apply_json_utf8(copy, patch, (int)length, error, errorCap)
+            && cx_options_finalize(copy, error, errorCap);
+        if (ok) CopyMemory(options, copy, sizeof(*options));
     }
-    SecureZeroMemory(patch, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, patch); return ok;
+done:
+    if (copy) { SecureZeroMemory(copy, sizeof(*copy)); HeapFree(GetProcessHeap(), 0, copy); }
+    if (patch) { SecureZeroMemory(patch, CX_OPTIONS_JSON_CAP); HeapFree(GetProcessHeap(), 0, patch); }
+    return ok;
 }
 
 /*
@@ -956,62 +1038,12 @@ static DWORD WINAPI home_work(LPVOID context) {
     BOOL forceRefresh;
     state->operationOK = FALSE; state->error[0] = 0;
     if (state->operation == HOME_SCRIPT_CHECK) {
-        CX_ADAPTER_REPLY reply; JT *tokens = NULL; char *json = NULL;
-        WCHAR *buffers = NULL, *url, *origin, *returnedOrigin, *identity, *returnedIdentity, *token, *expiry, *heartbeat;
-        DWORD n = 0; BOOL first = TRUE; int count, parameters;
         if (!state->examRun) {
             state->operationOK = cx_adapter_script_address_check(state->pendingScriptUrl, state->error, 512);
-            PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0); return 0;
-        }
-        ZeroMemory(&reply, sizeof(reply));
-        buffers = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-            (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
-        if (!buffers) goto script_done;
-        url = buffers; origin = url + CX_HOME_ADAPTER_URL_CAP; returnedOrigin = origin + CX_HOME_ADAPTER_URL_CAP;
-        identity = returnedOrigin + CX_HOME_ADAPTER_URL_CAP; returnedIdentity = identity + 128;
-        token = returnedIdentity + 128; expiry = token + CX_HOME_API_KEY_CAP; heartbeat = expiry + 64;
-        if (!cx_adapter_script_address_parts(state->pendingScriptUrl, url, CX_HOME_ADAPTER_URL_CAP,
-            origin, CX_HOME_ADAPTER_URL_CAP, state->error, 512) || !cx_script_identity(identity, 128)) goto script_done;
-        json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 16384);
-        tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192 * sizeof(JT));
-        if (!json || !tokens || !home_json_append_char(json, 16384, &n, '{')
-            || !home_json_append_pair(json, 16384, &n, "address", url, &first)
-            || !home_json_append_pair(json, 16384, &n, "identity", identity, &first)
-            || !home_json_append_char(json, 16384, &n, '}')) goto script_done;
-        if (!cx_adapter_request(origin, L"POST", L"/api/script-launch/resolve", NULL, json,
-            15000, CX_OPTIONS_JSON_CAP, &reply, state->error, 512)) goto script_done;
-        if (reply.status < 200 || reply.status >= 300) {
-            (void)home_response_string(&reply, "message", state->error, 512); goto script_done;
-        }
-        if (!home_response_string(&reply, "origin", returnedOrigin, CX_HOME_ADAPTER_URL_CAP)
-            || lstrcmpiW(returnedOrigin, origin)
-            || !home_response_string(&reply, "identity", returnedIdentity, 128) || lstrcmpW(returnedIdentity, identity)
-            || !home_response_string(&reply, "token", token, CX_HOME_API_KEY_CAP)
-            || !home_response_string(&reply, "expiresAt", expiry, 64)
-            || !home_response_string(&reply, "heartbeatUrl", heartbeat, CX_HOME_ADAPTER_URL_CAP)) goto script_done;
-        CopyMemory(&state->pendingConfig, state->config, sizeof(state->pendingConfig));
-        count = jparse(reply.body, (int)reply.length, tokens, 8192);
-        parameters = count > 0 ? jkey(reply.body, tokens, 0, "parameters") : -1;
-        if (parameters < 0 || tokens[parameters].type != '{'
-            || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reply.body + tokens[parameters].start,
-                tokens[parameters].end - tokens[parameters].start, state->pendingConfig.settingsJson, CX_HOME_SETTINGS_CAP - 1)) goto script_done;
-        state->pendingConfig.settingsJson[MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            reply.body + tokens[parameters].start, tokens[parameters].end - tokens[parameters].start,
-            NULL, 0)] = 0;
-        home_copy(state->pendingConfig.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP, origin);
-        home_copy(state->pendingConfig.apiKey, CX_HOME_API_KEY_CAP, token);
-        home_copy(state->pendingConfig.scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
-        if (!cx_grant_capture(&state->pendingConfig.verifiedExam, origin, token, identity, expiry)
-            || !cx_script_lease_start(origin, heartbeat, token, identity, expiry, state->error, 512)) goto script_done;
-        state->operationOK = TRUE;
-script_done:
-        if (!state->operationOK && !state->error[0]) home_copy(state->error, 512, L"脚本授权响应无效，未启动客户端。");
-        cx_adapter_reply_free(&reply);
-        if (json) { SecureZeroMemory(json, 16384); HeapFree(GetProcessHeap(), 0, json); }
-        if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
-        if (buffers) {
-            SecureZeroMemory(buffers, (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
-            HeapFree(GetProcessHeap(), 0, buffers);
+        } else {
+            CopyMemory(&state->pendingConfig, state->config, sizeof(state->pendingConfig));
+            state->operationOK = cx_home_config_resolve_script(&state->pendingConfig,
+                state->pendingScriptUrl, state->error, 512);
         }
         PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0);
         return 0;

@@ -31,6 +31,10 @@ BOOL cx_home_config_apply_options(CX_HOME_CONFIG *config, const CX_OPTIONS *opti
 void cx_home_config_clear(CX_HOME_CONFIG *config);
 BOOL cx_home_config_apply_session(const CX_HOME_CONFIG *config, CX_OPTIONS *options,
     WCHAR *error, DWORD errorCap);
+/* Redeem a script URL/compact PowerShell input without creating any window.
+   On failure config is unchanged; the caller must not fall back to a local run. */
+BOOL cx_home_config_resolve_script(CX_HOME_CONFIG *config, const WCHAR *input,
+    WCHAR *error, DWORD errorCap);
 
 /* A NULL examRun opens only the script address diagnostics window. */
 BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
