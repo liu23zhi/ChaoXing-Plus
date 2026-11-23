@@ -11,7 +11,7 @@ STACK = {"source-checks", "service-contract", "windows-contract", "joint-gate"}
 REQUIRED_RUN = {
     "source-checks": ("npm run typecheck", "npm run build", "owned-unit", "check-joint-workflow.py"),
     "service-contract": ("three-mode-contract.test.mjs",),
-    "windows-contract": ("npm run build", "extension-diagnostics.browser.test.mjs", "owned-profiles.browser.test.mjs", "owned-native-contracts.ps1"),
+    "windows-contract": ("npm run build", "extension-diagnostics.browser.test.mjs", "owned-profiles.browser.test.mjs", "owned-native-contracts.ps1", "tiku-launcher-native-contract.ps1"),
 }
 def validate(workflow):
     errors = []
@@ -43,7 +43,7 @@ def validate(workflow):
                 require(opts.get("persist-credentials") == "false" and not ({"lfs", "submodules"} & set(opts)),
                         f"{job_id}: checkout source only, without credentials or external assets")
                 if "repository" in opts:
-                    require(job_id == "service-contract" and opts["repository"] == "liu23zhi/TiKuHelper"
+                    require(job_id in {"service-contract", "windows-contract"} and opts["repository"] == "liu23zhi/TiKuHelper"
                             and bool(re.fullmatch(r"[0-9a-f]{40}", opts.get("ref", ""))),
                             "service fixture must use a pinned first-party checkout")
     require("secrets." not in json.dumps(workflow).lower(), "joint CI does not require repository secrets")

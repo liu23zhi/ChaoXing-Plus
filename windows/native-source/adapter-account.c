@@ -315,6 +315,28 @@ typedef struct CX_HTTP_DEADLINE {
     DWORD timeout;
 } CX_HTTP_DEADLINE;
 
+BOOL cx_adapter_script_address_parts(const WCHAR *address, WCHAR *url, DWORD urlCap,
+    WCHAR *origin, DWORD originCap, WCHAR *error, DWORD errorCap) {
+    URL_COMPONENTS parts; WCHAR host[512]; DWORD n;
+    if (!url || !origin || !cx_load_http() || !cx_script_address_url(address, url, urlCap)) goto invalid;
+    ZeroMemory(&parts, sizeof(parts)); parts.dwStructSize = sizeof(parts);
+    parts.lpszHostName = host; parts.dwHostNameLength = 512;
+    if (!g_http.crack(url, 0, 0, &parts) || !parts.dwHostNameLength
+        || parts.dwUserNameLength || parts.dwPasswordLength) goto invalid;
+    host[parts.dwHostNameLength] = 0;
+    if (parts.nScheme != INTERNET_SCHEME_HTTPS && (parts.nScheme != INTERNET_SCHEME_HTTP
+        || (lstrcmpiW(host, L"localhost") && lstrcmpW(host, L"127.0.0.1")
+            && lstrcmpW(host, L"[::1]") && lstrcmpW(host, L"::1")))) goto invalid;
+    n = parts.nScheme == INTERNET_SCHEME_HTTPS ? 8 : 7;
+    while (url[n] && url[n] != L'/') ++n;
+    if (n >= originCap) goto invalid;
+    CopyMemory(origin, url, n * sizeof(WCHAR)); origin[n] = 0;
+    return TRUE;
+invalid:
+    cx_error(error, errorCap, L"请填写有效的 HTTPS 脚本 URL 或系统生成的简短 PowerShell 指令；本机地址可使用 HTTP。");
+    return FALSE;
+}
+
 /* WinHTTP's receive timeout resets on each packet, including inside one
    synchronous ReadData. Closing the request is the documented cancellation
    path; exchange the owner so cleanup never closes the handle twice. */

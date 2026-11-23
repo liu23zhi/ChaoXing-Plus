@@ -19,6 +19,8 @@ typedef struct CX_HOME_CONFIG {
     CX_OWNED_RUN_GRANT verifiedExam; /* only a successful exchange can set this; not serialized */
     WCHAR settingsJson[CX_HOME_SETTINGS_CAP];
     WCHAR diagnosticScriptInput[CX_HOME_ADAPTER_URL_CAP]; /* in memory only */
+    BOOL examTestPage; /* local startup UI state, never serialized */
+    BOOL autoStartExam;
 } CX_HOME_CONFIG;
 
 typedef BOOL (*CX_HOME_EXAM_RUN)(CX_OPTIONS *options, WCHAR *error, DWORD errorCap);

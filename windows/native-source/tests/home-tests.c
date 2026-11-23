@@ -40,6 +40,11 @@ static BOOL blockFetch, showWindows;
 static BOOL edgeInstalled = TRUE, chromeInstalled = TRUE, mockCachePackage, rejectFirstVerify;
 static BOOL lastCacheNoDiskWrite, lastCachePathMatched;
 static DWORD cachedFetches, forcedFetches, verifyCalls;
+static DWORD resolveCalls, resolveExamCalls;
+static int resolveMode;
+static BOOL test_script_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
+    const WCHAR *authorization, const char *json, DWORD timeout, DWORD limit,
+    CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD cap);
 
 static BOOL test_show_window(HWND window, int command) {
     return ShowWindow(window, showWindows ? command : SW_HIDE);
@@ -128,12 +133,34 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 #define cx_browser_extension_id test_browser_id
 #define cx_account_window test_account_window
 #define cx_adapter_report_owned_exam_ready test_owned_exam_ready
+#define cx_adapter_request test_script_request
 #define cx_browser_extension_verify test_extension_verify
 /* 设备槽位：网络一律不真的发出去，只记录「该发的都发了」。 */
 #define cx_device_quota_fetch test_device_quota_fetch
 #define cx_device_sessions_report test_device_sessions_report
 #include "../home.c"
 #undef ShowWindow
+#undef cx_adapter_request
+
+static BOOL test_script_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
+    const WCHAR *authorization, const char *json, DWORD timeout, DWORD limit,
+    CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD cap) {
+    JT tokens[32]; WCHAR identity[128]; char ascii[128], body[2048]; int count, value;
+    if (lstrcmpW(path, L"/api/script-launch/resolve"))
+        return cx_adapter_request(base, method, path, authorization, json, timeout, limit, reply, error, cap);
+    ++resolveCalls; ZeroMemory(reply, sizeof(*reply));
+    if (lstrcmpW(base, L"https://fixture.invalid") || lstrcmpW(method, L"POST") || authorization) return FALSE;
+    count = jparse(json, lstrlenA(json), tokens, 32); value = count > 0 ? jkey(json, tokens, 0, "identity") : -1;
+    if (!jwstr(json, tokens, value, identity, 128)) return FALSE;
+    WideCharToMultiByte(CP_UTF8, 0, identity, -1, ascii, 128, NULL, NULL);
+    if (resolveMode == 3) lstrcpyA(body, "{\"message\":\"fixture denied\"}");
+    else wsprintfA(body, "{\"origin\":\"%s\",\"identity\":\"%s\",\"token\":\"sr_fixture_verified_session_0123456789\",\"expiresAt\":\"2099-01-01T00:00:00Z\",\"heartbeatUrl\":\"/heartbeat\",\"parameters\":{\"cx.new.work.answer-retry\":4}}",
+        resolveMode == 2 ? "https://other.invalid" : "https://fixture.invalid", ascii);
+    reply->status = resolveMode == 3 ? 403 : 200; reply->length = lstrlenA(body);
+    reply->body = (char *)HeapAlloc(GetProcessHeap(), 0, reply->length + 1);
+    if (!reply->body) return FALSE;
+    CopyMemory(reply->body, body, reply->length + 1); return TRUE;
+}
 
 /* ---- 设备槽位替身实现 ---------------------------------------------------- */
 
@@ -229,10 +256,14 @@ static void clear_messages(void) {
         if (message.message != WM_QUIT) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
 }
+static BOOL test_home_exam_noop(CX_OPTIONS *value, WCHAR *error, DWORD cap) {
+    (void)value; (void)error; (void)cap; return TRUE;
+}
 static HOME_STATE *make_home(void) {
     HOME_STATE *state = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
     if (!state) ExitProcess(3);
     state->options = &options; state->config = &shared;
+    state->examRun = test_home_exam_noop; /* this fixture represents the full home, not HEAD-only diagnostics */
     state->window = CreateWindowExW(0, HOME_CLASS, L"Home test", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         0, 0, 840, 510, NULL, NULL, home_instance, state);
     if (!state->window) ExitProcess(4);
@@ -880,6 +911,8 @@ static void CALLBACK home_tick(HWND window, UINT message, UINT_PTR timer, DWORD 
     state = (HOME_STATE *)GetWindowLongPtrW(home, GWLP_USERDATA);
     for (i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) if (!GetDlgItem(home, ids[i])) controls = FALSE;
     check(controls && GetDlgItem(home, HOME_SESSION_LIST), "the actual home page creates every workflow control");
+    check(!GetDlgItem(home, HOME_SCRIPT_URL) && !GetDlgItem(home, HOME_SCRIPT_CHECK),
+        "multi-browser homepage has no script URL or PowerShell input");
     icon = LoadIconW(home_instance, MAKEINTRESOURCEW(CX_RESOURCE_APP_ICON));
     check(icon && (HICON)SendMessageW(home, WM_GETICON, ICON_SMALL, 0) == icon
         && (HICON)GetClassLongPtrW(home, GCLP_HICON) == icon, "home window and class use the embedded application icon");
@@ -892,17 +925,82 @@ static void CALLBACK home_tick(HWND window, UINT message, UINT_PTR timer, DWORD 
     check(rect.right - rect.left == MulDiv(150, home_dpi, 96), "home controls scale from the active DPI");
     check(showWindows ? IsWindowVisible(home) : !IsWindowVisible(home), "home visibility matches the requested UI smoke mode");
     SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM, BN_CLICKED), 0);
-    check(!examCalled, "ordinary account credentials cannot dispatch the exam workflow");
+    check(!examCalled && state->examPage && GetDlgItem(home, HOME_SCRIPT_URL)
+        && GetDlgItem(home, HOME_EXAM_START), "entering the exam page exposes its optional script input without launching");
+    check(!cx_script_lease_active(), "local exam test starts without manufacturing a script lease");
+    SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
+    check(examCalled, "empty script URL dispatches the real local exam callback");
+    examCalled = FALSE;
     /* The positive UI flow uses an in-memory synthetic exchange receipt; no file
        or command-line setting may manufacture the production grant. */
     home_copy(shared.apiKey, CX_HOME_API_KEY_CAP, L"sr_fixture_verified_session_0123456789");
     cx_script_identity(shared.scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP);
     check(cx_grant_capture(&shared.verifiedExam, shared.adapterBaseUrl, shared.apiKey,
         shared.scriptIdentity, L"2099-01-01T00:00:00Z"), "synthetic successful exchange captures a private exam grant");
-    SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM, BN_CLICKED), 0);
+    SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
     check(examCalled && state->options == &options && options.sharedSettingsJson[0],
         "returning from the exam page preserves the home options");
+    SendMessageW(home, WM_COMMAND, MAKEWPARAM(HOME_EXAM_BACK, BN_CLICKED), 0);
+    check(!state->examPage && !GetDlgItem(home, HOME_SCRIPT_URL)
+        && IsWindowVisible(GetDlgItem(home, HOME_EDGE)) == showWindows,
+        "returning to multi-browser mode removes the exam-only input");
     SendMessageW(home, WM_CLOSE, 0, 0);
+}
+
+static DWORD localExamCalls, localPageChecks;
+static BOOL test_local_exam(CX_OPTIONS *received, WCHAR *error, DWORD cap) {
+    (void)received; (void)error; (void)cap; ++localExamCalls;
+    check(!cx_script_lease_active(), "no-address startup reaches the exam callback without a script lease"); return TRUE;
+}
+static void CALLBACK local_exam_tick(HWND unused, UINT message, UINT_PTR timer, DWORD tick) {
+    HWND window = owned_window(HOME_CLASS); HOME_STATE *state;
+    (void)unused; (void)message; (void)tick;
+    if (!window || !localExamCalls) return;
+    KillTimer(NULL, timer); ++localPageChecks;
+    state = (HOME_STATE *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    check(state->examPage && GetDlgItem(window, HOME_SCRIPT_URL) && !state->deviceId[0]
+        && !state->deviceInitialized, "direct exam testing never registers a multi-browser device");
+    SendMessageW(window, WM_CLOSE, 0, 0);
+}
+
+static BOOL resolve_exam(CX_OPTIONS *received, WCHAR *error, DWORD cap) {
+    (void)error; (void)cap; ++resolveExamCalls;
+    check(cx_script_lease_active() && cx_script_lease_valid()
+        && contains(received->sharedSettingsJson, "sr_fixture_verified_session_0123456789")
+        && contains(received->sharedSettingsJson, "common.settings.tiku-adapter.script-identity"),
+        "resolved script input reaches the exam callback with the real in-memory lease and special token");
+    return TRUE;
+}
+static void script_resolve_tests(void) {
+    CX_HOME_CONFIG *saved = HeapAlloc(GetProcessHeap(), 0, sizeof(*saved));
+    HOME_STATE *state; DWORD start, before; WCHAR text[512];
+    if (!saved) ExitProcess(7);
+    CopyMemory(saved, &shared, sizeof(shared));
+    state = make_home(); state->examRun = resolve_exam;
+    home_show_exam(state); SetDlgItemTextW(state->window, HOME_SCRIPT_URL,
+        L"powershell -c \"iex(irm https://fixture.invalid/launch)\"");
+    SendMessageW(state->window, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
+    start = GetTickCount();
+    while (state->worker && GetTickCount() - start < 5000) { clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT); }
+    check(resolveCalls == 1 && resolveExamCalls == 1 && state->operationOK
+        && !lstrcmpW(state->resolvedScriptUrl, L"powershell -c \"iex(irm https://fixture.invalid/launch)\""),
+        "URL or PowerShell startup resolves a script and automatically starts the exam workflow");
+    home_show_main(state); home_show_exam(state);
+    GetDlgItemTextW(state->window, HOME_SCRIPT_URL, text, 512);
+    check(text[0] && cx_script_lease_active(), "reopening the exam page preserves its input and current authorization");
+    cx_script_lease_stop();
+    for (resolveMode = 2; resolveMode <= 3; ++resolveMode) {
+        before = resolveExamCalls; state->resolvedScriptUrl[0] = 0;
+        SendMessageW(state->window, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
+        start = GetTickCount();
+        while (state->worker && GetTickCount() - start < 5000) { clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT); }
+        GetWindowTextW(state->status, text, 512);
+        check(!state->operationOK && !cx_script_lease_active() && before == resolveExamCalls,
+            "cross-origin grant or denied script never starts an exam or creates a lease");
+        if (resolveMode == 3) check(!lstrcmpW(text, L"fixture denied"), "server denial message is visible in the exam page");
+    }
+    resolveMode = 0; home_device_flush_exit(state); free_home(state); CopyMemory(&shared, saved, sizeof(shared));
+    SecureZeroMemory(saved, sizeof(*saved)); HeapFree(GetProcessHeap(), 0, saved);
 }
 
 static void script_session_tests(void) {
@@ -962,11 +1060,17 @@ void HomeTestMain(void) {
     device_key_tests(); device_injection_tests(); device_report_tests();
     device_status_tests(); device_over_limit_tests(); device_config_path_tests(); device_id_tests();
     script_session_tests();
+    script_resolve_tests();
     if (!SetTimer(NULL, 0, 20, home_tick)) ExitProcess(5);
     options.noDiskWrite = TRUE;
     options.noDiskWriteSet = TRUE;
     ok = cx_home_run(&options, &shared, test_exam, errorText, 512);
     check(ok && homeInspections == 1, "the complete home page exits after asynchronous cleanup");
+    cx_home_config_init(&shared); shared.examTestPage = shared.autoStartExam = TRUE;
+    if (!SetTimer(NULL, 0, 20, local_exam_tick)) ExitProcess(6);
+    ok = cx_home_run(&options, &shared, test_local_exam, errorText, 512);
+    check(ok && localExamCalls == 1 && localPageChecks == 1,
+        "direct no-address test mode starts once and remains usable after the exam workflow returns");
     CloseHandle(fetchEntered); CloseHandle(fetchRelease);
     cx_home_config_clear(&shared); cx_home_config_clear(&separate);
     output(failures ? "NATIVE HOME TESTS FAIL\n" : "NATIVE HOME TESTS PASS\n");

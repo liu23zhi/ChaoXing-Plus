@@ -59,6 +59,7 @@ static const WCHAR *selectionModes[4], *selectionCarriers[4], *selectionPaths[4]
 static DWORD modeGetterCalls, carrierGetterCalls, portLaunches, proxyLaunches;
 static BOOL launchProxy[8], launchEnvironmentOK, homeFreshOptions, homeSelectedOptions;
 static const WCHAR *expectedDiagnosticScriptInput;
+static BOOL homeExamPage;
 static WCHAR launchCarriers[8][16], handoffModes[8][16], handoffCarriers[8][16], handoffPaths[8][CX_OPTIONS_PATH_CAP];
 
 static const WCHAR *selected_mode_value(void) {
@@ -75,6 +76,8 @@ BOOL test_home(CX_OPTIONS *options, CX_HOME_CONFIG *config, CX_HOME_EXAM_RUN exa
     homeNoPreScan = !scans && !selections && !launches && !restartCalls;
     if (!examRun) return !lstrcmpW(config->diagnosticScriptInput,
         expectedDiagnosticScriptInput ? expectedDiagnosticScriptInput : L"");
+    homeExamPage = config->examTestPage && config->autoStartExam;
+    if (expectedDiagnosticScriptInput && lstrcmpW(config->diagnosticScriptInput, expectedDiagnosticScriptInput)) return FALSE;
     homeInside = TRUE;
     if (homeSettingsFixture && !cx_options_apply_json_utf8(options, homeSettingsFixture,
         h_len(homeSettingsFixture), error, cap)) ExitProcess(4);
@@ -277,6 +280,7 @@ static void reset(void) {
     earlyRestartExpected = tokenElevated = FALSE; tokenAvailable = TRUE; tokenQueries = 0;
     homeCalls = homeExamCalls = 0; homeInside = homeRepeatExam = FALSE; homeInvokesExam = TRUE;
     expectedDiagnosticScriptInput = NULL;
+    homeExamPage = FALSE;
     homeNoPreScan = homeNoPendingElevation = homeExamResult = homeSettingsPreserved = FALSE; homeSettingsFixture = NULL;
     h_copy(homeExpectedMode, CX_OPTIONS_SHORT_CAP, L"cdp-port"); h_copy(homeExpectedCarrier, 16, L"auto");
     for (i = 0; i < 4; ++i) { selectionModes[i] = NULL; selectionCarriers[i] = NULL; selectionPaths[i] = NULL; }
@@ -432,8 +436,28 @@ void __stdcall ElevationHostTestMain(void) {
         "explicit client path alone never starts the exam client and opens diagnostics");
     reset(); commandLineFixture = L"host.exe --script-url https://fixture.invalid/script";
     expectedDiagnosticScriptInput = L"https://fixture.invalid/script";
-    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeNoPreScan && !homeExamCalls && !scans && !launches && !tokenQueries,
-        "a script URL launch parameter only pre-fills the diagnostic window");
+    homeInvokesExam = FALSE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && homeNoPreScan && !homeExamCalls && !scans && !launches && !tokenQueries,
+        "a script URL launch parameter opens the exam page before its asynchronous authorization");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --exam-test --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel";
+    launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && homeExamCalls == 1
+        && scans && launches == 1 && !cx_script_lease_active(),
+        "silent-debug no-address test reaches real discovery, selection and launch without a script lease");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --exam-test \"powershell -c \\\"iex(irm https://fixture.invalid/script)\\\"\" --duration 321";
+    expectedDiagnosticScriptInput = L"powershell -c \"iex(irm https://fixture.invalid/script)\"";
+    homeInvokesExam = FALSE;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && !scans
+        && h_base_options.durationMs == 321, "PowerShell input and additional CLI values survive exam test argument parsing");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe"; launchFailure = ERROR_ACCESS_DENIED;
+    SetEnvironmentVariableW(L"CXPLUS_SCRIPT_BOOTSTRAP_B64", L"eyJxdWlldCI6dHJ1ZSwibm9EaXNrV3JpdGUiOnRydWV9");
+    check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage
+        && homeExamCalls == 1 && scans && selections && launches == 1,
+        "the actual PowerShell no-CLI bootstrap dispatches directly to the exam page and real client workflow");
+    SetEnvironmentVariableW(L"CXPLUS_SCRIPT_BOOTSTRAP_B64", NULL);
     reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe";
     homeSettingsFixture = "{\"injectMode\":\"cdp-port\",\"settings\":{\"common.settings.tikuAdapterApiKey\":\"tk_quote\\\"slash\\\\中文\",\"cx.new.work.answer-retry\":7}}";

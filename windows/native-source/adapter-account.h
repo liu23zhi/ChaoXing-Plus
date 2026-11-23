@@ -65,6 +65,9 @@ BOOL cx_adapter_same_origin_path(const WCHAR *baseUrl, const WCHAR *url, WCHAR *
 /* Read-only HEAD to an exact script URL or generated compact command. No
    credentials, redirect, script body, launch, or grant state is carried. */
 BOOL cx_adapter_script_address_check(const WCHAR *address, WCHAR *error, DWORD errorCap);
+/* Parse a compact command without executing it; HTTP is local-loopback only. */
+BOOL cx_adapter_script_address_parts(const WCHAR *address, WCHAR *url, DWORD urlCap,
+    WCHAR *origin, DWORD originCap, WCHAR *error, DWORD errorCap);
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account);
 
 /* Public auth settings select the only captcha flow the native UI may use.

@@ -31,6 +31,9 @@
 #define HOME_DEVICE 1414
 #define HOME_SCRIPT_URL 1415
 #define HOME_SCRIPT_CHECK 1416
+#define HOME_EXAM_START 1417
+#define HOME_EXAM_BACK 1418
+#define HOME_EXAM_STATUS 1419
 #define HOME_OPERATION_DONE (WM_APP + 24)
 /* 设备线程完成一次配额查询/会话上报后回到 UI 线程的唯一通道：
    所有 state->quota 的读取都发生在 UI 线程，与设备线程之间只经这条消息交接。 */
@@ -94,6 +97,11 @@ typedef struct HOME_STATE {
     DWORD operation;
     WCHAR pendingBrowser[16];
     WCHAR pendingScriptUrl[CX_HOME_ADAPTER_URL_CAP];
+    WCHAR resolvedScriptUrl[CX_HOME_ADAPTER_URL_CAP];
+    BOOL launchAfterCheck;
+    BOOL examPage;
+    BOOL deviceInitialized;
+    HWND mainStatus;
     CX_HOME_CONFIG pendingConfig;
     CX_BROWSER_SESSION *pendingSession;
     DWORD pendingSlot;
@@ -177,6 +185,11 @@ static void home_append(WCHAR *out, DWORD cap, const WCHAR *value) {
 
 static BOOL home_json_append_char(char *out, DWORD cap, DWORD *at, char c);
 static BOOL home_json_append_utf8(char *out, DWORD cap, DWORD *at, const WCHAR *value);
+static BOOL home_json_append_pair(char *out, DWORD cap, DWORD *at, const char *key,
+    const WCHAR *value, BOOL *first);
+static void home_show_exam(HOME_STATE *state);
+static void home_show_main(HOME_STATE *state);
+static void home_exam(HOME_STATE *state);
 
 static BOOL home_build_script_identity(WCHAR *out, DWORD cap) { return cx_script_identity(out, cap); }
 
@@ -566,7 +579,7 @@ static BOOL home_device_config_path(const HOME_STATE *state, WCHAR *out, DWORD c
 static void home_refresh_status(HOME_STATE *state) {
     WCHAR text[512];
     int sessions;
-    if (!state) return;
+    if (!state || state->examPage) return;
     sessions = home_open_sessions(state);
     if (!cx_device_status_text(&state->quota, sessions, text, 512)) return;
     home_copy(state->deviceText, 256, text);
@@ -925,7 +938,7 @@ static void home_poll_sessions(HOME_STATE *state) {
     }
     /* 时机 5：心跳。复用本 500ms 的 poll 循环做 60 秒分频（不新开 timer）。
        心跳同时刷新配额，服务端 3 分钟收不到就把它记 0（141 §5.4）。 */
-    {
+    if (state->deviceInitialized) {
         DWORD now = GetTickCount();
         if (!state->heartbeatAt || now - state->heartbeatAt >= HOME_HEARTBEAT_MS) {
             state->heartbeatAt = now;
@@ -943,8 +956,63 @@ static DWORD WINAPI home_work(LPVOID context) {
     BOOL forceRefresh;
     state->operationOK = FALSE; state->error[0] = 0;
     if (state->operation == HOME_SCRIPT_CHECK) {
-        state->operationOK = cx_adapter_script_address_check(state->pendingScriptUrl, state->error, 512);
-        SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
+        CX_ADAPTER_REPLY reply; JT *tokens = NULL; char *json = NULL;
+        WCHAR *buffers = NULL, *url, *origin, *returnedOrigin, *identity, *returnedIdentity, *token, *expiry, *heartbeat;
+        DWORD n = 0; BOOL first = TRUE; int count, parameters;
+        if (!state->examRun) {
+            state->operationOK = cx_adapter_script_address_check(state->pendingScriptUrl, state->error, 512);
+            PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0); return 0;
+        }
+        ZeroMemory(&reply, sizeof(reply));
+        buffers = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+            (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
+        if (!buffers) goto script_done;
+        url = buffers; origin = url + CX_HOME_ADAPTER_URL_CAP; returnedOrigin = origin + CX_HOME_ADAPTER_URL_CAP;
+        identity = returnedOrigin + CX_HOME_ADAPTER_URL_CAP; returnedIdentity = identity + 128;
+        token = returnedIdentity + 128; expiry = token + CX_HOME_API_KEY_CAP; heartbeat = expiry + 64;
+        if (!cx_adapter_script_address_parts(state->pendingScriptUrl, url, CX_HOME_ADAPTER_URL_CAP,
+            origin, CX_HOME_ADAPTER_URL_CAP, state->error, 512) || !cx_script_identity(identity, 128)) goto script_done;
+        json = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 16384);
+        tokens = (JT *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 8192 * sizeof(JT));
+        if (!json || !tokens || !home_json_append_char(json, 16384, &n, '{')
+            || !home_json_append_pair(json, 16384, &n, "address", url, &first)
+            || !home_json_append_pair(json, 16384, &n, "identity", identity, &first)
+            || !home_json_append_char(json, 16384, &n, '}')) goto script_done;
+        if (!cx_adapter_request(origin, L"POST", L"/api/script-launch/resolve", NULL, json,
+            15000, CX_OPTIONS_JSON_CAP, &reply, state->error, 512)) goto script_done;
+        if (reply.status < 200 || reply.status >= 300) {
+            (void)home_response_string(&reply, "message", state->error, 512); goto script_done;
+        }
+        if (!home_response_string(&reply, "origin", returnedOrigin, CX_HOME_ADAPTER_URL_CAP)
+            || lstrcmpiW(returnedOrigin, origin)
+            || !home_response_string(&reply, "identity", returnedIdentity, 128) || lstrcmpW(returnedIdentity, identity)
+            || !home_response_string(&reply, "token", token, CX_HOME_API_KEY_CAP)
+            || !home_response_string(&reply, "expiresAt", expiry, 64)
+            || !home_response_string(&reply, "heartbeatUrl", heartbeat, CX_HOME_ADAPTER_URL_CAP)) goto script_done;
+        CopyMemory(&state->pendingConfig, state->config, sizeof(state->pendingConfig));
+        count = jparse(reply.body, (int)reply.length, tokens, 8192);
+        parameters = count > 0 ? jkey(reply.body, tokens, 0, "parameters") : -1;
+        if (parameters < 0 || tokens[parameters].type != '{'
+            || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reply.body + tokens[parameters].start,
+                tokens[parameters].end - tokens[parameters].start, state->pendingConfig.settingsJson, CX_HOME_SETTINGS_CAP - 1)) goto script_done;
+        state->pendingConfig.settingsJson[MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            reply.body + tokens[parameters].start, tokens[parameters].end - tokens[parameters].start,
+            NULL, 0)] = 0;
+        home_copy(state->pendingConfig.adapterBaseUrl, CX_HOME_ADAPTER_URL_CAP, origin);
+        home_copy(state->pendingConfig.apiKey, CX_HOME_API_KEY_CAP, token);
+        home_copy(state->pendingConfig.scriptIdentity, CX_HOME_SCRIPT_IDENTITY_CAP, identity);
+        if (!cx_grant_capture(&state->pendingConfig.verifiedExam, origin, token, identity, expiry)
+            || !cx_script_lease_start(origin, heartbeat, token, identity, expiry, state->error, 512)) goto script_done;
+        state->operationOK = TRUE;
+script_done:
+        if (!state->operationOK && !state->error[0]) home_copy(state->error, 512, L"脚本授权响应无效，未启动客户端。");
+        cx_adapter_reply_free(&reply);
+        if (json) { SecureZeroMemory(json, 16384); HeapFree(GetProcessHeap(), 0, json); }
+        if (tokens) HeapFree(GetProcessHeap(), 0, tokens);
+        if (buffers) {
+            SecureZeroMemory(buffers, (4 * CX_HOME_ADAPTER_URL_CAP + 256 + CX_HOME_API_KEY_CAP + 64) * sizeof(WCHAR));
+            HeapFree(GetProcessHeap(), 0, buffers);
+        }
         PostMessageW(state->window, HOME_OPERATION_DONE, 0, 0);
         return 0;
     }
@@ -1019,7 +1087,7 @@ done:
 }
 
 static void home_buttons(HOME_STATE *state, BOOL enabled) {
-    static const int ids[] = { HOME_EDGE, HOME_CHROME, HOME_SEPARATE, HOME_CLOSE_SESSION, HOME_SETTINGS, HOME_ACCOUNT, HOME_EXAM, HOME_UPDATE, HOME_SCRIPT_URL, HOME_SCRIPT_CHECK };
+    static const int ids[] = { HOME_EDGE, HOME_CHROME, HOME_SEPARATE, HOME_CLOSE_SESSION, HOME_SETTINGS, HOME_ACCOUNT, HOME_EXAM, HOME_UPDATE, HOME_SCRIPT_URL, HOME_SCRIPT_CHECK, HOME_EXAM_START, HOME_EXAM_BACK };
     DWORD i;
     for (i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) EnableWindow(GetDlgItem(state->window, ids[i]), enabled);
 }
@@ -1052,7 +1120,7 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     if (config) CopyMemory(&state->pendingConfig, config, sizeof(*config));
     home_copy(state->pendingBrowser, 16, browser); state->operation = operation;
     home_buttons(state, FALSE);
-    home_status(state, operation == HOME_SCRIPT_CHECK ? L"正在检查脚本地址…"
+    home_status(state, operation == HOME_SCRIPT_CHECK ? L"正在获取脚本授权…"
         : operation == HOME_EXIT || operation == HOME_CLOSE_SESSION ? L"正在关闭并清理临时会话..." : L"正在从 tikuAdapter 获取扩展，请稍候...");
     state->worker = CreateThread(NULL, 0, home_work, state, 0, NULL);
     if (!state->worker) { home_buttons(state, TRUE); state->closing = FALSE; home_status(state, L"无法创建工作线程"); }
@@ -1513,7 +1581,7 @@ static void home_authorized_exam(void *context) {
             state->error, 512)) { home_status(state, state->error); goto done; }
     }
     ShowWindow(state->window, SW_HIDE);
-    home_owned_launcher_ready(state); /* first-party UI dispatch only; delivery cannot gate execution */
+    if (cx_script_lease_active()) home_owned_launcher_ready(state); /* only an actual script session reports readiness */
     state->examRun(options, state->error, 512);
     home_status(state, state->error[0] ? state->error : L"考试客户端流程已返回");
     ShowWindow(state->window, SW_SHOW); SetForegroundWindow(state->window);
@@ -1524,9 +1592,11 @@ done:
 
 static void home_exam(HOME_STATE *state) {
     if (!state || !state->config || !state->examRun) return;
+    /* 本地无地址测试可以启动客户端，但不会伪造脚本授权或占用服务端租约。 */
+    if (!cx_script_lease_active()) { home_authorized_exam(state); return; }
     if (!cx_grant_dispatch(&state->config->verifiedExam, state->config->adapterBaseUrl, state->config->apiKey, state->config->scriptIdentity,
                            home_authorized_exam, state)) {
-        home_status(state, L"可先填写脚本 URL 测试。正式启动考试客户端仍需通过已授权的脚本命令。");
+        home_status(state, L"脚本授权已失效，请重新填写脚本 URL 获取授权。");
         SetFocus(GetDlgItem(state->window, HOME_SCRIPT_URL));
     }
 }
@@ -1543,7 +1613,20 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         if (state->operation == HOME_SCRIPT_CHECK) {
             if (state->closing && !state->examRun) { DestroyWindow(window); return 0; }
             home_buttons(state, TRUE);
-            home_status(state, state->operationOK ? L"脚本地址可用。只读测试已完成。" : state->error);
+            if (!state->examRun) {
+                SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
+                home_status(state, state->operationOK ? L"脚本地址可用。只读测试已完成。" : state->error);
+                return 0;
+            }
+            if (state->operationOK) {
+                CopyMemory(state->config, &state->pendingConfig, sizeof(*state->config));
+                home_copy(state->resolvedScriptUrl, CX_HOME_ADAPTER_URL_CAP, state->pendingScriptUrl);
+            }
+            SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
+            cx_home_config_clear(&state->pendingConfig);
+            home_status(state, state->operationOK ? L"脚本授权已就绪，可以启动考试客户端。" : state->error);
+            if (state->operationOK && state->launchAfterCheck && !state->closing) home_exam(state);
+            state->launchAfterCheck = FALSE;
             if (state->closing) home_begin(state, HOME_EXIT, NULL, NULL);
             return 0;
         }
@@ -1585,7 +1668,8 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         switch (LOWORD(wParam)) {
         case HOME_SCRIPT_CHECK:
             GetDlgItemTextW(window, HOME_SCRIPT_URL, state->pendingScriptUrl, CX_HOME_ADAPTER_URL_CAP);
-            if (!state->pendingScriptUrl[0]) { home_status(state, L"请填写脚本 URL 或粘贴生成的命令。"); SetFocus(GetDlgItem(window, HOME_SCRIPT_URL)); return 0; }
+            if (!state->pendingScriptUrl[0]) { home_status(state, L"地址可留空，点击「启动考试客户端」进入无地址测试模式。"); return 0; }
+            state->launchAfterCheck = FALSE;
             home_begin(state, HOME_SCRIPT_CHECK, NULL, NULL);
             if (!state->worker) SecureZeroMemory(state->pendingScriptUrl, sizeof(state->pendingScriptUrl));
             return 0;
@@ -1604,7 +1688,15 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         case HOME_ACCOUNT:
             if (cx_account_window(window, state->config)) home_status(state, L"账号凭据已准备好，新会话将使用该 API key。");
             return 0;
-        case HOME_EXAM: home_exam(state); return 0;
+        case HOME_EXAM: home_show_exam(state); return 0;
+        case HOME_EXAM_BACK: home_show_main(state); return 0;
+        case HOME_EXAM_START:
+            GetDlgItemTextW(window, HOME_SCRIPT_URL, state->pendingScriptUrl, CX_HOME_ADAPTER_URL_CAP);
+            if (state->pendingScriptUrl[0] && lstrcmpW(state->pendingScriptUrl, state->resolvedScriptUrl)) {
+                state->launchAfterCheck = TRUE;
+                home_begin(state, HOME_SCRIPT_CHECK, NULL, NULL);
+            } else home_exam(state);
+            return 0;
         case HOME_EXIT: SendMessageW(window, WM_CLOSE, 0, 0); return 0;
         default: break;
         }
@@ -1639,7 +1731,52 @@ static void home_script_controls(HWND window, int y) {
     url = home_control(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
         158, y, 512, 30, window, HOME_SCRIPT_URL);
     SendMessageW(url, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
-    home_control(0, L"BUTTON", L"测试地址", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 680, y, 124, 30, window, HOME_SCRIPT_CHECK);
+    home_control(0, L"BUTTON", L"获取脚本授权", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 680, y, 124, 30, window, HOME_SCRIPT_CHECK);
+}
+
+static BOOL CALLBACK home_hide_main_control(HWND child, LPARAM unused) {
+    (void)unused; SetPropW(child, L"CXPlusMainControl", (HANDLE)1); ShowWindow(child, SW_HIDE); return TRUE;
+}
+static BOOL CALLBACK home_restore_main_control(HWND child, LPARAM unused) {
+    (void)unused;
+    if (RemovePropW(child, L"CXPlusMainControl")) ShowWindow(child, SW_SHOW);
+    else DestroyWindow(child);
+    return TRUE;
+}
+static void home_initialize_device(HOME_STATE *state) {
+    WCHAR configPath[CX_HOME_EXTENSION_PATH_CAP], idError[256];
+    if (state->deviceInitialized) return;
+    state->deviceInitialized = TRUE; configPath[0] = idError[0] = 0;
+    if (home_device_config_path(state, configPath, CX_HOME_EXTENSION_PATH_CAP))
+        (void)cx_device_id_ensure(configPath, state->options->noDiskWrite, state->deviceId,
+            CX_DEVICE_ID_CAP, idError, 256);
+    if (!state->deviceId[0] && idError[0]) home_device_notice(state, idError);
+    home_refresh_status(state);
+    home_device_kick(state, HOME_DEVICE_FETCH | (state->deviceId[0] ? HOME_DEVICE_REPORT : 0), home_open_sessions(state));
+}
+static void home_show_exam(HOME_STATE *state) {
+    if (!state || state->examPage) return;
+    state->mainStatus = state->status;
+    EnumChildWindows(state->window, home_hide_main_control, 0); state->examPage = TRUE;
+    SetWindowTextW(state->window, L"考试客户端 · 测试启动");
+    home_control(0, L"STATIC", L"考试客户端", WS_CHILD | WS_VISIBLE, 24, 20, 700, 32, state->window, 0);
+    home_control(0, L"STATIC", L"地址可留空直接测试；填写脚本 URL 或 PowerShell 指令后按正式脚本流程获取授权。", WS_CHILD | WS_VISIBLE, 24, 56, 780, 28, state->window, 0);
+    home_script_controls(state->window, 96);
+    state->status = home_control(0, L"STATIC", cx_script_lease_active()
+        ? L"当前脚本授权仍有效；长短命令共用本次运行会话。"
+        : L"当前为无地址测试模式；未取得脚本特殊令牌。", WS_CHILD | WS_VISIBLE, 24, 142, 780, 72, state->window, HOME_EXAM_STATUS);
+    home_control(0, L"BUTTON", L"启动考试客户端", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 24, 230, 160, 34, state->window, HOME_EXAM_START);
+    home_control(0, L"BUTTON", L"返回多浏览器", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 200, 230, 140, 34, state->window, HOME_EXAM_BACK);
+    SetDlgItemTextW(state->window, HOME_SCRIPT_URL, state->config->diagnosticScriptInput[0]
+        ? state->config->diagnosticScriptInput : state->resolvedScriptUrl);
+    SecureZeroMemory(state->config->diagnosticScriptInput, sizeof(state->config->diagnosticScriptInput));
+}
+static void home_show_main(HOME_STATE *state) {
+    if (!state || !state->examPage) return;
+    EnumChildWindows(state->window, home_restore_main_control, 0); state->examPage = FALSE;
+    state->status = state->mainStatus; SetWindowTextW(state->window, L"超星学习助手");
+    home_initialize_device(state);
+    home_refresh_list(state); home_refresh_status(state);
 }
 
 BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
@@ -1698,8 +1835,9 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     home_control(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE, 650, 395, 52, 32, window, HOME_EXIT);
     home_control(0, L"BUTTON", L"账号 / API key", WS_CHILD | WS_VISIBLE, 24, 435, 150, 30, window, HOME_ACCOUNT);
     home_control(0, L"BUTTON", L"检查扩展更新", WS_CHILD | WS_VISIBLE, 185, 435, 150, 30, window, HOME_UPDATE);
-    home_script_controls(window, 476);
+    if (config->examTestPage) home_show_exam(state);
     ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window); SetTimer(window, HOME_TIMER, 500, NULL);
+    if (config->autoStartExam) PostMessageW(window, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
     home_refresh_list(state);
     /*
        C4-1 + C4-2（141 §5.1 / R5）：
@@ -1708,19 +1846,7 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
             所以 exe 一启动就占 1 个，哪怕用户从不点「新会话」。
       两者都 fail-open：取不到 id 就不上报（只查配额），查不到配额只改状态栏文案。
     */
-    {
-        WCHAR configPath[CX_HOME_EXTENSION_PATH_CAP];
-        WCHAR idError[256];
-        configPath[0] = 0; idError[0] = 0;
-        if (home_device_config_path(state, configPath, CX_HOME_EXTENSION_PATH_CAP)) {
-            (void)cx_device_id_ensure(configPath, options->noDiskWrite, state->deviceId,
-                CX_DEVICE_ID_CAP, idError, 256);
-        }
-        if (!state->deviceId[0] && idError[0]) home_device_notice(state, idError);
-        home_refresh_status(state);
-        home_device_kick(state, HOME_DEVICE_FETCH | (state->deviceId[0] ? HOME_DEVICE_REPORT : 0),
-            home_open_sessions(state));
-    }
+    if (!config->examTestPage) home_initialize_device(state);
 message_loop:
     while ((got = GetMessageW(&message, NULL, 0, 0)) > 0) {
         if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }

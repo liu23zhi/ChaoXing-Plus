@@ -73,7 +73,8 @@ test('compiled host transfers a 740 launch after cleanup and keeps the selected 
     assert.match(result.stdout, /PASS closing the homepage without choosing examinations performs no discovery or launch/);
     assert.match(result.stdout, /PASS secondary common scan overrides configured recursive mode and cancellation returns to the homepage/);
     assert.match(result.stdout, /PASS secondary selection cancellation returns to the homepage without launching the configured client/);
-    assert.match(result.stdout, /PASS any user argument preserves configured direct-client selection semantics/);
+    assert.match(result.stdout, /PASS silent-debug no-address test reaches real discovery, selection and launch without a script lease/);
+    assert.match(result.stdout, /PASS the actual PowerShell no-CLI bootstrap dispatches directly to the exam page and real client workflow/);
     assert.match(result.stdout, /PASS secondary 740 immediately hands off its selected path with shared settings and injection mode JSON/);
     assert.match(result.stdout, /PASS secondary UAC cancellation returns to the homepage without a pending restart flag/);
     assert.match(result.stdout, /PASS the same homepage can retry examinations after cancelled UAC without leaking restart state/);

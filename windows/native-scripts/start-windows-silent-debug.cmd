@@ -12,7 +12,10 @@ rem Native silent debug entry: same scenario with --silent-delete-simulate (repo
 rem Node fallback: start-windows-node-silent-debug.cmd
 if not exist "%CXPLUS_EXE%" (echo [windows] chaoxing_plus.exe is missing next to this launcher.& echo [windows] Build it with: windows\native-source\build-windows.cmd& exit /b 9009)
 for %%d in ("%CXPLUS_EXE%") do set "CXPLUS_EXE_DIR=%%~dpd"
-start "" /wait "%CXPLUS_EXE%" --console --silent-scenario --stage-boot --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel %*
+rem Empty input starts the real exam-client workflow in local test mode.
+rem Optional URL/quoted PowerShell input and additional CLI options pass through.
+rem Multi-file debug builds do not support --stage-boot.
+start "" /wait "%CXPLUS_EXE%" --exam-test --console --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --no-panel %*
 set "EXIT_CODE=%ERRORLEVEL%"
 rem Keep this window open after the launcher finishes (set CXPLUS_NO_PAUSE=1 to skip).
 if /i not "%CXPLUS_NO_PAUSE%"=="1" pause

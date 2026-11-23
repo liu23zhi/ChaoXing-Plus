@@ -507,6 +507,38 @@ test('原生启动脚本只负责启动参数并在启动后保留窗口', async
   }
 });
 
+test('原生静默调试 CMD 保留空地址启动、URL、PowerShell 和附加参数', { skip: process.platform !== 'win32' }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'cx-native-debug-argv-'));
+  try {
+    const probe = path.join(directory, 'probe.mjs');
+    const resultPath = path.join(directory, 'argv.json');
+    await copyFile(process.execPath, path.join(directory, 'chaoxing_plus.exe'));
+    await writeFile(probe, `import {writeFileSync} from 'node:fs';writeFileSync(process.env.CX_ARGV_RESULT,JSON.stringify(process.argv.slice(2)));`, 'utf8');
+    const original = await readFile(launcherSource('start-windows-silent-debug.cmd'), 'utf8');
+    const launcher = path.join(directory, 'start-windows-silent-debug.cmd');
+    await writeFile(launcher, original.replace('"%CXPLUS_EXE%" --exam-test', `"%CXPLUS_EXE%" "${probe}" --exam-test`), 'utf8');
+    const cases = [
+      [],
+      ['--script-url', 'https://fixture.invalid/launch', '--duration', '321'],
+      ['powershell -c "iex(irm https://fixture.invalid/launch)"', '--duration', '654']
+    ];
+    const quote = (value) => `"${value.replaceAll('"', '\\"')}"`;
+    for (const extra of cases) {
+      const run = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quote(launcher)} ${extra.map(quote).join(' ')}"`], {
+        encoding: 'utf8', timeout: 20000, windowsHide: true, windowsVerbatimArguments: true,
+        env: { ...process.env, CXPLUS_NO_PAUSE: '1', CX_ARGV_RESULT: resultPath }, cwd: directory
+      });
+      assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+      const args = JSON.parse(await readFile(resultPath, 'utf8'));
+      assert.equal(args[0], '--exam-test');
+      assert.equal(args.includes('--stage-boot'), false);
+      assert.deepEqual(extra.length ? args.slice(-extra.length) : args.slice(args.length), extra);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test('原生入口在缺少 chaoxing_plus.exe 时给出中文提示并以 9009 退出', async () => {
   for (const name of ['start-windows.cmd', 'start-windows-debug.cmd', 'start-windows-silent.cmd']) {
     const source = await readFile(launcherSource(name), 'utf8');

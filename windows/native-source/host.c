@@ -142,6 +142,8 @@ static WCHAR h_scan_cache_path[CX_OPTIONS_PATH_CAP + 64];
 static WCHAR h_script_bootstrap_b64[CX_OPTIONS_JSON_CAP * 2];
 static char h_script_bootstrap_json[CX_OPTIONS_JSON_CAP + 1];
 static BOOL h_script_bootstrap_present;
+static BOOL h_exam_test;
+static WCHAR h_script_test_input[CX_HOME_ADAPTER_URL_CAP];
 /* Artifacts created by this run, captured so --no-retain-data can remove only
    the files this process wrote; pre-existing user data stays untouched. */
 static WCHAR h_created_log_path[HOST_PATH_CAP];
@@ -3516,10 +3518,27 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     h_zero(h_main_error, sizeof(h_main_error)); h_zero(h_exe_path, sizeof(h_exe_path)); GetModuleFileNameW(NULL, h_exe_path, HOST_PATH_CAP);
     cx_options_init(&h_base_options); cx_options_init(&h_cli_options); cx_options_init(&h_config_options); cx_options_init(&h_json_options);
     argv = CommandLineToArgvW(GetCommandLineW(), &argc); if (!argv) return 2;
-    if ((argc == 2 || argc == 3) && h_equal(argv[1], L"--script-url")) {
-        int result = h_script_address_diagnostics(argc == 3 ? argv[2] : NULL);
-        LocalFree(argv);
-        return result;
+    /* UI-only switches are stripped before the ordinary options parser. URL
+       input is one argv value, never a shell expression to execute. */
+    h_exam_test = FALSE; h_script_test_input[0] = 0; h_script_bootstrap_present = FALSE;
+    for (argument = 1; argument < argc;) {
+        int take = 0, next;
+        if (h_equal(argv[argument], L"--exam-test")) { h_exam_test = TRUE; take = 1; }
+        else if (h_equal(argv[argument], L"--script-url")) {
+            h_exam_test = TRUE; take = 1;
+            if (argument + 1 < argc && argv[argument + 1][0] != L'-') {
+                if (!h_copy(h_script_test_input, CX_HOME_ADAPTER_URL_CAP, argv[argument + 1])) { LocalFree(argv); return 2; }
+                take = 2;
+            }
+        } else if (h_exam_test && ((lstrlenW(argv[argument]) >= 7 && CompareStringOrdinal(argv[argument], 7, L"http://", 7, TRUE) == CSTR_EQUAL)
+            || (lstrlenW(argv[argument]) >= 8 && CompareStringOrdinal(argv[argument], 8, L"https://", 8, TRUE) == CSTR_EQUAL)
+            || (lstrlenW(argv[argument]) >= 10 && CompareStringOrdinal(argv[argument], 10, L"powershell", 10, TRUE) == CSTR_EQUAL))) {
+            if (!h_copy(h_script_test_input, CX_HOME_ADAPTER_URL_CAP, argv[argument])) { LocalFree(argv); return 2; }
+            take = 1;
+        }
+        if (!take) { ++argument; continue; }
+        for (next = argument; next + take < argc; ++next) argv[next] = argv[next + take];
+        argc -= take;
     }
     if (!cx_options_load_default(&h_base_options, h_exe_path, h_main_error, HOST_ERROR_CAP)) { LocalFree(argv); return 2; }
     ok = cx_options_parse_cli(&h_cli_options, argc - 1, argv + 1, h_main_error, HOST_ERROR_CAP);
@@ -3599,8 +3618,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     "      --wipe-retries <1-20>（默认 5） --wipe-retry-delay <50-5000 ms>（默认 200）\n"
     "      --wipe-runtime-retry|--no-wipe-runtime-retry --wipe-runtime-interval <1-86400 秒>（默认 30）\n"
             "  无参数启动显示首页，可创建 Edge/Chrome 临时会话，或进入考试客户端选择窗口。\n"
-            "  直接启动参数会打开脚本地址测试窗口，可粘贴 URL 或简短 PowerShell 命令。\n"
-            "  --script-url [URL]（打开测试窗口；提供地址时自动检测，不启动客户端）\n"
+            "  --exam-test（直接进入考试客户端测试；空地址无需脚本特殊令牌）\n"
+            "  --script-url [URL或PowerShell命令]（获取正式脚本授权并启动考试客户端；留空为本地测试）\n"
             "  浏览器扩展仅从 tikuAdapter 在线获取；关闭临时会话后清理资料。\n"
             "  common 只检查常见根目录及一级子目录；fallback-all 仅在常规无结果时递归。\n"
             "  原生选择/进度窗口为 DPI 感知界面，会按系统缩放比例调整控件与字体。\n"
@@ -3722,7 +3741,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     /* A direct invocation stays open for diagnostics. It never consumes a
        bootstrap ticket or reaches h_run's client-launch path. */
-    if (!h_default_gui && !h_base_options.listClients) return h_script_address_diagnostics(NULL);
+    if (!h_default_gui && !h_base_options.listClients && !h_exam_test && !h_script_bootstrap_present)
+        return h_script_address_diagnostics(NULL);
     if (h_base_options.elevateOnStart && !h_base_options.listClients && !h_base_options.attachPortSet) {
         DWORD childCode = 1;
         if (!h_base_options.elevated && !cx_elevation_query(&elevated)) {
@@ -3749,10 +3769,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
         CX_HOME_CONFIG *homeConfig = (CX_HOME_CONFIG *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*homeConfig));
         if (!homeConfig) { WSACleanup(); return 1; }
         cx_home_config_init(homeConfig);
+        if (h_exam_test || h_script_bootstrap_present) {
+            homeConfig->examTestPage = TRUE; homeConfig->autoStartExam = TRUE;
+            h_copy(homeConfig->diagnosticScriptInput, CX_HOME_ADAPTER_URL_CAP, h_script_test_input);
+            SecureZeroMemory(h_script_test_input, sizeof(h_script_test_input));
+        }
         ok = cx_home_config_apply_options(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP)
             && cx_home_config_apply_session(homeConfig, &h_base_options, h_main_error, HOST_ERROR_CAP);
         if (ok) {
-            if (h_default_gui && !h_base_options.attachPortSet && !h_base_options.listClients)
+            if ((h_default_gui || h_exam_test) && !h_base_options.attachPortSet && !h_base_options.listClients)
                 ok = cx_home_run(&h_base_options, homeConfig, h_home_exam, h_main_error, HOST_ERROR_CAP);
             else ok = h_run(&h_base_options, h_main_error, HOST_ERROR_CAP);
         }

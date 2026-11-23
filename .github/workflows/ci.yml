@@ -89,6 +89,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: liu23zhi/TiKuHelper
+          ref: 724b497a03ad6b8d27377cd437e440007de70341
+          path: .joint-service
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: .joint-service/go.mod
+          cache-dependency-path: .joint-service/go.sum
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22.23.1'
@@ -101,6 +111,9 @@ jobs:
       - name: 编译并运行自有 x86 名额、授权与回环 WinHTTP 夹具
         shell: pwsh
         run: ./scripts/ci/owned-native-contracts.ps1
+      - name: TiKu 实际 PS1 与原生启动配置和授权兼容
+        shell: pwsh
+        run: ./scripts/ci/tiku-launcher-native-contract.ps1 -TiKuHelperRoot ./.joint-service
 
   joint-gate:
     name: 三模式联合门禁
