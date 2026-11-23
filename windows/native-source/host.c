@@ -536,6 +536,7 @@ static const WCHAR *h_proxy_marker_suffix(void) { return L"\\cxhook-proxy.marker
 
 static BOOL h_silent_simulate = FALSE;
 static BOOL h_silent_done = FALSE;
+static volatile LONG h_silent_destruct_requested = FALSE;
 static CX_CLEANUP_PLAN *h_silent_plan = NULL;
 static DWORD h_silent_next_tick = 0;
 static WCHAR h_silent_parked[CX_CLEANUP_PATH_CAP];
@@ -974,6 +975,7 @@ static BOOL h_proxy_payload_available(const WCHAR *carrier) {
 }
 /* 自愈是否有意义：端口被别的进程占用时不要重试（换代理也没用，还可能干扰别人）。 */
 static BOOL h_selfheal_worthwhile(void) {
+    if (h_silent_done && InterlockedCompareExchange(&h_silent_destruct_requested, FALSE, FALSE)) return FALSE;
     if (h_report.endpointProbe.listenerSeen) return FALSE;
     if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_LISTENER_NOT_OWNED] > 0) return FALSE;
     if (h_report.endpointProbe.reasonCounts[CX_ENDPOINT_HTTP_FAILED] > 0) return FALSE;
@@ -2163,6 +2165,10 @@ done:
 static BOOL h_clear_client_log(CX_OPTIONS *options, BOOL startup) {
     WCHAR dir[CX_CLEANUP_PATH_CAP], log[CX_CLEANUP_PATH_CAP];
     const WCHAR *client = h_selected_path[0] ? h_selected_path : (options->clientPathSet ? options->clientPath : NULL);
+    if (options->silentDeleteSimulate) {
+        h_audit_event("info", "cleanup", "Client debug.log cleanup planned (simulate)");
+        return TRUE;
+    }
     if (!client || !client[0]) return TRUE;
     if (startup && !options->wipeOwnedFilesOnStart && !options->deleteSuspend && !options->silentScenario) return TRUE;
     if (!h_parent_dir(client, dir, CX_CLEANUP_PATH_CAP)) return TRUE;
@@ -2389,6 +2395,9 @@ static void h_silent_begin_destruct(BOOL forced) {
         h_audit_event("info", "self-destruct", forced
             ? "Session end received; deleting program traces before shutdown"
             : "Destruction requested; removing program traces");
+        /* Publish intent before commit publishes h_silent_done. The shutdown
+           callback can run on a different thread from the client watcher. */
+        InterlockedExchange(&h_silent_destruct_requested, TRUE);
         h_purge_commit();
         h_report.stopReason = forced && h_shutdown_pending ? "self-destruct-shutdown" : "self-destruct";
     }
@@ -3020,6 +3029,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     int attempt = 0;
     DWORD runStarted = GetTickCount();
     WCHAR auditError[256];
+    options->selfDestructCompleted = FALSE;
     if (!cx_script_lease_valid()) { h_error(error, errorCap, L"脚本会话已失效，未启动客户端。"); return FALSE; }
     /* 多文件版（外置资源）不能删除发布原件：EXE 与 assets 被删掉就再也起不来。
        因此它只拒绝"删除发布文件"这一类意图，自毁与启动清理降级为"只清理运行痕迹"。 */
@@ -3033,6 +3043,7 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
     h_dll_proxy_mode = FALSE; h_proxy_auto_installed = FALSE;
     h_gui_mode_chosen = FALSE; h_gui_inject_mode[0] = 0; h_gui_proxy_carrier[0] = 0;
     h_silent_active = FALSE; h_silent_done = FALSE; h_silent_simulate = FALSE;
+    InterlockedExchange(&h_silent_destruct_requested, FALSE);
     /* 上一轮若已建立关机关联，先停掉再重置；同一进程只保留一份待删清单。 */
     if (h_purge_ready) { cx_purge_close(&h_purge); h_purge_ready = FALSE; }
     h_shutdown_pending = FALSE;
@@ -3355,7 +3366,16 @@ static BOOL h_run(CX_OPTIONS *options, WCHAR *error, DWORD errorCap) {
 
     /* Window DPI/snapshot sampling runs once the CDP endpoint is ready (owned launch only). */
     h_started = GetTickCount(); h_duration = options->durationSet ? (DWORD)options->durationMs : 0;
-    ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);        if (ok || h_needs_elevation || options->attachPortSet) break;
+    ok = h_watch_targets(port, options, bootstrap, bootstrapLength, bundle, bundleLength, style, styleLength, trampoline, trampolineLength, error, errorCap);
+        /* Self-destruction cancels injection intentionally. It is not an
+           endpoint failure and must never stop or relaunch the exam client. */
+        if (h_silent_done && InterlockedCompareExchange(&h_silent_destruct_requested, FALSE, FALSE)) {
+            options->selfDestructCompleted = TRUE; ok = TRUE; h_exit_code = 0;
+            h_report.stopReason = h_shutdown_pending ? "self-destruct-shutdown" : "self-destruct";
+            if (error && errorCap) error[0] = 0;
+            break;
+        }
+        if (ok || h_needs_elevation || options->attachPortSet) break;
         if (attempt == 0 && h_selfheal_worthwhile() && h_selfheal_retry(options, client)) {
             h_audit_event("warn", "inject", "Endpoint unavailable; retrying with settings-only proxy");
             if (!options->quiet) h_print(L"端口方式未拿到端点，改用 settings-only 代理重试\n");
@@ -3384,7 +3404,9 @@ done:
     if (!ok && !options->quiet) h_print(error[0] ? error : L"native host failed");
     if (bootstrap) HeapFree(GetProcessHeap(), 0, bootstrap); if (bundle) HeapFree(GetProcessHeap(), 0, bundle); if (style) HeapFree(GetProcessHeap(), 0, style); if (trampoline) HeapFree(GetProcessHeap(), 0, trampoline);
     if (client) {
-        if (!ok || options->stopClientOnExit || cx_script_lease_active()) { proc_stop_owned(h_client_pid); WaitForSingleObject(client, 5000); }
+        if (!options->selfDestructCompleted && (!ok || options->stopClientOnExit || cx_script_lease_active())) {
+            proc_stop_owned(h_client_pid); WaitForSingleObject(client, 5000);
+        }
         CloseHandle(client);
     }
     cx_discovery_free(&result);
@@ -3741,7 +3763,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
     }
     /* A direct invocation stays open for diagnostics. It never consumes a
        bootstrap ticket or reaches h_run's client-launch path. */
-    if (!h_default_gui && !h_base_options.listClients && !h_exam_test && !h_script_bootstrap_present)
+    if (!h_default_gui && !h_base_options.listClients && !h_exam_test && !h_script_bootstrap_present
+        && !h_base_options.silentScenario)
         return h_script_address_diagnostics(NULL);
     if (h_base_options.elevateOnStart && !h_base_options.listClients && !h_base_options.attachPortSet) {
         DWORD childCode = 1;

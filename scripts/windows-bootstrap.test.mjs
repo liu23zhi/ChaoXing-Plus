@@ -149,7 +149,7 @@ function createHarness({ config = {}, instance = 'test-instance', styleText = '/
   }
   windowObject.window = windowObject;
   windowObject.self = windowObject;
-  // 子 frame 用独立对象模拟 top，self !== top 才能让静默控制拒绝安装。
+  // 子 frame 用独立对象模拟 top，以区分键盘监听和顶层全屏上报。
   windowObject.top = isTopFrame ? windowObject : {};
   windowObject.Element = FakeElement;
   windowObject.MutationObserver = class FakeMutationObserver {
@@ -729,7 +729,7 @@ function silentKeydown(key, { ctrl = true, alt = true, shift = true } = {}) {
   };
 }
 
-test('静默控制只在顶层文档安装并上报自毁快捷键', async () => {
+test('顶层文档上报已配置的自毁快捷键', async () => {
   const harness = createHarness({
     config: {},
     silent: { clientPid: 1234, selfDestructKeys: ['Ctrl+Alt+Shift+E', 'F8'] }
@@ -746,20 +746,28 @@ test('静默控制只在顶层文档安装并上报自毁快捷键', async () =>
   assert.equal(hotkey.prevented, 1, '命中自毁键后要吞掉页面默认处理');
 });
 
-test('子 frame 不安装静默控制，避免 iframe 尺寸被当成退出全屏', async () => {
+test('考试子 frame 响应自毁快捷键，但不把 iframe 尺寸当成退出全屏', async () => {
   const harness = createHarness({
     config: {},
     isTopFrame: false,
-    silent: { clientPid: 4321, selfDestructKeys: ['F8'] },
+    silent: { clientPid: 4321, selfDestructKeys: ['Ctrl+Alt+Shift+E', 'F8'] },
     screen: { width: 1920, height: 1080 },
     viewport: { width: 320, height: 200 }
   });
   await harness.run();
-  harness.fireWindowEvent(silentKeydown('F8'));
+  const hotkey = silentKeydown('F8', { ctrl: false, alt: false, shift: false });
+  harness.fireWindowEvent(hotkey);
+  harness.fireWindowEvent(silentKeydown('E'));
+  harness.fireWindowEvent({ ...silentKeydown('F8', { ctrl: false, alt: false, shift: false }), repeat: true });
+  harness.fireWindowEvent(silentKeydown('S'));
+  harness.fireWindowEvent({ type: 'resize' });
   harness.fireDocumentEvent({ type: 'fullscreenchange' });
   const silentMessages = harness.parseMessages()
     .filter((message) => message.kind === 'silent-hotkey' || message.kind === 'silent-fullscreen');
-  assert.deepEqual(silentMessages, [], '子 frame 不得上报任何静默事件');
+  assert.deepEqual(silentMessages.map(message => [message.kind, message.detail.shortcut]),
+    [['silent-hotkey', 'F8'], ['silent-hotkey', 'ctrl+alt+shift+E']],
+    '已注入的考试子 frame 只上报已配置且非重复的快捷键，不上报全屏事件');
+  assert.equal(hotkey.prevented, 1);
 });
 
 test('静默全屏状态按顶层文档尺寸上报进入与退出', async () => {

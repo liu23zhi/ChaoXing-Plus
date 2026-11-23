@@ -507,32 +507,69 @@ test('原生启动脚本只负责启动参数并在启动后保留窗口', async
   }
 });
 
-test('原生静默调试 CMD 保留空地址启动、URL、PowerShell 和附加参数', { skip: process.platform !== 'win32' }, async () => {
+test('两个原生静默 CMD 传入自毁快捷键并保真传递 URL、PowerShell 和附加参数', { skip: process.platform !== 'win32' }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'cx-native-debug-argv-'));
   try {
     const probe = path.join(directory, 'probe.mjs');
     const resultPath = path.join(directory, 'argv.json');
-    await copyFile(process.execPath, path.join(directory, 'chaoxing_plus.exe'));
+    const probeExe = path.join(directory, 'chaoxing_plus.exe');
+    await copyFile(process.execPath, probeExe);
+    // Production chaoxing_plus.exe is a GUI-subsystem image. Match that on the
+    // owned probe so CMD's real `start` does not open a console for Node. Only
+    // this temporary copy is patched; preserve the launcher's start semantics.
+    const image = await readFile(probeExe);
+    assert.equal(image.readUInt16LE(0), 0x5a4d, 'probe must be a DOS/PE executable');
+    const peOffset = image.readUInt32LE(0x3c);
+    assert.ok(peOffset + 24 <= image.length, 'probe PE header must be within the image');
+    assert.equal(image.readUInt32LE(peOffset), 0x00004550, 'probe must have a PE signature');
+    const optionalHeader = peOffset + 24;
+    assert.ok(image.readUInt16LE(peOffset + 20) >= 70 && optionalHeader + 70 <= image.length,
+      'probe optional header must contain Subsystem');
+    assert.ok([0x10b, 0x20b].includes(image.readUInt16LE(optionalHeader)), 'probe must use a PE32 or PE32+ optional header');
+    image.writeUInt16LE(2, optionalHeader + 68); // IMAGE_SUBSYSTEM_WINDOWS_GUI
+    await writeFile(probeExe, image);
+    assert.equal((await readFile(probeExe)).readUInt16LE(optionalHeader + 68), 2,
+      'temporary argv probe must use the same GUI subsystem as the native host');
     await writeFile(probe, `import {writeFileSync} from 'node:fs';writeFileSync(process.env.CX_ARGV_RESULT,JSON.stringify(process.argv.slice(2)));`, 'utf8');
-    const original = await readFile(launcherSource('start-windows-silent-debug.cmd'), 'utf8');
-    const launcher = path.join(directory, 'start-windows-silent-debug.cmd');
-    await writeFile(launcher, original.replace('"%CXPLUS_EXE%" --exam-test', `"%CXPLUS_EXE%" "${probe}" --exam-test`), 'utf8');
     const cases = [
       [],
       ['--script-url', 'https://fixture.invalid/launch', '--duration', '321'],
       ['powershell -c "iex(irm https://fixture.invalid/launch)"', '--duration', '654']
     ];
     const quote = (value) => `"${value.replaceAll('"', '\\"')}"`;
-    for (const extra of cases) {
-      const run = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quote(launcher)} ${extra.map(quote).join(' ')}"`], {
-        encoding: 'utf8', timeout: 20000, windowsHide: true, windowsVerbatimArguments: true,
-        env: { ...process.env, CXPLUS_NO_PAUSE: '1', CX_ARGV_RESULT: resultPath }, cwd: directory
-      });
-      assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-      const args = JSON.parse(await readFile(resultPath, 'utf8'));
-      assert.equal(args[0], '--exam-test');
-      assert.equal(args.includes('--stage-boot'), false);
-      assert.deepEqual(extra.length ? args.slice(-extra.length) : args.slice(args.length), extra);
+    for (const name of ['start-windows-silent.cmd', 'start-windows-silent-debug.cmd']) {
+      const original = await readFile(launcherSource(name), 'utf8');
+      const launcher = path.join(directory, name);
+      await writeFile(launcher, original.replace('"%CXPLUS_EXE%" --', `"%CXPLUS_EXE%" "${probe}" --`), 'utf8');
+      const debug = name.includes('-debug');
+      for (const extra of cases) {
+        await rm(resultPath, { force: true });
+        const run = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${quote(launcher)} ${extra.map(quote).join(' ')}"`], {
+          encoding: 'utf8', timeout: 20000, windowsHide: true, windowsVerbatimArguments: true,
+          env: { ...process.env, CXPLUS_NO_PAUSE: '1', CX_ARGV_RESULT: resultPath }, cwd: directory
+        });
+        assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+        const deadline = Date.now() + 5000;
+        let args;
+        while (Date.now() < deadline) {
+          try { args = JSON.parse(await readFile(resultPath, 'utf8')); break; }
+          catch (error) {
+            if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+        }
+        assert.ok(args, `${name} argv probe did not finish`);
+        assert.equal(args[0], debug ? '--exam-test' : '--silent-scenario');
+        assert.equal(args.includes('--stage-boot'), !debug);
+        assert.equal(args.includes('--silent-delete-simulate'), debug);
+        for (const key of ['Ctrl+Alt+Shift+E', 'F8']) {
+          assert.ok(args.some((arg, index) => arg === '--self-destruct-key' && args[index + 1] === key), `${name} must pass the ${key} self-destruct key`);
+        }
+        assert.equal(args.includes('--no-self-destruct-confirm'), true, `${name} must not interrupt silent self-destruct with a confirmation dialog`);
+        assert.equal(args.includes('--stop-client-on-exit'), false, `${name} must not request client shutdown`);
+        const suffix = debug ? extra : [...extra, '--stage-boot'];
+        assert.deepEqual(suffix.length ? args.slice(-suffix.length) : args.slice(args.length), suffix);
+      }
     }
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

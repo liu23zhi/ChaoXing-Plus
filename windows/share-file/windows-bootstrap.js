@@ -102,13 +102,13 @@
     if (silentControlInstalled) return;
     var silent = win.__CX_WIN_SILENT__;
     if (!silent || typeof silent !== "object") return;
-    // 只有顶层文档可以上报静默热键/全屏状态：答题页会注入大量 about:blank
-    // iframe，子 frame 的 innerWidth/innerHeight 永远小于屏幕，一旦把它当成
-    // "已退出全屏"就会在考试进行中误触发自毁。
+    // 键盘事件不会跨文档冒泡，已注入的答题 iframe 也需要监听自毁快捷键。
+    // 全屏状态仍只由顶层文档上报，避免小尺寸 iframe 被误判为退出全屏。
+    var topDocument = false;
     try {
-      if (win.self !== win.top) return;
+      topDocument = win.self === win.top;
     } catch (error) {
-      return;
+      // 无法读取顶层关系时仍允许已配置的快捷键，但不报告全屏。
     }
     silentControlInstalled = true;
     var keys = Array.isArray(silent.selfDestructKeys) ? silent.selfDestructKeys : [];
@@ -127,6 +127,7 @@
         }
       }, true);
     } catch (error) { /* ignore */ }
+    if (!topDocument) return;
     try {
       win.addEventListener('resize', function () { reportSilentFullscreen(false); });
       doc.addEventListener('fullscreenchange', function () { reportSilentFullscreen(false); });

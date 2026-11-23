@@ -948,6 +948,21 @@ static void CALLBACK home_tick(HWND window, UINT message, UINT_PTR timer, DWORD 
 }
 
 static DWORD localExamCalls, localPageChecks;
+static BOOL self_destruct_exam(CX_OPTIONS *received, WCHAR *error, DWORD cap) {
+    (void)error; (void)cap; received->selfDestructCompleted = TRUE; return TRUE;
+}
+static void self_destruct_home_tests(void) {
+    HOME_STATE *state = make_home(); DWORD start;
+    state->examRun = self_destruct_exam;
+    home_authorized_exam(state);
+    check(state->closing, "completed exam self-destruct closes the assistant instead of reopening its homepage");
+    start = GetTickCount();
+    while (IsWindow(state->window) && GetTickCount() - start < 5000) {
+        clear_messages(); MsgWaitForMultipleObjects(0, NULL, FALSE, 10, QS_ALLINPUT);
+    }
+    check(!IsWindow(state->window), "completed exam self-destruct joins the assistant window cleanup");
+    free_home(state);
+}
 static BOOL test_local_exam(CX_OPTIONS *received, WCHAR *error, DWORD cap) {
     (void)received; (void)error; (void)cap; ++localExamCalls;
     check(!cx_script_lease_active(), "no-address startup reaches the exam callback without a script lease"); return TRUE;
@@ -1061,6 +1076,7 @@ void HomeTestMain(void) {
     device_status_tests(); device_over_limit_tests(); device_config_path_tests(); device_id_tests();
     script_session_tests();
     script_resolve_tests();
+    self_destruct_home_tests();
     if (!SetTimer(NULL, 0, 20, home_tick)) ExitProcess(5);
     options.noDiskWrite = TRUE;
     options.noDiskWriteSet = TRUE;

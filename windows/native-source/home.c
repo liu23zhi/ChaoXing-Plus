@@ -1583,6 +1583,11 @@ static void home_authorized_exam(void *context) {
     ShowWindow(state->window, SW_HIDE);
     if (cx_script_lease_active()) home_owned_launcher_ready(state); /* only an actual script session reports readiness */
     state->examRun(options, state->error, 512);
+    if (options->selfDestructCompleted) {
+        /* The assistant is leaving; the exam process remains independent. */
+        SendMessageW(state->window, WM_CLOSE, 0, 0);
+        goto done;
+    }
     home_status(state, state->error[0] ? state->error : L"考试客户端流程已返回");
     ShowWindow(state->window, SW_SHOW); SetForegroundWindow(state->window);
 done:

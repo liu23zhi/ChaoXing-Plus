@@ -163,6 +163,7 @@ typedef struct CX_OPTIONS {
     BOOL selfDestructConfirmSet;
     BOOL silentScenario;
     BOOL silentDeleteSimulate;
+    BOOL selfDestructCompleted; /* runtime result only; never read from CLI or serialized settings */
     BOOL silentClientPathSet;
     WCHAR injectMode[CX_OPTIONS_SHORT_CAP];
     WCHAR injectProxyDir[CX_OPTIONS_PATH_CAP];
