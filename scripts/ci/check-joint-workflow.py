@@ -13,6 +13,19 @@ REQUIRED_RUN = {
     "service-contract": ("three-mode-contract.test.mjs",),
     "windows-contract": ("npm run build", "extension-diagnostics.browser.test.mjs", "owned-profiles.browser.test.mjs", "owned-native-contracts.ps1", "tiku-launcher-native-contract.ps1"),
 }
+WINDOWS_BUILD_ENTRIES = (
+    "windows/native-source/build-windows.cmd",
+    "windows/native-source/build-windows.ps1",
+    "windows/native-source/build-windows.sh",
+    "windows/hook-source/build-proxy.ps1",
+)
+WINDOWS_BUILD_RUNS = {f"./scripts/ci/windows-build-entry.ps1 -Entry '{entry}'": entry for entry in WINDOWS_BUILD_ENTRIES}
+WINDOWS_BUILD_CONDITION = "$" + "{{ !cancelled() }}"
+WINDOWS_BUILD_LOG_PATHS = (
+    "$" + "{{ runner.temp }}/windows-build-logs/*/build.log",
+    "$" + "{{ runner.temp }}/windows-build-logs/*/result.txt",
+)
+
 def validate(workflow):
     errors = []
     def require(condition, message):
@@ -35,7 +48,17 @@ def validate(workflow):
                 f"{job_id}: no delegated workflow or privilege override")
         for step in job.get("steps", []):
             action = step.get("uses")
-            if action:
+            if action and action.startswith("actions/upload-artifact@"):
+                opts = step.get("with", {})
+                require(job_id == "windows-contract"
+                        and bool(re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", action))
+                        and opts.get("name") == "windows-build-logs"
+                        and tuple(opts.get("path", "").splitlines()) == WINDOWS_BUILD_LOG_PATHS
+                        and opts.get("if-no-files-found") == "error"
+                        and step.get("if") == WINDOWS_BUILD_CONDITION
+                        and "continue-on-error" not in step,
+                        "Windows evidence upload must be pinned and limited to build logs and exit records")
+            elif action:
                 require(bool(re.fullmatch(r"actions/(checkout|setup-node|setup-go)@[0-9a-f]{40}", action)),
                         f"{job_id}: only pinned official setup/checkout actions")
             if action and action.startswith("actions/checkout@"):
@@ -55,8 +78,23 @@ def validate(workflow):
         job = jobs.get(name, {})
         require("if" not in job and "continue-on-error" not in job, f"{name}: conditional gate/ignored error")
         steps = job.get("steps", [])
-        require(all("if" not in step and "continue-on-error" not in step for step in steps),
+        build_steps = [step for step in steps if name == "windows-contract"
+                       and step.get("run") in WINDOWS_BUILD_RUNS]
+        evidence_steps = [step for step in steps if name == "windows-contract"
+                          and step.get("uses", "").startswith("actions/upload-artifact@")]
+        require(all("if" not in step and "continue-on-error" not in step
+                    for step in steps if step not in build_steps and step not in evidence_steps),
                 f"{name}: core steps must not be skipped or soft-fail")
+        if name == "windows-contract":
+            require(len(evidence_steps) == 1, "windows-contract: expected one Windows build evidence upload")
+            for run, entry in WINDOWS_BUILD_RUNS.items():
+                matching = [step for step in build_steps if step["run"] == run]
+                require(len(matching) == 1, f"windows-contract: missing required Windows build {entry}")
+                for step in matching:
+                    require(step.get("shell") == "pwsh"
+                            and step.get("if") == WINDOWS_BUILD_CONDITION
+                            and "continue-on-error" not in step,
+                            f"windows-contract: Windows build must not be skipped or soft-fail: {entry}")
         runs = "\n".join(str(step.get("run", "")) for step in steps)
         for command in REQUIRED_RUN[name]:
             require(command in runs, f"{name}: missing required check {command}")
