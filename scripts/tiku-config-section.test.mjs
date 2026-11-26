@@ -13,7 +13,7 @@ const code = ts.transpileModule(functions.map(node => node.getText(parsed)).join
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None }
 }).outputText;
 
-function createSection(document, probe) {
+function createSection(document, probe, browserMode = false) {
   const modals = [];
   const saved = {};
   const events = [];
@@ -24,6 +24,8 @@ function createSection(document, probe) {
     applySectionCardStyle() {}, applySectionTitleStyle() {}, applyHintTextStyle() {},
     applyControlChrome() {}, applyActionButtonStyle() {},
     isWindowsHostRuntime: () => false,
+    usesBrowserAgreementGate: () => browserMode,
+    browserExtensionRuntime: () => ({ sendMessage: async value => events.push(value.operation) }),
     DEFAULT_TIKU_BASE_URL: 'https://adapter.example',
     resolveTikuAdapterBaseUrl: (raw, fallback) => String(raw ?? '').trim() || fallback,
     testTikuAdapterConfig: probe,
@@ -213,5 +215,19 @@ test('题库配置修改后废弃旧测试结果，测试期间不重复发送�
     await pending;
     assert.equal(root.querySelector('[data-cx-tiku-test-result]').hidden, true);
     assert.equal(testButton.disabled, false);
+  });
+});
+
+
+test('普通扩展只在独立扩展内部页处理题库地址和密钥', async () => {
+  await withMinimalDom(async document => {
+    const section = createSection(document, async () => { throw new Error('no network'); }, true);
+    assert.deepEqual(section.root.querySelectorAll('input'), []);
+    const button = section.root.querySelectorAll('button').find(node => node.textContent === '打开扩展题库设置');
+    assert.ok(button);
+    button.onclick({ isTrusted: false });
+    assert.deepEqual(section.events, []);
+    button.onclick({ isTrusted: true });
+    assert.deepEqual(section.events, ['open-settings']);
   });
 });

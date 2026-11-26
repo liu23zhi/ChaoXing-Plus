@@ -1,5 +1,6 @@
 import { AnswererWrapper, SearchInformation, Result } from './interface';
 import { request } from '../utils/request';
+import { usesBrowserAgreementGate } from '../../runtime/agreement-gate.js';
 
 export const AnswerWrapperHandlerConfig = {
   timeout_seconds: 60
@@ -17,7 +18,9 @@ export async function defaultAnswerWrapperHandler(
   const searchInfos: SearchInformation[] = [];
   const temp: AnswererWrapper[] = answererWrappers.map((wrapper) => ({
     ...JSON.parse(JSON.stringify(wrapper)),
-    executeRequest: wrapper.executeRequest
+    executeRequest: wrapper.executeRequest,
+    prepareRequestData: wrapper.prepareRequestData,
+    parseResponse: wrapper.parseResponse
   }));
   if (temp.length === 0) {
     throw new Error('题库配置不能为空，请配置后重新开始自动答题。');
@@ -38,10 +41,16 @@ export async function defaultAnswerWrapperHandler(
           handler = 'return (res)=> [JSON.stringify(res), undefined]'
         } = wrapper;
       try {
+        if (usesBrowserAgreementGate() && (!wrapper.prepareRequestData || !wrapper.parseResponse || !executeRequest)) {
+          throw new Error('普通扩展只支持内置题库。');
+        }
         let results: Result[] = [];
         let requestData;
         let url: URL;
-        if (method.toLocaleLowerCase() === 'get') {
+        if (wrapper.prepareRequestData) {
+          url = new URL(wrapper.url);
+          requestData = wrapper.prepareRequestData(env);
+        } else if (method.toLocaleLowerCase() === 'get') {
           url = new URL(resolvePlaceHolder(wrapper.url, { encodeURI: true }));
           Object.keys(wrapperData).forEach((key) => {
             url.searchParams.set(key, resolvePlaceHolder(wrapperData[key]));
@@ -91,7 +100,7 @@ export async function defaultAnswerWrapperHandler(
           throw new Error('题库请求超时，可能是题库问题，或者请检查网络或者重试。');
         }
 
-        const responseHandler = Function(handler)();
+        const responseHandler = wrapper.parseResponse ?? Function(handler)();
         if (typeof responseHandler !== 'function') {
           throw new Error('handler 响应处理器必须返回一个函数');
         }
