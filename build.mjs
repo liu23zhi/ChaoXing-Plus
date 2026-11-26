@@ -62,7 +62,8 @@ function copyStaticFiles() {
   for (const file of [
     'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
     'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
-    'extension-agreement.html', 'extension-course-metadata.js'
+    'extension-agreement.html', 'extension-course-metadata.js',
+    'extension-deep-thinking.js', 'extension-deep-thinking-worker.js'
   ]) {
     copyFileSync('src/' + file, 'dist/' + file);
   }

@@ -45,8 +45,10 @@
     'cx.new.auto-read.',
     'cx.new.study-dispatcher.'
   ];
+  const legacyDeepThinkingKey = 'cx.new.study.deepThinking';
   const sharedStoreExcludedKeys = new Set([
-    'common.work-results.results'
+    'common.work-results.results',
+    ...(isolated ? [legacyDeepThinkingKey] : [])
   ]);
   const sharedStoreExactKeys = new Set([
     'common.apps.question-caches'
@@ -133,6 +135,12 @@
 
   const getSharedAttributeName = (key) => `data-chaoxing-plus-shared-${key.replace(/[^a-z0-9_-]/gi, '-')}`;
 
+  if (isolated) {
+    // The paid-mode preference is now read from trusted Chrome storage, never a page mirror.
+    root.removeAttribute(getSharedAttributeName(legacyDeepThinkingKey));
+    try { localStorage.removeItem(legacyDeepThinkingKey); } catch { /* including opaque frames */ }
+  }
+
   const serializeSharedValue = (value) => {
     try {
       return JSON.stringify(value);
@@ -204,7 +212,8 @@
     Object.entries(detail).forEach(([key, value]) => {
       // Native-owned browser sessions write this UUID in the extension's own storage before opening the site.
       // Page settings must not manufacture/change the host's browser identity or script authorization.
-      if ((isolated && privateKeys.has(key)) || ['common.settings.device-instance','common.settings.tiku-adapter.script-identity',
+      if ((isolated && (privateKeys.has(key) || key === 'common.settings.work-options'))
+        || ['common.settings.device-instance','common.settings.tiku-adapter.script-identity',
         'common.settings.tiku-adapter.script-session-token'].includes(key) || !shouldShareStoreKey(key)) {
         return;
       }

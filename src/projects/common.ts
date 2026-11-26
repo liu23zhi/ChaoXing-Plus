@@ -1,4 +1,8 @@
 import { browserExtensionRuntime, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
+import {
+  browserDeepThinkingEnabled, browserDeepThinkingPrompted, onBrowserDeepThinkingChanged,
+  openBrowserDeepThinkingGuide, writeBrowserDeepThinking
+} from '../runtime/deep-thinking-guide.js';
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType, QuestionEvidence } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
@@ -873,7 +877,9 @@ function getWorkOptions(): CommonWorkOptions {
     ),
     enableAIFallbackAnswer: getStudySettingValue('enableAIFallbackAnswer', true),
     useAsyncTikuSearch,
-    deepThinking: getStudySettingValue('deepThinking', stored.deepThinking ?? false),
+    deepThinking: usesBrowserAgreementGate()
+      ? browserDeepThinkingEnabled()
+      : getStudySettingValue('deepThinking', stored.deepThinking ?? false),
     aiFallbackFailureAction: getStudySettingValue('aiFallbackFailureAction', stored.aiFallbackFailureAction ?? 'pause'),
     answererWrappers: dynamicWrapper ? [dynamicWrapper] : []
   };
@@ -2004,7 +2010,25 @@ function createConfigField(
 
     toggle.append(stateText, stateDesc);
     let confirmationPending = false;
-    toggle.onclick = () => {
+    const browserDeepThinking = key === 'deepThinking' && usesBrowserAgreementGate();
+    if (browserDeepThinking) {
+      toggle.dataset.cxDeepThinkingToggle = 'true';
+      toggle.setAttribute('aria-label', '深度思考');
+      toggle.setAttribute('aria-pressed', String(checked));
+    }
+    toggle.onclick = (event) => {
+      if (browserDeepThinking) {
+        if (!event.isTrusted || confirmationPending) return;
+        if (!browserDeepThinkingPrompted() || !checked) {
+          openBrowserDeepThinkingGuide();
+          return;
+        }
+        confirmationPending = true;
+        void writeBrowserDeepThinking('change', false, true).then(saved => {
+          if (!saved) $message.error('未能保存深度思考设置，请确认用户协议状态后重试。');
+        }).catch(() => {}).finally(() => { confirmationPending = false; });
+        return;
+      }
       if (key === 'deepThinking' && !checked) {
         if (confirmationPending) return;
         confirmationPending = true;
@@ -2309,7 +2333,8 @@ function createStudySettingsPanel() {
   const script = {
     namespace: studyNamespace,
     cfg: Object.fromEntries(
-      Object.entries(studyConfigDefs).map(([key, definition]) => [key, getStudySettingValue(key, definition.defaultValue)])
+      Object.entries(studyConfigDefs).map(([key, definition]) => [key, key === 'deepThinking' && usesBrowserAgreementGate()
+        ? browserDeepThinkingEnabled() : getStudySettingValue(key, definition.defaultValue)])
     )
   };
 
@@ -3675,6 +3700,8 @@ window.addEventListener('storage', (event) => {
     }
   }
 });
+
+if (usesBrowserAgreementGate()) onBrowserDeepThinkingChanged(renderWorkResultsPanel);
 
 document.addEventListener('chaoxing-plus:shared-store-hydrate', (event) => {
   const detail = typeof event === 'object' && event && 'detail' in event

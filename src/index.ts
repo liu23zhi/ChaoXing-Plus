@@ -1,5 +1,6 @@
 import { start } from './runtime/index.js';
 import { browserExtensionRuntime, usesBrowserAgreementGate } from './runtime/agreement-gate.js';
+import { startBrowserDeepThinking } from './runtime/deep-thinking-guide.js';
 import { SearchInfosElement } from './elements/search.infos.js';
 import { definedProjects } from './projects/index.js';
 
@@ -7,6 +8,7 @@ async function launch() {
   if (usesBrowserAgreementGate()) {
     const boot = (globalThis as { __CXPLUS_EXTENSION_BOOT__?: Promise<boolean> }).__CXPLUS_EXTENSION_BOOT__;
     if (!browserExtensionRuntime() || !boot || !(await boot)) return;
+    await startBrowserDeepThinking();
   } else if (!customElements.get('search-infos')) {
     customElements.define('search-infos', SearchInfosElement);
   }

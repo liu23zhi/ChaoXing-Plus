@@ -152,6 +152,8 @@ test('built MV3: owned HTTPS agreement, consent lifecycle, mounted status, ordin
     'common.settings.tiku-adapter.baseurl': base, 'common.settings.tiku-adapter.key': access,
     'common.settings.work-options': { searchDelaySeconds: 0, thread: 1, stopSecondWhenFinish: 0, upload: 'save',
       redundanceWordsText: '', answerSeparators: '#,|', answerMatchMode: 'includes', deepThinking: false },
+    // This fixture is about the agreement gate; the separate deep-thinking browser test starts unprompted.
+    deepThinkingEnabled: false, hasPromptedDeepThinking: true, 'cx.new.study.deepThinking': false,
     'cx.new.study.useAsyncTikuSearch': false, 'cx.new.study.enableAIFallbackAnswer': false,
     'cx.new.study.enableMedia': false, 'cx.new.study.mode': 'manually'
   }), { base, access });
