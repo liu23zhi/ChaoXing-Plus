@@ -35,7 +35,9 @@ export function registerAgreement(chrome, defaultBase) {
       result = chrome.tabs.create({ url: internalPage }).then(() => ({ opened: true }));
     } else if (internal || topContent) {
       const reader = id(sender);
-      if (internal && op === 'configure-source') {
+      if (internal && (op === 'diagnose' || op === 'clear-source-key')) {
+        result = controller.run(op);
+      } else if (internal && op === 'configure-source') {
         if (typeof message.base !== 'string' || message.base.length > 2048 || typeof message.key !== 'string' || message.key.length > 1024) return false;
         result = controller.run(op, { base: message.base, key: message.key });
       } else if (op === 'refresh') {

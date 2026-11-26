@@ -66,6 +66,9 @@ function fixture(storage = {}) {
       const u = new URL(url);
       const operation = u.pathname.split('/').at(-1);
       requests.push({ origin: u.origin, operation, auth: Boolean(init.headers.Authorization) });
+      if (operation === 'health') return Response.json({ success: true, status: 'succeeded',
+        taskId: 'owned', statusUrl: '/api/search/status?taskId=owned',
+        deviceAccess: { allowed: true, reason: 'already-registered', limit: 2, used: 3 } });
       if (operation === 'devices') return Response.json({ deviceId: proofId, deviceCredential: 'agd_' + 'x'.repeat(43) }, { status: 201 });
       if (operation === 'consents') storage.accepted = true;
       const status = { version: 'v1', deviceId: proofId, needsAcceptance: !storage.accepted, content_hash: hash(body) };
@@ -139,4 +142,28 @@ test('authority is rechecked after real health and task probes, immediately befo
     retryAttempts: 1, healthProbeDelayMs: 0
   }), /阅读并同意/);
   assert.deepEqual(calls, [['/api/search/health', 'GET'], ['/api/search/status', 'GET']]);
+});
+
+test('the approved provider can be explicitly diagnosed or cleared without a lookup or a leaked token in the response', async () => {
+  const f = fixture();
+  await f.run('refresh');
+  assert.equal(f.requests.some(r => r.operation === 'health'), false);
+  const result = await f.run('diagnose');
+  assert.equal(result.state, 'ok');
+  assert.deepEqual({ limit: result.deviceLimit, used: result.deviceUsed }, { limit: 2, used: 3 });
+  assert.equal(JSON.stringify(result).includes(key), false);
+  assert.ok(f.requests.some(r => r.operation === 'health' && r.auth));
+  const count = f.requests.filter(r => r.auth).length;
+  assert.equal((await f.run('clear-source-key')).cleared, true);
+  assert.equal(f.storage['common.settings.tiku-adapter.key'], '');
+  assert.equal((await f.run('diagnose')).state, 'missing-key');
+  await f.run('refresh');
+  assert.equal(f.requests.filter(r => r.auth).length, count);
+});
+
+test('clearing an old local token from invalid configuration still performs no request', async () => {
+  const f = fixture({ 'common.settings.tiku-adapter.baseurl': 'http://legacy.fixture.invalid' });
+  assert.equal((await f.run('clear-source-key')).cleared, true);
+  assert.equal(f.storage['common.settings.tiku-adapter.key'], '');
+  assert.deepEqual(f.requests, []);
 });

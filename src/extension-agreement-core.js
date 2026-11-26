@@ -73,6 +73,7 @@ export function createAgreementController({
   let configRevision = 0;
   let loadedCache;
   let offlineDocument;
+  const diagnosticInstance = crypto.randomUUID();
   let enrollmentWait = 0; // The server also rate-limits registration across all configured deployments.
 
   function changed() {
@@ -153,6 +154,45 @@ export function createAgreementController({
       await ensureCurrent(cfg);
       const updates = { [name]: cfg.base, [APPROVED_SOURCE]: { base: cfg.base, rawBase: cfg.rawBase, key: cfg.key } };
       await write(updates);
+    }
+  }
+  async function diagnose(cfg) {
+    if (cfg.mode !== 'extension' || !cfg.scope) return { state: 'invalid-config' };
+    if (!cfg.key) return { state: 'missing-key' };
+    if (offline()) return { state: 'server-error' };
+    try {
+      await ensureCurrent(cfg);
+      await bindKey(cfg);
+      await ensureCurrent(cfg);
+      const started = now();
+      const response = await request(cfg.base + '/api/search/health', {
+        method: 'GET', headers: {
+          Authorization: 'Bearer ' + cfg.key, 'X-Device-Id': cfg.device, 'X-Device-Instance': diagnosticInstance
+        }, signal: AbortSignal.timeout(3000), redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer'
+      });
+      await ensureCurrent(cfg);
+      if (response.status === 401) return { state: 'invalid-key' };
+      if (response.status === 429) return { state: 'rate-limited' };
+      if (response.status !== 403 && !response.ok) return { state: 'server-error' };
+      const value = await readAgreementJSON(response, 16384);
+      await ensureCurrent(cfg);
+      const count = n => Number.isSafeInteger(n) && n >= 0;
+      if (response.status === 403) {
+        if (value?.code !== 'DEVICE_LIMIT_EXCEEDED' || (value.reason !== 'limit-exceeded' && !(value.reason === undefined
+          && count(value.limit) && value.limit > 0 && count(value.used) && value.used >= value.limit))) return { state: 'invalid-key' };
+        return { state: 'device-limit-exceeded', deviceLimit: count(value.limit) ? value.limit : undefined,
+          deviceUsed: count(value.used) ? value.used : undefined };
+      }
+      if (value?.success !== true || value.status !== 'succeeded' || !text(value.taskId) || !text(value.statusUrl)) {
+        return { state: 'server-error' };
+      }
+      const access = value.deviceAccess;
+      const counts = access?.allowed === true && access.reason === 'already-registered' && count(access.limit)
+        && access.limit > 0 && count(access.used) && access.used > access.limit
+        ? { deviceLimit: access.limit, deviceUsed: access.used } : {};
+      return { state: 'ok', latencyMs: now() - started, ...counts };
+    } catch (error) {
+      return { state: error?.message === 'source-unconfirmed' ? 'source-unconfirmed' : 'server-error' };
     }
   }
   async function credentials(cfg) {
@@ -295,6 +335,14 @@ export function createAgreementController({
       return null;
     }
     const cfg = await context();
+    if (operation === 'diagnose') return diagnose(cfg);
+    if (operation === 'clear-source-key' && cfg.mode !== 'host') {
+      const latest = await configuration();
+      if (latest.rawBase !== cfg.rawBase || latest.mode !== cfg.mode || latest.key !== cfg.key || latest.device !== cfg.device) return { cleared: false };
+      await write({ [KEY]: '', [APPROVED_SOURCE]: null });
+      changed();
+      return { cleared: true }; // The worker storage listener refreshes without the removed key.
+    }
     if (operation === 'configure-source' || operation === 'confirm-source') {
       if (cfg.mode !== 'extension') return display(null, null, 'configuration');
       const newBase = normalizeAgreementBase(data.base);

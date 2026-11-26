@@ -39,7 +39,10 @@ function copyStaticFiles() {
     content_scripts: [
       { ...contentCoverage, js: ['extension-agreement-view.js', 'extension-agreement-content.js', 'extension-entry.js'], run_at: 'document_start' },
       // Static library imports may require <head>; keep privileged runtime isolated and run after DOM creation.
-      { ...contentCoverage, js: ['chaoxing-plus.js'], run_at: 'document_end' }
+      { ...contentCoverage, js: ['chaoxing-plus.js'], run_at: 'document_end' },
+      // No network, credentials or commands in this narrow, read-only MAIN script.
+      { matches: ['*://*.chaoxing.com/knowledge/cards*'], world: 'MAIN',
+        js: ['extension-course-metadata.js'], run_at: 'document_start', all_frames: true }
     ],
     web_accessible_resources: [
       {
@@ -59,7 +62,7 @@ function copyStaticFiles() {
   for (const file of [
     'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
     'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
-    'extension-agreement.html'
+    'extension-agreement.html', 'extension-course-metadata.js'
   ]) {
     copyFileSync('src/' + file, 'dist/' + file);
   }
@@ -118,7 +121,11 @@ async function main() {
       },
       rollupOptions: {
         output: {
-          entryFileNames: 'chaoxing-plus.js'
+          entryFileNames: 'chaoxing-plus.js',
+          // Defer the whole bundle, including static module initialization, until the
+          // isolated bootstrapping script confirms this tab's extension switch.
+          banner: 'void Promise.resolve(globalThis.__CXPLUS_EXTENSION_BOOT__).then(enabled => { if (!enabled) return;',
+          footer: '});'
         }
       },
       outDir: 'dist',

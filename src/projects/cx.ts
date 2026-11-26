@@ -18,6 +18,7 @@ import {
 import { Project, $gm, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
+import { readOrdinaryCourseAttachments } from '../runtime/ordinary-course-attachments.js';
 import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
 import { playbackRate, volume } from '../utils/configs.js';
@@ -494,7 +495,7 @@ export type Attachment = {
   property: {
     mid: string;
     _jobid: string;
-    module: 'insertbook' | 'insertdoc' | 'insertflash' | 'work' | 'insertaudio' | 'insertvideo';
+    module?: 'insertbook' | 'insertdoc' | 'insertflash' | 'work' | 'insertaudio' | 'insertvideo';
     name?: string;
     author?: string;
     bookname?: string;
@@ -2073,6 +2074,7 @@ function workResultsMethods() {
       retryQuestion: (index: number, resetAnswer?: boolean) => Promise<SimplifyWorkResult | undefined>;
       canRetryQuestion?: (index: number) => boolean;
       clearAnswers?: () => void | Promise<void>;
+      authorizeReset?: () => Promise<void>;
       prepareReset?: () => void | Promise<void>;
       getQuestions?: () => SimplifyWorkResult[];
     }) => void;
@@ -3557,8 +3559,13 @@ function rateHack() {
   }
 }
 
+function readCurrentCourseAttachments(): Attachment[] {
+  if (usesBrowserAgreementGate()) return readOrdinaryCourseAttachments();
+  return (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
+}
+
 function hasPendingCurrentPageJobAttachments() {
-  const attachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
+  const attachments = readCurrentCourseAttachments();
   const context = getDeferredChapterContext();
   return attachments.some((attachment) => {
     const jobId = String(attachment.jobid || attachment.property._jobid || '');
@@ -3862,7 +3869,7 @@ export async function study(opts: StudyOptions) {
     mode: opts.mode,
     sourcePosition,
     deferredTaskCount: Object.keys(studyContext.state.tasks).length,
-    attachmentCount: (($gm.unsafeWindow as any).attachments?.length as number) || 0
+    attachmentCount: readCurrentCourseAttachments().length
   }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
   const initialMetadata = initialCourseContext.chapters.find((chapter) => chapter.id === initialCourseContext.chapterId);
   const inspectedSnapshot = initialCourseContext.state.inspectedSnapshots?.[initialCourseContext.chapterId];
@@ -3880,7 +3887,7 @@ export async function study(opts: StudyOptions) {
   const maxSubmissionAttempts = 1 + getUnfinishedQuestionRetryAttempts();
   let manualAnswerPaused = false;
   let searching = true;
-  let attachmentCount: number = (($gm.unsafeWindow as any).attachments?.length as number) || 0;
+  let attachmentCount: number = readCurrentCourseAttachments().length;
   let visibleContentState: VisibleContentState = 'empty';
   let scanRound = 0;
   const waitTimeout = 3 + attachmentCount * 2;
@@ -3896,7 +3903,7 @@ export async function study(opts: StudyOptions) {
     const result = searchJob(opts, searchedJobs);
     visibleContentState = result.visibleContentState;
     const scanCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey());
-    const pageAttachments = (($gm.unsafeWindow as any).attachments as Attachment[] | undefined) ?? [];
+    const pageAttachments = readCurrentCourseAttachments();
     logDebug('info', '课程学习扫描诊断', {
       studyRunId,
       scanRound,
@@ -4017,7 +4024,7 @@ export async function study(opts: StudyOptions) {
   if (!getCurrentChapterCompletionDiagnostics().currentChapterFinished) {
     const deferredJobIds = new Set(Object.values(deferredContext.state.tasks)
       .filter((task) => task.tabKey === deferredContext.tabKey).map((task) => task.jobId));
-    const unresolvedAttachments = ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || []).some((attachment) => {
+    const unresolvedAttachments = readCurrentCourseAttachments().some((attachment) => {
       const jobId = String(attachment.jobid || attachment.property._jobid || '');
       return attachment.job === true && attachment.isPassed !== true && !deferredJobIds.has(jobId) && !completedOrdinaryJobIds.has(jobId);
     });
@@ -4031,7 +4038,7 @@ export async function study(opts: StudyOptions) {
         unresolvedAttachments,
         currentChapterFinished: false,
         sourcePosition,
-        pendingJobs: ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || [])
+        pendingJobs: readCurrentCourseAttachments()
           .filter((item) => item.job === true && item.isPassed !== true).slice(0, 5)
           .map((item) => ({ jobId: String(item.jobid || item.property._jobid || ''), attachmentJob: item.job, attachmentPassed: item.isPassed ?? null }))
       }, undefined, { correlationId: buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey()) });
@@ -4078,7 +4085,7 @@ export async function study(opts: StudyOptions) {
       const result = searchJob(opts, [], target);
       const job = result.job;
       if (!job?.func) {
-        const attachment = ((($gm.unsafeWindow as any).attachments as Attachment[] | undefined) || [])
+        const attachment = readCurrentCourseAttachments()
           .find((item) => String(item.jobid || item.property._jobid || '') === target.jobId);
         if (attachment?.isPassed) {
           target.state = 'complete';
@@ -4508,6 +4515,7 @@ function searchIFrame(root: Document) {
 
 function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: DeferredChapterTask): SearchJobResult {
   const knowCardWin = $gm.unsafeWindow as Window & Record<string, any>;
+  const attachments = readCurrentCourseAttachments();
   const deferredContext = getDeferredChapterContext();
 
   const searchJobElement = (root: HTMLIFrameElement) => {
@@ -4600,7 +4608,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
         return { visibleContentState: 'finished-job' };
       }
 
-      const attachment: Attachment | undefined = (knowCardWin.attachments as Attachment[] | undefined)?.find((item) => {
+      const attachment: Attachment | undefined = attachments.find((item) => {
         const attachmentJobId = item.jobid || item.property._jobid;
         if (!attachmentJobId) {
           return false;
@@ -4610,7 +4618,7 @@ function searchJob(opts: StudyOptions, searchedJobs: Job[], retryTarget?: Deferr
 
       if (!attachment) {
         logSearchSkip('missing-attachment', 'visible-unmapped', {
-          attachmentCount: knowCardWin.attachments?.length ?? 0
+          attachmentCount: attachments.length
         });
         return { visibleContentState: 'visible-unmapped' };
       }
@@ -5699,6 +5707,7 @@ const JobRunner = {
         async onElementSearched(elements) {
           const type = resolveQuestionType(elements.type[0] ?? elements.options[0]?.closest('.TiMu') ?? frameDocument);
           if (type === 'judgement') {
+            if (usesBrowserAgreementGate()) await requireTikuWorkAgreement();
             elements.options.forEach((option) => {
               const opt = option?.textContent?.trim() || '';
               if (opt.includes('对') || opt.includes('错')) {
@@ -5734,7 +5743,12 @@ const JobRunner = {
       prepareReset: () => { answerRun.cancel(); taskBusy = false; uploadInProgress = false; },
       getQuestions: () => roots.map((root) => ({ question: chapterTestTaskQuestionTitleTransform(Array.from(root.querySelectorAll<HTMLElement>('.Zy_TItle .clearfix'))),
         type: normalizeResultQuestionType(resolveAnswerSearchType(root)), requested: false, resolved: false, searchInfos: [] })),
-      clearAnswers: () => resetCxQuestionAnswers(roots),
+      authorizeReset: requireTikuWorkAgreement,
+      clearAnswers: async () => {
+        if (usesBrowserAgreementGate()) await waitForTabAnswerContinue(frameDocument);
+        await requireTikuWorkAgreement();
+        resetCxQuestionAnswers(roots);
+      },
       isRunning: () => worker.isRunning || taskBusy || uploadInProgress || tikuAdapterBalanceRecoveryState.paused,
       isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => { worker.isStop = true; worker.emit('stop'); },
@@ -5757,6 +5771,8 @@ const JobRunner = {
         if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
           return undefined;
         }
+        if (usesBrowserAgreementGate()) await waitForTabAnswerContinue(frameDocument);
+        await requireTikuWorkAgreement();
         if (!answerRun.isCurrent(retryRun)) return undefined;
         if (resetAnswer) resetCxQuestionAnswers([root]);
 
@@ -7153,7 +7169,12 @@ function workOrExam(
       prepareReset: () => { answerRun.cancel(); taskBusy = false; uploadInProgress = false; retryInFlight = false; },
       getQuestions: () => liveRoots().map((root) => ({ question: workOrExamQuestionTitleTransform(Array.from(root.querySelectorAll<HTMLElement>(workOrExamTitleSelector))),
         type: normalizeResultQuestionType(resolveAnswerSearchType(root)), requested: false, resolved: false, searchInfos: [] })),
-      clearAnswers: () => resetCxQuestionAnswers(liveRoots()),
+      authorizeReset: requireTikuWorkAgreement,
+      clearAnswers: async () => {
+        if (usesBrowserAgreementGate()) await waitForTabAnswerContinue();
+        await requireTikuWorkAgreement();
+        resetCxQuestionAnswers(liveRoots());
+      },
       isRunning: () => worker.isRunning || taskBusy || uploadInProgress || tikuAdapterBalanceRecoveryState.paused,
       isStopped: () => worker.isStop || tikuAdapterBalanceRecoveryState.paused,
       stop: () => { worker.isStop = true; worker.emit('stop'); },
@@ -7181,7 +7202,9 @@ function workOrExam(
           if (!(await allowTikuAdapterRetryAfterBalanceRecovery())) {
             return undefined;
           }
-          if (!answerRun.isCurrent(retryRun)) return undefined;
+          if (usesBrowserAgreementGate()) await waitForTabAnswerContinue();
+          await requireTikuWorkAgreement();
+          if (!answerRun.isCurrent(retryRun) || liveRoots()[index] !== root) return undefined;
           if (resetAnswer) resetCxQuestionAnswers([root]);
 
           resetTikuAdapterBalanceGuard(getStoredTikuAdapterConfig());

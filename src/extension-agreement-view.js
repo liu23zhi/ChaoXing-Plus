@@ -52,9 +52,13 @@ const mountCxAgreement = ({ internal, send }) => {
   dismiss.hidden = internal;
   const source = internal ? create('form', 'source-settings', '', card) : undefined;
   const sourceMessage = source ? create('p', 'source-status', '', source) : undefined;
+  sourceMessage?.setAttribute('role', 'status');
   const sourceBase = source ? create('input', 'source-base', '', create('label', '', 'HTTPS 题库地址 ', source)) : undefined;
   const sourceKey = source ? create('input', 'source-key', '', create('label', '', '访问令牌（留空保留同地址令牌） ', source)) : undefined;
   const sourceSave = source ? create('button', 'source-save', '确认并保存题库地址', source) : undefined;
+  const sourceProbe = source ? create('button', 'source-probe', '测试连接', source) : undefined;
+  const sourceClear = source ? create('button', 'source-clear', '移除本地令牌', source) : undefined;
+  if (sourceProbe && sourceClear) sourceProbe.type = sourceClear.type = 'button';
   if (sourceBase && sourceKey) {
     sourceBase.type = 'url'; sourceBase.required = true;
     sourceKey.type = 'password'; sourceKey.autocomplete = 'off';
@@ -203,6 +207,32 @@ const mountCxAgreement = ({ internal, send }) => {
       }
     } finally { if (!destroyed) sourceSave.disabled = false; }
   }
+  async function sourceAction(event) {
+    if (!event.isTrusted || destroyed || sourceSave.disabled) return;
+    sourceSave.disabled = sourceProbe.disabled = sourceClear.disabled = true;
+    sourceMessage.textContent = '';
+    const clear = event.currentTarget === sourceClear;
+    try {
+      const result = await send(clear ? 'clear-source-key' : 'diagnose');
+      if (destroyed) return;
+      if (clear) {
+        if (result?.cleared) sourceKey.value = '';
+        sourceMessage.textContent = result?.cleared ? '已移除本地令牌，未替你在服务器撤销该令牌。' : '无法移除当前令牌。';
+        return;
+      }
+      const used = Number.isSafeInteger(result?.deviceUsed) && Number.isSafeInteger(result?.deviceLimit)
+        ? `（已用 ${result.deviceUsed}/${result.deviceLimit} 台）` : '';
+      const messages = { ok: '连接正常，访问令牌有效', 'missing-key': '请先配置访问令牌',
+        'invalid-config': '请先确认有效的 HTTPS 地址', 'source-unconfirmed': '请先确认当前自定义题库地址',
+        'invalid-key': '访问令牌未获服务器许可', 'rate-limited': '校验过于频繁，请稍后再试',
+        'device-limit-exceeded': '超出设备数量上限', 'server-error': '无法连接或验证服务器' };
+      sourceMessage.textContent = (messages[result?.state] ?? '无法完成连接测试') + used + '。';
+    } finally {
+      if (!destroyed) sourceSave.disabled = sourceProbe.disabled = sourceClear.disabled = false;
+    }
+  }
+  sourceProbe?.addEventListener('click', sourceAction);
+  sourceClear?.addEventListener('click', sourceAction);
   settings.addEventListener('click', openSettings);
   source?.addEventListener('submit', saveSource);
   body.addEventListener('scroll', noteBottom);
@@ -220,6 +250,8 @@ const mountCxAgreement = ({ internal, send }) => {
       body.removeEventListener('scroll', noteBottom);
       settings.removeEventListener('click', openSettings);
       source?.removeEventListener('submit', saveSource);
+      sourceProbe?.removeEventListener('click', sourceAction);
+      sourceClear?.removeEventListener('click', sourceAction);
       accept.removeEventListener('click', onAccept);
       dismiss.removeEventListener('click', onDismiss);
       reopen.removeEventListener('click', onReopen);
