@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
+import ts from '@typescript/typescript6';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
@@ -932,4 +935,45 @@ test('an existing status fetcher uses one current approved source-key pair, and 
   current = { baseurl: b, accessKey: '' };
   assert.equal((await fetchStatus()).kind, 'no-token');
   assert.deepEqual(hits, []);
+});
+
+
+test('the actual status mount keeps parallel reads and default redirects in the frozen host', async () => {
+  const { http } = await loadModules();
+  const text = await readFile(resolve(scriptsDir, '..', 'src/projects/common.ts'), 'utf8');
+  const ast = ts.createSourceFile('common.ts', text, ts.ScriptTarget.Latest, true);
+  const mount = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'mountServiceStatusHttpFetcher');
+  const code = ts.transpileModule(mount.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const ordinary of [false, true]) {
+    let release;
+    let fetcher;
+    const held = new Promise(resolve => { release = resolve; });
+    const starts = [];
+    const context = {
+      usesBrowserAgreementGate: () => ordinary,
+      DEFAULT_TIKU_BASE_URL: 'https://mounted.fixture.invalid',
+      getStoredTikuAdapterConfig: () => ({ baseurl: 'https://mounted.fixture.invalid', key: 'local-only' }),
+      resolveTikuAdapterBaseUrl: raw => raw,
+      runtimeStore: { getProviderConfigRevision: () => 1 },
+      setServiceStatusFetcher: fn => { fetcher = fn; },
+      createServiceStatusHttpFetcher: http.createServiceStatusHttpFetcher,
+      fetchServiceStatusRequester: async (_url, init) => {
+        starts.push(init.redirect ?? 'default');
+        if (starts.length === 1) await held;
+        return summaryResponse();
+      }
+    };
+    vm.runInNewContext(code + '; mountServiceStatusHttpFetcher();', context);
+    const running = fetcher();
+    const beforeRelease = starts.slice();
+    release();
+    await running;
+    if (ordinary) {
+      assert.deepEqual(beforeRelease, ['error']);
+      assert.deepEqual(starts, ['error', 'error']);
+    } else {
+      assert.deepEqual(beforeRelease, ['default', 'default']);
+      assert.deepEqual(starts, ['default', 'default']);
+    }
+  }
 });

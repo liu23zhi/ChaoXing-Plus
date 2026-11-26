@@ -809,15 +809,30 @@ export function getStoredTikuAdapterConfig() {
  * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
  */
 function mountServiceStatusHttpFetcher() {
-  setServiceStatusFetcher(createServiceStatusHttpFetcher({
-    getConfig: () => {
-      const config = getStoredTikuAdapterConfig();
-      return { baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
-        accessKey: config.key, scriptIdentity: config.scriptIdentity, revision: runtimeStore.getProviderConfigRevision() };
-    },
+  const common = {
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
     includeSearchHistory: true
+  };
+  if (usesBrowserAgreementGate()) {
+    setServiceStatusFetcher(createServiceStatusHttpFetcher({
+      ...common,
+      getConfig: () => {
+        const config = getStoredTikuAdapterConfig();
+        return { baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
+          accessKey: config.key, scriptIdentity: config.scriptIdentity, revision: runtimeStore.getProviderConfigRevision() };
+      }
+    }));
+    return;
+  }
+  // Do not change the frozen injection clients' transport or settings behavior.
+  const config = getStoredTikuAdapterConfig();
+  setServiceStatusFetcher(createServiceStatusHttpFetcher({
+    ...common,
+    baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
+    getBaseurl: () => resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
+    accessKey: config.key,
+    scriptIdentity: config.scriptIdentity
   }));
 }
 
