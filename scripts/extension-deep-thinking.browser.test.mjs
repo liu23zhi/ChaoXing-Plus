@@ -121,7 +121,7 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   const assertState = async value => assert.deepEqual(await read(), {
     [keys[0]]: value, [keys[1]]: true, [keys[2]]: value
   });
-  const trustedUrl = new URL('popup.html#deep-thinking', internalUrl).href;
+  const trustedUrl = new URL('extension-deep-thinking-settings.html', internalUrl).href;
   async function openSettings(page, fromGuide = true) {
     const opening = browser.waitForTarget(target => target.type() === 'page' && target.url() === trustedUrl, { timeout: 12000 });
     if (fromGuide) await click(page, 'button.configure');
@@ -138,7 +138,7 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
       noOpener: window.opener === null,
       costNotice: document.getElementById('deep-thinking-description').textContent.includes('费用也可能更高'),
       notExposed: !chrome.runtime.getManifest().web_accessible_resources
-        .some(item => item.resources.includes('popup.html') || item.resources.includes('*'))
+        .some(item => item.resources.some(resource => resource === 'extension-deep-thinking-settings.html' || resource.includes('*')))
     }));
     assert.deepEqual(surface, { protocol: 'chrome-extension:', topLevel: true, noOpener: true, costNotice: true, notExposed: true });
     return confirmation;

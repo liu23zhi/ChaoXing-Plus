@@ -3,8 +3,6 @@ import { DEEP_THINKING_KEYS, DEEP_THINKING_KIND, DEEP_THINKING_SETTINGS_PAGE } f
 
 const section = document.getElementById('deep-thinking-settings');
 if (section && window === window.top && location.href === chrome.runtime.getURL(DEEP_THINKING_SETTINGS_PAGE)) {
-  document.getElementById('popup-general').hidden = true;
-  section.hidden = false;
   const status = document.getElementById('deep-thinking-status');
   const notice = document.getElementById('deep-thinking-notice');
   const enable = document.getElementById('deep-thinking-enable');
@@ -64,7 +62,4 @@ if (section && window === window.top && location.href === chrome.runtime.getURL(
   });
   window.addEventListener('pageshow', event => { if (event.persisted) mount(); });
   mount();
-} else {
-  // Opening the dedicated choice page does not start the general popup's diagnostics UI.
-  void import('./popup.js');
 }

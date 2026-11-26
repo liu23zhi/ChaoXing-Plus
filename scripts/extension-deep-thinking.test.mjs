@@ -14,7 +14,7 @@ const view = 'agreement.view.v1';
 const ext = 'extension';
 const target = { id: ext, frameId: 0, tab: { id: 1 }, url: 'https://owned.chaoxing.com:123/settings' };
 const extensionURL = page => 'chrome-extension://' + ext + '/' + page;
-const trusted = { ...target, url: extensionURL('popup.html#deep-thinking') };
+const trusted = { ...target, url: extensionURL('extension-deep-thinking-settings.html') };
 
 test('strict booleans distinguish old defaults, effective legacy true, explicit false and corrupt pairs', () => {
   for (const [raw, active, done] of [
@@ -64,7 +64,8 @@ test('worker serializes fresh choices, applies one atomic write, protects later 
   const change = (value, expected) => ({ operation: 'change', enabled: value, expected });
   for (const sender of [
     { ...trusted, id: 'external' }, { ...trusted, frameId: 1 }, target,
-    { ...trusted, url: extensionURL('popup.html') }, { ...trusted, url: extensionURL('extension-agreement.html') },
+    { ...trusted, url: extensionURL('popup.html') }, { ...trusted, url: extensionURL('popup.html#deep-thinking') },
+    { ...trusted, url: extensionURL('extension-agreement.html') },
     { ...trusted, url: 'about:blank' }, { ...trusted, tab: undefined }
   ]) assert.equal(await send(choice(true), sender), undefined);
   assert.equal(await send(choice('true')), undefined);
@@ -151,7 +152,7 @@ test('web document messages can request navigation but cannot persist a preferen
   const navigation = await send({ operation: 'open' });
   assert.deepEqual({ direct, mixed, navigation, persisted, opened }, {
     direct: undefined, mixed: undefined, navigation: { opened: true }, persisted: false,
-    opened: ['chrome-extension://extension/popup.html#deep-thinking']
+    opened: ['chrome-extension://extension/extension-deep-thinking-settings.html']
   });
 });
 
@@ -225,4 +226,17 @@ test('effective preference is invalidated on relevant change and BFCache restore
     retriedChangedRead: true, retriedRestoredRead: true, writes: 0,
     durable: { [enabled]: false, [prompted]: true, [legacy]: false }
   });
+});
+
+
+test('regular popup initializes its original module during document load; trusted choice has a separate document', () => {
+  const readSource = name => readFileSync(new URL('../src/' + name, import.meta.url), 'utf8');
+  const modules = html => Array.from(html.matchAll(/<script type="module" src="([^"]+)"><\/script>/g), match => match[1]);
+  const popup = readSource('popup.html');
+  assert.deepEqual(modules(popup), ['./popup.js'], 'the regular popup must not defer initialization to a dynamic import');
+  assert.doesNotMatch(popup, /id="deep-thinking-settings"/);
+  const settings = readSource('extension-deep-thinking-settings.html');
+  assert.deepEqual(modules(settings), ['./extension-deep-thinking-settings.js']);
+  assert.match(settings, /id="deep-thinking-settings"/);
+  assert.doesNotMatch(readSource('extension-deep-thinking-settings.js'), /import\(['"]\.\/popup\.js['"]\)/);
 });

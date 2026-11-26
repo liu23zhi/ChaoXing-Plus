@@ -63,7 +63,8 @@ function copyStaticFiles() {
     'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
     'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
     'extension-agreement.html', 'extension-course-metadata.js',
-    'extension-deep-thinking.js', 'extension-deep-thinking-worker.js', 'extension-deep-thinking-settings.js'
+    'extension-deep-thinking.js', 'extension-deep-thinking-worker.js',
+    'extension-deep-thinking-settings.html', 'extension-deep-thinking-settings.js'
   ]) {
     copyFileSync('src/' + file, 'dist/' + file);
   }

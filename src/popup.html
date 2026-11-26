@@ -43,11 +43,6 @@
         color: var(--ink);
       }
 
-      section[hidden] { display: none; }
-      .preference-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-      .preference-actions .button:disabled { opacity: .5; cursor: default; }
-      .preference-actions .secondary { background: var(--surface); color: var(--ink); box-shadow: none; }
-
       .card {
         display: grid;
         gap: 12px;
@@ -213,7 +208,7 @@
     </style>
   </head>
   <body>
-    <section class="card" id="popup-general">
+    <section class="card">
       <div class="title">超星学习助手</div>
       <div class="desc">为 chaoxing.com 打造的自动学习与自动搜题扩展：视频自动播放、章节测验、作业与考试自动答题。</div>
       <label class="switch-row" for="extension-enabled">
@@ -235,17 +230,6 @@
       </section>
       <button id="open-chaoxing" class="button" type="button">打开超星官网</button>
     </section>
-    <section class="card" id="deep-thinking-settings" aria-labelledby="deep-thinking-title" hidden>
-      <h1 class="title" id="deep-thinking-title">深度思考设置</h1>
-      <p class="desc" id="deep-thinking-description">开启后，AI 可能进行多轮模型调用与联网搜索，等待时间会更长，费用也可能更高。设置在已打开的超星标签页之间共享。</p>
-      <div class="switch-state" id="deep-thinking-status" role="status">正在读取设置…</div>
-      <div class="preference-actions">
-        <button class="button secondary" id="deep-thinking-disable" aria-describedby="deep-thinking-description" type="button" disabled>暂不开启</button>
-        <button class="button" id="deep-thinking-enable" aria-describedby="deep-thinking-description" type="button" disabled>立即开启</button>
-      </div>
-      <div class="switch-state" id="deep-thinking-notice" role="status"></div>
-      <div class="note">不想更改时直接关闭此页。</div>
-    </section>
-    <script type="module" src="./extension-deep-thinking-settings.js"></script>
+    <script type="module" src="./popup.js"></script>
   </body>
 </html>
