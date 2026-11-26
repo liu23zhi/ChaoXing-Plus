@@ -121,6 +121,37 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   const assertState = async value => assert.deepEqual(await read(), {
     [keys[0]]: value, [keys[1]]: true, [keys[2]]: value
   });
+  const trustedUrl = new URL('popup.html#deep-thinking', internalUrl).href;
+  async function openSettings(page, fromGuide = true) {
+    const opening = browser.waitForTarget(target => target.type() === 'page' && target.url() === trustedUrl, { timeout: 12000 });
+    if (fromGuide) await click(page, 'button.configure');
+    else {
+      await page.bringToFront();
+      await page.click('[data-cx-deep-thinking-toggle]');
+    }
+    const confirmation = await (await opening).page();
+    observe(confirmation);
+    await confirmation.waitForSelector('#deep-thinking-settings', { visible: true });
+    const surface = await confirmation.evaluate(() => ({
+      protocol: location.protocol,
+      topLevel: window === window.top,
+      noOpener: window.opener === null,
+      costNotice: document.getElementById('deep-thinking-description').textContent.includes('费用也可能更高'),
+      notExposed: !chrome.runtime.getManifest().web_accessible_resources
+        .some(item => item.resources.includes('popup.html') || item.resources.includes('*'))
+    }));
+    assert.deepEqual(surface, { protocol: 'chrome-extension:', topLevel: true, noOpener: true, costNotice: true, notExposed: true });
+    return confirmation;
+  }
+  async function confirm(confirmation, value) {
+    const button = value ? '#deep-thinking-enable' : '#deep-thinking-disable';
+    await confirmation.bringToFront();
+    await confirmation.waitForSelector(button + ':enabled', { timeout: 12000 });
+    await confirmation.click(button);
+    await confirmation.waitForFunction(() => document.getElementById('deep-thinking-notice').textContent.includes('已同步共享设置'),
+      { timeout: 12000, polling: 60 });
+    await confirmation.close();
+  }
 
   if (oldDist) {
     assert.deepEqual(await read(), {});
@@ -168,8 +199,12 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   await checked(first, false);
   t.diagnostic('T02 fixture: panel reads off');
   assert.equal(await first.evaluate(selector => document.querySelector(selector).shadowRoot.activeElement?.className, dialog), 'close');
-  await first.evaluate(selector => document.querySelector(selector).shadowRoot.querySelector('.enable').click(), dialog);
-  assert.deepEqual(await read(), oldDist ? { [keys[2]]: false } : {}, 'JS click is not an explicit choice');
+  assert.deepEqual(await first.evaluate(selector => {
+    const shadow = document.querySelector(selector).shadowRoot;
+    return Array.from(shadow.querySelectorAll('button'), node => node.textContent.trim());
+  }, dialog), ['×', '打开扩展设置'], 'the owned web fixture only presents navigation, never choice controls');
+  await first.evaluate(selector => document.querySelector(selector).shadowRoot.querySelector('.configure').click(), dialog);
+  assert.deepEqual(await read(), oldDist ? { [keys[2]]: false } : {}, 'page-only navigation does not save');
   await first.bringToFront();
   await first.mouse.click(5, 5);
   assert.deepEqual(await read(), oldDist ? { [keys[2]]: false } : {}, 'backdrop interaction writes nothing');
@@ -184,8 +219,12 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   await first.reload(); await guide(first);
   const second = await browser.newPage(); observe(second); await second.goto(url);
   await guide(second);
-  await click(first, 'button.disable');
-  t.diagnostic('T02 fixture: disable choice click');
+  const ignored = await openSettings(first);
+  assert.deepEqual(await read(), oldDist ? { [keys[2]]: false } : {}, 'opening the trusted page alone changes nothing');
+  await ignored.close();
+  await guide(first); await guide(second);
+  await confirm(await openSettings(first), false);
+  t.diagnostic('T02 fixture: trusted extension page decline');
   await Promise.all([guide(first, false), guide(second, false), checked(first, false), checked(second, false)])
     .catch(async error => {
       console.error('persisted choice', await read(), 'dialog message', await first.evaluate(selector =>
@@ -202,8 +241,8 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   await clear(); // Simulates a fresh window/profile preference, without bypassing the agreement.
   await first.reload(); await second.reload();
   await guide(first); await guide(second);
-  await click(second, 'button.enable');
-  t.diagnostic('T02 fixture: enable choice click');
+  await confirm(await openSettings(second), true);
+  t.diagnostic('T02 fixture: trusted extension page opt-in');
   await Promise.all([guide(first, false), guide(second, false), checked(first, true), checked(second, true)]);
   await assertState(true);
   t.diagnostic('T02 fixture: durable on');
@@ -226,19 +265,19 @@ test('ordinary MV3: consent first, explicit choice, trusted isolation and produc
   t.diagnostic('T02 fixture: recorded exclusive storage');
   await settingsTab(first);
   t.diagnostic('T02 fixture: panel settings');
-  await first.click('[data-cx-deep-thinking-toggle]');
+  const manualOff = await openSettings(first, false);
+  await assertState(true); // navigating from the production control does not write
+  await confirm(manualOff, false);
   await Promise.all([checked(first, false), checked(second, false)]);
-  await assertState(false); // existing real control updates the same stored policy
-  await first.click('[data-cx-deep-thinking-toggle]');
-  await guide(first);
-  await first.evaluate(selector => document.querySelector(selector).shadowRoot.querySelector('.enable').click(), dialog);
   await assertState(false);
-  await click(first, 'button.disable'); // Cancel manual enable; no write.
+  const manualOn = await openSettings(first, false);
+  await manualOn.waitForSelector('#deep-thinking-enable:enabled', { timeout: 12000 });
+  await manualOn.evaluate(() => document.getElementById('deep-thinking-enable').click());
+  await assertState(false);
+  await manualOn.close(); // Cancel manual enable; no write.
   await guide(first, false);
   await assertState(false);
-  await first.click('[data-cx-deep-thinking-toggle]');
-  await guide(first);
-  await click(first, 'button.enable');
+  await confirm(await openSettings(first, false), true);
   await Promise.all([guide(first, false), checked(first, true), checked(second, true)]);
   await assertState(true);
   t.diagnostic('T02 fixture: manual switch synced both directions');

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import ts from '@typescript/typescript6';
 import { registerDeepThinking } from '../src/extension-deep-thinking-worker.js';
 import { DEEP_THINKING_KIND, readDeepThinkingState } from '../src/extension-deep-thinking.js';
@@ -12,6 +13,8 @@ const prompted = 'hasPromptedDeepThinking';
 const view = 'agreement.view.v1';
 const ext = 'extension';
 const target = { id: ext, frameId: 0, tab: { id: 1 }, url: 'https://owned.chaoxing.com:123/settings' };
+const extensionURL = page => 'chrome-extension://' + ext + '/' + page;
+const trusted = { ...target, url: extensionURL('popup.html#deep-thinking') };
 
 test('strict booleans distinguish old defaults, effective legacy true, explicit false and corrupt pairs', () => {
   for (const [raw, active, done] of [
@@ -38,7 +41,7 @@ test('worker serializes fresh choices, applies one atomic write, protects later 
   let failRead = false;
   let failWrite = false;
   const chrome = {
-    runtime: { id: ext, onMessage: { addListener(listener) { onMessage = listener; } } },
+    runtime: { id: ext, getURL: extensionURL, onMessage: { addListener(listener) { onMessage = listener; } } },
     storage: { local: {
       async get(keys) {
         if (failRead) { failRead = false; throw Error('owned read failure'); }
@@ -53,17 +56,16 @@ test('worker serializes fresh choices, applies one atomic write, protects later 
   };
   bind();
   function bind() { registerDeepThinking(chrome); }
-  const send = (message, sender = target) => new Promise(resolve => {
+  const send = (message, sender = trusted) => new Promise(resolve => {
     const handled = onMessage({ kind: DEEP_THINKING_KIND, ...message }, sender, resolve);
     if (!handled) resolve(undefined);
   });
   const choice = value => ({ operation: 'choose', enabled: value });
   const change = (value, expected) => ({ operation: 'change', enabled: value, expected });
   for (const sender of [
-    { ...target, id: 'external' }, { ...target, frameId: 1 },
-    { ...target, url: 'https://owned.chaoxing.com.other/' },
-    { ...target, url: 'https://other.test/?next=https://chaoxing.com/' },
-    { ...target, url: 'about:blank' }, { ...target, tab: undefined }
+    { ...trusted, id: 'external' }, { ...trusted, frameId: 1 }, target,
+    { ...trusted, url: extensionURL('popup.html') }, { ...trusted, url: extensionURL('extension-agreement.html') },
+    { ...trusted, url: 'about:blank' }, { ...trusted, tab: undefined }
   ]) assert.equal(await send(choice(true), sender), undefined);
   assert.equal(await send(choice('true')), undefined);
   assert.equal(await send({ operation: 'change', enabled: true }), undefined);
@@ -84,7 +86,7 @@ test('worker serializes fresh choices, applies one atomic write, protects later 
   assert.equal(Object.hasOwn(values, prompted), false);
   assert.deepEqual(await send(change(true, false)), { saved: false });
 
-  assert.deepEqual(await Promise.all([send(choice(false)), send(choice(true), { ...target, tab: { id: 2 } })]),
+  assert.deepEqual(await Promise.all([send(choice(false)), send(choice(true), { ...trusted, tab: { id: 2 } })]),
     [{ saved: true }, { saved: true }]); // both receive confirmed state, only the first choice writes
   assert.deepEqual(writes, [{ [enabled]: false, [prompted]: true, [legacy]: false }]);
   bind(); // MV3 worker restarted; durable choice still wins over a stale prompt.
@@ -128,4 +130,99 @@ test('actual getWorkOptions consumes the same canonical ordinary preference as t
   assert.equal(read().deepThinking, true);
   oldFallback = false;
   assert.equal(read().deepThinking, false);
+});
+
+
+test('web document messages can request navigation but cannot persist a preference', async () => {
+  let listener;
+  let persisted = false;
+  const opened = [];
+  const chrome = {
+    runtime: { id: ext, getURL: extensionURL, onMessage: { addListener(fn) { listener = fn; } } },
+    tabs: { async create(tab) { opened.push(tab.url); } },
+    storage: { local: { async get() { return { [view]: { phase: 'accepted' } }; }, async set() { persisted = true; } } }
+  };
+  registerDeepThinking(chrome);
+  const send = (body, sender = target) => new Promise(resolve => {
+    if (!listener({ kind: DEEP_THINKING_KIND, ...body }, sender, resolve)) resolve(undefined);
+  });
+  const direct = await send({ operation: 'choose', enabled: true });
+  const mixed = await send({ operation: 'open', enabled: true });
+  const navigation = await send({ operation: 'open' });
+  assert.deepEqual({ direct, mixed, navigation, persisted, opened }, {
+    direct: undefined, mixed: undefined, navigation: { opened: true }, persisted: false,
+    opened: ['chrome-extension://extension/popup.html#deep-thinking']
+  });
+});
+
+test('effective preference is invalidated on relevant change and BFCache restore until authoritative read succeeds', async () => {
+  const source = readFileSync(new URL('../src/runtime/deep-thinking-guide.ts', import.meta.url), 'utf8');
+  const compiled = ts.transpileModule(source, { compilerOptions: {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS
+  } }).outputText;
+  let readFailure = false;
+  let stored = { [enabled]: true, [prompted]: true, [legacy]: true };
+  let writes = 0;
+  let reads = 0;
+  const listeners = new Set();
+  const window = new EventTarget();
+  window.top = window;
+  const chrome = { storage: {
+    local: { async get() { reads++; if (readFailure) throw Error('owned read failure'); return stored; }, async set() { writes++; } },
+    onChanged: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } }
+  } };
+  const api = {};
+  runInNewContext(compiled, { exports: api, window, chrome, location: { href: target.url },
+    setTimeout, clearTimeout,
+    require(name) {
+      if (name === '../extension-deep-thinking.js') return { DEEP_THINKING_KIND, DEEP_THINKING_KEYS: [enabled, prompted, legacy, oldOptions],
+        isDeepThinkingTarget: () => true, readDeepThinkingState };
+      if (name === './agreement-gate.js') return { browserExtensionRuntime: () => ({}) };
+      if (name === './deep-thinking-view.js') return { mountDeepThinkingDialog: () => { throw Error('unneeded test view'); } };
+      throw new Error('unexpected import: ' + name);
+    }
+  });
+  const enabledNow = () => api.browserDeepThinkingEnabled();
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  await api.startBrowserDeepThinking();
+  const initial = enabledNow();
+  stored = { [enabled]: false, [prompted]: true, [legacy]: false };
+  readFailure = true;
+  for (const listener of listeners) listener({ [enabled]: true }, 'local');
+  const afterChangeDuringRead = enabledNow();
+  await settle();
+  const afterChangedReadFailure = enabledNow();
+  readFailure = false;
+  let readsBeforeFocus = reads;
+  window.dispatchEvent(new Event('focus'));
+  await settle();
+  const recoveredOff = enabledNow();
+  const retriedChangedRead = reads > readsBeforeFocus;
+  stored = { [enabled]: true, [prompted]: true, [legacy]: true };
+  for (const listener of listeners) listener({ [enabled]: true }, 'local');
+  await settle();
+  const restoredTrue = enabledNow();
+
+  window.dispatchEvent(new Event('pagehide'));
+  const detached = listeners.size;
+  const hidden = enabledNow();
+  readFailure = true;
+  stored = { [enabled]: false, [prompted]: true, [legacy]: false };
+  window.dispatchEvent(new Event('pageshow'));
+  await settle();
+  const afterRestoreReadFailure = enabledNow();
+  readFailure = false;
+  readsBeforeFocus = reads;
+  window.dispatchEvent(new Event('focus'));
+  await settle();
+  const recoveredAfterRestore = enabledNow();
+  const retriedRestoredRead = reads > readsBeforeFocus;
+  window.dispatchEvent(new Event('pagehide'));
+  assert.deepEqual({ initial, afterChangeDuringRead, afterChangedReadFailure, recoveredOff, restoredTrue,
+    detached, hidden, afterRestoreReadFailure, recoveredAfterRestore, retriedChangedRead, retriedRestoredRead, writes, durable: stored }, {
+    initial: true, afterChangeDuringRead: false, afterChangedReadFailure: false, recoveredOff: false, restoredTrue: true,
+    detached: 0, hidden: false, afterRestoreReadFailure: false, recoveredAfterRestore: false,
+    retriedChangedRead: true, retriedRestoredRead: true, writes: 0,
+    durable: { [enabled]: false, [prompted]: true, [legacy]: false }
+  });
 });

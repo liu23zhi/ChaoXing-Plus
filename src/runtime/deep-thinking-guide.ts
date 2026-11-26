@@ -1,5 +1,5 @@
 import {
-  DEEP_THINKING_KIND, DEEP_THINKING_KEYS, isDeepThinkingTarget, readDeepThinkingState
+  DEEP_THINKING_KIND, DEEP_THINKING_KEYS, isDeepThinkingTarget, readDeepThinkingState, type DeepThinkingState
 } from '../extension-deep-thinking.js';
 import { browserExtensionRuntime } from './agreement-gate.js';
 import { mountDeepThinkingDialog } from './deep-thinking-view.js';
@@ -12,28 +12,25 @@ type LocalStorage = {
 type AgreementPresentation = Pick<EventTarget, 'addEventListener' | 'removeEventListener'> & { isAccepted(): boolean };
 type GuideGlobals = {
   chrome?: { storage?: LocalStorage; runtime?: {
-    sendMessage(message: Record<string, unknown>): Promise<{ saved?: boolean } | undefined>;
+    sendMessage(message: Record<string, unknown>): Promise<{ opened?: boolean } | undefined>;
   } };
   __CXPLUS_AGREEMENT_PRESENTATION__?: AgreementPresentation;
 };
 
 const globals = globalThis as GuideGlobals;
-let state = readDeepThinkingState();
-let refreshCurrent = () => Promise.resolve();
-let reopenGuide = () => {};
+// Undefined is not a fresh/no-choice record: do not offer the guide or consume historical true until read succeeds.
+let state: DeepThinkingState | undefined;
 const observers = new Set<() => void>();
 
-export const browserDeepThinkingEnabled = () => state.enabled;
-export const browserDeepThinkingPrompted = () => state.prompted;
-export const openBrowserDeepThinkingGuide = () => reopenGuide();
+export const browserDeepThinkingEnabled = () => state?.enabled === true;
 export const onBrowserDeepThinkingChanged = (callback: () => void) => { observers.add(callback); };
 
-export async function writeBrowserDeepThinking(operation: 'choose' | 'change', enabled: boolean, expected?: boolean) {
+export async function openBrowserDeepThinkingSettings() {
   if (!browserExtensionRuntime() || !globals.__CXPLUS_AGREEMENT_PRESENTATION__?.isAccepted()) return false;
   try {
-    const answer = await globals.chrome?.runtime?.sendMessage({ kind: DEEP_THINKING_KIND, operation, enabled, expected });
-    await refreshCurrent();
-    return answer?.saved === true;
+    // Website UI can only request navigation. The extension-owned document makes the choice.
+    const answer = await globals.chrome?.runtime?.sendMessage({ kind: DEEP_THINKING_KIND, operation: 'open' });
+    return answer?.opened === true;
   } catch {
     return false;
   }
@@ -45,75 +42,67 @@ export async function startBrowserDeepThinking() {
   const presentation = window === window.top && isDeepThinkingTarget(location.href)
     ? globals.__CXPLUS_AGREEMENT_PRESENTATION__ : undefined;
   let active = false;
-  let loaded = false;
   let generation = 0;
+  let retry: ReturnType<typeof setTimeout> | undefined;
   let dismissed = false;
-  let manualEnable = false;
   let dialog: ReturnType<typeof mountDeepThinkingDialog> | undefined;
-  let displayed: 'choose' | 'change' | undefined;
 
   function render() {
-    let mode: typeof displayed;
-    if (active && loaded && presentation?.isAccepted()) {
-      if (!state.prompted && !dismissed) mode = 'choose';
-      else if (manualEnable && state.prompted && !state.enabled) mode = 'change';
+    if (active && state && !state.prompted && !dismissed && presentation?.isAccepted()) {
+      dialog ??= mountDeepThinkingDialog({
+        dismiss() { dismissed = true; render(); },
+        open: openBrowserDeepThinkingSettings
+      });
+    } else {
+      dialog?.destroy();
+      dialog = undefined;
     }
-    if (mode === displayed) return;
-    displayed = mode;
-    dialog?.destroy();
-    dialog = undefined;
-    if (mode !== 'change') manualEnable = false;
-    if (!mode) return;
-    dialog = mountDeepThinkingDialog({
-      dismiss() { dismissed = true; manualEnable = false; render(); },
-      choose: enabled => {
-        if (mode === 'choose') return writeBrowserDeepThinking('choose', enabled);
-        if (enabled) return writeBrowserDeepThinking('change', true, false);
-        manualEnable = false;
-        render();
-        return Promise.resolve(true);
-      }
-    });
   }
-  async function refresh() {
+  function publish(next: DeepThinkingState | undefined) {
+    const previousEnabled = browserDeepThinkingEnabled();
+    state = next;
+    render();
+    if (previousEnabled !== browserDeepThinkingEnabled()) for (const listener of observers) listener();
+  }
+  function clearRetry() {
+    if (retry !== undefined) clearTimeout(retry);
+    retry = undefined;
+  }
+  async function refresh(retryOnce = true) {
+    clearRetry();
     const request = ++generation;
+    publish(undefined);
     try {
       const values = await storage?.local.get(DEEP_THINKING_KEYS);
       if (!active || request !== generation) return;
-      const next = readDeepThinkingState(values);
-      const changed = next.enabled !== state.enabled || next.prompted !== state.prompted;
-      state = next;
-      loaded = true;
-      render();
-      if (changed) for (const listener of observers) listener();
-    } catch { /* On read failure keep the last verified value; a later change or explicit retry rereads. */ }
+      publish(readDeepThinkingState(values));
+    } catch {
+      if (active && request === generation && retryOnce) retry = setTimeout(() => { void refresh(false); }, 350);
+    }
   }
   const changed: StorageChanged = (changes, areaName) => {
     if (active && areaName === 'local' && DEEP_THINKING_KEYS.some(key => key in changes)) void refresh();
   };
+  function onFocus() {
+    if (active && !state) void refresh();
+  }
   async function mount() {
     if (active) return;
     active = true;
-    loaded = false;
     try { storage?.onChanged.addListener(changed); } catch { /* Extension context invalidated. */ }
     presentation?.addEventListener('change', render);
+    window.addEventListener('focus', onFocus);
     await refresh();
-    render();
   }
   function unmount() {
     active = false;
     ++generation;
+    clearRetry();
     try { storage?.onChanged.removeListener(changed); } catch { /* Extension context invalidated. */ }
     presentation?.removeEventListener('change', render);
-    render();
+    window.removeEventListener('focus', onFocus);
+    publish(undefined);
   }
-  refreshCurrent = refresh;
-  reopenGuide = () => {
-    dismissed = false;
-    manualEnable = state.prompted;
-    if (loaded) render();
-    else void refresh();
-  };
   window.addEventListener('pagehide', unmount);
   window.addEventListener('pageshow', mount);
   await mount();

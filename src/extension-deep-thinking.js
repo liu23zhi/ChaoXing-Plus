@@ -1,5 +1,6 @@
 // One storage policy for the isolated runtime and MV3 worker. Never read a page's DOM/localStorage.
 export const DEEP_THINKING_KIND = 'chaoxing-plus:deep-thinking';
+export const DEEP_THINKING_SETTINGS_PAGE = 'popup.html#deep-thinking';
 export const DEEP_THINKING_KEYS = [
   'deepThinkingEnabled', 'hasPromptedDeepThinking', 'cx.new.study.deepThinking', 'common.settings.work-options'
 ];

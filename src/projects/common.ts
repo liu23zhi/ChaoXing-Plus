@@ -1,7 +1,6 @@
 import { browserExtensionRuntime, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import {
-  browserDeepThinkingEnabled, browserDeepThinkingPrompted, onBrowserDeepThinkingChanged,
-  openBrowserDeepThinkingGuide, writeBrowserDeepThinking
+  browserDeepThinkingEnabled, onBrowserDeepThinkingChanged, openBrowserDeepThinkingSettings
 } from '../runtime/deep-thinking-guide.js';
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType, QuestionEvidence } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
@@ -2015,17 +2014,14 @@ function createConfigField(
       toggle.dataset.cxDeepThinkingToggle = 'true';
       toggle.setAttribute('aria-label', '深度思考');
       toggle.setAttribute('aria-pressed', String(checked));
+      stateDesc.textContent = '在扩展设置中更改';
     }
     toggle.onclick = (event) => {
       if (browserDeepThinking) {
         if (!event.isTrusted || confirmationPending) return;
-        if (!browserDeepThinkingPrompted() || !checked) {
-          openBrowserDeepThinkingGuide();
-          return;
-        }
         confirmationPending = true;
-        void writeBrowserDeepThinking('change', false, true).then(saved => {
-          if (!saved) $message.error('未能保存深度思考设置，请确认用户协议状态后重试。');
+        void openBrowserDeepThinkingSettings().then(opened => {
+          if (!opened) $message.error('未能打开深度思考设置，请确认用户协议状态后重试。');
         }).catch(() => {}).finally(() => { confirmationPending = false; });
         return;
       }
