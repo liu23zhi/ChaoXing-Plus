@@ -109,10 +109,12 @@ export async function request<T extends 'json' | 'text'>(
             clearTimeout(timeout);
             opts?.signal?.removeEventListener('abort', onAbort);
             if (!conflictReplay && !callerIdentity) {
-              const deviceId = await beforeConflictDeadline(deadlineAt, opts?.signal,
+              const signal = opts?.signal;
+              const deviceId = await beforeConflictDeadline(deadlineAt, signal,
                 () => recoverDeviceIdAfterConflict(attemptHeaders[DEVICE_ID_HEADER]));
               const allowed = deviceId && (!usesBrowserAgreementGate() || (tikuIdentity
-                && await beforeConflictDeadline(deadlineAt, opts?.signal, () => hasTikuAgreement(tikuIdentity.baseurl, tikuIdentity.key))));
+                && await beforeConflictDeadline(deadlineAt, signal, () => hasTikuAgreement(tikuIdentity.baseurl, tikuIdentity.key,
+                  () => !signal?.aborted && Date.now() < deadlineAt))));
               if (allowed && deviceId && Date.now() < deadlineAt) {
                 conflictReplay = { deviceId, error };
                 attempt--;

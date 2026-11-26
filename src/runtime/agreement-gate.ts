@@ -14,7 +14,7 @@ export function browserExtensionRuntime(): ExtensionRuntime | undefined {
   return usesBrowserAgreementGate() && runtime?.id && typeof runtime.sendMessage === 'function' ? runtime : undefined;
 }
 
-export async function hasTikuAgreement(base: string, key: string): Promise<boolean> {
+export async function hasTikuAgreement(base: string, key: string, mayDispatch?: () => boolean): Promise<boolean> {
   if (!usesBrowserAgreementGate()) return true;
   const runtime = browserExtensionRuntime();
   if (!runtime || !navigator.onLine || !base || !key) return false;
@@ -31,7 +31,11 @@ export async function hasTikuAgreement(base: string, key: string): Promise<boole
       const timer = setTimeout(onLeave, 20000);
       window.addEventListener('pagehide', onLeave, { once: true });
       void Promise.resolve()
-        .then(() => runtime.sendMessage?.({ kind: 'chaoxing-plus:agreement', operation: 'authorize', base, keyHash }))
+        .then(() => {
+          // Conflict recovery may end while the digest is in flight. Check at dispatch, not before hashing.
+          if (mayDispatch && !mayDispatch()) return;
+          return runtime.sendMessage?.({ kind: 'chaoxing-plus:agreement', operation: 'authorize', base, keyHash });
+        })
         .then(answer => finish(answer?.allowed === true && navigator.onLine), onLeave);
     });
   } catch {

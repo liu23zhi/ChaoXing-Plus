@@ -566,3 +566,46 @@ test('a device changed again during consent cannot replace the identity confirme
     });
   });
 });
+
+for (const end of ['caller abort', 'overall deadline']) {
+  test(`recovery digest completing after ${end} never dispatches worker authorization`, async t => {
+    const clock = recoveryClock(t), controller = new AbortController();
+    const reason = new DOMException('fixture canceled during digest', 'AbortError');
+    const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto'), realCrypto = globalThis.crypto;
+    let startDigest, finishDigest;
+    const digestStarted = new Promise(resolve => { startDigest = resolve; });
+    const digestResult = new Promise(resolve => { finishDigest = resolve; });
+    try {
+      Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {
+        getRandomValues: array => realCrypto.getRandomValues(array),
+        subtle: { digest: () => { startDigest(); return digestResult; } }
+      } });
+      await isolatedProfile(async f => {
+        const calls = [];
+        await withFetch(async (_url, req) => {
+          calls.push(req.headers[DEVICE_ID_HEADER]);
+          return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+        }, async () => {
+          const observed = observeRequest({ ...timedRecovery, timeoutMs:1200, signal:controller.signal });
+          await f.writing;
+          const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+          await digestStarted;
+          assert.deepEqual(f.authorizations, [], 'digest is pending and no worker message is in flight');
+          if (end === 'caller abort') controller.abort(reason);
+          else clock.tick(1200);
+          await observed.finished;
+          if (end === 'caller abort') assert.equal(observed.error, reason);
+          else assert.equal(observed.error?.status, 409);
+
+          finishDigest(new ArrayBuffer(32));
+          await new Promise(resolve => setImmediate(resolve));
+          assert.deepEqual(f.authorizations, [], 'a late digest must not dispatch authorize');
+          assert.deepEqual(calls, [f.original], 'no further business fetch');
+        });
+      });
+    } finally {
+      if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto);
+      else delete globalThis.crypto;
+    }
+  });
+}
