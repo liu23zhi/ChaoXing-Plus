@@ -116,6 +116,9 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/tiku-launcher-native-contract.ps1 -TiKuHelperRoot ./.joint-service
 
+      - name: 验证非交互提示与构建产物门禁
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.test.ps1
       - name: 试编译 windows/native-source/build-windows.cmd
         if: ${{ !cancelled() }}
         shell: pwsh

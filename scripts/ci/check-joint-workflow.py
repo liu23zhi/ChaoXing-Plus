@@ -11,7 +11,7 @@ STACK = {"source-checks", "service-contract", "windows-contract", "joint-gate"}
 REQUIRED_RUN = {
     "source-checks": ("npm run typecheck", "npm run build", "owned-unit", "check-joint-workflow.py"),
     "service-contract": ("three-mode-contract.test.mjs",),
-    "windows-contract": ("npm run build", "extension-diagnostics.browser.test.mjs", "owned-profiles.browser.test.mjs", "owned-native-contracts.ps1", "tiku-launcher-native-contract.ps1"),
+    "windows-contract": ("npm run build", "extension-diagnostics.browser.test.mjs", "owned-profiles.browser.test.mjs", "owned-native-contracts.ps1", "tiku-launcher-native-contract.ps1", "windows-build-entry.test.ps1"),
 }
 WINDOWS_BUILD_ENTRIES = (
     "windows/native-source/build-windows.cmd",

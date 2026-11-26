@@ -79,7 +79,9 @@ try {
     $archive = Join-Path $scratch 'source.zip'
     $source = Join-Path $scratch 'src'
     Write-Log "scratch=$source"
-    Invoke-Logged $git @('-C', $repo, 'archive', '--format=zip', "--output=$archive", 'HEAD', '--', '.', ':(exclude)tests/private-clients')
+    # Never stage tracked build artifacts or generated Windows assets as build inputs.
+    Invoke-Logged $git @('-C', $repo, '-c', 'core.autocrlf=false', 'archive', '--format=zip', "--output=$archive", 'HEAD', '--', '.',
+        ':(exclude)tests/private-clients', ':(exclude)windows/native-build', ':(exclude)dist-windows')
     [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
     $lockfile = Join-Path $source 'package-lock.json'
     Write-Log "package-lock sha256=$((Get-FileHash -LiteralPath $lockfile).Hash)"
@@ -87,6 +89,7 @@ try {
     New-Item -ItemType Directory -Path $entryTemp | Out-Null
     $previousTemp = $env:TEMP
     $previousTmp = $env:TMP
+    $previousPause = $env:CX_CI_SKIP_BUILD_PAUSE
     Push-Location -LiteralPath $source
     try {
         $env:TEMP = $env:TMP = $entryTemp
@@ -125,6 +128,8 @@ try {
         }
 
         $phase = 'build'
+        # Both CMD and Git Bash pass this process-local opt-out to their child PowerShell.
+        if ($id -ne 'build-proxy.ps1') { $env:CX_CI_SKIP_BUILD_PAUSE = '1' }
         switch ($id) {
             'build-windows.cmd' {
                 # Keep script behavior (including its package self-checks); feed EOF to pause.
@@ -141,7 +146,29 @@ try {
                 Invoke-Logged $powershell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Entry)
             }
         }
+        $phase = 'outputs'
+        $relativeOutputs = @('hook/winmm.dll', 'hook/tests/proxy-test.exe')
+        if ($id -ne 'build-proxy.ps1') {
+            $relativeOutputs += @(
+                'bin/chaoxing_plus.exe',
+                'bin/multi-file/chaoxing_plus.exe',
+                'bin/multi-file/chaoxing_plus.com',
+                'bin/multi-file/package-to-single/chaoxing_plus.exe',
+                'release/single-file/chaoxing_plus.exe',
+                'release/multi-file/chaoxing_plus.exe',
+                'release/multi-file/chaoxing_plus.com',
+                'release/multi-file/package-to-single/chaoxing_plus.exe'
+            )
+        }
+        foreach ($relative in $relativeOutputs) {
+            $artifact = Get-Item -LiteralPath (Join-Path $source "windows/native-build/$relative") -ErrorAction SilentlyContinue
+            if (-not $artifact -or $artifact.PSIsContainer -or $artifact.Length -le 0) {
+                throw "Build exited 0 but did not produce a nonempty output: windows/native-build/$relative"
+            }
+            Write-Log "output=windows/native-build/$relative bytes=$($artifact.Length)"
+        }
     } finally {
+        $env:CX_CI_SKIP_BUILD_PAUSE = $previousPause
         $env:TEMP = $previousTemp
         $env:TMP = $previousTmp
         Pop-Location
