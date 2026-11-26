@@ -1,5 +1,6 @@
 /// <reference path="../types.d.ts" />
 import md5 from 'md5';
+import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement } from '../runtime/agreement-gate.js';
 import { type SearchInformation, type QuestionEvidence } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
 import { pollTikuAdapterSearchTask, pollTikuAdapterTask, type TikuAdapterTaskEnvelope } from '../core/answer-wrapper/task-poller.js';
@@ -265,6 +266,7 @@ export async function requestTikuAdapterAnswerEvidence(
   const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   const body = normalizeTikuAdapterAnswerEvidencePayload(payload);
   const idempotencyKey = String(options.idempotencyKey ?? createStableEvidenceIdempotencyKey(body));
@@ -342,6 +344,7 @@ export async function requestTikuAdapterSearchTask(
   const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   const phaseStartedAt = Date.now();
   const phaseDeadlineAt = phaseStartedAt + normalizePositiveInteger(options.statusTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS);
@@ -476,12 +479,13 @@ async function probeTikuAdapterSearchHealth(
   throw lastError instanceof Error ? lastError : new Error('async search health check failed');
 }
 
-function requestTikuAdapterLegacySearch(
+async function requestTikuAdapterLegacySearch(
   baseurl: string,
   key: string,
   payload: Record<string, unknown>,
   options: { requestTimeoutMs: number; retryAttempts: number; retryDelayMs: number; deadlineAt?: number; idempotencyKey?: string; scriptIdentity?: string }
 ) {
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
   return requestTikuAdapterJSON<Record<string, unknown>>(createTikuAdapterSearchUrl(baseurl), key, {
     method: 'POST', data: payload, timeoutMs: options.requestTimeoutMs,
     deadlineAt: options.deadlineAt, retryAttempts: options.retryAttempts,
@@ -528,6 +532,7 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
   if (problem) {
     throw new Error(problem);
   }
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   if (!scriptIdentity && isTikuAdapterBalanceBlocked(baseurl, key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });

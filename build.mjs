@@ -36,7 +36,7 @@ function copyStaticFiles() {
     content_scripts: [
       {
         matches: chaoxingHosts,
-        js: ['extension-entry.js'],
+        js: ['extension-agreement-view.js', 'extension-agreement-content.js', 'extension-entry.js'],
         run_at: 'document_start',
         all_frames: true,
         match_about_blank: true,
@@ -58,9 +58,15 @@ function copyStaticFiles() {
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
-  for (const file of ['extension-tab-pause.js', 'extension-worker.js']) {
+  for (const file of [
+    'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
+    'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
+    'extension-agreement.html'
+  ]) {
     copyFileSync('src/' + file, 'dist/' + file);
   }
+
+  writeFileSync('dist/extension-agreement-config.js', 'export const defaultBase = ' + JSON.stringify(defaultTikuBaseUrl) + ';\n');
 
   copyFileSync('windows/node-source/extension-log-core.mjs', 'dist/extension-diagnostics.js');
 
@@ -101,7 +107,8 @@ async function main() {
     resolve: { extensions: ['.ts', '.mts', '.js', '.mjs', '.json'] },
     define: {
       __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
-      __CXPLUS_WINDOWS_INJECTION_LOG__: 'false'
+      __CXPLUS_WINDOWS_INJECTION_LOG__: 'false',
+      __CXPLUS_BROWSER_AGREEMENT_GATE__: 'true'
     },
     build: {
       watch: watchMode ? {} : null,

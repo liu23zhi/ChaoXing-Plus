@@ -212,8 +212,9 @@ test('runtime controls remain available while an automatic retry is paused for b
   assert.doesNotMatch(source, /worker\.on\('done', clearRuntimeControls\);/u);
 });
 
-test('work and exam upload waits through a balance pause before upload and before submit or save', async () => {
-  const runScenario = async (uploadMode, pauseAtSleep, autoSubmitEnabled = true) => {
+test('work upload waits through a balance pause and rechecks agreement before submit or save', async () => {
+  const runScenario = async (uploadMode, pauseAtSleep, autoSubmitEnabled = true, agreementChangesWhilePaused = false) => {
+    let agreementAllowed = true;
     let paused = false;
     let sleepCalls = 0;
     let uploadCalls = 0;
@@ -249,6 +250,7 @@ test('work and exam upload waits through a balance pause before upload and befor
       $message: { info() {}, success() {} },
       logDebug() {},
       workExamCorrelationId: '',
+      requireTikuWorkAgreement: async () => { if (!agreementAllowed) throw new Error('agreement changed'); },
       assertInitialAnswerRun: () => {},
       waitForInitialAnswerRun: async (task) => task,
       submitWorkOrExamPage: async () => { submitCalls++; },
@@ -268,7 +270,14 @@ test('work and exam upload waits through a balance pause before upload and befor
       }
     }
 
+    if (agreementChangesWhilePaused) agreementAllowed = false;
     context.tikuAdapterBalanceRecoveryState.paused = false;
+    if (agreementChangesWhilePaused) {
+      await assert.rejects(running, /agreement changed/);
+      assert.equal(submitCalls, 0);
+      assert.equal(saveCalls, 0);
+      return;
+    }
     await running;
     const shouldSubmit = uploadMode === 'submit' && autoSubmitEnabled;
     assert.equal(submitCalls, shouldSubmit ? 1 : 0);
@@ -281,6 +290,8 @@ test('work and exam upload waits through a balance pause before upload and befor
     await runScenario(uploadMode, 2);
   }
   await runScenario('submit', 0, false);
+  await runScenario('submit', 2, true, true);
+  await runScenario('save', 2, true, true);
 });
 
 test('workOrExam uses step-by-step exam selectors and ignores generic type distractors', async () => {

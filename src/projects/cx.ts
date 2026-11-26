@@ -18,6 +18,7 @@ import {
 import { Project, $gm, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
+import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement } from '../runtime/agreement-gate.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
 import { playbackRate, volume } from '../utils/configs.js';
 import { waitForElement, waitForMedia } from '../utils/study.js';
@@ -44,6 +45,7 @@ import {
   requestTikuAdapterAIFallback,
   requestTikuAdapterAnswerEvidence,
   resolveTikuAdapterQuestionType,
+  resolveTikuAdapterBaseUrl,
   TIKU_ADAPTER_AI_FALLBACK_WORKER_TIMEOUT_SECONDS
 } from './tiku-adapter-config.js';
 import {
@@ -2090,6 +2092,21 @@ function replaceCurrentWorkResults(results: SimplifyWorkResult[]) {
   workResultsMethods().setResults?.([...currentResults.slice(0, currentBatchStart), ...results]);
 }
 
+function isTikuWorkAllowed() {
+  const { baseurl, key } = getStoredTikuAdapterConfig();
+  return hasTikuAgreement(resolveTikuAdapterBaseUrl(baseurl), key.trim());
+}
+
+async function requireTikuWorkAgreement() {
+  if (!(await isTikuWorkAllowed())) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
+}
+
+async function allowTikuWork() {
+  if (await isTikuWorkAllowed()) return true;
+  $message.warn(AGREEMENT_REQUIRED_MESSAGE);
+  return false;
+}
+
 function getWorkOptions(): CommonWorkOptions {
   return settingsMethods().getWorkOptions?.() ?? defaultWorkOptions;
 }
@@ -3000,7 +3017,10 @@ export const CXProject = Project.create({
         commonWork(
           this,
           {
-            workerProvider: (opts) => workOrExam(isExam ? 'exam' : 'work', { ...opts, preview_mode: true }),
+            workerProvider: async (opts) => {
+              if (!isExam && !(await allowTikuWork())) return;
+              return workOrExam(isExam ? 'exam' : 'work', { ...opts, preview_mode: true });
+            },
             enable_control_panel: true
           },
           getWorkOptions()
@@ -5404,6 +5424,7 @@ const JobRunner = {
       answerWrapperEmptyWarning(0);
       return { finished: false, disposition: 'disabled' };
     }
+    if (!(await allowTikuWork())) return { finished: false, disposition: 'disabled' };
     await mappingRecognize(frameDocument);
     const chapterFrameDebug = {
       src: frame.getAttribute('src') ?? '',
@@ -5541,6 +5562,7 @@ const JobRunner = {
             : provider();
         },
         work: async (ctx) => {
+          await requireTikuWorkAgreement();
           const { elements, searchInfos } = ctx;
           const type = resolveChapterQuestionType(ctx.root, elements);
 
@@ -5949,6 +5971,7 @@ const JobRunner = {
           if (phase === 'open-confirmation') confirmedSubmission = false;
           const pausedAt = Date.now();
           if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue(frameDocument);
+          await requireTikuWorkAgreement();
           deadline.expiresAt += Date.now() - pausedAt;
           checkChapterTask();
           if (phase === 'submit' && isSubmissionComplete()) return false;
@@ -6001,6 +6024,7 @@ const JobRunner = {
         };
         const saveChapter = async () => {
           if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue(frameDocument);
+          await requireTikuWorkAgreement();
           const action = resolveChapterAction('noSubmit');
           const expiredOnSave = await invokeChapterActionWithExpiryCapture(
             frameWindow as Window & Record<string, any>, frameDocument, action, 0,
@@ -6807,6 +6831,7 @@ function workOrExam(
           : provider();
       },
       work: async (ctx) => {
+        if (type === 'work') await requireTikuWorkAgreement();
         const { elements, searchInfos } = ctx;
         const questionType = resolveQuestionTypeForWork(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document, {
           elements: { options: elements.options as HTMLElement[] }
@@ -7096,6 +7121,10 @@ function workOrExam(
         await waitForInitialAnswerRun(sleep(3000));
         await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
 
+        if (type === 'work') {
+          if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
+          await requireTikuWorkAgreement();
+        }
         if (shouldSubmit) {
           if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
           await submitWorkOrExamPage(type);
