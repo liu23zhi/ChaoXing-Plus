@@ -17,7 +17,7 @@ import {
   TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE,
   TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
 } from '../core/utils/tiku-adapter-error.js';
-import { DEVICE_ID_HEADER, isDeviceIdConflict, regenerateDeviceId, tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
+import { DEVICE_ID_HEADER, isDeviceIdConflict, recoverDeviceIdAfterConflict, tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
@@ -856,7 +856,7 @@ async function requestTikuAdapterJSON<T>(
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
     }
     // Check at the point of each possible write, AFTER health, polling and retry waits.
-    if (usesBrowserAgreementGate() && options.method === 'POST' && !(await hasTikuAgreement(identity.baseurl, key))) {
+    if (usesBrowserAgreementGate() && (options.method === 'POST' || deviceConflictRetried) && !(await hasTikuAgreement(identity.baseurl, key))) {
       throw new Error(AGREEMENT_REQUIRED_MESSAGE);
     }
     const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
@@ -906,7 +906,7 @@ async function requestTikuAdapterJSON<T>(
         //
         // 命中的端点确实挂了 DeviceLimit：/api/search/tasks（router.go:186/209）。
         if (!deviceConflictRetried && !scriptIdentity && isDeviceIdConflict(response.status, responseBody)
-          && regenerateDeviceId(deviceHeaders[DEVICE_ID_HEADER])) {
+          && await recoverDeviceIdAfterConflict(deviceHeaders[DEVICE_ID_HEADER])) {
           deviceConflictRetried = true;
           // Use the next existing attempt when possible. Only an explicit, confirmed
           // conflict at the limit gets one final attempt, never a new transport budget.

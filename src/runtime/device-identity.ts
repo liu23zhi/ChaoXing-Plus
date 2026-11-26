@@ -29,6 +29,7 @@
  */
 
 import { runtimeStore } from './store.js';
+import { usesBrowserAgreementGate } from './agreement-gate.js';
 
 /** 持久化 key。归属 `common.settings.` 前缀，才能被 shared-store 通道同步。 */
 export const DEVICE_ID_STORAGE_KEY = 'common.settings.device-id';
@@ -207,6 +208,76 @@ export function regenerateDeviceId(rejectedId?: string): string | undefined {
   if (readPersistedDeviceId() !== next) return;
   cachedDeviceId = next;
   return next;
+}
+
+type DeviceChrome = {
+  runtime?: { id?: string; lastError?: unknown };
+  storage?: {
+    local?: {
+      set(items: Record<string, string>, callback: () => void): void;
+      get(key: string, callback: (items: Record<string, unknown>) => void): void;
+    };
+    onChanged?: {
+      addListener(listener: (changes: Record<string, { newValue?: unknown }>, area: string) => void): void;
+      removeListener(listener: (changes: Record<string, { newValue?: unknown }>, area: string) => void): void;
+    };
+  };
+};
+
+function confirmOrdinaryBrowserDeviceId(next: string, replace: boolean): Promise<boolean> {
+  const chrome = (globalThis as { chrome?: DeviceChrome }).chrome;
+  const storage = chrome?.storage?.local, changes = chrome?.storage?.onChanged;
+  if (!chrome?.runtime?.id || !storage || !changes) return Promise.resolve(false);
+  return new Promise(resolve => {
+    let confirmed = false, settled = false;
+    const finish = (success: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { changes.removeListener(onChange); } catch { /* extension context lost */ }
+      resolve(success);
+    };
+    // Wait for both the Chrome acknowledgement and the existing isolated settings
+    // bridge to publish the value. Do not set the private mirror optimistically.
+    const check = () => { if (confirmed && readPersistedDeviceId() === next) finish(true); };
+    const onChange = (keys: Record<string, { newValue?: unknown }>, area: string) => {
+      if (area === 'local' && keys[DEVICE_ID_STORAGE_KEY]?.newValue === next) queueMicrotask(check);
+    };
+    const acknowledge = () => {
+      if (chrome.runtime?.lastError) { finish(false); return; }
+      confirmed = true;
+      check();
+    };
+    const timer = setTimeout(() => finish(false), 2000);
+    try {
+      changes.addListener(onChange);
+      if (replace) storage.set({ [DEVICE_ID_STORAGE_KEY]: next }, acknowledge);
+      else storage.get(DEVICE_ID_STORAGE_KEY, items => {
+        if (chrome.runtime?.lastError || normalizeId(items[DEVICE_ID_STORAGE_KEY]) !== next) finish(false);
+        else acknowledge();
+      });
+    } catch { finish(false); }
+  });
+}
+
+let browserRecovery: { rejectedId: string; pending: Promise<string | undefined> } | undefined;
+
+/** Called only after a structured HTTP conflict. Host or caller-owned IDs are not recoverable here. */
+export async function recoverDeviceIdAfterConflict(rejectedId?: string): Promise<string | undefined> {
+  if (!usesBrowserAgreementGate()) return regenerateDeviceId(rejectedId);
+  if (!rejectedId || hostBrowserId() || (globalThis as { __CX_WIN_HOST__?: unknown }).__CX_WIN_HOST__) return;
+  if (browserRecovery) return browserRecovery.rejectedId === rejectedId ? browserRecovery.pending : undefined;
+
+  const current = ensureDeviceId(), replace = current === rejectedId;
+  const next = replace ? createRandomId() : current;
+  const pending = confirmOrdinaryBrowserDeviceId(next, replace).then(ok => {
+    if (!ok) return undefined;
+    cachedDeviceId = next;
+    return next;
+  });
+  const flight = { rejectedId, pending };
+  browserRecovery = flight;
+  try { return await pending; } finally { if (browserRecovery === flight) browserRecovery = undefined; }
 }
 
 /**

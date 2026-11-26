@@ -259,3 +259,136 @@ test('a caller-owned explicit device header is not replayed or reidentified by t
   assert.equal(calls.length, 1);
   assert.equal(calls[0].headers[DEVICE_ID_HEADER], 'fixture-external-owner-device');
 });
+
+async function isolatedProfile(testBody) {
+  const key = 'common.settings.device-id', original = 'fixture-old-isolated-device';
+  const names = ['window', 'navigator', 'localStorage', 'chrome', '__CXPLUS_BROWSER_AGREEMENT_GATE__', '__CXPLUS_PRIVATE_SETTINGS__'];
+  const descriptors = names.map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]);
+  const listeners = new Set(), writes = [], authorizations = [];
+  let shared = original, stored = original, allowed = true, firstWrite;
+  const writing = new Promise(resolve => { firstWrite = resolve; });
+  const runtime = { id: 'fixture-extension', sendMessage: async msg => {
+    assert.equal(msg.operation, 'authorize');
+    authorizations.push(allowed);
+    return { allowed };
+  }};
+  const local = {
+    set: (values, done) => { writes.push({ id: values[key], done }); firstWrite(); },
+    get: (_keys, done) => { queueMicrotask(() => done({ [key]: stored })); }
+  };
+  const publish = (id, notify = true) => {
+    shared = id;
+    if (notify) for (const listener of listeners) listener({ [key]: { newValue: id } }, 'local');
+  };
+  const chrome = { runtime, storage: { local, onChanged: {
+    addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener)
+  }} };
+  const privateSettings = {
+    has: k => k === key, get: () => shared,
+    set: (k, value) => { shared = value; local.set({ [k]: value }, () => { void runtime.lastError; }); }
+  };
+  for (const [name, value] of Object.entries({
+    window: new EventTarget(), navigator: { onLine: true }, localStorage: { getItem: () => null },
+    chrome, __CXPLUS_BROWSER_AGREEMENT_GATE__: true, __CXPLUS_PRIVATE_SETTINGS__: privateSettings,
+  })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  try {
+    await testBody({
+      original, writes, writing, authorizations, shared: () => shared, stored: () => stored,
+      authorize: value => { allowed = value; }, publish, commit: id => { stored = id; },
+      fail() {
+        runtime.lastError = { message: 'fixture storage rejected the write' };
+        try { for (const item of writes) item.done(); } finally { delete runtime.lastError; }
+      },
+    });
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+    reset();
+  }
+}
+
+test('isolated ordinary recovery requires a successful Chrome write AND an updated shared mirror', async () => {
+  await isolatedProfile(async f => {
+    const sent = [], operation = () => request(ADAPTER_URL, { headers: AUTH, timeoutMs: 3000 });
+    await withFetch(async (_url, init) => {
+      const id = init.headers[DEVICE_ID_HEADER]; sent.push(id);
+      return id === f.original ? conflictResponse() : Response.json({ accepted:true });
+    }, async () => {
+      const inFlight = Promise.all([operation(), operation()]);
+      await f.writing;
+      assert.equal(f.shared(), f.original, 'dispatching the write is not confirmation');
+      assert.equal(f.writes.length, 1);
+      const { id, done } = f.writes[0];
+      f.commit(id); done();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(sent, [f.original, f.original], 'Chrome receipt without synchronized mirror is not a retry');
+      f.publish(id);
+      const results = await inFlight;
+      assert.deepEqual(results, [{ accepted:true }, { accepted:true }]);
+      assert.deepEqual(sent, [f.original, f.original, id, id]);
+      assert.equal(f.writes.length, 1);
+      assert.equal(f.stored(), id);
+      assert.equal(f.shared(), id);
+    });
+  });
+});
+
+test('isolated ordinary recovery on Chrome storage failure retains the previous ID and surfaces the original 409', async () => {
+  await isolatedProfile(async f => {
+    const sent = [];
+    await withFetch(async (_url, init) => {
+      sent.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const rejected = assert.rejects(request(ADAPTER_URL, { headers: AUTH }), e => e.status === 409);
+      await f.writing; f.fail();
+      await rejected;
+    });
+    assert.deepEqual(sent, [f.original]);
+    assert.equal(f.shared(), f.original);
+    assert.equal(f.stored(), f.original);
+  });
+});
+
+test('isolated ordinary recovery does not resend after trusted authorization is withdrawn', async () => {
+  await isolatedProfile(async f => {
+    const sent = [];
+    await withFetch(async (_url, init) => {
+      sent.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const rejected = assert.rejects(request(ADAPTER_URL, { headers: AUTH }), e => e.status === 409);
+      await f.writing;
+      const { id, done } = f.writes[0];
+      f.authorize(false);
+      f.commit(id); f.publish(id); done();
+      await rejected;
+      assert.equal(f.stored(), id);
+    });
+    assert.deepEqual(sent, [f.original]);
+    assert.deepEqual(f.authorizations, [false]);
+  });
+});
+
+test('isolated ordinary recovery reuses a cross-tab replacement only if Chrome already persisted it', async () => {
+  for (const durable of [false, true]) {
+    await isolatedProfile(async f => {
+      const sharedReplacement = 'fixture-cross-tab-updated-id', calls = [];
+      await withFetch(async (_url, init) => {
+        calls.push(init.headers[DEVICE_ID_HEADER]);
+        if (calls.length > 1) return Response.json({ accepted:true });
+        if (durable) f.commit(sharedReplacement);
+        f.publish(sharedReplacement);
+        return conflictResponse();
+      }, async () => {
+        const result = request(ADAPTER_URL, { headers: AUTH });
+        if (durable) assert.deepEqual(await result, { accepted:true });
+        else await assert.rejects(result, e => e.status === 409);
+      });
+      assert.deepEqual(calls, durable ? [f.original, sharedReplacement] : [f.original]);
+      assert.deepEqual(f.writes, [], 'an observed replacement is verified, not regenerated');
+    });
+  }
+});

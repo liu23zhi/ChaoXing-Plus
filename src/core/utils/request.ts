@@ -10,9 +10,10 @@ import {
 import {
   DEVICE_ID_HEADER,
   isDeviceIdConflict,
-  regenerateDeviceId,
+  recoverDeviceIdAfterConflict,
   tikuAdapterDeviceHeaders
 } from '../../runtime/device-identity.js';
+import { hasTikuAgreement, usesBrowserAgreementGate } from '../../runtime/agreement-gate.js';
 
 export async function request<T extends 'json' | 'text'>(
   url: string,
@@ -108,7 +109,8 @@ export async function request<T extends 'json' | 'text'>(
           try { payload = JSON.parse(text); } catch { /* legacy servers may return plain text */ }
           // 设备冲突优先于普通错误分类：它不是业务失败，而是「这个 ID 用不了」。
           if (!deviceConflictRetried && !callerIdentity && isDeviceIdConflict(response.status, payload)
-            && regenerateDeviceId(attemptHeaders[DEVICE_ID_HEADER])) {
+            && await recoverDeviceIdAfterConflict(attemptHeaders[DEVICE_ID_HEADER])
+            && (!usesBrowserAgreementGate() || (tikuIdentity && await hasTikuAgreement(tikuIdentity.baseurl, tikuIdentity.key)))) {
             deviceConflictRetried = true;
             // attempt-- 配合 continue：这一轮不消耗重试预算，下一次仍用同一个 attempt 号。
             attempt--;
