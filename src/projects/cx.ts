@@ -2785,24 +2785,40 @@ function isAttachmentFinished(attachment: Attachment | undefined) {
   return attachment.job !== true || attachment.isPassed === true;
 }
 
+function readAttachmentCompletionObservation(attachment: Attachment, ordinary: boolean): Attachment | undefined {
+  if (!ordinary) return attachment; // The frozen hosts already hold the site's live object.
+  const id = attachment.jobid || attachment.property._jobid;
+  if (!id) return undefined;
+  return readCurrentCourseAttachments().find(item => (item.jobid || item.property._jobid) === id);
+}
+
 async function waitForAttachmentComplete(
   attachment: Attachment | undefined,
   timeoutMs = 30000,
-  intervalMs = 1000
+  intervalMs = 1000,
+  onComplete?: (observation: Attachment) => void
 ): Promise<boolean> {
   if (!attachment) {
     await sleep(3000);
     return false;
   }
 
+  const ordinary = usesBrowserAgreementGate();
+  const confirmed = () => {
+    const observation = readAttachmentCompletionObservation(attachment, ordinary);
+    // A missing hint or field is not a positive completion in the read-only projection.
+    if (!observation || (ordinary
+      ? observation.job !== false && observation.isPassed !== true
+      : !isAttachmentFinished(observation))) return false;
+    onComplete?.(observation);
+    return true;
+  };
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (isAttachmentFinished(attachment)) {
-      return true;
-    }
+    if (confirmed()) return true;
     await sleep(intervalMs);
   }
-  return isAttachmentFinished(attachment);
+  return confirmed();
 }
 
 async function waitForCurrentChapterFinished(timeoutMs = 15000, intervalMs = 1000): Promise<boolean> {
@@ -5062,6 +5078,7 @@ const JobRunner = {
         elapsedMs: Math.max(0, Date.now() - startedAt)
       }, undefined, { correlationId: mediaCorrelationId });
     };
+    let completedAttachment = attachment;
     const reportResult = (
       outcome: MediaExecutionDiagnostics['outcome'],
       attachmentWaitResult: boolean | null = null,
@@ -5070,7 +5087,7 @@ const JobRunner = {
       completionWaitDurationMs = 0,
       errorName?: string
     ): MediaExecutionDiagnostics => {
-      const attachmentDiagnostics = getStudyAttachmentDiagnostics(attachment);
+      const attachmentDiagnostics = getStudyAttachmentDiagnostics(completedAttachment);
       const completionSource = attachmentDiagnostics.attachmentPassed === true ? 'attachment-passed'
         : attachmentDiagnostics.attachmentJob === false ? 'attachment-no-longer-job'
           : chapterWaitResult === true ? 'chapter-icon' : 'none';
@@ -5323,7 +5340,9 @@ const JobRunner = {
         clearTimeout(startTimeout);
         const completionWaitStartedAt = Date.now();
         logMediaPhase('attachment-wait-start', { timeoutMs: 15000 });
-        const finished = await waitForAttachmentComplete(attachment, 15000);
+        const finished = await waitForAttachmentComplete(attachment, 15000, undefined, observation => {
+          completedAttachment = observation;
+        });
         if (settled) return;
         logMediaPhase('attachment-wait-result', { waitResult: finished });
         let chapterFinished: boolean | null = null;
