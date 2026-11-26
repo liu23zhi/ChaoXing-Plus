@@ -10,6 +10,7 @@ import puppeteer from 'puppeteer';
 import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 
 const access = 'local-integration-fixture';
+const secondAccess = 'second-owned-fixture';
 const deviceId = '7075530c-7398-40eb-b5b1-9f1ce331f762';
 const credential = 'agd_' + 'a'.repeat(43);
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -35,7 +36,7 @@ const enabled = page => page.waitForFunction(() =>
   document.getElementById('cx-plus-agreement')?.shadowRoot.querySelector('.accept').disabled === false);
 const deniedButton = page => page.evaluate(() => document.getElementById('cx-plus-agreement').shadowRoot.querySelector('.accept').disabled);
 
-test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offline and refresh', { timeout: 90000 }, async t => {
+test('built MV3: owned HTTPS agreement, consent lifecycle, mounted status, ordinary metadata and off switch', { timeout: 120000 }, async t => {
   const output = createTestDirectory('agreement-chrome');
   const profile = join(output, 'profile');
   const extensionPath = join(output, 'extension');
@@ -47,7 +48,15 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
 
   const fixtureSpki = sha256Spki(certPath);
   let version = 'v1', signed = '', reads = 0, enrollments = 0, consents = 0;
-  let searches = 0, broken = false, unavailable = false;
+  let searches = 0, broken = false, unavailable = false, healthHits = 0, holdLookup = false, agreementStatusHits = 0;
+  const statusHits = [];
+  const course = '<!doctype html><title>Owned course</title><input id="curCourseId" value="course">' +
+    '<input id="curClazzId" value="class"><input id="curChapterId" value="chapter">' +
+    '<div class="posCatalog_select posCatalog_active" id="chapter"><input class="jobUnfinishCount" value="1"></div>' +
+    '<iframe id="iframe" src="/knowledge/cards?courseId=course&clazzid=class&chapterId=chapter" style="width:600px;height:400px"></iframe>';
+  const card = '<!doctype html><title>Owned card</title>' +
+    '<script>window.attachments=[{jobid:"owned-audio",job:true,isPassed:false,property:{_jobid:"owned-audio",name:"Owned passive attachment"}}]</script>' +
+    '<div class="ans-attach-ct"><iframe jobid="owned-audio" src="/fixture/audio" style="width:400px;height:200px"></iframe></div>';
   const simpleWorkPage = '<!doctype html><title>Owned ordinary work fixture</title>' +
     '<main><form><div class="singleQuesId"><div class="TiMu"><input type="hidden" name="answertype1" value="0">' +
     '<div class="Zy_TItle"><div class="clearfix">Owned ordinary fixture question</div></div>' +
@@ -58,8 +67,10 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
     const url = new URL(req.url, 'https://localhost');
     const path = url.pathname;
     if (!path.startsWith('/api/')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(path === '/mooc2/work/dowork'
-        ? simpleWorkPage : '<!doctype html><title>Owned local fixture</title><main>Owned local fixture</main>');
+      const routes = { '/mooc2/work/dowork': simpleWorkPage, '/mycourse/studentstudy': course, '/knowledge/cards': card,
+        '/fixture/audio': '<!doctype html><title>Inert local audio</title><audio id="audio" preload="none"></audio>' };
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(routes[path]
+        ?? '<!doctype html><title>Owned local fixture</title><main>Owned local fixture</main>');
       return;
     }
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -68,8 +79,21 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
     if (unavailable && path.startsWith('/api/agreements/')) return res.destroy();
     const reply = (data, status = 200) => res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(data));
+    const second = req.headers.host.startsWith('127.0.0.1:');
+    const authorized = req.headers.authorization === 'Bearer ' + (second ? secondAccess : access);
+    if (path.startsWith('/api/service-status/')) {
+      statusHits.push({ second, authorized, hasAuthorization: Boolean(req.headers.authorization) });
+      return reply({ schemaVersion: 1, status: 'healthy', retained: 0 });
+    }
+    if (path === '/api/search/health') {
+      healthHits++;
+      return authorized ? reply({ success: true, status: 'succeeded', taskId: 'owned-diagnostic',
+        statusUrl: '/api/search/status?taskId=owned-diagnostic',
+        deviceAccess: { allowed: true, reason: 'already-registered', limit: 2, used: 3 } }) : reply({}, 401);
+    }
     if (path === '/api/search' && req.method === 'POST') {
       searches++;
+      if (holdLookup) return; // Keep the original ordinary run and its controls mounted.
       // No admitted mutation or external answer: only a local count and an empty result.
       return reply({ question: 'Owned ordinary fixture question', type: 0, answer: {} });
     }
@@ -78,9 +102,9 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
       return reply({ deviceId, deviceCredential: credential }, 201);
     }
     if (!path.startsWith('/api/agreements/') || req.headers['x-agreement-device'] !== credential
-      || (req.headers.authorization && req.headers.authorization !== 'Bearer ' + access)) return reply({ code: 'proof_required' }, 401);
+      || (req.headers.authorization && !authorized)) return reply({ code: 'proof_required' }, 401);
     const state = { version, content_hash: sha(body(version)), needsAcceptance: signed !== version };
-    if (path === '/api/agreements/status') return reply({ ...state, deviceId });
+    if (path === '/api/agreements/status') { agreementStatusHits++; return reply({ ...state, deviceId }); }
     if (path === '/api/agreements/current') {
       reads++;
       if (url.searchParams.get('version') !== version) return reply({ code: 'version_conflict' }, 409);
@@ -128,7 +152,8 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
     'common.settings.tiku-adapter.baseurl': base, 'common.settings.tiku-adapter.key': access,
     'common.settings.work-options': { searchDelaySeconds: 0, thread: 1, stopSecondWhenFinish: 0, upload: 'save',
       redundanceWordsText: '', answerSeparators: '#,|', answerMatchMode: 'includes', deepThinking: false },
-    'cx.new.study.useAsyncTikuSearch': false, 'cx.new.study.enableAIFallbackAnswer': false
+    'cx.new.study.useAsyncTikuSearch': false, 'cx.new.study.enableAIFallbackAnswer': false,
+    'cx.new.study.enableMedia': false, 'cx.new.study.mode': 'manually'
   }), { base, access });
   const setup = await browser.newPage();
   await setup.goto(new URL('popup.html', page.url()).href);
@@ -139,7 +164,7 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
   await visibleReader(first); await visibleReader(second);
   await waitUi(second, '完整阅读并同意');
   const workUrl = ownedPage + 'mooc2/work/dowork';
-  async function protectedOrdinaryEntry(expectSearch) {
+  async function protectedOrdinaryEntry(expectSearch, keepOpen = false) {
     const work = await browser.newPage();
     const errors = [];
     work.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
@@ -169,7 +194,8 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
         status: document.getElementById('cx-plus-agreement')?.shadowRoot.querySelector('.status').textContent
       })));
       throw error;
-    } finally { await work.close(); }
+    } finally { if (!keepOpen) await work.close(); }
+    return work;
   }
   await protectedOrdinaryEntry(false);
   assert.equal(searches, 0);
@@ -196,22 +222,37 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
   await bottom(first); await enabled(first); await click(first, 'accept');
   await waitUi(first, '已确认同意'); await waitUi(second, '已确认同意');
   assert.equal(await second.evaluate(() => document.getElementById('cx-plus-agreement').hidden), true);
-  await protectedOrdinaryEntry(true);
-  assert.ok(searches > 0, 'the actual packaged, accepted ordinary runtime performed an owned fixture request');
-  const admittedLookups = searches;
   const outOfScope = await browser.newPage();
   await outOfScope.goto(ownedPage + 'mooc2/exam/preview'); // Owned empty route only; decline unsupported mode.
   await outOfScope.waitForSelector('#panel-common-work-results');
   assert.equal(await outOfScope.$('.swal2-confirm'), null);
-  assert.equal(searches, admittedLookups);
+  assert.equal(searches, 0);
   await outOfScope.close();
+  holdLookup = true;
+  const previousWorkPage = await protectedOrdinaryEntry(true, true);
+  await previousWorkPage.$eval('input[type=radio]', input => { input.checked = true; });
+  assert.notEqual(await previousWorkPage.$('input[type=radio]:checked'), null);
+  assert.ok(searches > 0, 'the actual packaged, accepted ordinary runtime performed an owned fixture request');
   assert.equal(consents, 1);
   assert.equal(enrollments, 1);
   assert.equal(await setup.evaluate(async () => (await chrome.storage.local.get('agreement.install.v1'))['agreement.install.v1']), 'complete');
 
+  const ownedCourse = await browser.newPage();
+  const courseReports = [];
+  ownedCourse.on('console', message => courseReports.push(message.text()));
+  await ownedCourse.goto(ownedPage + 'mycourse/studentstudy?courseId=course&clazzid=class&chapterId=chapter&mooc2=1');
+  for (let n = 0; n < 180 && !courseReports.some(line => line.includes('Owned passive attachment')); n++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.ok(courseReports.some(line => line.includes('Owned passive attachment')),
+    'the actual ordinary disabled-media scan names the valid MAIN attachment: ' + courseReports.slice(-12).join('; '));
+  assert.equal(await ownedCourse.frames().find(frame => frame.url().includes('/fixture/audio')).$eval('audio', node => node.paused), true);
+  await ownedCourse.close();
+  const searchesBeforeVersion = searches;
+
   version = 'v2'; broken = true;
   await protectedOrdinaryEntry(false);
-  assert.equal(searches, admittedLookups, 'invalid document blocks the actual runtime');
+  assert.equal(searches, searchesBeforeVersion, 'invalid document blocks the actual runtime');
   await waitUi(first, '摘要未通过校验');
   assert.match(await first.evaluate(() => document.getElementById('cx-plus-agreement').shadowRoot.querySelector('.body').textContent), / v1/);
   broken = false;
@@ -221,11 +262,37 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
   await first.setOfflineMode(false);
   await waitUi(first, '协议已更新'); await waitUi(second, '协议已更新');
   assert.equal(await deniedButton(first), true);
+  const byText = async (tab, text) => {
+    const handle = await tab.evaluateHandle(value => Array.from(document.querySelectorAll('#panel-common-work-results button'))
+      .find(node => node.textContent === value && node.getClientRects().length > 0), text);
+    assert.ok(handle.asElement(), 'visible control: ' + text);
+    await handle.evaluate(element => element.click()); // Exercise the mounted panel handler independent of overlay geometry.
+  };
+  await previousWorkPage.bringToFront();
+  await waitUi(previousWorkPage, '协议已更新');
+  await click(previousWorkPage, 'dismiss');
+  const beforeReset = agreementStatusHits;
+  const clearedControls = await previousWorkPage.evaluate(() => {
+    const button = Array.from(document.querySelectorAll('#panel-common-work-results button'))
+      .find(node => node.textContent === '清空结果' && node.getClientRects().length > 0);
+    if (!button || button.disabled) return false;
+    button.click(); // Exercise the existing control; authority still comes only from the worker.
+    return true;
+  });
+  assert.equal(clearedControls, true);
+  for (let n = 0; n < 100 && agreementStatusHits === beforeReset; n++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(agreementStatusHits > beforeReset, 'clearing consulted live service authority');
+
+  assert.notEqual(await previousWorkPage.$('input[type=radio]:checked'), null, 'revocation preserves owned form input');
+  assert.equal(searches, searchesBeforeVersion);
+  await previousWorkPage.close();
+  holdLookup = false;
+  await first.bringToFront();
   unavailable = true;
   await first.setOfflineMode(true);
   await waitUi(first, '当前离线');
   await protectedOrdinaryEntry(false);
-  assert.equal(searches, admittedLookups, 'unreachable authority cannot release a new ordinary lookup');
+  assert.equal(searches, searchesBeforeVersion, 'unreachable authority cannot release a new ordinary lookup');
   assert.equal(consents, 1);
   unavailable = false;
   await first.bringToFront();
@@ -249,4 +316,46 @@ test('built MV3: owned HTTPS install, ignored page, true click, two tabs, offlin
   await first.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
   await waitUi(first, '协议已更新');
   assert.equal((await first.$$('#cx-plus-agreement')).length, 1);
+
+  const beforeStatus = statusHits.length;
+  await first.bringToFront();
+  await byText(first, '题库状态');
+  for (let n = 0; n < 60 && statusHits.length < beforeStatus + 2; n++) await new Promise(resolve => setTimeout(resolve, 75));
+  assert.deepEqual(statusHits.slice(beforeStatus), Array(2).fill({ second: false, authorized: true, hasAuthorization: true }));
+  const settings = await browser.newPage();
+  await settings.goto(new URL('extension-agreement.html', setup.url()).href);
+  await waitUi(settings, '协议已更新');
+  const beforeDiagnosis = healthHits;
+  await click(settings, 'source-probe');
+  const sourceMessage = (tab, text) => tab.waitForFunction(value => document.getElementById('cx-plus-agreement')
+    ?.shadowRoot.querySelector('.source-status')?.textContent.includes(value), {}, text);
+  await sourceMessage(settings, '已用 3/2 台');
+  assert.equal(healthHits, beforeDiagnosis + 1);
+  const beforeSwitch = statusHits.length;
+  await settings.$eval('pierce/.source-base', (el, value) => { el.value = value; }, 'https://127.0.0.1:' + port);
+  await settings.$eval('pierce/.source-key', (el, value) => { el.value = value; }, secondAccess);
+  await click(settings, 'source-save');
+  await sourceMessage(settings, '题库地址已确认');
+  await first.bringToFront();
+  await byText(first, '立即刷新'); // Do not reload the already-mounted consumer.
+  for (let n = 0; n < 60 && statusHits.length < beforeSwitch + 2; n++) await new Promise(resolve => setTimeout(resolve, 75));
+  assert.deepEqual(statusHits.slice(beforeSwitch), Array(2).fill({ second: true, authorized: true, hasAuthorization: true }));
+  await settings.bringToFront();
+  await click(settings, 'source-clear');
+  await sourceMessage(settings, '已移除本地令牌');
+  await click(settings, 'source-probe');
+  await sourceMessage(settings, '请先配置访问令牌');
+  assert.equal(healthHits, beforeDiagnosis + 1, 'revoked key does not create a new health request');
+  const beforeClearRefresh = statusHits.length;
+  await first.bringToFront();
+  await byText(first, '立即刷新');
+  await first.waitForFunction(() => document.body.textContent.includes('状态数据需要通过访问令牌读取'));
+  assert.equal(statusHits.length, beforeClearRefresh);
+
+  await setup.evaluate(() => chrome.storage.local.set({ 'common.settings.extension-enabled': false }));
+  const off = await browser.newPage();
+  await off.goto(ownedPage + 'fixture/off');
+  await waitUi(off, '扩展已停用');
+  assert.equal(await off.$('#panel-common-work-results'), null);
+  assert.equal(await off.$('.swal2-container'), null);
 });
