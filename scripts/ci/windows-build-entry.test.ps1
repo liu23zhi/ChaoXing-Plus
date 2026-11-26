@@ -151,3 +151,6 @@ exit 0
 } finally {
     foreach ($name in $envNames) { [Environment]::SetEnvironmentVariable($name, $oldEnv[$name]) }
 }
+
+# The last fixture deliberately exits 23; report the assertion suite's own success to Actions.
+exit 0
