@@ -8,6 +8,7 @@ import { createTestDirectory } from './test-helpers/temp-directory.mjs';
 import { diagnosticBrowserArgs } from './test-helpers/local-diagnostic-page.mjs';
 
 const key = 'common.settings.device-id';
+const marker = 'agreement.last-device-replacement.v1';
 const oldId = 'fixture-old';
 const manifest = {
   manifest_version: 3, name: 'Owned Chrome storage fixture', version: '1.0',
@@ -47,11 +48,13 @@ test('real Chrome storage rejects a replacement at quota; successful recovery pe
   await writeFile(join(extension, 'probe.js'), `
     import { request } from './src/core/utils/request.js';
     import { getDeviceIdentity } from './src/runtime/device-identity.js';
-    const key = ${JSON.stringify(key)};
+    const key = ${JSON.stringify(key)}, marker = ${JSON.stringify(marker)};
     globalThis.fixtureIdentity = () => ({
       privateId: globalThis.__CXPLUS_PRIVATE_SETTINGS__.get(key),
       pageLocalId: localStorage.getItem(key),
-      pageAttribute: document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-device-id')
+      pageAttribute: document.documentElement.getAttribute('data-chaoxing-plus-shared-common-settings-device-id'),
+      pageLocalMarker: localStorage.getItem(marker),
+      pageMarkerAttribute: document.documentElement.getAttribute('data-chaoxing-plus-shared-agreement-last-device-replacement-v1')
     });
     globalThis.findDevice = () => getDeviceIdentity().deviceId;
     globalThis.exerciseConflict = async () => {
@@ -68,7 +71,8 @@ test('real Chrome storage rejects a replacement at quota; successful recovery pe
         disposition = 'ok';
       } catch (error) { disposition = error.status; }
       finally { globalThis.fetch = before; }
-      return { calls, disposition, stored: (await chrome.storage.local.get(key))[key], ...fixtureIdentity() };
+      const durable = await chrome.storage.local.get([key, marker]);
+      return { calls, disposition, stored: durable[key], marker: durable[marker] ?? null, ...fixtureIdentity() };
     };
   `);
 
@@ -94,7 +98,7 @@ test('real Chrome storage rejects a replacement at quota; successful recovery pe
   await first.waitForFunction(expected => globalThis.fixtureIdentity().privateId === expected, {}, oldId);
   const denied = await first.evaluate(() => globalThis.exerciseConflict());
   assert.deepEqual(denied, { calls: [oldId], disposition: 409, stored: oldId, privateId: oldId,
-    pageLocalId: null, pageAttribute: null });
+    pageLocalId: null, pageAttribute: null, marker: null, pageLocalMarker: null, pageMarkerAttribute: null });
 
   await first.evaluate(() => chrome.storage.local.remove('owned-fixture-quota'));
   const second = await browser.newPage();
@@ -109,6 +113,9 @@ test('real Chrome storage rejects a replacement at quota; successful recovery pe
   assert.equal(accepted.stored, accepted.privateId);
   assert.equal(accepted.pageLocalId, null);
   assert.equal(accepted.pageAttribute, null);
+  assert.equal(accepted.marker, accepted.stored);
+  assert.equal(accepted.pageLocalMarker, null);
+  assert.equal(accepted.pageMarkerAttribute, null);
   await second.waitForFunction(expected => globalThis.findDevice() === expected, {}, accepted.stored);
   await second.reload();
   await second.waitForFunction(expected => globalThis.fixtureIdentity?.().privateId === expected, {}, accepted.stored);

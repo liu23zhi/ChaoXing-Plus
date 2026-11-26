@@ -34,6 +34,7 @@ import { usesBrowserAgreementGate } from './agreement-gate.js';
 /** 持久化 key。归属 `common.settings.` 前缀，才能被 shared-store 通道同步。 */
 export const DEVICE_ID_STORAGE_KEY = 'common.settings.device-id';
 const HOST_BROWSER_STORAGE_KEY = 'common.settings.device-instance';
+const AGREEMENT_DEVICE_REPLACEMENT = 'agreement.last-device-replacement.v1';
 const UUID_V4 = /^[a-f\d]{8}-[a-f\d]{4}-4[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
 
 /** 141 §7 规定的两个请求头名（服务端按这两个名字读）。 */
@@ -215,7 +216,7 @@ type DeviceChrome = {
   storage?: {
     local?: {
       set(items: Record<string, string>, callback: () => void): void;
-      get(key: string, callback: (items: Record<string, unknown>) => void): void;
+      get(keys: string[], callback: (items: Record<string, unknown>) => void): void;
     };
     onChanged?: {
       addListener(listener: (changes: Record<string, { newValue?: unknown }>, area: string) => void): void;
@@ -245,17 +246,23 @@ function confirmOrdinaryBrowserDeviceId(next: string, replace: boolean): Promise
     };
     const acknowledge = () => {
       if (chrome.runtime?.lastError) { finish(false); return; }
-      confirmed = true;
-      check();
+      if (settled) return;
+      try {
+        storage.get([DEVICE_ID_STORAGE_KEY, AGREEMENT_DEVICE_REPLACEMENT], items => {
+          if (chrome.runtime?.lastError || normalizeId(items?.[DEVICE_ID_STORAGE_KEY]) !== next
+            || items?.[AGREEMENT_DEVICE_REPLACEMENT] !== next) { finish(false); return; }
+          confirmed = true;
+          check();
+        });
+      } catch { finish(false); }
     };
     const timer = setTimeout(() => finish(false), 2000);
     try {
       changes.addListener(onChange);
-      if (replace) storage.set({ [DEVICE_ID_STORAGE_KEY]: next }, acknowledge);
-      else storage.get(DEVICE_ID_STORAGE_KEY, items => {
-        if (chrome.runtime?.lastError || normalizeId(items[DEVICE_ID_STORAGE_KEY]) !== next) finish(false);
-        else acknowledge();
-      });
+      // One Chrome write: the agreement worker must recognize a rotation even before its change event.
+      // The marker has no shared-page mirror, is never sent over the network, and cannot grant consent.
+      if (replace) storage.set({ [DEVICE_ID_STORAGE_KEY]: next, [AGREEMENT_DEVICE_REPLACEMENT]: next }, acknowledge);
+      else acknowledge();
     } catch { finish(false); }
   });
 }

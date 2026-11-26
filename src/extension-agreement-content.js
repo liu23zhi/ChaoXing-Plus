@@ -1,7 +1,8 @@
 (() => {
   const KIND = 'chaoxing-plus:agreement';
   const VIEW = 'agreement.view.v1';
-  const configKeys = ['common.settings.tiku-adapter.baseurl', 'common.settings.tiku-adapter.key', 'common.settings.device-id',
+  const DEVICE = 'common.settings.device-id';
+  const configKeys = ['common.settings.tiku-adapter.baseurl', 'common.settings.tiku-adapter.key', DEVICE,
     'common.settings.device-instance', 'common.settings.tiku-adapter.script-identity', 'common.settings.extension-enabled'];
   const internal = location.href === chrome.runtime.getURL('extension-agreement.html');
   const top = window === window.top;
@@ -27,7 +28,9 @@
     if (configKeys.some(key => key in changes)) {
       refreshSerial++;
       render(null);
-      // The service worker rechecks and publishes an authoritative view.
+      // The first late business ID can keep exactly the same signed view. Chrome does not
+      // notify for an equal value, so request the authoritative response after clearing.
+      if (DEVICE in changes) void refresh();
     } else if (changes[VIEW]) {
       refreshSerial++;
       render(changes[VIEW].newValue);
