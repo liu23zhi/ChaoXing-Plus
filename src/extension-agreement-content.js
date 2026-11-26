@@ -13,17 +13,6 @@
       return chrome.runtime.sendMessage({ kind: KIND, operation, ...data }).catch(() => null);
     } catch { return Promise.resolve(null); }
   };
-  const check = async event => {
-    const data = event.detail;
-    if (!active || !data || typeof data.id !== 'string' || data.id.length > 96
-      || typeof data.base !== 'string' || data.base.length > 2048
-      || typeof data.keyHash !== 'string' || !/^[a-f0-9]{64}$/.test(data.keyHash)) return;
-    const result = navigator.onLine ? await send('authorize', { base: data.base, keyHash: data.keyHash }) : null;
-    if (!active) return;
-    document.dispatchEvent(new CustomEvent('chaoxing-plus:agreement-result', {
-      detail: { id: data.id, allowed: result?.allowed === true && navigator.onLine }
-    }));
-  };
   function render(next) {
     current = next;
     view?.render(next);
@@ -56,7 +45,6 @@
   function mount() {
     if (active) return;
     active = true;
-    if (!internal) document.addEventListener('chaoxing-plus:agreement-check', check);
     if (!top && !internal) return;
     view = mountCxAgreement({ internal, send });
     chrome.storage.onChanged.addListener(changed);
@@ -70,7 +58,6 @@
     if (!active) return;
     active = false;
     refreshSerial++;
-    document.removeEventListener('chaoxing-plus:agreement-check', check);
     if (!view) return;
     clearInterval(poll);
     chrome.storage.onChanged.removeListener(changed);

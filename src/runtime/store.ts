@@ -1,3 +1,8 @@
+import { usesBrowserAgreementGate } from './agreement-gate.js';
+
+type PrivateSettings = { has: (key: string) => boolean; get: (key: string) => unknown; set: (key: string, value: unknown) => void };
+const privateSettings = () => (globalThis as { __CXPLUS_PRIVATE_SETTINGS__?: PrivateSettings }).__CXPLUS_PRIVATE_SETTINGS__;
+
 const memoryStore = new Map<string, unknown>();
 const memoryRemovedKeys = new Set<string>();
 
@@ -29,7 +34,8 @@ function isWindowsHostRuntime() {
 }
 
 function shouldShareStoreKey(key: string) {
-  return SHARED_STORE_EXCLUDED_KEYS.has(key) === false
+  return !(usesBrowserAgreementGate() && privateSettings()?.has(key))
+    && SHARED_STORE_EXCLUDED_KEYS.has(key) === false
     && (SHARED_STORE_EXACT_KEYS.has(key) || SHARED_STORE_PREFIXES.some((prefix) => key.startsWith(prefix)));
 }
 
@@ -239,6 +245,8 @@ try {
 
 export const runtimeStore = {
   get<T>(key: string, fallback: T): T {
+    const owned = usesBrowserAgreementGate() ? privateSettings() : undefined;
+    if (owned?.has(key)) return (owned.get(key) ?? fallback) as T;
     if (memoryRemovedKeys.has(key)) {
       return fallback;
     }
@@ -261,6 +269,8 @@ export const runtimeStore = {
     return writeMemory(key, result.value);
   },
   set<T>(key: string, value: T): void {
+    const owned = usesBrowserAgreementGate() ? privateSettings() : undefined;
+    if (owned?.has(key)) { owned.set(key, value); return; }
     writeMemory(key, value);
     if (!isWindowsNoDiskWrite()) {
       try {

@@ -1,3 +1,4 @@
+import { browserExtensionRuntime, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType, QuestionEvidence } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
@@ -2464,6 +2465,20 @@ function createTikuAdapterConfigSection() {
   });
   container.style.display = 'grid';
   container.style.gap = '12px';
+
+  if (usesBrowserAgreementGate()) {
+    const heading = createElement('div', { text: '题库配置' });
+    const open = createElement('button', { text: '打开扩展题库设置' });
+    open.type = 'button';
+    applyActionButtonStyle(open, 'primary');
+    open.onclick = event => {
+      if (event.isTrusted) void browserExtensionRuntime()?.sendMessage?.({
+        kind: 'chaoxing-plus:agreement', operation: 'open-settings'
+      }).catch(() => {});
+    };
+    container.append(heading, open);
+    return container;
+  }
 
   const header = createElement('div');
   header.style.display = 'grid';

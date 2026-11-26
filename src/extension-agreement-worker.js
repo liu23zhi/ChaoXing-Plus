@@ -9,6 +9,8 @@ export function registerAgreement(chrome, defaultBase) {
   const id = sender => [sender.tab?.id ?? -1, sender.frameId ?? 0, sender.documentId ?? sender.url].join(':');
   let refreshInProgress;
   function refresh(online) {
+    // A restored link requests a new observation, not an older in-flight ordinary refresh.
+    if (online) return controller.run('refresh', { online: true });
     refreshInProgress ??= controller.run('refresh', { online }).finally(() => { refreshInProgress = undefined; });
     return refreshInProgress;
   }
@@ -29,9 +31,14 @@ export function registerAgreement(chrome, defaultBase) {
         result = controller.run(op, message).finally(() => authorizations.delete(check));
         authorizations.set(check, result);
       }
+    } else if (op === 'open-settings' && topContent) {
+      result = chrome.tabs.create({ url: internalPage }).then(() => ({ opened: true }));
     } else if (internal || topContent) {
       const reader = id(sender);
-      if (op === 'refresh') {
+      if (internal && op === 'configure-source') {
+        if (typeof message.base !== 'string' || message.base.length > 2048 || typeof message.key !== 'string' || message.key.length > 1024) return false;
+        result = controller.run(op, { base: message.base, key: message.key });
+      } else if (op === 'refresh') {
         result = refresh(message.online === true);
       } else if (op === 'prepare' || op === 'accept') {
         if (typeof message.version !== 'string' || message.version.length > 48

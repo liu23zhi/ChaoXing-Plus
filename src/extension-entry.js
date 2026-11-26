@@ -1,8 +1,15 @@
 (() => {
+  // In the shipped manifest the extension app itself is an isolated content script.
+  // The standalone bootstrap remains usable by older non-agreement fixtures.
+  const isolated = typeof mountCxAgreement === 'function';
+  let finishBoot;
+  if (isolated) globalThis.__CXPLUS_EXTENSION_BOOT__ = new Promise(resolve => { finishBoot = resolve; });
+  if (document.documentElement) run();
+  else document.addEventListener('DOMContentLoaded', run, { once: true });
+
+  function run() {
   const root = document.documentElement;
-  if (!root) {
-    return;
-  }
+  if (!root) { finishBoot?.(false); return; }
 
   // Extension-owned events only: no URL, page payload, console arguments or credentials.
   const diagnostic = (event, duration_ms) => {
@@ -134,9 +141,40 @@
     }
   };
 
+  const baseKey = 'common.settings.tiku-adapter.baseurl';
+  const keyKey = 'common.settings.tiku-adapter.key';
+  const deviceKey = 'common.settings.device-id';
+  const bindingKey = 'agreement.approved-provider.v1';
+  const privateKeys = new Set([baseKey, keyKey, deviceKey, bindingKey, 'common.settings.device-instance',
+    'common.settings.tiku-adapter.script-identity', 'common.settings.tiku-adapter.script-session-token']);
+  const privateValues = {};
+  if (isolated) {
+    globalThis.__CXPLUS_PRIVATE_SETTINGS__ = {
+      has: key => privateKeys.has(key),
+      get(key) {
+        if (key !== keyKey) return privateValues[key];
+        const binding = privateValues[bindingKey];
+        return binding && binding.rawBase === (privateValues[baseKey] ?? '') && binding.key === privateValues[keyKey] ? binding.key : undefined;
+      },
+      set(key, value) {
+        if (key !== deviceKey) return;
+        privateValues[key] = value;
+        chrome.storage.local.set({ [key]: value }, () => { void chrome.runtime.lastError; });
+      }
+    };
+    // Remove stale copies left by the old MAIN-world configuration bridge.
+    for (const key of privateKeys) {
+      root.removeAttribute(getSharedAttributeName(key));
+      try { localStorage.removeItem(key); } catch { /* including opaque frames */ }
+    }
+  }
   const applySharedStoreValues = (values) => {
     const shared = {};
     Object.entries(values ?? {}).forEach(([key, value]) => {
+      if (isolated && privateKeys.has(key)) {
+        privateValues[key] = value;
+        return;
+      }
       if (!shouldShareStoreKey(key)) {
         return;
       }
@@ -163,7 +201,7 @@
     Object.entries(detail).forEach(([key, value]) => {
       // Native-owned browser sessions write this UUID in the extension's own storage before opening the site.
       // Page settings must not manufacture/change the host's browser identity or script authorization.
-      if (['common.settings.device-instance','common.settings.tiku-adapter.script-identity',
+      if ((isolated && privateKeys.has(key)) || ['common.settings.device-instance','common.settings.tiku-adapter.script-identity',
         'common.settings.tiku-adapter.script-session-token'].includes(key) || !shouldShareStoreKey(key)) {
         return;
       }
@@ -191,9 +229,13 @@
     syncSharedStoreToExtension(event?.detail);
   });
 
+  let hydrateReady = Promise.resolve();
   if (chrome?.storage?.local?.get) {
-    chrome.storage.local.get(null, (result) => {
-      applySharedStoreValues(result ?? {});
+    hydrateReady = new Promise(resolve => {
+      chrome.storage.local.get(null, (result) => {
+        applySharedStoreValues(result ?? {});
+        resolve();
+      });
     });
   }
 
@@ -205,7 +247,7 @@
 
       const nextValues = {};
       Object.entries(changes ?? {}).forEach(([key, change]) => {
-        if (!shouldShareStoreKey(key)) {
+        if (!shouldShareStoreKey(key) && !(isolated && privateKeys.has(key))) {
           return;
         }
 
@@ -354,17 +396,19 @@
     }
 
     if (!(await readExtensionEnabled())) {
-      // 总开关关闭：不注入主脚本，页面保持原样，也不创建面板。
+      // 总开关关闭：不启动主脚本，也不创建面板。
+      finishBoot?.(false);
       return;
     }
 
     diagnostic('extension.ready');
-    await hydrateTabPause();
+    await Promise.all([hydrateTabPause(), hydrateReady]);
 
     root.dataset[injectedMarkerKey] = frameMarker;
     window[injectedWindowKey] = frameMarker;
 
     injectStyle();
+    if (isolated) { finishBoot(true); return; }
     void ensureSwalRuntime();
 
     const script = document.createElement('script');
@@ -386,6 +430,7 @@
     }, { once: true });
   } else {
     void inject();
+  }
   }
 })();
 

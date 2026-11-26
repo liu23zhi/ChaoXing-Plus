@@ -18,7 +18,7 @@ import {
 import { Project, $gm, runtimeStore } from '../runtime/index.js';
 import { $message, $modal } from '../runtime/message.js';
 import { sleep } from '../runtime/dom.js';
-import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement } from '../runtime/agreement-gate.js';
+import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import { commonWork, enableCopy, playMedia } from '../utils/index.js';
 import { playbackRate, volume } from '../utils/configs.js';
 import { waitForElement, waitForMedia } from '../utils/study.js';
@@ -3012,8 +3012,9 @@ export const CXProject = Project.create({
         }
       },
       oncomplete() {
-        clearWorkResultsOnPageLoad();
         const isExam = /\/exam\/preview/.test(location.href);
+        if (usesBrowserAgreementGate() && isExam) return;
+        clearWorkResultsOnPageLoad();
         commonWork(
           this,
           {
@@ -3122,6 +3123,7 @@ export const CXProject = Project.create({
       ],
       hideInPanel: true,
       oncomplete() {
+        if (usesBrowserAgreementGate()) return;
         const unsafeDocument = ($gm.unsafeWindow as Window & { document?: Document }).document;
         if (unsafeDocument?.querySelector('.mark_info')?.textContent?.includes('不允许整卷预览')) {
           $message.warn('当前考试禁止整卷预览，将按逐题模式运行。');
@@ -5563,6 +5565,10 @@ const JobRunner = {
         },
         work: async (ctx) => {
           await requireTikuWorkAgreement();
+            const waitForAuthorizedWrite = async () => {
+              await ctx.waitForContinue?.();
+              if (usesBrowserAgreementGate()) await requireTikuWorkAgreement();
+            };
           const { elements, searchInfos } = ctx;
           const type = resolveChapterQuestionType(ctx.root, elements);
 
@@ -5571,7 +5577,7 @@ const JobRunner = {
             const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
 
             const handler = async (questionType: typeof type, answer: string, option: HTMLElement | undefined) => {
-              await ctx.waitForContinue?.();
+              await waitForAuthorizedWrite();
               if ((questionType === 'judgement' || questionType === 'single' || questionType === 'multiple') && option) {
                 const checkedBeforeClick = isChapterChoiceChecked(option);
                 let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
@@ -5580,14 +5586,14 @@ const JobRunner = {
                 if (!checkedBeforeClick) {
                   option.click();
                   await sleep(100);
-                  await ctx.waitForContinue?.();
+                  await waitForAuthorizedWrite();
                   checkedAfterNativeClick = isChapterChoiceChecked(option);
                   if (checkedAfterNativeClick) {
                     appliedBy = 'native-click';
                   } else {
                     triggerSyntheticClick(option);
                     await sleep(100);
-                    await ctx.waitForContinue?.();
+                    await waitForAuthorizedWrite();
                     appliedBy = isChapterChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
                   }
                 }
@@ -5637,7 +5643,7 @@ const JobRunner = {
                 for (let index = 0; index < elements.lineSelectBox.length; index++) {
                   const box = elements.lineSelectBox[index];
                   if (ans[index]) {
-                    await ctx.waitForContinue?.();
+                    await waitForAuthorizedWrite();
                     box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
                     await sleep(200);
                   }
@@ -6283,6 +6289,7 @@ function workOrExam(
     preview_mode: boolean;
   }
 ) {
+  if (usesBrowserAgreementGate() && type === 'exam') return;
   const workExamCorrelationId = buildChapterCorrelationId(CXAnalyses.getCurrentChapterStayKey(), {
     targetJobId: type,
     jobName: preview_mode ? `${type}-preview` : `${type}-step-by-step`
@@ -6691,6 +6698,7 @@ function workOrExam(
     }
 
     if (!confirmedSubmission && !isCompleted()) {
+      if (usesBrowserAgreementGate()) await requireTikuWorkAgreement();
       if (typeof assertInitialAnswerRun === 'function') assertInitialAnswerRun();
       if (hasSubmitCheckTimes) {
         if (!isConfirmationReady()) throw new Error('作业/考试提交确认入口尚未就绪，已取消本次提交。');
@@ -6831,7 +6839,11 @@ function workOrExam(
           : provider();
       },
       work: async (ctx) => {
-        if (type === 'work') await requireTikuWorkAgreement();
+        await requireTikuWorkAgreement();
+          const waitForAuthorizedWrite = async () => {
+            await ctx.waitForContinue?.();
+            if (usesBrowserAgreementGate()) await requireTikuWorkAgreement();
+          };
         const { elements, searchInfos } = ctx;
         const questionType = resolveQuestionTypeForWork(resolveWorkOrExamQuestionTypeRoot(elements) ?? elements.options[0]?.closest('.singleQuesId, .questionLi') ?? document, {
           elements: { options: elements.options as HTMLElement[] }
@@ -6846,7 +6858,7 @@ function workOrExam(
           const resolver = createDefaultQuestionResolver(ctx)[questionType];
           const resolvedOptions = elements.options.map((option) => optimizationElementWithImage(option));
           const handler = async (resolvedType: QuestionTypes, answer: string, option: HTMLElement | undefined) => {
-            await ctx.waitForContinue?.();
+            await waitForAuthorizedWrite();
             if ((resolvedType === 'judgement' || resolvedType === 'single' || resolvedType === 'multiple') && option) {
               const checkedBeforeClick = isWorkOrExamChoiceChecked(option);
               let appliedBy = checkedBeforeClick ? 'already-checked' : 'none';
@@ -6855,14 +6867,14 @@ function workOrExam(
               if (!checkedBeforeClick) {
                 option.click();
                 await sleep(100);
-                await ctx.waitForContinue?.();
+                await waitForAuthorizedWrite();
                 checkedAfterNativeClick = isWorkOrExamChoiceChecked(option);
                 if (checkedAfterNativeClick) {
                   appliedBy = 'native-click';
                 } else {
                   triggerSyntheticClick(option);
                   await sleep(400);
-                  await ctx.waitForContinue?.();
+                  await waitForAuthorizedWrite();
                   appliedBy = isWorkOrExamChoiceChecked(option) ? 'synthetic-click' : 'unapplied';
                 }
               }
@@ -6910,7 +6922,7 @@ function workOrExam(
               for (let index = 0; index < elements.lineSelectBox.length; index++) {
                 const box = elements.lineSelectBox[index];
                 if (ans[index]) {
-                  await ctx.waitForContinue?.();
+                  await waitForAuthorizedWrite();
                   box.querySelector<HTMLElement>(`li[data="${ans[index]}"] a`)?.click();
                   await sleep(200);
                 }
@@ -6922,11 +6934,11 @@ function workOrExam(
         }
 
         if (questionType === 'fill') {
-          return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[], ctx.waitForContinue);
+          return readerAndFillHandle(searchInfos, elements.filling as HTMLElement[], waitForAuthorizedWrite);
         }
 
         if (questionType === 'reader') {
-          return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[], ctx.waitForContinue);
+          return readerAndFillHandle(searchInfos, elements.reading as HTMLElement[], waitForAuthorizedWrite);
         }
 
         return { finish: false };
@@ -7121,17 +7133,10 @@ function workOrExam(
         await waitForInitialAnswerRun(sleep(3000));
         await waitForInitialAnswerRun(waitForTikuAdapterBalanceRecovery());
 
-        if (type === 'work') {
-          if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
-          await requireTikuWorkAgreement();
-        }
-        if (shouldSubmit) {
-          if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
-          await submitWorkOrExamPage(type);
-        } else {
-          if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
-          await saveWorkOrExamPage(type);
-        }
+        if (typeof waitForTabAnswerContinue === 'function') await waitForTabAnswerContinue();
+        await requireTikuWorkAgreement();
+        if (shouldSubmit) await submitWorkOrExamPage(type);
+        else await saveWorkOrExamPage(type);
       }
     });
   }

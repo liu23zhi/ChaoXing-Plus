@@ -44,10 +44,21 @@ const mountCxAgreement = ({ internal, send }) => {
   const timing = create('p', 'timing', '', card);
   const controls = create('footer', '', '', card);
   const accept = create('button', 'accept', '读完并同意', controls);
+  const settings = create('button', 'settings', '打开扩展题库设置', controls);
   const retry = create('button', 'retry', '重新获取', controls);
   const dismiss = create('button', 'dismiss', '暂不同意', controls);
-  for (const node of [accept, retry, dismiss, reopen]) node.type = 'button';
+  for (const node of [accept, settings, retry, dismiss, reopen]) node.type = 'button';
+  settings.hidden = internal;
   dismiss.hidden = internal;
+  const source = internal ? create('form', 'source-settings', '', card) : undefined;
+  const sourceMessage = source ? create('p', 'source-status', '', source) : undefined;
+  const sourceBase = source ? create('input', 'source-base', '', create('label', '', 'HTTPS 题库地址 ', source)) : undefined;
+  const sourceKey = source ? create('input', 'source-key', '', create('label', '', '访问令牌（留空保留同地址令牌） ', source)) : undefined;
+  const sourceSave = source ? create('button', 'source-save', '确认并保存题库地址', source) : undefined;
+  if (sourceBase && sourceKey) {
+    sourceBase.type = 'url'; sourceBase.required = true;
+    sourceKey.type = 'password'; sourceKey.autocomplete = 'off';
+  }
   let state, identity, readAt, timer, preparing = false, destroyed = false, collapsed = false, sending = false, serial = 0;
 
   function clearReading(notify) {
@@ -114,6 +125,10 @@ const mountCxAgreement = ({ internal, send }) => {
     accept.hidden = signed || !next?.canSign;
     retry.hidden = signed;
     dismiss.hidden = internal || signed;
+    if (sourceBase && next?.serviceBase && sourceBase !== shadow.activeElement && sourceBase.dataset.configured !== next.serviceBase) {
+      sourceBase.value = next.serviceBase;
+      sourceBase.dataset.configured = next.serviceBase;
+    }
     status.textContent = !navigator.onLine ? '当前离线，可只读；无法签署或使用受限功能。' : ({
       accepted: '服务端已确认同意当前版本。',
       pending: next?.acceptedVersion ? '协议已更新，请重新阅读并签署后再使用题库。' : '请完整阅读并同意后再使用题库。',
@@ -124,6 +139,7 @@ const mountCxAgreement = ({ internal, send }) => {
       unavailable: '暂时无法确认服务端状态。保留原正文只读，请稍后重试。',
       offline: '当前离线，可只读；无法签署或使用受限功能。',
       configuration: '无法验证当前题库配置或设备。请核对配置并重试。',
+      'source-unconfirmed': '自定义题库地址尚未确认。请在扩展内部设置页核对并确认地址；尚未发送令牌。',
       disabled: '扩展已停用。',
       host: '此运行模式不使用普通扩展协议页。'
     })[phase] ?? '正在获取当前协议…';
@@ -140,6 +156,13 @@ const mountCxAgreement = ({ internal, send }) => {
     const result = await send('accept', { version: current.version, hash: current.hash });
     if (destroyed || active !== serial) return;
     sending = false;
+    if (result?.resetReading) {
+      clearReading(false);
+      body.scrollTop = 0;
+      render(result);
+      if (state?.canSign) timing.textContent = '阅读计时已失效，请重新阅读后再次主动确认。';
+      return;
+    }
     render(result ?? { ...state, phase: 'submit-failed', canSign: false });
   }
   function onDismiss(ev) {
@@ -164,6 +187,24 @@ const mountCxAgreement = ({ internal, send }) => {
     if (!destroyed && active === serial) render(updated);
 
   }
+  const openSettings = event => { if (event.isTrusted) void send('open-settings'); };
+  async function saveSource(event) {
+    event.preventDefault();
+    if (!event.isTrusted || sourceSave.disabled || destroyed) return;
+    sourceSave.disabled = true;
+    sourceMessage.textContent = '';
+    const request = send('configure-source', { base: sourceBase.value.trim(), key: sourceKey.value.trim() });
+    sourceKey.value = '';
+    try {
+      const updated = await request;
+      if (!destroyed) {
+        if (updated?.sourceError || !updated) sourceMessage.textContent = updated?.sourceError ?? '无法保存配置，请重试。';
+        else if (updated.serviceBase === sourceBase.value.trim().replace(/\/+$/, '')) sourceMessage.textContent = '题库地址已确认。';
+      }
+    } finally { if (!destroyed) sourceSave.disabled = false; }
+  }
+  settings.addEventListener('click', openSettings);
+  source?.addEventListener('submit', saveSource);
   body.addEventListener('scroll', noteBottom);
   accept.addEventListener('click', onAccept);
   dismiss.addEventListener('click', onDismiss);
@@ -177,6 +218,8 @@ const mountCxAgreement = ({ internal, send }) => {
       destroyed = true;
       clearReading(true);
       body.removeEventListener('scroll', noteBottom);
+      settings.removeEventListener('click', openSettings);
+      source?.removeEventListener('submit', saveSource);
       accept.removeEventListener('click', onAccept);
       dismiss.removeEventListener('click', onDismiss);
       reopen.removeEventListener('click', onReopen);

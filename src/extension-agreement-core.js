@@ -3,6 +3,7 @@ export const AGREEMENT_VIEW_KEY = 'agreement.view.v1';
 export const AGREEMENT_INSTALL_KEY = 'agreement.install.v1';
 const BASE = 'common.settings.tiku-adapter.baseurl';
 const KEY = 'common.settings.tiku-adapter.key';
+const APPROVED_SOURCE = 'agreement.approved-provider.v1';
 const LOCAL_DEVICE = 'common.settings.device-id';
 const HOST_MODE_KEYS = ['common.settings.device-instance', 'common.settings.tiku-adapter.script-identity'];
 export const AGREEMENT_CONFIG_KEYS = [BASE, KEY, LOCAL_DEVICE, ...HOST_MODE_KEYS, 'common.settings.extension-enabled'];
@@ -87,7 +88,7 @@ export function createAgreementController({
   async function publish(view) {
     if (!lastView || view.document !== lastView.document || view.phase !== lastView.phase || view.scope !== lastView.scope
       || view.pendingVersion !== lastView.pendingVersion || view.acceptedVersion !== lastView.acceptedVersion
-      || view.installState !== lastView.installState) {
+      || view.installState !== lastView.installState || view.serviceBase !== lastView.serviceBase) {
       await write({ [AGREEMENT_VIEW_KEY]: view });
       lastView = view;
     }
@@ -95,8 +96,10 @@ export function createAgreementController({
   }
   async function configuration() {
     const config = await read(AGREEMENT_CONFIG_KEYS);
-    const base = normalizeAgreementBase(text(config[BASE]) || defaultBase);
-    return { base, key: text(config[KEY]), device: text(config[LOCAL_DEVICE]),
+    const rawBase = typeof config[BASE] === 'string' ? config[BASE] : '';
+    const key = text(config[KEY]);
+    const base = normalizeAgreementBase(text(rawBase) || defaultBase);
+    return { base, rawBase, key, device: text(config[LOCAL_DEVICE]),
       mode: HOST_MODE_KEYS.some(k => text(config[k])) ? 'host'
         : config['common.settings.extension-enabled'] === false ? 'disabled' : 'extension' };
   }
@@ -140,11 +143,16 @@ export function createAgreementController({
   async function bindKey(cfg) {
     if (!cfg.key) return;
     const name = 'agreement.key-base.' + cfg.keyHash;
-    const old = (await read([name]))[name];
-    if (old && old !== cfg.base) throw new Error('configuration');
-    if (!old) {
+    const stored = await read([name, APPROVED_SOURCE]);
+    const bound = stored[name];
+    const choice = stored[APPROVED_SOURCE];
+    if (bound && bound !== cfg.base) throw new Error('configuration');
+    const confirmed = choice?.rawBase === cfg.rawBase && choice?.key === cfg.key && choice?.base === cfg.base;
+    if (cfg.base !== normalizeAgreementBase(defaultBase) && !confirmed) throw new Error('source-unconfirmed');
+    if (!bound || !confirmed) {
       await ensureCurrent(cfg);
-      await write({ [name]: cfg.base });
+      const updates = { [name]: cfg.base, [APPROVED_SOURCE]: { base: cfg.base, rawBase: cfg.rawBase, key: cfg.key } };
+      await write(updates);
     }
   }
   async function credentials(cfg) {
@@ -194,7 +202,8 @@ export function createAgreementController({
       document: data?.document ?? await fallback(),
       canSign: phase === 'pending' && pendingVersion !== null,
       // View state is never an authorization grant; callers require a live proof.
-      scope: cfg?.scope ?? null
+      scope: cfg?.scope ?? null,
+      serviceBase: cfg?.rawBase?.trim() || cfg?.base || normalizeAgreementBase(defaultBase)
     });
     if (cfg?.scope) await ensureCurrent(cfg);
     lastViewContext = cfg;
@@ -207,7 +216,7 @@ export function createAgreementController({
   }
   async function refresh(cfg, online = false) {
     if (cfg.mode !== 'extension') return display(null, null, cfg.mode);
-    if (!cfg.scope) return display(null, null, 'configuration');
+    if (!cfg.scope) return display(cfg, null, 'configuration');
     const previous = await cache(cfg);
     if (offline()) return display(cfg, previous, 'offline');
     const { retryKey } = names(cfg);
@@ -263,8 +272,9 @@ export function createAgreementController({
       return display(cfg, current, status.needsAcceptance ? 'pending' : 'accepted', status.needsAcceptance ? status.version : null);
     } catch (error) {
       await ensureCurrent(cfg);
-      const phase = ['not-published', 'version-changed', 'configuration', 'contract'].includes(error?.message)
+      const phase = ['not-published', 'version-changed', 'configuration', 'contract', 'source-unconfirmed'].includes(error?.message)
         ? error.message : 'unavailable';
+      if (phase === 'source-unconfirmed') return display(cfg, previous, phase);
       const failures = (lastFailure?.failures ?? 0) + 1;
       await write({ [retryKey]: { failures, phase, limited: Boolean(error?.wait),
         until: now() + Math.max(error?.wait ?? 0, Math.min(300000, 5000 * 2 ** Math.min(failures - 1, 6))) } }).catch(() => {});
@@ -285,17 +295,39 @@ export function createAgreementController({
       return null;
     }
     const cfg = await context();
+    if (operation === 'configure-source' || operation === 'confirm-source') {
+      if (cfg.mode !== 'extension') return display(null, null, 'configuration');
+      const newBase = normalizeAgreementBase(data.base);
+      if (!newBase || (operation === 'confirm-source' && newBase !== cfg.base)) return { ...lastView, sourceError: '需要有效的 HTTPS 题库地址。' };
+      const newKey = text(data.key) || (newBase === cfg.base ? cfg.key : '');
+      if (newKey && !/^[\x21-\x7e]{1,1024}$/.test(newKey)) return { ...lastView, sourceError: '访问令牌格式无效。' };
+      const boundKey = newKey ? 'agreement.key-base.' + await digest(newKey) : '';
+      const existing = boundKey ? (await read([boundKey]))[boundKey] : undefined;
+      if (existing && existing !== newBase) return { ...lastView, sourceError: '该访问令牌已关联另一题库地址；请使用新地址签发的令牌。' };
+      const original = await configuration();
+      if (original.rawBase !== cfg.rawBase || original.key !== cfg.key || original.mode !== cfg.mode || original.device !== cfg.device) {
+        return { ...lastView, sourceError: '题库配置已变更，请核对后重试。' };
+      }
+      await write({ [BASE]: newBase, [KEY]: newKey, [APPROVED_SOURCE]: { base: newBase, rawBase: newBase, key: newKey },
+        ...(boundKey ? { [boundKey]: newBase } : {}) });
+      changed();
+      const configured = await context();
+      if (configured.scope) await remove([names(configured).retryKey]).catch(() => {});
+      return refresh(configured);
+    }
     if (operation === 'authorize') {
-      if (cfg.mode === 'host') return { allowed: true };
       if (!cfg.scope || !cfg.key || normalizeAgreementBase(data.base) !== cfg.base || data.keyHash !== cfg.keyHash) return { allowed: false };
       const view = await refresh(cfg);
       await ensureCurrent(cfg);
       return { allowed: view.phase === 'accepted' && !offline() };
     }
     if (operation === 'refresh') return refresh(cfg, data.online === true);
-    const view = lastView;
+    const view = lastView && lastViewContext?.keyHash === cfg.keyHash && lastViewContext?.revision === cfg.revision
+      && lastView.scope === cfg.scope ? lastView : await refresh(cfg);
     const doc = matches(cfg, view);
-    if (!doc || doc.version !== data.version || doc.hash !== data.hash || offline()) return view;
+    if (!doc || doc.version !== data.version || doc.hash !== data.hash || offline()) {
+      return operation === 'accept' ? { ...view, resetReading: true } : view;
+    }
     const prior = readers.get(reader);
     if (operation === 'prepare') {
       await ensureCurrent(cfg);
@@ -306,7 +338,9 @@ export function createAgreementController({
       return view;
     }
     if (operation !== 'accept' || !prior || prior.scope !== cfg.scope || prior.version !== doc.version
-      || prior.hash !== doc.hash || now() - prior.reached < 5000) return view;
+      || prior.hash !== doc.hash || now() - prior.reached < 5000) {
+      return operation === 'accept' ? { ...view, resetReading: true } : view;
+    }
     try {
       await ensureCurrent(cfg);
       const credential = await credentials(cfg);

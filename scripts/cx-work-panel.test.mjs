@@ -59,7 +59,7 @@ test('cx clears stale work result questions when study or work pages load before
   const studyStart = source.indexOf('export async function study(opts: StudyOptions) {');
   const clearResults = source.indexOf('clearWorkResultsOnPageLoad();', studyStart);
   assert.ok(clearResults > studyStart && clearResults < source.indexOf('const runJobs = async', studyStart));
-  assert.equal(source.includes("oncomplete() {\n        clearWorkResultsOnPageLoad();\n        const isExam = /\\/exam\\/preview/.test(location.href);"), true);
+  assert.match(source, /if \(usesBrowserAgreementGate\(\) && isExam\) return;\s*clearWorkResultsOnPageLoad\(\);\s*commonWork\(/u);
   assert.equal(source.includes('workResultsMethods().init?.();'), true);
   assert.equal(source.includes('workResultsMethods().setResults?.(simplified);'), true);
   assert.equal(source.includes('workResultsMethods().appendResults?.(simplified);'), true);

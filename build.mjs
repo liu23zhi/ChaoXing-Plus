@@ -18,6 +18,9 @@ function copyStaticFiles() {
     '*://*.chaoxing.com/*'
   ];
 
+  const contentCoverage = { matches: chaoxingHosts, world: 'ISOLATED', all_frames: true,
+    match_about_blank: true, match_origin_as_fallback: true };
+
   const manifest = {
     manifest_version: 3,
     default_locale: 'zh_CN',
@@ -34,19 +37,14 @@ function copyStaticFiles() {
       default_popup: 'popup.html'
     },
     content_scripts: [
-      {
-        matches: chaoxingHosts,
-        js: ['extension-agreement-view.js', 'extension-agreement-content.js', 'extension-entry.js'],
-        run_at: 'document_start',
-        all_frames: true,
-        match_about_blank: true,
-        match_origin_as_fallback: true
-      }
+      { ...contentCoverage, js: ['extension-agreement-view.js', 'extension-agreement-content.js', 'extension-entry.js'], run_at: 'document_start' },
+      // Static library imports may require <head>; keep privileged runtime isolated and run after DOM creation.
+      { ...contentCoverage, js: ['chaoxing-plus.js'], run_at: 'document_end' }
     ],
     web_accessible_resources: [
       {
         matches: ['<all_urls>'],
-        resources: ['chaoxing-plus.js', 'vendor/sweetalert2.min.css', 'vendor/sweetalert2.all.min.js']
+        resources: ['vendor/sweetalert2.min.css', 'vendor/sweetalert2.all.min.js']
       }
     ]
   };
