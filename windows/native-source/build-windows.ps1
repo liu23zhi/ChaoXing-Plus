@@ -261,4 +261,5 @@ if ($LASTEXITCODE -ne 0) { throw 'SHA256 output failed.' }
 
 
 
-pause
+# The CI wrapper opts out of this final prompt only; direct callers still pause.
+if ($env:CX_CI_SKIP_BUILD_PAUSE -cne '1') { pause }

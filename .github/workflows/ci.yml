@@ -37,7 +37,8 @@ jobs:
           if ! /usr/bin/python3 -c 'import yaml'; then
             sudo apt-get update -qq && sudo apt-get install --yes --no-install-recommends python3-yaml
           fi
-          /usr/bin/python3 scripts/ci/check-joint-workflow.py .github/workflows/ci.yml
+          /usr/bin/python3 -B scripts/ci/check-joint-workflow.py .github/workflows/ci.yml
+          /usr/bin/python3 -B scripts/ci/check-windows-build-workflow.test.py
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
@@ -114,6 +115,36 @@ jobs:
       - name: TiKu 实际 PS1 与原生启动配置和授权兼容
         shell: pwsh
         run: ./scripts/ci/tiku-launcher-native-contract.ps1 -TiKuHelperRoot ./.joint-service
+
+      - name: 验证非交互提示与构建产物门禁
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.test.ps1
+      - name: 试编译 windows/native-source/build-windows.cmd
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.ps1 -Entry 'windows/native-source/build-windows.cmd'
+      - name: 试编译 windows/native-source/build-windows.ps1
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.ps1 -Entry 'windows/native-source/build-windows.ps1'
+      - name: 试编译 windows/native-source/build-windows.sh
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.ps1 -Entry 'windows/native-source/build-windows.sh'
+      - name: 试编译 windows/hook-source/build-proxy.ps1
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/ci/windows-build-entry.ps1 -Entry 'windows/hook-source/build-proxy.ps1'
+      - name: 保留各构建入口的日志、版本和退出码
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-build-logs
+          path: |
+            ${{ runner.temp }}/windows-build-logs/*/build.log
+            ${{ runner.temp }}/windows-build-logs/*/result.txt
+          if-no-files-found: error
+          retention-days: 7
 
   joint-gate:
     name: 三模式联合门禁
