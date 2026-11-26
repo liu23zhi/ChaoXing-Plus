@@ -899,3 +899,37 @@ test('判据：baseurl 与 getBaseurl 都不给时返回 null（静默，不抛�
   assert.equal(snapshot, null, '没有地址时必须返回 null，交给「还没设置题库地址」的静默分支');
   assert.equal(called, false, '没地址就不该发请求');
 });
+
+test('an existing status fetcher uses one current approved source-key pair, and cancels on takeover or revocation', async () => {
+  const { http } = await loadModules();
+  const a = 'https://first.fixture.invalid', b = 'https://second.fixture.invalid';
+  let current = { baseurl: a, accessKey: 'fixture-a' };
+  const hits = [];
+  let release;
+  let pause;
+  const fetchStatus = http.createServiceStatusHttpFetcher({
+    getConfig: () => current,
+    includeSearchHistory: true,
+    requester: async (url, init) => {
+      hits.push([new URL(url).origin, init.headers.Authorization]);
+      if (pause) await new Promise(resolve => { release = resolve; current = { baseurl: b, accessKey: 'fixture-b' }; });
+      return summaryResponse();
+    }
+  });
+  await fetchStatus();
+  assert.deepEqual(hits, [[a, 'Bearer fixture-a'], [a, 'Bearer fixture-a']]);
+  hits.length = 0;
+  pause = true;
+  const original = fetchStatus();
+  pause = false;
+  release();
+  assert.equal(await original, null, 'old data may not publish after a source switch');
+  assert.deepEqual(hits, [[a, 'Bearer fixture-a']], 'the follow-up request is canceled before dispatch');
+  hits.length = 0;
+  await fetchStatus();
+  assert.deepEqual(hits, [[b, 'Bearer fixture-b'], [b, 'Bearer fixture-b']]);
+  hits.length = 0;
+  current = { baseurl: b, accessKey: '' };
+  assert.equal((await fetchStatus()).kind, 'no-token');
+  assert.deepEqual(hits, []);
+});

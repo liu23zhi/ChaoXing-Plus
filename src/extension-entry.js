@@ -148,9 +148,11 @@
   const privateKeys = new Set([baseKey, keyKey, deviceKey, bindingKey, 'common.settings.device-instance',
     'common.settings.tiku-adapter.script-identity', 'common.settings.tiku-adapter.script-session-token']);
   const privateValues = {};
+  let providerRevision = 0;
   if (isolated) {
     globalThis.__CXPLUS_PRIVATE_SETTINGS__ = {
       has: key => privateKeys.has(key),
+      revision: () => providerRevision,
       get(key) {
         if (key !== keyKey) return privateValues[key];
         const binding = privateValues[bindingKey];
@@ -172,6 +174,7 @@
     const shared = {};
     Object.entries(values ?? {}).forEach(([key, value]) => {
       if (isolated && privateKeys.has(key)) {
+        if (key === baseKey || key === keyKey || key === bindingKey) providerRevision++;
         privateValues[key] = value;
         return;
       }

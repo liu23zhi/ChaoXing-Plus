@@ -1,6 +1,6 @@
 import { usesBrowserAgreementGate } from './agreement-gate.js';
 
-type PrivateSettings = { has: (key: string) => boolean; get: (key: string) => unknown; set: (key: string, value: unknown) => void };
+type PrivateSettings = { revision: () => number; has: (key: string) => boolean; get: (key: string) => unknown; set: (key: string, value: unknown) => void };
 const privateSettings = () => (globalThis as { __CXPLUS_PRIVATE_SETTINGS__?: PrivateSettings }).__CXPLUS_PRIVATE_SETTINGS__;
 
 const memoryStore = new Map<string, unknown>();
@@ -244,6 +244,7 @@ try {
 }
 
 export const runtimeStore = {
+  getProviderConfigRevision() { return usesBrowserAgreementGate() ? privateSettings()?.revision() : undefined; },
   get<T>(key: string, fallback: T): T {
     const owned = usesBrowserAgreementGate() ? privateSettings() : undefined;
     if (owned?.has(key)) return (owned.get(key) ?? fallback) as T;

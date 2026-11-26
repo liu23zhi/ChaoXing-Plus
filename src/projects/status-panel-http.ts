@@ -63,7 +63,11 @@ export function buildServiceStatusUrl(baseurl: string, endpoint: string): string
   return `${normalizedBase}${path}`;
 }
 
+type StatusProviderConfig = { baseurl: string; accessKey: string; scriptIdentity?: string; revision?: number };
+
 export type ServiceStatusHttpFetcherOptions = {
+  /** Read the currently approved destination and credential together, never independently. */
+  getConfig?: () => StatusProviderConfig;
   /**
    * 固定 baseurl（原有形态，保留向后兼容）。
    *
@@ -151,15 +155,28 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : SERVICE_STATUS_REQUEST_TIMEOUT_MS;
 
   return async (): Promise<ServiceStatusSnapshot | null> => {
-    // 每次取数都重新解析（getBaseurl 存在时），这样用户改了题库地址立即生效。
-    const baseurl = resolveOptionsBaseUrl(options);
+    const readConfig = () => options.getConfig ? options.getConfig() : {
+      baseurl: resolveOptionsBaseUrl(options), accessKey: options.accessKey ?? '', scriptIdentity: options.scriptIdentity
+    };
+    let config: StatusProviderConfig;
+    try { config = readConfig(); } catch { return null; }
+    if (!config) return null;
+    const { baseurl, scriptIdentity } = config;
+    const stillCurrent = () => {
+      if (!options.getConfig) return true;
+      try {
+        const latest = options.getConfig();
+        return latest.baseurl === baseurl && latest.accessKey === config.accessKey
+          && latest.scriptIdentity === scriptIdentity && latest.revision === config.revision;
+      } catch { return false; }
+    };
     const url = buildServiceStatusUrl(baseurl, endpoint);
     if (!url) {
       // 没配置 baseurl：不是错误，是「还没设置题库地址」。静默返回 null。
       return null;
     }
 
-    const accessKey = String(options.accessKey ?? '').trim();
+    const accessKey = String(config.accessKey ?? '').trim();
     // 连 key 都没有 → 前端就知道结果，**不发请求**。
     // 与「发了请求被拒」分开：用户动作完全相反（去填令牌 vs 看服务端原因）。
     if (!accessKey) {
@@ -176,23 +193,34 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
         method: 'GET',
         // 状态接口是 `Cache-Control: no-store`；这里显式声明避免中间层缓存。
         cache: 'no-store',
+        ...(options.getConfig ? { redirect: 'error' as const } : {}),
         // AuthOrAccessToken 只在带 Authorization 时才走 access-token 分支；
         // 不带会回退到登录 JWT 分支 → 401「请重新登录」。
         headers: {
           Authorization: `Bearer ${accessKey}`,
-          ...(String(options.scriptIdentity ?? '').trim()
-            ? { 'X-Script-Identity': String(options.scriptIdentity).trim() }
+          ...(String(scriptIdentity ?? '').trim()
+            ? { 'X-Script-Identity': String(scriptIdentity).trim() }
             : {})
         },
         signal: controller?.signal
       };
+      const request = (address: string) => {
+        if (!stillCurrent()) return Promise.reject(new Error('service configuration changed'));
+        return options.requester(address, requestInit);
+      };
       if (!options.includeSearchHistory) {
-        return normalizeServiceStatusSnapshot(await options.requester(url, requestInit));
+        const snapshot = await request(url);
+        return stillCurrent() ? normalizeServiceStatusSnapshot(snapshot) : null;
       }
-      const [summary, history] = await Promise.allSettled([
-        options.requester(url, requestInit),
-        options.requester(buildServiceStatusUrl(baseurl, SERVICE_STATUS_SERIES_ENDPOINT), requestInit)
-      ]);
+      const summaryRead = Promise.allSettled([request(url)]);
+      const historyUrl = buildServiceStatusUrl(baseurl, SERVICE_STATUS_SERIES_ENDPOINT);
+      // Older in-process clients keep their parallel behavior. A live browser
+      // configuration can be revoked while the first request is in flight.
+      const historyRead = options.getConfig ? null : Promise.allSettled([request(historyUrl)]);
+      const [summary] = await summaryRead;
+      if (!stillCurrent()) return null;
+      const [history] = await (historyRead ?? Promise.allSettled([request(historyUrl)]));
+      if (!stillCurrent()) return null;
       // 主摘要被拒绝时不展示任何图；网络故障则允许独立历史请求继续提供真实数据。
       if (summary.status === 'rejected' && [401, 403].includes(readHttpStatus(summary.reason) ?? 0)) {
         throw summary.reason;
@@ -204,6 +232,7 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
       const result = snapshot ?? (historySnapshot?.searchHistory !== null ? historySnapshot : null);
       return result ? { ...result, searchHistory: historySnapshot?.searchHistory ?? null } : null;
     } catch (error) {
+      if (!stillCurrent()) return null;
       // 401 与 403 必须分开：两者用户要做的事完全不同。
       //   401 = key 无效/被禁用/是脚本令牌 → 看服务端原因，可能要换令牌
       //   403 = 身份不够 → 找管理员
