@@ -258,11 +258,11 @@ test('a caller-owned explicit device header is not replayed or reidentified by t
 });
 
 async function isolatedProfile(testBody) {
-  const key = 'common.settings.device-id', original = 'fixture-old-isolated-device';
+  const key = 'common.settings.device-id', marker = 'agreement.last-device-replacement.v1', original = 'fixture-old-isolated-device';
   const names = ['window', 'navigator', 'localStorage', 'chrome', '__CXPLUS_BROWSER_AGREEMENT_GATE__', '__CXPLUS_PRIVATE_SETTINGS__'];
   const descriptors = names.map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]);
   const listeners = new Set(), writes = [], authorizations = [];
-  let shared = original, stored = original, allowed = true, firstWrite, firstAuthorization, heldAuthorization;
+  let shared = original, stored = original, storedMarker, allowed = true, firstWrite, firstAuthorization, heldAuthorization;
   const writing = new Promise(resolve => { firstWrite = resolve; });
   const checking = new Promise(resolve => { firstAuthorization = resolve; });
   const runtime = { id: 'fixture-extension', sendMessage: async msg => {
@@ -272,8 +272,8 @@ async function isolatedProfile(testBody) {
     return { allowed: heldAuthorization ? await heldAuthorization : allowed };
   }};
   const local = {
-    set: (values, done) => { writes.push({ id: values[key], done }); firstWrite(); },
-    get: (_keys, done) => { queueMicrotask(() => done({ [key]: stored })); }
+    set: (values, done) => { writes.push({ id: values[key], marker: values[marker], done }); firstWrite(); },
+    get: (_keys, done) => { queueMicrotask(() => done({ [key]: stored, [marker]: storedMarker })); }
   };
   const publish = (id, notify = true) => {
     shared = id;
@@ -301,7 +301,7 @@ async function isolatedProfile(testBody) {
         heldAuthorization = new Promise(resolve => { release = resolve; });
         return release;
       },
-      publish, commit: id => { stored = id; },
+      publish, commit: (id, durableMarker = id) => { stored = id; storedMarker = durableMarker; },
       fail() {
         runtime.lastError = { message: 'fixture storage rejected the write' };
         try { for (const item of writes) item.done(); } finally { delete runtime.lastError; }
@@ -327,8 +327,8 @@ test('isolated ordinary recovery requires a successful Chrome write AND an updat
       await f.writing;
       assert.equal(f.shared(), f.original, 'dispatching the write is not confirmation');
       assert.equal(f.writes.length, 1);
-      const { id, done } = f.writes[0];
-      f.commit(id); done();
+      const { id, marker, done } = f.writes[0];
+      f.commit(id, marker ?? null); done();
       await new Promise(resolve => setImmediate(resolve));
       assert.deepEqual(sent, [f.original, f.original], 'Chrome receipt without synchronized mirror is not a retry');
       f.publish(id);
@@ -338,6 +338,7 @@ test('isolated ordinary recovery requires a successful Chrome write AND an updat
       assert.equal(f.writes.length, 1);
       assert.equal(f.stored(), id);
       assert.equal(f.shared(), id);
+      assert.equal(marker, id, 'the new ID and private rotation marker are sent in the same write');
     });
   });
 });
@@ -378,13 +379,15 @@ test('isolated ordinary recovery does not resend after trusted authorization is 
 });
 
 test('isolated ordinary recovery reuses a cross-tab replacement only if Chrome already persisted it', async () => {
-  for (const durable of [false, true]) {
+  for (const storage of ['missing-id', 'missing-marker', 'wrong-marker', 'confirmed']) {
     await isolatedProfile(async f => {
+      const durable = storage === 'confirmed';
       const sharedReplacement = 'fixture-cross-tab-updated-id', calls = [];
       await withFetch(async (_url, init) => {
         calls.push(init.headers[DEVICE_ID_HEADER]);
         if (calls.length > 1) return Response.json({ accepted:true });
-        if (durable) f.commit(sharedReplacement);
+        if (storage !== 'missing-id') f.commit(sharedReplacement,
+          durable ? sharedReplacement : storage === 'wrong-marker' ? 'other-id' : null);
         f.publish(sharedReplacement);
         return conflictResponse();
       }, async () => {

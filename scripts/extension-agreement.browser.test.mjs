@@ -147,6 +147,11 @@ test('built MV3: owned HTTPS agreement, consent lifecycle, mounted status, ordin
   assert.equal(await deniedButton(page), true, 'internal page neither auto-signs nor starts unscrolled');
   assert.equal(consents, 0);
   assert.equal(enrollments, 1);
+  const deviceKeys = ['common.settings.device-id', 'agreement.local-device.v1', 'agreement.view.v1'];
+  const initialDevice = await page.evaluate(keys => chrome.storage.local.get(keys), deviceKeys);
+  assert.equal(initialDevice[deviceKeys[0]], undefined, 'ordinary agreement startup cannot write shared device identity');
+  assert.match(initialDevice[deviceKeys[1]].id, /^[a-f0-9-]{36}$/);
+  assert.equal(initialDevice[deviceKeys[1]].firstDevice, null);
   assert.equal(await page.evaluate(() => document.getElementById('cx-plus-agreement').shadowRoot.querySelector('.body img')), null, 'rendered text, never remote HTML');
   await page.evaluate(({ base, access }) => chrome.storage.local.set({
     'common.settings.tiku-adapter.baseurl': base, 'common.settings.tiku-adapter.key': access,
@@ -222,6 +227,18 @@ test('built MV3: owned HTTPS agreement, consent lifecycle, mounted status, ordin
   assert.equal(await deniedButton(first), true);
   assert.equal(consents, 0);
   await bottom(first); await enabled(first); await click(first, 'accept');
+  await waitUi(first, '已确认同意'); await waitUi(second, '已确认同意');
+  const signedDevice = await setup.evaluate(keys => chrome.storage.local.get(keys), deviceKeys);
+  assert.equal(signedDevice[deviceKeys[0]], undefined, 'fixture has not initialized its business device yet');
+  const businessDevice = 'owned-ordinary-late-id';
+  await setup.evaluate(({ name, value }) => chrome.storage.local.set({ [name]: value }), { name: deviceKeys[0], value: businessDevice });
+  await setup.waitForFunction(async ({ keys, scope, value }) => {
+    const stored = await chrome.storage.local.get(keys);
+    return stored[keys[1]]?.firstDevice === value && stored[keys[2]]?.phase === 'accepted'
+      && stored[keys[2]]?.scope === scope;
+  }, { timeout: 12000, polling: 75 }, { keys: deviceKeys, scope: signedDevice[deviceKeys[2]].scope, value: businessDevice });
+  assert.equal(enrollments, 1, 'a late first business ID preserves the server-confirmed subject');
+  assert.equal((await setup.evaluate(keys => chrome.storage.local.get(keys), deviceKeys))[deviceKeys[0]], businessDevice);
   await waitUi(first, '已确认同意'); await waitUi(second, '已确认同意');
   assert.equal(await second.evaluate(() => document.getElementById('cx-plus-agreement').hidden), true);
   const outOfScope = await browser.newPage();
