@@ -56,6 +56,12 @@ BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method,
     DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply,
     WCHAR *error, DWORD errorCap);
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply);
+/* Native ordinary agreement: fixed HTTPS transport, no redirects or proof logging. */
+BOOL cx_adapter_agreement_base(const WCHAR *input, WCHAR *out, DWORD cap);
+BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
+    const WCHAR *authorization, const WCHAR *proof, const char *json, DWORD limit, CX_ADAPTER_REPLY *reply);
+BOOL cx_adapter_agreement_sha256(const BYTE *data, DWORD length, char out[65]);
+
 /* Only our own launcher's ready event. No caller-supplied method/path/headers/content. */
 BOOL cx_adapter_report_owned_exam_ready(const CX_OWNED_RUN_GRANT *grant,const WCHAR *device,const WCHAR *launch);
 BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method,

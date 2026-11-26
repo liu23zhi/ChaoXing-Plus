@@ -93,6 +93,9 @@ typedef struct HOME_STATE {
     HOME_SESSION_SLOT sessions[HOME_MAX_SESSIONS];
     WCHAR error[512];
     BOOL closing;
+    volatile LONG agreementCancelled;
+    struct HA_RECORD *agreementMemory;
+    WCHAR agreementMemoryScope[65];
     HANDLE worker;
     DWORD operation;
     WCHAR pendingBrowser[16];
@@ -1028,6 +1031,8 @@ static void home_poll_sessions(HOME_STATE *state) {
     }
 }
 
+#include "home-agreement.inc"
+
 static DWORD WINAPI home_work(LPVOID context) {
     HOME_STATE *state = (HOME_STATE *)context;
     WCHAR *browserPath = NULL, *cacheDir = NULL;
@@ -1103,7 +1108,7 @@ static DWORD WINAPI home_work(LPVOID context) {
     ZeroMemory(&options, sizeof(options)); options.browserPath = browserPath;
     options.crxData = data; options.crxSize = size; options.initialUrl = L"https://www.chaoxing.com/";
     options.settingsJsonUTF8 = settings;
-    if (!cx_script_lease_valid()) goto done;
+    if (!cx_script_lease_valid() || !home_agreement_admit(state) || ha_cancelled(state) || !cx_script_lease_valid()) goto done;
     state->operationOK = cx_browser_start(&options, &state->pendingSession, state->error, 512);
 done:
     /* 注入上下文只在本次调用内有效：任何后续（设置对话框预览、考试模式）
@@ -1129,6 +1134,7 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     if (state->worker) return;
     isNewSession = operation == HOME_EDGE || operation == HOME_CHROME;
     if (isNewSession && !cx_script_lease_valid()) { SendMessageW(state->window, WM_CLOSE, 0, 0); return; }
+    if (isNewSession) InterlockedExchange(&state->agreementCancelled, 0);
     state->pendingSlot = HOME_MAX_SESSIONS;
     if (operation == HOME_CLOSE_SESSION) {
         selected = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
@@ -1744,6 +1750,7 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
         }
     }
     if (message == WM_CLOSE) {
+        InterlockedExchange(&state->agreementCancelled, 1);
         if (!state->examRun) {
             state->closing = TRUE;
             if (state->worker) home_status(state, L"检查结束后将关闭窗口…");
@@ -1902,6 +1909,7 @@ message_loop:
     if (state->pendingSession) cx_browser_destroy(state->pendingSession);
     if (IsWindow(window)) DestroyWindow(window);
     if (home_default_font) DeleteObject(home_default_font); home_default_font = NULL;
+    ha_free_record(state->agreementMemory);
     SecureZeroMemory(state, sizeof(*state)); HeapFree(GetProcessHeap(), 0, state);
     if (examRun) cx_script_lease_stop();
     cx_home_config_clear(config);

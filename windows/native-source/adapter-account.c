@@ -349,7 +349,7 @@ static DWORD WINAPI cx_http_deadline_work(LPVOID context) {
     return 0;
 }
 
-static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, BOOL scriptAddressProbe) {
+static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, BOOL scriptAddressProbe, BOOL agreementRequest, const WCHAR *agreementProof) {
     WCHAR *buffers = NULL, *url, *host, *object, *extra, *headers, *authHeader; URL_COMPONENTS parts; HINTERNET session = NULL, conn = NULL, req = NULL; DWORD status = 0, statusSize = sizeof(status), used = 0, got, cap, flags = 0, disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION; BYTE *body = NULL; BOOL ok = FALSE;
     DWORD started = GetTickCount();
     CX_HTTP_DEADLINE deadline; HANDLE watchdog = NULL;
@@ -372,6 +372,7 @@ static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCH
         && lstrcmpW(host, L"127.0.0.1") && lstrcmpW(host, L"[::1]") && lstrcmpW(host, L"::1")) {
         cx_error(error, errorCap, L"脚本地址必须使用 HTTPS，本机回环地址可使用 HTTP。"); goto done;
     }
+    if (agreementRequest && parts.nScheme != INTERNET_SCHEME_HTTPS) goto done;
     if (runIdentity && parts.nScheme != INTERNET_SCHEME_HTTPS && lstrcmpiW(host,L"localhost")
         && lstrcmpW(host,L"127.0.0.1") && lstrcmpW(host,L"[::1]") && lstrcmpW(host,L"::1")) goto done;
     session = g_http.open(L"超星学习助手/0.1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -388,6 +389,8 @@ static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCH
     used = 0; if (auth && *auth) { if (!cx_append_w(authHeader, 4300, &used, L"Authorization: ") || !cx_append_w(authHeader, 4300, &used, auth) || !cx_append_w(authHeader, 4300, &used, L"\r\n")) { cx_error(error, errorCap, L"鉴权信息过长。"); goto done; } }
     used = 0; headers[0] = 0; if (!cx_append_w(headers, 4608, &used, L"Accept: application/json\r\n") || !cx_append_w(headers, 4608, &used, L"Content-Type: application/json; charset=utf-8\r\n") || (auth && *auth && !cx_append_w(headers, 4608, &used, authHeader))) { cx_error(error, errorCap, L"请求头过长。"); goto done; }
     if (runIdentity && *runIdentity && (!cx_append_w(headers, 4608, &used, L"X-Script-Identity: ") || !cx_append_w(headers, 4608, &used, runIdentity) || !cx_append_w(headers, 4608, &used, L"\r\n"))) { cx_error(error, errorCap, L"脚本身份请求头过长。"); goto done; }
+    if (agreementProof && (!cx_append_w(headers, 4608, &used, L"X-Agreement-Device: ")
+        || !cx_append_w(headers, 4608, &used, agreementProof) || !cx_append_w(headers, 4608, &used, L"\r\n"))) goto done;
     if (!g_http.addHeaders(req, headers, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) { cx_error(error, errorCap, L"设置请求头失败。"); goto done; }
     if (!cx_http_remaining(req, started, timeout) || !g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0)
         || !cx_http_remaining(req, started, timeout) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
@@ -415,14 +418,82 @@ done:
     if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
 }
 static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
-    return cx_http_url_internal(base, path, method, auth, runIdentity, json, timeout, bodyLimit, reply, error, errorCap, FALSE);
+    return cx_http_url_internal(base, path, method, auth, runIdentity, json, timeout, bodyLimit, reply, error, errorCap, FALSE, FALSE, NULL);
 }
 BOOL cx_adapter_script_address_check(const WCHAR *address, WCHAR *error, DWORD errorCap) {
     CX_ADAPTER_REPLY unusedReply;
-    return cx_http_url_internal(address, NULL, L"HEAD", NULL, NULL, NULL, 5000, 0, &unusedReply, error, errorCap, TRUE);
+    return cx_http_url_internal(address, NULL, L"HEAD", NULL, NULL, NULL, 5000, 0, &unusedReply, error, errorCap, TRUE, FALSE, NULL);
 }
 BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, NULL, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
 BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const WCHAR *identity, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, identity, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
+BOOL cx_adapter_agreement_base(const WCHAR *input, WCHAR *out, DWORD cap) {
+    URL_COMPONENTS parts; WCHAR port[12]; DWORD n, i, used = 0;
+    if (!input || !out || !cx_load_http()) return FALSE;
+    n = cx_wlen(input);
+    if (n < 9 || n >= 4096 || CompareStringOrdinal(input, 8, L"https://", 8, TRUE) != CSTR_EQUAL) return FALSE;
+    for (i = 8; i < n; ++i) if (input[i] < 33 || input[i] == L'?' || input[i] == L'#'
+        || input[i] == L'@' || input[i] == L'\\') return FALSE;
+    ZeroMemory(&parts, sizeof(parts)); parts.dwStructSize = sizeof(parts);
+    parts.dwHostNameLength = parts.dwUserNameLength = parts.dwPasswordLength = parts.dwUrlPathLength
+        = parts.dwExtraInfoLength = (DWORD)-1;
+    if (!g_http.crack(input, n, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS || !parts.dwHostNameLength
+        || parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength || !parts.nPort
+        || parts.dwHostNameLength + 9 >= cap) return FALSE;
+    out[0] = 0;
+    if (!cx_append_w(out, cap, &used, L"https://")) return FALSE;
+    for (i = 0; i < parts.dwHostNameLength; ++i) {
+        WCHAR ch = parts.lpszHostName[i];
+        out[used++] = ch >= L'A' && ch <= L'Z' ? ch + (L'a' - L'A') : ch;
+    }
+    out[used] = 0;
+    if (parts.nPort != 443) {
+        wsprintfW(port, L":%u", (UINT)parts.nPort);
+        if (!cx_append_w(out, cap, &used, port)) return FALSE;
+    }
+    n = parts.dwUrlPathLength;
+    while (n && parts.lpszUrlPath[n - 1] == L'/') --n;
+    n = cx_strip_api_prefix(parts.lpszUrlPath, n);
+    if (n >= cap - used) return FALSE;
+    if (n) CopyMemory(out + used, parts.lpszUrlPath, n * sizeof(WCHAR));
+    out[used + n] = 0; return TRUE;
+}
+BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
+    const WCHAR *authorization, const WCHAR *proof, const char *json, DWORD limit, CX_ADAPTER_REPLY *reply) {
+    static const WCHAR pinned[] = L"api/agreements/current?version=";
+    DWORD i;
+    if (reply) ZeroMemory(reply, sizeof(*reply));
+    if (!base || !method || !path || !limit || limit > 2UL * 1024UL * 1024UL
+        || cx_wlen(base) < 9 || CompareStringOrdinal(base, 8, L"https://", 8, TRUE) != CSTR_EQUAL) return FALSE;
+    for (i = 8; base[i]; ++i) if (base[i] < 33 || base[i] == L'?' || base[i] == L'#'
+        || base[i] == L'@' || base[i] == L'\\') return FALSE;
+    if (!lstrcmpW(path, L"api/agreements/devices")) {
+        if (lstrcmpW(method, L"POST") || authorization || proof || json) return FALSE;
+    } else {
+        if (!authorization || !proof) return FALSE;
+        if (!lstrcmpW(path, L"api/agreements/consents")) {
+            if (lstrcmpW(method, L"POST") || !json) return FALSE;
+        } else {
+            if (lstrcmpW(method, L"GET") || json) return FALSE;
+            if (lstrcmpW(path, L"api/agreements/status")) {
+                DWORD prefix = ARRAYSIZE(pinned) - 1, n = cx_wlen(path);
+                if (n <= prefix || n - prefix > 48 || !cx_mem_equal(path, pinned, prefix * sizeof(WCHAR))) return FALSE;
+                for (i = prefix; path[i]; ++i) {
+                    WCHAR c = path[i];
+                    if (!((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9')
+                        || (i > prefix && (c == L'.' || c == L'-' || c == L'_')))) return FALSE;
+                }
+            }
+        }
+    }
+    if (proof) {
+        if (cx_wlen(proof) != 47 || proof[0] != L'a' || proof[1] != L'g' || proof[2] != L'd' || proof[3] != L'_') return FALSE;
+        for (i = 4; proof[i]; ++i) if (!((proof[i] >= L'a' && proof[i] <= L'z') || (proof[i] >= L'A' && proof[i] <= L'Z')
+            || (proof[i] >= L'0' && proof[i] <= L'9') || proof[i] == L'_' || proof[i] == L'-')) return FALSE;
+    }
+    if (authorization) for (i = 0; authorization[i]; ++i) if (authorization[i] < 32 || authorization[i] > 126) return FALSE;
+    return cx_http_url_internal(base, path, method, authorization, NULL, json, 8500, limit, reply, NULL, 0,
+        FALSE, TRUE, proof);
+}
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply) { if (reply && reply->body) HeapFree(GetProcessHeap(), 0, reply->body); if (reply) { reply->body = NULL; reply->length = 0; reply->status = 0; } }
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account) { if (account) { SecureZeroMemory(account, sizeof(*account)); account->accessTokenId = 0; } }
 
@@ -524,6 +595,11 @@ done: if (hash) g_bcryptDestroy(hash); if (object) HeapFree(GetProcessHeap(), 0,
 static BOOL cx_hex_digest(const BYTE digest[32], char out[65]) {
     static const char hex[] = "0123456789abcdef"; DWORD i; if (!digest || !out) return FALSE;
     for (i = 0; i < 32; i++) { out[i * 2] = hex[digest[i] >> 4]; out[i * 2 + 1] = hex[digest[i] & 15]; } out[64] = 0; return TRUE;
+}
+BOOL cx_adapter_agreement_sha256(const BYTE *data, DWORD length, char out[65]) {
+    BYTE digest[32];
+    BOOL ok = cx_sha256(data, length, digest) && cx_hex_digest(digest, out);
+    SecureZeroMemory(digest, sizeof(digest)); return ok;
 }
 static BOOL cx_hex_equal(const char *left, const char *right) {
     DWORD i; if (!left || !right || cx_alen(left) != 64 || cx_alen(right) != 64) return FALSE;
