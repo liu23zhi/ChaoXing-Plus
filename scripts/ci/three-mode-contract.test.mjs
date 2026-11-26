@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
-const pinned = '56acb76dc6a92b875abf26781bfab44e787a3880';
+const legacyPin = '56acb76dc6a92b875abf26781bfab44e787a3880';
+const pendingStartPin = '186480e58182f91875863b63e3ccafc38f9bebea';
 const joint = 'TestChaoXingThreeModeHTTP';
 const quota = 'TestNativeHostReportedSessionsUseThreeThenOneSlot';
 const client = fileURLToPath(new URL('../../', import.meta.url));
@@ -19,7 +20,9 @@ test('extension and host send three modes to the pinned TiKuHelper HTTP/store; h
   assert.ok(process.env.TIKUHELPER_ROOT, 'Set TIKUHELPER_ROOT to the pinned TiKuHelper checkout');
   const checkout = resolve(process.env.TIKUHELPER_ROOT);
   const head = await run('git', ['-C', checkout, 'rev-parse', 'HEAD']);
-  assert.equal(head.stdout.trim(), pinned, 'unexpected TiKuHelper checkout');
+  const pinned = head.stdout.trim();
+  assert.ok([legacyPin, pendingStartPin].includes(pinned), 'unexpected TiKuHelper checkout');
+  const current = pinned === pendingStartPin;
   const dir = await mkdtemp(join(tmpdir(), 'cx-three-mode-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const tar = join(dir, 'service.tar');
@@ -38,7 +41,8 @@ test('extension and host send three modes to the pinned TiKuHelper HTTP/store; h
   try {
     result = await run('go', args, {
       cwd: dir, maxBuffer: 16 << 20, timeout: 12 * 60_000,
-      env: { ...buildEnv, GOENV: 'off', GOWORK: 'off', CX_CONTRACT_NODE: process.execPath, CX_CONTRACT_CLIENT: client },
+      env: { ...buildEnv, GOENV: 'off', GOWORK: 'off', CX_CONTRACT_NODE: process.execPath,
+        CX_CONTRACT_CLIENT: client, CX_CONTRACT_LAYOUT: current ? 'pending-start' : 'legacy' },
     });
   } catch (err) {
     // Decode Go's test stream so CI shows the failing check rather than a buried JSON escape.
@@ -53,5 +57,6 @@ test('extension and host send three modes to the pinned TiKuHelper HTTP/store; h
   for (const e of events.filter(e => e.Test === joint && e.Output?.includes('CONTRACT:'))) {
     t.diagnostic(e.Output.slice(e.Output.indexOf('CONTRACT:')).trim());
   }
+  t.diagnostic('TiKuHelper ' + pinned + ': ' + (current ? 'pending Start' : 'legacy Start'));
   t.diagnostic(quota + ': PASS (unbound host rejected; reported 3, 3, 0 → occupied 3, 3, 1)');
 });

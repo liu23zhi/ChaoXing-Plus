@@ -17,7 +17,7 @@ import {
   TIKU_ADAPTER_QUOTA_FAILURE_MESSAGE,
   TIKU_ADAPTER_UPSTREAM_FAILURE_MESSAGE
 } from '../core/utils/tiku-adapter-error.js';
-import { isDeviceIdConflict, regenerateDeviceId, tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
+import { DEVICE_ID_HEADER, isDeviceIdConflict, recoverDeviceIdAfterConflict, tikuAdapterDeviceHeaders } from '../runtime/device-identity.js';
 
 export const TIKU_ADAPTER_BASEURL_KEY = 'common.settings.tiku-adapter.baseurl';
 export const TIKU_ADAPTER_KEY_KEY = 'common.settings.tiku-adapter.key';
@@ -845,7 +845,7 @@ async function requestTikuAdapterJSON<T>(
   }
 
   let lastError: unknown;
-  const maxAttempts = Math.max(1, options.retryAttempts);
+  let maxAttempts = Math.max(1, options.retryAttempts);
   const requestBody = options.method === 'POST' ? JSON.stringify(options.data ?? {}) : undefined;
   // 141 §4.2 / S7：设备冲突只重试一次。放在循环外，跨 attempt 保持。
   let deviceConflictRetried = false;
@@ -856,7 +856,7 @@ async function requestTikuAdapterJSON<T>(
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
     }
     // Check at the point of each possible write, AFTER health, polling and retry waits.
-    if (usesBrowserAgreementGate() && options.method === 'POST' && !(await hasTikuAgreement(identity.baseurl, key))) {
+    if (usesBrowserAgreementGate() && (options.method === 'POST' || deviceConflictRetried) && !(await hasTikuAgreement(identity.baseurl, key))) {
       throw new Error(AGREEMENT_REQUIRED_MESSAGE);
     }
     const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
@@ -864,12 +864,13 @@ async function requestTikuAdapterJSON<T>(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.min(options.timeoutMs, remainingMs));
     try {
+      const deviceHeaders = tikuAdapterDeviceHeaders();
       const response = await fetch(url, {
         method: options.method,
         headers: {
           // 141 §7 入口 4：配置探测 / 搜索任务 / 轮询共用的 JSON 通道。
           // 设备头放最前，Authorization 等业务头随后覆盖同名键。
-          ...tikuAdapterDeviceHeaders(),
+          ...deviceHeaders,
           Authorization: createTikuAdapterAuthorizationHeader(key),
           ...(scriptIdentity ? { 'X-Script-Identity': scriptIdentity } : {}),
           ...options.extraHeaders,
@@ -904,19 +905,12 @@ async function requestTikuAdapterJSON<T>(
         // （＝默认路径）遇到冲突直接失败，只有自定义题库能自动恢复。
         //
         // 命中的端点确实挂了 DeviceLimit：/api/search/tasks（router.go:186/209）。
-        if (!deviceConflictRetried && isDeviceIdConflict(response.status, responseBody)) {
+        if (!deviceConflictRetried && !scriptIdentity && isDeviceIdConflict(response.status, responseBody)
+          && await recoverDeviceIdAfterConflict(deviceHeaders[DEVICE_ID_HEADER])) {
           deviceConflictRetried = true;
-          regenerateDeviceId();
-          // ⚠️ 这里**不能**用 `attempt--; continue;`（2026-11-15 实测踩到）。
-          //
-          // request.ts 里那样写是安全的：它的 maxAttempts 对 POST 恒为 1，
-          // attempt-- 后 continue 恰好再跑一次就结束。
-          // 但本函数的 maxAttempts = TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS = 3，
-          // attempt-- 会让这一轮完全不消耗预算 —— 实测「连续 409」用例里循环次数
-          // 超出 maxAttempts（8 次），把重试预算整个架空。
-          //
-          // 正确做法：普通 `continue`，让这次冲突重试**占用**一个 attempt。
-          // 「冲突换 ID 后重试一次」本来就该计入预算；免费的重试会被后续预算逻辑放大。
+          // Use the next existing attempt when possible. Only an explicit, confirmed
+          // conflict at the limit gets one final attempt, never a new transport budget.
+          if (attempt === maxAttempts) maxAttempts++;
           continue;
         }
         if (response.status === 404) {

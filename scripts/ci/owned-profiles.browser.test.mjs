@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createTestDirectory, resolveTestPath } from '../test-helpers/temp-directory.mjs';
+import { diagnosticBrowserArgs, openDiagnosticPage } from '../test-helpers/local-diagnostic-page.mjs';
 
 const puppeteer = createRequire(resolve(process.env.CX_BROWSER_DEPENDENCIES || resolveTestPath(), 'package.json'))('puppeteer');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -65,8 +66,7 @@ test('three live, isolated Chrome profiles send native_browser diagnostics for o
       // Sequential cold starts limit peak load; keep every profile open through the cross-profile checks.
       const browser = await puppeteer.launch({ headless: true, pipe: true, userDataDir: join(root, 'p' + i), enableExtensions: [dist],
         executablePath: process.env.CX_BROWSER_EXECUTABLE, timeout: 25_000, protocolTimeout: 18_000, signal: t.signal,
-        args: ['--disable-background-networking', '--disable-component-update', '--no-proxy-server',
-          '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'],
+        args: diagnosticBrowserArgs,
       });
       browsers.push(browser);
       const worker = await browser.waitForTarget(target => target.type() === 'service_worker' &&
@@ -77,26 +77,29 @@ test('three live, isolated Chrome profiles send native_browser diagnostics for o
       await page.evaluate(fields => chrome.storage.local.set(fields), {
         'common.settings.tiku-adapter.baseurl': base, 'common.settings.tiku-adapter.key': token, [deviceKey]: device, [browserKey]: id,
       });
-      await until(() => starts.length > i, 'missing real start for profile ' + i);
-      assert.equal(starts[i].browser_id, id);
-    }
-    assert.equal(new Set(starts.map(s => s.browser_id)).size, 3);
-    assert.equal(new Set(starts.map(s => s.launch_id)).size, 3);
-    for (const [i, page] of pages.entries()) {
-      // One signal at a time: a batch observed now must come from exactly this profile and launch.
       await page.evaluate(({ k, v }) => chrome.storage.local.set({ [k]: v }), { k: signalKey, v: i + 1 });
-      await until(() => batches.length > i, 'missing real settings event for profile ' + i);
+      await page.waitForFunction(() => document.getElementById('diagnostics-state').textContent.includes('已启用'));
+      assert.equal(starts.length, 0, 'no browser started a diagnostic file without a target page');
+      assert.equal(batches.length, 0);
+    }
+    for (const [i, browser] of browsers.entries()) {
+      // One real target-page event at a time, from exactly this profile and launch.
+      await openDiagnosticPage(browser);
+      await until(() => batches.length > i, 'missing real target-page event for profile ' + i);
+      assert.equal(starts[i].browser_id, ids[i]);
       const { entries, ...scope } = batches[i];
       assert.deepEqual(scope, starts[i]);
       assert.deepEqual(entries.map(({ time, ...entry }) => {
         assert.ok(Number.isFinite(Date.parse(time))); return entry;
-      }), [{ event: 'settings.saved', level: 'info' }]);
+      }), [{ event: 'extension.ready', level: 'info' }]);
     }
+    assert.equal(new Set(starts.map(s => s.browser_id)).size, 3);
+    assert.equal(new Set(starts.map(s => s.launch_id)).size, 3);
     const stored = await Promise.all(pages.map(p => p.evaluate(keys => chrome.storage.local.get(keys), [deviceKey, browserKey, signalKey])));
     assert.deepEqual(stored, ids.map((id, i) => ({ [deviceKey]: device, [browserKey]: id, [signalKey]: i + 1 })));
     assert.equal(starts.length, 3); assert.equal(batches.length, 3); assert.ok(policies >= 3);
     if (errors.length) throw errors[0];
-    t.diagnostic('3 live Chrome profiles: one device, 3 host browser IDs, 3 distinct launches, 3 correctly scoped settings events');
+    t.diagnostic('3 live Chrome profiles: one device, 3 host browser IDs, 3 distinct launches, 3 correctly scoped target-page events');
   } finally {
     const closed = await Promise.allSettled(browsers.map(b => b.close()));
     server.closeAllConnections();

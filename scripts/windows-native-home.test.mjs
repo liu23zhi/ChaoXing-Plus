@@ -86,6 +86,8 @@ function runHome(dpi, visible = false) {
     'injecting the device id preserves every other key in the config file',
     'the complete home page exits after asynchronous cleanup',
     'script activation uses a fresh 32 byte cryptographic hexadecimal identity',
+    'authorized exam diagnostics use an independent device even without a browser host',
+    'each new authorized exam diagnostic run gets a fresh device and launch identity',
     'activated sessions replace consumed tickets in memory and force no disk writes',
     'a failed script lease closes every owned browser through normal cleanup',
     'shutdown joins and clears the script heartbeat worker'

@@ -123,7 +123,7 @@ test('冲突重试对 POST 也生效（业务上不会重放的请求也必须�
   assert.equal(calls[1].init.body, calls[0].init.body);
 });
 
-test('冲突重试不消耗既有重试预算：GET 的 maxAttempts 仍然是原来的语义', async () => {
+test('a confirmed 409 permits just one recovery replay even if it ends in a transport failure', async () => {
   const calls = [];
   await withFetch(async (url, init) => {
     calls.push({ url, init });
@@ -131,16 +131,13 @@ test('冲突重试不消耗既有重试预算：GET 的 maxAttempts 仍然是原
     if (calls.length === 2) throw new TypeError('Failed to fetch');
     return Response.json({ answer: { answerText: 'A' } });
   }, async () => {
-    const result = await request(ADAPTER_URL, {
+    await assert.rejects(request(ADAPTER_URL, {
       headers: AUTH,
       retry: { maxAttempts: 3, delayMs: 0 },
       timeoutMs: 5000
-    });
-    assert.deepEqual(result, { answer: { answerText: 'A' } });
+    }), /Failed to fetch/);
   });
-
-  // 冲突重试（第 2 次）之后，网络错误仍应能走既有重试逻辑（第 3 次）。
-  assert.equal(calls.length, 3, '冲突重试不该吃掉一次网络重试预算');
+  assert.equal(calls.length, 2, 'the remaining transport budget cannot send a third request after conflict recovery');
 });
 
 test('regenerateDeviceId 的落点一致：冲突后用过的 ID 不会在后续请求里复活', async () => {
@@ -167,3 +164,448 @@ test('直接调 regenerateDeviceId 是幂等可用：连续调用得到不同 ID
   assert.match(b, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
   assert.notEqual(a, b);
 });
+
+test('host-owned browser retains the injected device and session after a conflict instead of rewriting either', async () => {
+  const device = 'fixture-native-host';
+  const instance = 'ac67a37a-668f-4918-bb9e-bd219ab2b107';
+  const key = 'common.settings.device-id', instanceKey = 'common.settings.device-instance';
+  const values = new Map([[key, JSON.stringify(device)], [instanceKey, JSON.stringify(instance)]]);
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null, setItem: (k,v) => values.set(k,v) };
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => {
+      ids.push([init.headers[DEVICE_ID_HEADER], init.headers[DEVICE_INSTANCE_HEADER]]);
+      return conflictResponse();
+    }, async () => {
+      await assert.rejects(request(ADAPTER_URL, { headers: AUTH }), error => error.status === 409);
+    });
+    assert.deepEqual(ids, [[device, instance]]);
+    assert.equal(JSON.parse(values.get(key)), device);
+    assert.equal(JSON.parse(values.get(instanceKey)), instance);
+  } finally { globalThis.localStorage = before; reset(); }
+});
+
+test('script-authenticated conflict surfaces without changing the ordinary device ID or replaying the request', async () => {
+  const calls = [];
+  await withFetch(async (_url, init) => { calls.push(init); return conflictResponse(); }, async () => {
+    await assert.rejects(request(ADAPTER_URL, {
+      headers: { ...AUTH, 'x-script-identity': 'owned-fixture' }
+    }), error => error.status === 409);
+  });
+  assert.equal(calls.length, 1);
+});
+
+test('parallel responses for the same retired device reuse a single replacement and follow the persisted profile value', async () => {
+  const device = 'fixture-profile-before';
+  const key = 'common.settings.device-id';
+  const values = new Map([[key, JSON.stringify(device)]]);
+  const writes = [], extensionWrites = [];
+  const before = globalThis.localStorage, previousChrome = globalThis.chrome;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null,
+    setItem: (k, v) => { values.set(k,v); writes.push(JSON.parse(v)); } };
+  globalThis.chrome = { storage: { local: { set: (items, cb) => { extensionWrites.push(items); cb(); } } } };
+  const { getDeviceIdentity, __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => {
+      const id = init.headers[DEVICE_ID_HEADER]; ids.push(id);
+      // Yield so both first requests used the same original ID; no network access.
+      return id === device ? conflictResponse() : Response.json({ ok:true });
+    }, () => Promise.all([request(ADAPTER_URL, { headers: AUTH }), request(ADAPTER_URL, { headers: AUTH })]));
+    assert.equal(ids.length, 4);
+    assert.deepEqual(ids.slice(0,2), [device,device]);
+    assert.notEqual(ids[2],device);
+    assert.deepEqual(ids.slice(2), [ids[2],ids[2]]);
+    assert.equal(JSON.parse(values.get(key)), ids[2]);
+    assert.deepEqual(writes, [ids[2]]);
+    assert.deepEqual(extensionWrites, [{ [key]: ids[2] }]);
+    // Simulate hydration from another extension tab; the old in-memory ID must not win.
+    values.set(key, JSON.stringify('fixture-profile-synchronized'));
+    assert.equal(getDeviceIdentity().deviceId, 'fixture-profile-synchronized');
+  } finally { globalThis.localStorage = before; globalThis.chrome = previousChrome; reset(); }
+});
+
+test('when the shared device write does not take effect, a conflict surfaces without replaying the old ID', async () => {
+  const key = 'common.settings.device-id', device = 'fixture-read-only-profile';
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => k === key ? JSON.stringify(device) : null,
+    setItem() { throw new Error('fixture storage is read only'); } };
+  const { getDeviceIdentity, __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => { ids.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse(); }, async () => {
+      await assert.rejects(request(ADAPTER_URL, { headers: AUTH }), error => error.status === 409);
+    });
+    assert.deepEqual(ids, [device]);
+    assert.equal(getDeviceIdentity().deviceId, device);
+  } finally { globalThis.localStorage = before; reset(); }
+});
+
+test('a caller-owned explicit device header is not replayed or reidentified by the ordinary profile', async () => {
+  const calls = [];
+  await withFetch(async (_url, init) => { calls.push(init); return conflictResponse(); }, async () => {
+    await assert.rejects(request(ADAPTER_URL, {
+      headers: { ...AUTH, [DEVICE_ID_HEADER]: 'fixture-external-owner-device' }
+    }), error => error.status === 409);
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers[DEVICE_ID_HEADER], 'fixture-external-owner-device');
+});
+
+async function isolatedProfile(testBody) {
+  const key = 'common.settings.device-id', original = 'fixture-old-isolated-device';
+  const names = ['window', 'navigator', 'localStorage', 'chrome', '__CXPLUS_BROWSER_AGREEMENT_GATE__', '__CXPLUS_PRIVATE_SETTINGS__'];
+  const descriptors = names.map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]);
+  const listeners = new Set(), writes = [], authorizations = [];
+  let shared = original, stored = original, allowed = true, firstWrite, firstAuthorization, heldAuthorization;
+  const writing = new Promise(resolve => { firstWrite = resolve; });
+  const checking = new Promise(resolve => { firstAuthorization = resolve; });
+  const runtime = { id: 'fixture-extension', sendMessage: async msg => {
+    assert.equal(msg.operation, 'authorize');
+    authorizations.push(allowed);
+    firstAuthorization();
+    return { allowed: heldAuthorization ? await heldAuthorization : allowed };
+  }};
+  const local = {
+    set: (values, done) => { writes.push({ id: values[key], done }); firstWrite(); },
+    get: (_keys, done) => { queueMicrotask(() => done({ [key]: stored })); }
+  };
+  const publish = (id, notify = true) => {
+    shared = id;
+    if (notify) for (const listener of listeners) listener({ [key]: { newValue: id } }, 'local');
+  };
+  const chrome = { runtime, storage: { local, onChanged: {
+    addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener)
+  }} };
+  const privateSettings = {
+    has: k => k === key, get: () => shared,
+    set: (k, value) => { shared = value; local.set({ [k]: value }, () => { void runtime.lastError; }); }
+  };
+  for (const [name, value] of Object.entries({
+    window: new EventTarget(), navigator: { onLine: true }, localStorage: { getItem: () => null },
+    chrome, __CXPLUS_BROWSER_AGREEMENT_GATE__: true, __CXPLUS_PRIVATE_SETTINGS__: privateSettings,
+  })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  try {
+    await testBody({
+      original, writes, writing, checking, authorizations, shared: () => shared, stored: () => stored,
+      authorize: value => { allowed = value; },
+      holdAuthorization() {
+        let release;
+        heldAuthorization = new Promise(resolve => { release = resolve; });
+        return release;
+      },
+      publish, commit: id => { stored = id; },
+      fail() {
+        runtime.lastError = { message: 'fixture storage rejected the write' };
+        try { for (const item of writes) item.done(); } finally { delete runtime.lastError; }
+      },
+    });
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+    reset();
+  }
+}
+
+test('isolated ordinary recovery requires a successful Chrome write AND an updated shared mirror', async () => {
+  await isolatedProfile(async f => {
+    const sent = [], operation = () => request(ADAPTER_URL, { headers: AUTH, timeoutMs: 3000 });
+    await withFetch(async (_url, init) => {
+      const id = init.headers[DEVICE_ID_HEADER]; sent.push(id);
+      return id === f.original ? conflictResponse() : Response.json({ accepted:true });
+    }, async () => {
+      const inFlight = Promise.all([operation(), operation()]);
+      await f.writing;
+      assert.equal(f.shared(), f.original, 'dispatching the write is not confirmation');
+      assert.equal(f.writes.length, 1);
+      const { id, done } = f.writes[0];
+      f.commit(id); done();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(sent, [f.original, f.original], 'Chrome receipt without synchronized mirror is not a retry');
+      f.publish(id);
+      const results = await inFlight;
+      assert.deepEqual(results, [{ accepted:true }, { accepted:true }]);
+      assert.deepEqual(sent, [f.original, f.original, id, id]);
+      assert.equal(f.writes.length, 1);
+      assert.equal(f.stored(), id);
+      assert.equal(f.shared(), id);
+    });
+  });
+});
+
+test('isolated ordinary recovery on Chrome storage failure retains the previous ID and surfaces the original 409', async () => {
+  await isolatedProfile(async f => {
+    const sent = [];
+    await withFetch(async (_url, init) => {
+      sent.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const rejected = assert.rejects(request(ADAPTER_URL, { headers: AUTH }), e => e.status === 409);
+      await f.writing; f.fail();
+      await rejected;
+    });
+    assert.deepEqual(sent, [f.original]);
+    assert.equal(f.shared(), f.original);
+    assert.equal(f.stored(), f.original);
+  });
+});
+
+test('isolated ordinary recovery does not resend after trusted authorization is withdrawn', async () => {
+  await isolatedProfile(async f => {
+    const sent = [];
+    await withFetch(async (_url, init) => {
+      sent.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const rejected = assert.rejects(request(ADAPTER_URL, { headers: AUTH }), e => e.status === 409);
+      await f.writing;
+      const { id, done } = f.writes[0];
+      f.authorize(false);
+      f.commit(id); f.publish(id); done();
+      await rejected;
+      assert.equal(f.stored(), id);
+    });
+    assert.deepEqual(sent, [f.original]);
+    assert.deepEqual(f.authorizations, [false]);
+  });
+});
+
+test('isolated ordinary recovery reuses a cross-tab replacement only if Chrome already persisted it', async () => {
+  for (const durable of [false, true]) {
+    await isolatedProfile(async f => {
+      const sharedReplacement = 'fixture-cross-tab-updated-id', calls = [];
+      await withFetch(async (_url, init) => {
+        calls.push(init.headers[DEVICE_ID_HEADER]);
+        if (calls.length > 1) return Response.json({ accepted:true });
+        if (durable) f.commit(sharedReplacement);
+        f.publish(sharedReplacement);
+        return conflictResponse();
+      }, async () => {
+        const result = request(ADAPTER_URL, { headers: AUTH });
+        if (durable) assert.deepEqual(await result, { accepted:true });
+        else await assert.rejects(result, e => e.status === 409);
+      });
+      assert.deepEqual(calls, durable ? [f.original, sharedReplacement] : [f.original]);
+      assert.deepEqual(f.writes, [], 'an observed replacement is verified, not regenerated');
+    });
+  }
+});
+
+
+const timedRecovery = { headers: AUTH, timeoutMs: 4500, retry: { maxAttempts: 3, delayMs: 0 } };
+
+function recoveryClock(t) {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  return t.mock.timers;
+}
+
+function observeRequest(opts = timedRecovery) {
+  const observed = {};
+  observed.finished = request(ADAPTER_URL, opts).then(
+    result => { observed.result = result; },
+    error => { observed.error = error; }
+  );
+  return observed;
+}
+
+test('slow confirmed-conflict storage failure preserves 409 despite available transport attempts', async t => {
+  const clock = recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [];
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]);
+      return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+    }, async () => {
+      const observed = observeRequest();
+      await f.writing;
+      clock.tick(1600); // past the 1500 ms transport slice, still inside the 4500 ms request
+      f.fail();
+      await observed.finished;
+      assert.equal(observed.error?.status, 409);
+      assert.deepEqual(calls, [f.original]);
+      assert.equal(f.shared(), f.original);
+    });
+  });
+});
+
+test('slow confirmed-conflict storage success can still replay exactly once before the overall deadline', async t => {
+  const clock = recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [], signals = [];
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]); signals.push(req.signal);
+      return calls.length === 1 ? conflictResponse() : Response.json({ accepted:true });
+    }, async () => {
+      const observed = observeRequest();
+      await f.writing;
+      clock.tick(1600);
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await observed.finished;
+      assert.equal(signals[0].aborted, false, 'the completed fetch body is no longer under a transport timer');
+      assert.deepEqual(observed.result, { accepted:true });
+      assert.deepEqual(calls, [f.original, id]);
+      assert.equal(f.writes.length, 1);
+      assert.deepEqual(f.authorizations, [true]);
+    });
+  });
+});
+
+test('slow trusted refusal after a confirmed conflict preserves 409 and forbids replay', async t => {
+  const clock = recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [], release = f.holdAuthorization();
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]);
+      return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+    }, async () => {
+      const observed = observeRequest();
+      await f.writing;
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await f.checking;
+      clock.tick(1600);
+      release(false);
+      await observed.finished;
+      assert.equal(observed.error?.status, 409);
+      assert.deepEqual(calls, [f.original]);
+    });
+  });
+});
+
+test('overall deadline stops a confirmed conflict waiting for consent without losing its 409', async t => {
+  const clock = recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [], release = f.holdAuthorization();
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]);
+      return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+    }, async () => {
+      const observed = observeRequest({ ...timedRecovery, timeoutMs:1200 });
+      await f.writing;
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await f.checking;
+      clock.tick(1200);
+      await new Promise(resolve => setImmediate(resolve));
+      const settledAtDeadline = observed.error;
+      release(true);
+      await observed.finished;
+      assert.equal(settledAtDeadline?.status, 409);
+      assert.equal(observed.error?.status, 409);
+      assert.deepEqual(calls, [f.original]);
+    });
+  });
+});
+
+test('external cancellation interrupts confirmed-conflict storage wait without any replay', async t => {
+  recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [], caller = new AbortController(), reason = new DOMException('fixture canceled', 'AbortError');
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const observed = observeRequest({ ...timedRecovery, signal:caller.signal });
+      await f.writing;
+      caller.abort(reason);
+      await new Promise(resolve => setImmediate(resolve));
+      const settledAtAbort = observed.error;
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await observed.finished;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settledAtAbort, reason);
+      assert.equal(observed.error, reason);
+      assert.deepEqual(calls, [f.original]);
+      assert.deepEqual(f.authorizations, []);
+    });
+  });
+});
+
+
+test('late storage success after the overall deadline cannot start consent or replay', async t => {
+  const clock = recoveryClock(t);
+  await isolatedProfile(async f => {
+    const calls = [];
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]); return conflictResponse();
+    }, async () => {
+      const observed = observeRequest({ ...timedRecovery, timeoutMs:1200 });
+      await f.writing;
+      clock.tick(1200);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(observed.error?.status, 409);
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await observed.finished;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(calls, [f.original]);
+      assert.deepEqual(f.authorizations, []);
+    });
+  });
+});
+
+test('a device changed again during consent cannot replace the identity confirmed for the only replay', async () => {
+  await isolatedProfile(async f => {
+    const calls = [], release = f.holdAuthorization();
+    await withFetch(async (_url, req) => {
+      calls.push(req.headers[DEVICE_ID_HEADER]);
+      return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+    }, async () => {
+      const observed = observeRequest();
+      await f.writing;
+      const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+      await f.checking;
+      f.commit('fixture-newer-cross-tab-id'); f.publish('fixture-newer-cross-tab-id');
+      release(true);
+      await observed.finished;
+      assert.equal(observed.error?.status, 409);
+      assert.deepEqual(calls, [f.original]);
+    });
+  });
+});
+
+for (const end of ['caller abort', 'overall deadline']) {
+  test(`recovery digest completing after ${end} never dispatches worker authorization`, async t => {
+    const clock = recoveryClock(t), controller = new AbortController();
+    const reason = new DOMException('fixture canceled during digest', 'AbortError');
+    const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto'), realCrypto = globalThis.crypto;
+    let startDigest, finishDigest;
+    const digestStarted = new Promise(resolve => { startDigest = resolve; });
+    const digestResult = new Promise(resolve => { finishDigest = resolve; });
+    try {
+      Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {
+        getRandomValues: array => realCrypto.getRandomValues(array),
+        subtle: { digest: () => { startDigest(); return digestResult; } }
+      } });
+      await isolatedProfile(async f => {
+        const calls = [];
+        await withFetch(async (_url, req) => {
+          calls.push(req.headers[DEVICE_ID_HEADER]);
+          return calls.length === 1 ? conflictResponse() : Response.json({ unexpected:true });
+        }, async () => {
+          const observed = observeRequest({ ...timedRecovery, timeoutMs:1200, signal:controller.signal });
+          await f.writing;
+          const { id, done } = f.writes[0]; f.commit(id); f.publish(id); done();
+          await digestStarted;
+          assert.deepEqual(f.authorizations, [], 'digest is pending and no worker message is in flight');
+          if (end === 'caller abort') controller.abort(reason);
+          else clock.tick(1200);
+          await observed.finished;
+          if (end === 'caller abort') assert.equal(observed.error, reason);
+          else assert.equal(observed.error?.status, 409);
+
+          finishDigest(new ArrayBuffer(32));
+          await new Promise(resolve => setImmediate(resolve));
+          assert.deepEqual(f.authorizations, [], 'a late digest must not dispatch authorize');
+          assert.deepEqual(calls, [f.original], 'no further business fetch');
+        });
+      });
+    } finally {
+      if (originalCrypto) Object.defineProperty(globalThis, 'crypto', originalCrypto);
+      else delete globalThis.crypto;
+    }
+  });
+}

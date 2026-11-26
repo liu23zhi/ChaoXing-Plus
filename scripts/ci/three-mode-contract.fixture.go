@@ -74,6 +74,7 @@ func TestChaoXingThreeModeHTTP(t *testing.T) {
 	}
 	before := snapshot()
 	dir := t.TempDir()
+	current := os.Getenv("CX_CONTRACT_LAYOUT") == "pending-start"
 	oldDB, oldFiles := diagnosticDB, extensionLogFiles
 	diagnosticDB, extensionLogFiles = func() *gorm.DB { return db }, extensionlogs.New(dir)
 	t.Cleanup(func() { diagnosticDB, extensionLogFiles = oldDB, oldFiles })
@@ -86,7 +87,7 @@ func TestChaoXingThreeModeHTTP(t *testing.T) {
 	server := httptest.NewServer(r)
 	defer server.Close()
 	input, err := json.Marshal(map[string]any{"origin": server.URL, "dir": dir, "device": device,
-		"ownerA": a.ID, "ownerB": b.ID, "normalA": normalA, "normalB": normalB,
+		"ownerA": a.ID, "ownerB": b.ID, "normalA": normalA, "normalB": normalB, "current": current,
 		"lease": lease.Token, "identity": identity, "expiresAt": lease.ExpiresAt})
 	check(err)
 
@@ -116,14 +117,19 @@ func TestChaoXingThreeModeHTTP(t *testing.T) {
 	// The diagnostic handler never writes quota. Exercise the separate real
 	// host-report service using the three browsers open in this bounded fixture,
 	// then all closed. Historical log rows are not a live session census.
-	page, err := extensionLogFiles.Read("", 100, extensionlogs.Filter{UserID: a.ID, Mode: "native_browser", DeviceID: device})
+	// A fresh Store must rebuild the log index without relying on pending or in-memory acknowledgement state.
+	page, err := extensionlogs.New(dir).Read("", 100, extensionlogs.Filter{UserID: a.ID, Mode: "native_browser", DeviceID: device})
 	check(err)
 	browsers := map[string]bool{}
 	for _, row := range page.Entries {
 		browsers[row.BrowserID] = true
 	}
-	if len(browsers) != 3 || browsers[""] || len(page.Entries) != 6 {
-		t.Fatal("expected three distinct browser scopes and six stored browser records")
+	wantRows := 6
+	if current {
+		wantRows = 3
+	}
+	if len(browsers) != 3 || browsers[""] || len(page.Entries) != wantRows {
+		t.Fatalf("expected three distinct browser scopes and %d stored browser records", wantRows)
 	}
 	for _, step := range []struct{ reported, occupied int }{{len(browsers), 3}, {0, 1}} {
 		check(service.ReportDeviceSessionCount(db, a.ID, device, step.reported, time.Now()))
