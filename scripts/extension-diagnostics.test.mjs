@@ -161,16 +161,18 @@ test('a rejected or failed start for a real event leaves no acknowledgement and 
 
 test('worker accepts event records only from a top-frame target-page content script', async () => {
   const local = store(settings), session = store(), calls = [];
-  let onMessage;
+  let onMessage, wake;
   registerDiagnostics({
     storage: { local, session, onChanged: { addListener() {} } },
     runtime: {
       id: 'fixture-extension', getManifest: () => ({ version: '6.3.0' }),
       getURL: path => 'chrome-extension://fixture-extension/' + path,
       onMessage: { addListener(listener) { onMessage = listener; } },
-      onStartup: { addListener() {} }, onInstalled: { addListener() {} }
+      onStartup: { addListener(listener) { wake = listener; } }, onInstalled: { addListener() {} }
     }
   }, async (_url, req) => { calls.push(req); return req.method === 'GET' ? response(200, { enabled: true }) : response(201); });
+  // The popup reports the current policy, not necessarily a batch queued while startup was in flight.
+  await wake();
   const msg = { kind: KIND, op: 'record', event: 'extension.ready', credentials: 'never accepted' };
   const sender = { id: 'fixture-extension', tab: { id: 2 }, frameId: 0, url: 'https://learn.chaoxing.com/fixture' };
   for (const changes of [
