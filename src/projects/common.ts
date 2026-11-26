@@ -1,3 +1,4 @@
+import { browserExtensionRuntime, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import type { AnswererWrapper, SearchInformation, SimplifyWorkResult, WorkUploadType, QuestionEvidence } from '../core/index.js';
 import { DEFAULT_WORKER_THREAD_COUNT } from '../core/index.js';
 import { Project, runtimeStore } from '../runtime/index.js';
@@ -94,6 +95,7 @@ type WorkResultsRuntimeControls = {
   retryQuestion: (index: number, resetAnswer?: boolean) => Promise<SimplifyWorkResult | undefined>;
   canRetryQuestion?: (index: number) => boolean;
   clearAnswers?: () => void | Promise<void>;
+  authorizeReset?: () => Promise<void>;
   prepareReset?: () => void | Promise<void>;
   getQuestions?: () => SimplifyWorkResult[];
 };
@@ -807,27 +809,28 @@ export function getStoredTikuAdapterConfig() {
  * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
  */
 function mountServiceStatusHttpFetcher() {
-  const config = getStoredTikuAdapterConfig();
-  const baseurl = resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL);
-  // endpoint 显式传入，不依赖 status-panel 的默认常量：baseurl 规则将来变化时，
-  // 依赖默认值会让请求静默打到别处而不是暴露出来。
-  //
-  // 走**摘要**端点（AuthOrAccessToken）：PLUS 只有 adapter key，没有管理员 JWT。
-  // 管理员端点带逐分钟 points，属运维可见信息，不能给每个持 key 的用户。
-  setServiceStatusFetcher(createServiceStatusHttpFetcher({
-    baseurl,
-    // ⚠️ 同时给 getBaseurl（2026-11-15，138 §5.2）：`baseurl` 是**建 fetcher 那一刻**的快照，
-    // 用户之后在面板改题库地址不会重建 fetcher，状态 Tab 就永远请求旧地址
-    // —— 这正是用户报的「改了题库 URL 但状态 TAB 依旧请求默认 URL」。
-    // 保存路径已补 mountServiceStatusHttpFetcher() 重建（见 saveButton 回调），
-    // 但仍给 getBaseurl 作第二道保险：将来若有第二个写入口（导入配置、多标签页同步），
-    // 不重建也仍然读最新值。二者的优先级在 status-panel-http 里定：getBaseurl 优先。
-    getBaseurl: () =>
-      resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
+  const common = {
     endpoint: '/api/service-status/summary',
     requester: fetchServiceStatusRequester,
-    includeSearchHistory: true,
-    // 摘要端点是 AuthOrAccessToken：必须带 Bearer，否则会回退到登录 JWT 分支 → 401。
+    includeSearchHistory: true
+  };
+  if (usesBrowserAgreementGate()) {
+    setServiceStatusFetcher(createServiceStatusHttpFetcher({
+      ...common,
+      getConfig: () => {
+        const config = getStoredTikuAdapterConfig();
+        return { baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
+          accessKey: config.key, scriptIdentity: config.scriptIdentity, revision: runtimeStore.getProviderConfigRevision() };
+      }
+    }));
+    return;
+  }
+  // Do not change the frozen injection clients' transport or settings behavior.
+  const config = getStoredTikuAdapterConfig();
+  setServiceStatusFetcher(createServiceStatusHttpFetcher({
+    ...common,
+    baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
+    getBaseurl: () => resolveTikuAdapterBaseUrl(getStoredTikuAdapterConfig().baseurl, DEFAULT_TIKU_BASE_URL),
     accessKey: config.key,
     scriptIdentity: config.scriptIdentity
   }));
@@ -955,6 +958,8 @@ async function clearAndRetryWorkResults() {
   state.workResults.resetOperation = operation;
   renderWorkResultsPanel();
   try {
+    await controls.authorizeReset?.();
+    if (!isCurrent()) return;
     await controls.prepareReset?.();
     if (!isCurrent()) return;
     // Clear every page before publishing unanswered results or applying any new answer.
@@ -2464,6 +2469,20 @@ function createTikuAdapterConfigSection() {
   });
   container.style.display = 'grid';
   container.style.gap = '12px';
+
+  if (usesBrowserAgreementGate()) {
+    const heading = createElement('div', { text: '题库配置' });
+    const open = createElement('button', { text: '打开扩展题库设置' });
+    open.type = 'button';
+    applyActionButtonStyle(open, 'primary');
+    open.onclick = event => {
+      if (event.isTrusted) void browserExtensionRuntime()?.sendMessage?.({
+        kind: 'chaoxing-plus:agreement', operation: 'open-settings'
+      }).catch(() => {});
+    };
+    container.append(heading, open);
+    return container;
+  }
 
   const header = createElement('div');
   header.style.display = 'grid';

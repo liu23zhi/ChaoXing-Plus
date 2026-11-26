@@ -23,7 +23,7 @@ function deferred() {
 }
 
 async function fixture({ preview = true, pageCount = 2, holdUpload = false, countdownMs = 10000, holdInitialPage = 0,
-  holdNavigationDirection } = {}) {
+  holdNavigationDirection, enforceAgreement = false } = {}) {
   const [cx, common, scope] = await Promise.all([
     readFile('src/projects/cx.ts', 'utf8'), readFile('src/projects/common.ts', 'utf8'),
     readFile('src/projects/cx-answer-run-scope.ts', 'utf8')
@@ -46,6 +46,7 @@ async function fixture({ preview = true, pageCount = 2, holdUpload = false, coun
   const invalidNavigations = [];
   const workers = [];
   const errors = [];
+  let agreementAllowed = true;
   const document = { defaultView: null, querySelectorAll: () => preview ? roots : [roots[currentPage]], querySelector(selector) {
     if (selector.includes('getTheNextQuestion(1)') && currentPage + 1 < roots.length) return { click: () => navigate(1) };
     if (selector.includes('getTheNextQuestion(-1)') && currentPage > 0) return { click: () => navigate(-1) };
@@ -115,6 +116,9 @@ async function fixture({ preview = true, pageCount = 2, holdUpload = false, coun
     resolveAnswerSearchType: () => 'single', resolveQuestionTypeForWork: () => 'single', normalizeResultQuestionType: (type) => type,
     detectManualAnswer: () => false, notifyManualAnswerRequired() {},
     tikuAdapterBalanceRecoveryState: { paused: false }, waitForTikuAdapterBalanceRecovery: async () => {},
+    usesBrowserAgreementGate: () => enforceAgreement, requireTikuWorkAgreement: async () => {
+      if (!agreementAllowed) throw new Error('agreement changed');
+    },
     allowTikuAdapterRetryAfterBalanceRecovery: async () => true, resetTikuAdapterBalanceGuard() {}, getStoredTikuAdapterConfig: () => ({}),
     shouldSkipCacheForManualRetry: () => false, shouldSkipCacheForAutomaticRetry: () => false,
     waitForTabAnswerContinue: async () => {}, resetCxQuestionAnswers: (targets) => {
@@ -145,6 +149,7 @@ async function fixture({ preview = true, pageCount = 2, holdUpload = false, coun
   await new Promise((done) => setImmediate(done));
   return { context, state, roots, events, workers, errors, firstAnswer, heldPageEntered, countdown, countdownEntered,
     navigationEntered, navigationSleep, invalidNavigations,
+    revokeAgreement: () => { agreementAllowed = false; },
     currentPage: () => currentPage, settle: () => new Promise((done) => setImmediate(done)) };
 }
 
@@ -232,4 +237,31 @@ test('clearing during a backward navigation wait uses the page already reached',
     [['Question 1', true], ['Question 2', true], ['Question 3', true]]);
   assert.equal(f.events.includes('save'), false);
   assert.deepEqual(f.errors, []);
+});
+
+
+test('an older ordinary run cannot clear input nor restart workers after authorization is withdrawn', async () => {
+  const f = await fixture({ enforceAgreement: true });
+  f.revokeAgreement();
+  await f.context.clearAndRetryWorkResults();
+  assert.equal(f.workers.length, 1);
+  assert.equal(f.workers[0].isClose, false);
+  assert.equal(f.roots.some(root => root.cleared), false);
+
+  await assert.rejects(f.state.workResults.runtimeControls.retryQuestion(0, true), /agreement changed/);
+  assert.equal(f.roots.some(root => root.cleared), false);
+  assert.equal(f.workers.length, 1);
+});
+
+test('ordinary per-question retry rechecks after its actual pause before touching input', async () => {
+  const f = await fixture({ enforceAgreement: true });
+  const pause = deferred(), atPause = deferred();
+  f.context.waitForTabAnswerContinue = () => { atPause.resolve(); return pause.promise; };
+  const queued = f.state.workResults.runtimeControls.retryQuestion(0, true);
+  await atPause.promise;
+  f.revokeAgreement();
+  pause.resolve();
+  await assert.rejects(queued, /agreement changed/);
+  assert.equal(f.roots.some(root => root.cleared), false);
+  assert.equal(f.workers.length, 1);
 });

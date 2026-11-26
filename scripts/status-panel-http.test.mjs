@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
+import ts from '@typescript/typescript6';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCompiledTypeScriptModule } from './test-helpers/load-compiled-typescript.mjs';
@@ -898,4 +901,79 @@ test('判据：baseurl 与 getBaseurl 都不给时返回 null（静默，不抛�
   const snapshot = await fetcher({ now: Date.now() });
   assert.equal(snapshot, null, '没有地址时必须返回 null，交给「还没设置题库地址」的静默分支');
   assert.equal(called, false, '没地址就不该发请求');
+});
+
+test('an existing status fetcher uses one current approved source-key pair, and cancels on takeover or revocation', async () => {
+  const { http } = await loadModules();
+  const a = 'https://first.fixture.invalid', b = 'https://second.fixture.invalid';
+  let current = { baseurl: a, accessKey: 'fixture-a' };
+  const hits = [];
+  let release;
+  let pause;
+  const fetchStatus = http.createServiceStatusHttpFetcher({
+    getConfig: () => current,
+    includeSearchHistory: true,
+    requester: async (url, init) => {
+      hits.push([new URL(url).origin, init.headers.Authorization]);
+      if (pause) await new Promise(resolve => { release = resolve; current = { baseurl: b, accessKey: 'fixture-b' }; });
+      return summaryResponse();
+    }
+  });
+  await fetchStatus();
+  assert.deepEqual(hits, [[a, 'Bearer fixture-a'], [a, 'Bearer fixture-a']]);
+  hits.length = 0;
+  pause = true;
+  const original = fetchStatus();
+  pause = false;
+  release();
+  assert.equal(await original, null, 'old data may not publish after a source switch');
+  assert.deepEqual(hits, [[a, 'Bearer fixture-a']], 'the follow-up request is canceled before dispatch');
+  hits.length = 0;
+  await fetchStatus();
+  assert.deepEqual(hits, [[b, 'Bearer fixture-b'], [b, 'Bearer fixture-b']]);
+  hits.length = 0;
+  current = { baseurl: b, accessKey: '' };
+  assert.equal((await fetchStatus()).kind, 'no-token');
+  assert.deepEqual(hits, []);
+});
+
+
+test('the actual status mount keeps parallel reads and default redirects in the frozen host', async () => {
+  const { http } = await loadModules();
+  const text = await readFile(resolve(scriptsDir, '..', 'src/projects/common.ts'), 'utf8');
+  const ast = ts.createSourceFile('common.ts', text, ts.ScriptTarget.Latest, true);
+  const mount = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'mountServiceStatusHttpFetcher');
+  const code = ts.transpileModule(mount.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const ordinary of [false, true]) {
+    let release;
+    let fetcher;
+    const held = new Promise(resolve => { release = resolve; });
+    const starts = [];
+    const context = {
+      usesBrowserAgreementGate: () => ordinary,
+      DEFAULT_TIKU_BASE_URL: 'https://mounted.fixture.invalid',
+      getStoredTikuAdapterConfig: () => ({ baseurl: 'https://mounted.fixture.invalid', key: 'local-only' }),
+      resolveTikuAdapterBaseUrl: raw => raw,
+      runtimeStore: { getProviderConfigRevision: () => 1 },
+      setServiceStatusFetcher: fn => { fetcher = fn; },
+      createServiceStatusHttpFetcher: http.createServiceStatusHttpFetcher,
+      fetchServiceStatusRequester: async (_url, init) => {
+        starts.push(init.redirect ?? 'default');
+        if (starts.length === 1) await held;
+        return summaryResponse();
+      }
+    };
+    vm.runInNewContext(code + '; mountServiceStatusHttpFetcher();', context);
+    const running = fetcher();
+    const beforeRelease = starts.slice();
+    release();
+    await running;
+    if (ordinary) {
+      assert.deepEqual(beforeRelease, ['error']);
+      assert.deepEqual(starts, ['error', 'error']);
+    } else {
+      assert.deepEqual(beforeRelease, ['default', 'default']);
+      assert.deepEqual(starts, ['default', 'default']);
+    }
+  }
 });

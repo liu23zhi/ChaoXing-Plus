@@ -219,3 +219,21 @@ test('the bounded log panel retains terminal durations, completion evidence and 
     assert.ok(rendered.includes(`"${key}"`), `${key} remains visible in the log panel`);
   }
 });
+
+test('terminal diagnostics use the same positive attachment observation that ended the wait', async () => {
+  const f = fixture({
+    async waitForAttachmentComplete(initial, _timeout, _interval, onComplete) {
+      onComplete({ ...initial, job: false });
+      assert.equal(initial.job, true); // The detached starting snapshot is not rewritten.
+      return true;
+    }
+  });
+  const pending = f.start();
+  await flush();
+  await f.end();
+  const result = await pending;
+  assert.equal(result.completionConfirmed, true);
+  assert.equal(result.completionSource, 'attachment-no-longer-job');
+  assert.equal(result.attachmentWaitResult, true);
+  assert.equal(result.chapterWaitResult, null);
+});

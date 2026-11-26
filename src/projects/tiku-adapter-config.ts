@@ -1,5 +1,6 @@
 /// <reference path="../types.d.ts" />
 import md5 from 'md5';
+import { AGREEMENT_REQUIRED_MESSAGE, hasTikuAgreement, usesBrowserAgreementGate } from '../runtime/agreement-gate.js';
 import { type SearchInformation, type QuestionEvidence } from '../core/index.js';
 import type { AnswererWrapper } from '../core/answer-wrapper/interface.js';
 import { pollTikuAdapterSearchTask, pollTikuAdapterTask, type TikuAdapterTaskEnvelope } from '../core/answer-wrapper/task-poller.js';
@@ -265,6 +266,7 @@ export async function requestTikuAdapterAnswerEvidence(
   const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   const body = normalizeTikuAdapterAnswerEvidencePayload(payload);
   const idempotencyKey = String(options.idempotencyKey ?? createStableEvidenceIdempotencyKey(body));
@@ -342,6 +344,7 @@ export async function requestTikuAdapterSearchTask(
   const scriptIdentity = String(config.scriptIdentity ?? '').trim();
   const problem = getTikuAdapterConfigProblem({ baseurl, key });
   if (problem) throw new Error(problem);
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   const phaseStartedAt = Date.now();
   const phaseDeadlineAt = phaseStartedAt + normalizePositiveInteger(options.statusTimeoutMs, TIKU_ADAPTER_SEARCH_TASK_TIMEOUT_MS);
@@ -476,12 +479,13 @@ async function probeTikuAdapterSearchHealth(
   throw lastError instanceof Error ? lastError : new Error('async search health check failed');
 }
 
-function requestTikuAdapterLegacySearch(
+async function requestTikuAdapterLegacySearch(
   baseurl: string,
   key: string,
   payload: Record<string, unknown>,
   options: { requestTimeoutMs: number; retryAttempts: number; retryDelayMs: number; deadlineAt?: number; idempotencyKey?: string; scriptIdentity?: string }
 ) {
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
   return requestTikuAdapterJSON<Record<string, unknown>>(createTikuAdapterSearchUrl(baseurl), key, {
     method: 'POST', data: payload, timeoutMs: options.requestTimeoutMs,
     deadlineAt: options.deadlineAt, retryAttempts: options.retryAttempts,
@@ -528,6 +532,7 @@ export async function requestTikuAdapterAIFallback(config: TikuAdapterConfig, pa
   if (problem) {
     throw new Error(problem);
   }
+  if (!(await hasTikuAgreement(baseurl, key))) throw new Error(AGREEMENT_REQUIRED_MESSAGE);
 
   if (!scriptIdentity && isTikuAdapterBalanceBlocked(baseurl, key)) {
     throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
@@ -832,6 +837,7 @@ async function requestTikuAdapterJSON<T>(
   });
   const scriptIdentity = String(options.scriptIdentity ?? '').trim();
   const identity = { ...requestIdentity, baseurl: options.balanceScopeBaseurl ?? requestIdentity.baseurl };
+  if (usesBrowserAgreementGate() && requestIdentity.baseurl !== identity.baseurl) throw new Error('题库响应地址与已确认配置不一致。');
   // Polling an existing task only delivers its original result; it creates no new fee.
   const existingTaskDelivery = options.method === 'GET' && options.deferBalanceBlockUntilPollingCompletes === true;
   if (!scriptIdentity && !existingTaskDelivery && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
@@ -848,6 +854,10 @@ async function requestTikuAdapterJSON<T>(
     const sameOperationRetry = attempt > 1 && Boolean(options.extraHeaders?.['Idempotency-Key']?.trim());
     if (!scriptIdentity && !existingTaskDelivery && !sameOperationRetry && isTikuAdapterBalanceBlocked(identity.baseurl, identity.key)) {
       throw createTikuAdapterRequestError({ code: 'INSUFFICIENT_BALANCE' });
+    }
+    // Check at the point of each possible write, AFTER health, polling and retry waits.
+    if (usesBrowserAgreementGate() && options.method === 'POST' && !(await hasTikuAgreement(identity.baseurl, key))) {
+      throw new Error(AGREEMENT_REQUIRED_MESSAGE);
     }
     const remainingMs = options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now();
     if (remainingMs <= 0) throw new Error('tikuAdapter request timed out');
@@ -1047,6 +1057,65 @@ export function getTikuAdapterConfigProblem(config: TikuAdapterConfig): TikuAdap
   return undefined;
 }
 
+const staticTikuFields = {
+  question: (env: Record<string, any>) => { const title = env.title == null ? '' : env.title; return String(title).trim(); },
+  options: (env: Record<string, any>) => { const raw = String(env.options == null ? '' : env.options).split(/\n+/).map((item) => item.trim()).filter(Boolean); const isNoise = (item: string) => /function\s*[$\w]*\s*\(|=>|\$\(|\.parent\(|\.find\(|\.removeClass\(|\.addClass\(|\.css\(|UEDITOR_CONFIG|\.edui-|addListener\(|contentChange|;$/.test(item) || /^(var|let|const|if|else|window\.|document\.|editor\d*\.|\$\.|\/\/|\/\*|\} else|\.\w+\()/.test(item) || !/[\p{L}\p{N}]/u.test(item); const kept: string[] = []; for (const item of raw) { if (!isNoise(item) && !kept.includes(item)) kept.push(item); } return kept.length > 0 ? kept : raw; },
+  type: (env: Record<string, any>) => {
+          const value = String(env.type == null ? 'unknown' : env.type);
+          return value === 'single'
+            ? 0
+            : value === 'multiple'
+              ? 1
+              : value === 'judgement'
+                ? 3
+                : value === 'completion' || value === 'fill' || value === 'line'
+                  ? 2
+                  : value === 'reader' ? 4 : -1;
+        },
+  skipCache: (env: Record<string, any>) => typeof env.skipCache === 'boolean' ? env.skipCache : undefined,
+  deepThinking: (env: Record<string, any>) => env.deepThinking === true ? true : undefined,
+  questionEvidence: (env: Record<string, any>) => { const value = env.questionEvidence; if (!value || typeof value !== 'object') return undefined; const normalize = (items: unknown) => Array.isArray(items) ? items.map((item, index) => ({ url: String(item && item.url || ''), alt: String(item && item.alt || ''), index: Number.isInteger(item && item.index) ? item.index : index })).filter((item: { url: string; alt: string }) => item.url || item.alt) : []; return { stemImages: normalize(value.stemImages), optionImages: normalize(value.optionImages) }; },
+};
+
+const staticTikuResponse = (res: any) => {
+      const data = res == null ? {} : res;
+      const answer = data.answer == null ? {} : data.answer;
+      const question = typeof data.question === 'string' ? data.question : '';
+      const isChoiceType = data.type === 0 || data.type === 1;
+      const answerKeyText = typeof answer.answerKeyText === 'string' ? answer.answerKeyText.trim() : '';
+      if (isChoiceType && answerKeyText) {
+        return [question, answerKeyText, { source: 'tikuAdapter' }];
+      }
+
+      const answerIndex = Array.isArray(answer.answerIndex)
+        ? answer.answerIndex.filter((item: number) => Number.isInteger(item) && item >= 0)
+        : [];
+      if (isChoiceType && answerIndex.length > 0) {
+        return [question, answerIndex.map((index: number) => String.fromCharCode(index + 65)).join(''), { source: 'tikuAdapter' }];
+      }
+
+      const answerText = typeof answer.answerText === 'string' ? answer.answerText.trim() : '';
+      if (answerText) {
+        return [question, answerText, { source: 'tikuAdapter' }];
+      }
+
+      const bestAnswer = Array.isArray(answer.bestAnswer)
+        ? answer.bestAnswer.map((item: unknown) => String(item).trim()).filter(Boolean)
+        : [];
+      if (bestAnswer.length > 0) {
+        return [question, bestAnswer.join('#'), { source: 'tikuAdapter' }];
+      }
+
+      const firstAllAnswer = Array.isArray(answer.allAnswer)
+        ? answer.allAnswer.find((item: unknown) => Array.isArray(item) && item.map((value) => String(value).trim()).filter(Boolean).length > 0)
+        : undefined;
+      if (firstAllAnswer) {
+        return [question, firstAllAnswer.join('#'), { source: 'tikuAdapter' }];
+      }
+
+      return undefined;
+    };
+
 export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): AnswererWrapper {
   const baseurl = resolveTikuAdapterBaseUrl(config.baseurl);
   const key = String(config.key ?? '').trim();
@@ -1082,6 +1151,14 @@ export function createTikuAdapterAnswererWrapper(config: TikuAdapterConfig): Ans
       maxAttempts: TIKU_ADAPTER_AI_FALLBACK_RETRY_ATTEMPTS,
       delayMs: TIKU_ADAPTER_AI_FALLBACK_RETRY_DELAY_MS
     },
+    ...(usesBrowserAgreementGate() ? {
+      prepareRequestData: (env: Record<string, any>) => ({
+        qid: '', question: staticTikuFields.question(env), options: staticTikuFields.options(env),
+        type: staticTikuFields.type(env), courseName: '', extra: '', skipCache: staticTikuFields.skipCache(env),
+        deepThinking: staticTikuFields.deepThinking(env), questionEvidence: staticTikuFields.questionEvidence(env)
+      }),
+      parseResponse: staticTikuResponse
+    } : {}),
     data: {
       qid: '',
       question: {

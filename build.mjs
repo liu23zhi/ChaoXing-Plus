@@ -18,6 +18,9 @@ function copyStaticFiles() {
     '*://*.chaoxing.com/*'
   ];
 
+  const contentCoverage = { matches: chaoxingHosts, world: 'ISOLATED', all_frames: true,
+    match_about_blank: true, match_origin_as_fallback: true };
+
   const manifest = {
     manifest_version: 3,
     default_locale: 'zh_CN',
@@ -34,19 +37,17 @@ function copyStaticFiles() {
       default_popup: 'popup.html'
     },
     content_scripts: [
-      {
-        matches: chaoxingHosts,
-        js: ['extension-entry.js'],
-        run_at: 'document_start',
-        all_frames: true,
-        match_about_blank: true,
-        match_origin_as_fallback: true
-      }
+      { ...contentCoverage, js: ['extension-agreement-view.js', 'extension-agreement-content.js', 'extension-entry.js'], run_at: 'document_start' },
+      // Static library imports may require <head>; keep privileged runtime isolated and run after DOM creation.
+      { ...contentCoverage, js: ['chaoxing-plus.js'], run_at: 'document_end' },
+      // No network, credentials or commands in this narrow, read-only MAIN script.
+      { matches: ['*://*.chaoxing.com/knowledge/cards*'], world: 'MAIN',
+        js: ['extension-course-metadata.js'], run_at: 'document_start', all_frames: true }
     ],
     web_accessible_resources: [
       {
         matches: ['<all_urls>'],
-        resources: ['chaoxing-plus.js', 'vendor/sweetalert2.min.css', 'vendor/sweetalert2.all.min.js']
+        resources: ['vendor/sweetalert2.min.css', 'vendor/sweetalert2.all.min.js']
       }
     ]
   };
@@ -58,9 +59,15 @@ function copyStaticFiles() {
   if (existsSync('src/extension-entry.js')) {
     copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
   }
-  for (const file of ['extension-tab-pause.js', 'extension-worker.js']) {
+  for (const file of [
+    'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
+    'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
+    'extension-agreement.html', 'extension-course-metadata.js'
+  ]) {
     copyFileSync('src/' + file, 'dist/' + file);
   }
+
+  writeFileSync('dist/extension-agreement-config.js', 'export const defaultBase = ' + JSON.stringify(defaultTikuBaseUrl) + ';\n');
 
   copyFileSync('windows/node-source/extension-log-core.mjs', 'dist/extension-diagnostics.js');
 
@@ -101,7 +108,8 @@ async function main() {
     resolve: { extensions: ['.ts', '.mts', '.js', '.mjs', '.json'] },
     define: {
       __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
-      __CXPLUS_WINDOWS_INJECTION_LOG__: 'false'
+      __CXPLUS_WINDOWS_INJECTION_LOG__: 'false',
+      __CXPLUS_BROWSER_AGREEMENT_GATE__: 'true'
     },
     build: {
       watch: watchMode ? {} : null,
@@ -113,7 +121,11 @@ async function main() {
       },
       rollupOptions: {
         output: {
-          entryFileNames: 'chaoxing-plus.js'
+          entryFileNames: 'chaoxing-plus.js',
+          // Defer the whole bundle, including static module initialization, until the
+          // isolated bootstrapping script confirms this tab's extension switch.
+          banner: 'void Promise.resolve(globalThis.__CXPLUS_EXTENSION_BOOT__).then(enabled => { if (!enabled) return;',
+          footer: '});'
         }
       },
       outDir: 'dist',

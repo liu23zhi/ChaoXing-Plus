@@ -14,7 +14,7 @@ test('entry bootstrap does not use a top-window singleton guard that suppresses 
   assert.equal(source.includes("const runtimeStartedKey = '__chaoxing_plus_runtime_started__';"), false);
   assert.equal(source.includes('const runtimeOwner = window.top ?? window;'), false);
   assert.equal(source.includes("runtime already started, skip duplicate bootstrap"), false);
-  assert.equal(source.includes('start(definedProjects()).catch((err) => {'), true);
+  assert.match(source, /await start\(definedProjects\(\)\);[\s\S]*launch\(\).catch/);
 });
 
 test('entry bootstrap stays in the page only once even if extension-entry injects repeatedly in nested frames', async () => {
@@ -90,7 +90,7 @@ test('extension entry skips the main script while the popup switch is off', asyn
   assert.equal(source.includes('chrome.storage.local.get(extensionEnabledKey, (result) => {'), true);
   assert.equal(source.includes('resolve(isEnabledValue(result?.[extensionEnabledKey]));'), true);
   assert.equal(source.includes('if (!(await readExtensionEnabled())) {'), true);
-  assert.equal(source.includes('// 总开关关闭：不注入主脚本，页面保持原样，也不创建面板。'), true);
+  assert.match(source, /if \(!\(await readExtensionEnabled\(\)\)\) \{[\s\S]*finishBoot\?\.\(false\);\s*return;/);
 
   // 开关判断必须发生在创建 script 标签之前，关闭时页面完全不加载主脚本。
   assert.equal(

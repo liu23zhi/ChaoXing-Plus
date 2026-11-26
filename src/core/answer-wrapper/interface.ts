@@ -50,6 +50,9 @@ export interface AnswererWrapper {
 		headers: Record<string, string>;
 		timeoutMs: number;
 	}) => Promise<unknown>;
+	/** Compiled built-in parsers for the ordinary MV3 content-script CSP. */
+	prepareRequestData?: (env: Record<string, any>) => Record<string, any>;
+	parseResponse?: (value: unknown) => unknown;
 	/** 单次题库请求超时时间，秒 */
 	timeoutSeconds?: number;
 	/** 题库请求失败重试配置 */
