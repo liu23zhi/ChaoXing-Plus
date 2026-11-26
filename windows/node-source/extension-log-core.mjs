@@ -1,4 +1,4 @@
-// Only normal extension diagnostics. Neither destinations nor credentials come from event messages.
+// Diagnostics for extension profiles and explicitly authorized local hosts. Event messages never set destinations or credentials.
 export const BASE = 'common.settings.tiku-adapter.baseurl';
 export const KEY = 'common.settings.tiku-adapter.key';
 export const DEVICE = 'common.settings.device-id'; // same persisted value used by X-Device-Id
@@ -26,7 +26,7 @@ export function serviceURL(raw) {
 export function createDiagnostics({ storage, session, version, nativeExam, send = fetch, now = Date.now,
   schedule = setTimeout, cancel = clearTimeout, batchDelay = 1000, retryDelay = 3500, timeout = 5000, policyTTL = 60000 }) {
   let epoch = 0, pending = [], timer, active, request, launchPromise, policy;
-  let state = 'pending', service = '', wantStart = false, startRetried = false;
+  let state = 'pending', service = '', wantRefresh = false, refreshRetried = false;
   const inspect = () => ({ service, state }); // never expose account, device, launch ID or key
   async function config() {
     const values = await storage.get([BASE, KEY, DEVICE, BROWSER, ENDPOINT_BINDING]);
@@ -66,13 +66,13 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
     })().catch(error => { launchPromise = undefined; throw error; });
   }
   function later(delay) {
-    if (timer === undefined && !active && (pending.length || wantStart)) {
+    if (timer === undefined && !active && (pending.length || wantRefresh)) {
       timer = schedule(() => { timer = undefined; void pump(); }, delay);
     }
   }
   function reset() {
     epoch++; pending = []; policy = undefined; state = 'pending'; service = '';
-    wantStart = true; startRetried = false; cancel(timer); timer = undefined; request?.abort();
+    wantRefresh = true; refreshRetried = false; cancel(timer); timer = undefined; request?.abort();
     later(0);
   }
   async function http(cfg, path, json) {
@@ -94,17 +94,15 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
     if (active) return active;
     const generation = epoch, batch = pending.splice(0,24);
     const live = () => generation === epoch;
-    wantStart = false;
+    wantRefresh = false;
     let backoff = false;
     active = (async () => {
       const cfg = await config(); if (!live()) return;
       service = cfg.url;
       if (!cfg.scope || !session) { state = cfg.reason || 'unavailable'; pending = []; return; }
       const owned = batch.filter(e => e.scope === cfg.scope);
-      const stamp = await launchID(); if (!live()) return;
-      const identity = { version, mode:cfg.mode, device_id:cfg.device, ...(cfg.mode === 'native_browser' ? {browser_id:cfg.browser} : {}), launch_id:stamp };
-      const ack = cfg.scope + ':' + stamp;
-      const previous = (await session.get(ACK))[ACK]; if (!live()) return;
+      // The standalone Node host keeps its existing eager handshake behavior.
+      const hostStamp = nativeExam ? await launchID() : undefined; if (!live()) return;
       const disable = async () => {
         pending = []; state = 'disabled';
         policy = { scope:cfg.scope, expires:now()+policyTTL, enabled:false };
@@ -119,6 +117,13 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
         policy = { scope:cfg.scope, expires:now()+policyTTL, enabled:true };
       }
       if (!policy.enabled) { state = 'disabled'; pending = []; return; }
+      // Startup, popup inspection, worker wake and settings hydration are not target-page events.
+      // Even older services that write during /start must not receive it for an idle profile.
+      if (!nativeExam && !owned.length) { state = 'enabled'; return; }
+      const stamp = hostStamp ?? await launchID(); if (!live()) return;
+      const identity = { version, mode:cfg.mode, device_id:cfg.device, ...(cfg.mode === 'native_browser' ? {browser_id:cfg.browser} : {}), launch_id:stamp };
+      const ack = cfg.scope + ':' + stamp;
+      const previous = (await session.get(ACK))[ACK]; if (!live()) return;
       const start = async () => {
         const r = await http(cfg,'/start',identity); if (!live()) return false;
         if (r.status === 403 && r.body?.enabled === false) { await disable(); return false; }
@@ -131,7 +136,7 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
       if (!live()) return;
       state = 'enabled';
       const entries = owned.map(({ scope, retried, ...fields }) => fields);
-      if (!entries.length) return; // The start signal itself records the real extension launch.
+      if (!entries.length) return; // An eager host handshake is not a diagnostic event.
       const payload = { ...identity, entries };
       let r = await http(cfg,'',payload); if (!live()) return;
       if (r.status === 409 && r.body?.need_start === true) {
@@ -145,14 +150,15 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
       if (!live()) return;
       state = 'unavailable';
       pending = [...batch.filter(e => !e.retried).map(e => ({...e,retried:true})), ...pending].slice(-64);
-      // In a quiet/offline profile retry the initial handshake once; subsequent online/wake resumes the same launch ID.
-      if (!batch.length && !startRetried) { startRetried = true; wantStart = true; }
+      // Retry a quiet/offline policy refresh once (an explicit Node host may also handshake here).
+      if (!batch.length && !refreshRetried) { refreshRetried = true; wantRefresh = true; }
       backoff = true;
     }).finally(() => { active = undefined; later(backoff ? retryDelay : batchDelay); });
     return active;
   }
   async function record(event, duration) {
     const level = LEVELS.get(event); if (!level) return;
+    const observedAt = nativeExam ? undefined : now();
     const generation = epoch, cfg = await config(); if (generation !== epoch || !cfg.scope) return;
     if (policy?.scope === cfg.scope && !policy.enabled) {
       if (now() >= policy.expires) void pump();
@@ -161,7 +167,7 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
     const prev = pending.at(-1);
     if (prev?.scope === cfg.scope && !prev.retried && prev.event === event) prev.count = Math.min(1000,(prev.count || 1)+1);
     else {
-      const e = { time:new Date(now()).toISOString(), event, level, scope:cfg.scope };
+      const e = { time:new Date(observedAt ?? now()).toISOString(), event, level, scope:cfg.scope };
       if (Number.isSafeInteger(duration) && duration >= 0 && duration <= 60000) e.duration_ms = duration;
       if (pending.length === 64) pending.shift();
       pending.push(e);
@@ -171,9 +177,18 @@ export function createDiagnostics({ storage, session, version, nativeExam, send 
   function onStorageChanged(changes, area) {
     if (area !== 'local') return;
     if ([BASE,KEY,DEVICE,BROWSER].some(k => changes[k] && changes[k].oldValue !== changes[k].newValue)) reset();
-    else if (Object.keys(changes).some(k => k.startsWith('common.settings.'))) void record('settings.saved').catch(() => {});
+    else if (nativeExam && Object.keys(changes).some(k => k.startsWith('common.settings.'))) void record('settings.saved').catch(() => {});
   }
   return { record, onStorageChanged, wake: () => pump(true), status:async () => { await pump(); if (state === 'pending') await pump(); return inspect(); } };
+}
+
+function isTargetPageSender(sender) {
+  if (sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) return false;
+  try {
+    const { protocol, hostname } = new URL(sender.url);
+    return (protocol === 'https:' || protocol === 'http:')
+      && (hostname === 'chaoxing.com' || hostname.endsWith('.chaoxing.com'));
+  } catch { return false; }
 }
 
 export function registerDiagnostics(api, send = fetch) {
@@ -186,8 +201,8 @@ export function registerDiagnostics(api, send = fetch) {
     const popup = sender.url === api.runtime.getURL('popup.html');
     let work;
     if (popup && msg.op === 'inspect') work = diag.status();
-    else if (Number.isInteger(sender.tab?.id) && msg.op === 'record') work = diag.record(msg.event,msg.duration_ms);
-    else if (Number.isInteger(sender.tab?.id) && msg.op === 'online') work = diag.wake();
+    else if (msg.op === 'record' && isTargetPageSender(sender)) work = diag.record(msg.event,msg.duration_ms);
+    else if (msg.op === 'online' && isTargetPageSender(sender)) work = diag.wake();
     else return false;
     Promise.resolve(work).then(result => respond(result ?? {ok:true}), () => respond({state:'unavailable'}));
     return true;

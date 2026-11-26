@@ -167,3 +167,95 @@ test('直接调 regenerateDeviceId 是幂等可用：连续调用得到不同 ID
   assert.match(b, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
   assert.notEqual(a, b);
 });
+
+test('host-owned browser retains the injected device and session after a conflict instead of rewriting either', async () => {
+  const device = 'fixture-native-host';
+  const instance = 'ac67a37a-668f-4918-bb9e-bd219ab2b107';
+  const key = 'common.settings.device-id', instanceKey = 'common.settings.device-instance';
+  const values = new Map([[key, JSON.stringify(device)], [instanceKey, JSON.stringify(instance)]]);
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null, setItem: (k,v) => values.set(k,v) };
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => {
+      ids.push([init.headers[DEVICE_ID_HEADER], init.headers[DEVICE_INSTANCE_HEADER]]);
+      return conflictResponse();
+    }, async () => {
+      await assert.rejects(request(ADAPTER_URL, { headers: AUTH }), error => error.status === 409);
+    });
+    assert.deepEqual(ids, [[device, instance]]);
+    assert.equal(JSON.parse(values.get(key)), device);
+    assert.equal(JSON.parse(values.get(instanceKey)), instance);
+  } finally { globalThis.localStorage = before; reset(); }
+});
+
+test('script-authenticated conflict surfaces without changing the ordinary device ID or replaying the request', async () => {
+  const calls = [];
+  await withFetch(async (_url, init) => { calls.push(init); return conflictResponse(); }, async () => {
+    await assert.rejects(request(ADAPTER_URL, {
+      headers: { ...AUTH, 'x-script-identity': 'owned-fixture' }
+    }), error => error.status === 409);
+  });
+  assert.equal(calls.length, 1);
+});
+
+test('parallel responses for the same retired device reuse a single replacement and follow the persisted profile value', async () => {
+  const device = 'fixture-profile-before';
+  const key = 'common.settings.device-id';
+  const values = new Map([[key, JSON.stringify(device)]]);
+  const writes = [], extensionWrites = [];
+  const before = globalThis.localStorage, previousChrome = globalThis.chrome;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null,
+    setItem: (k, v) => { values.set(k,v); writes.push(JSON.parse(v)); } };
+  globalThis.chrome = { storage: { local: { set: (items, cb) => { extensionWrites.push(items); cb(); } } } };
+  const { getDeviceIdentity, __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => {
+      const id = init.headers[DEVICE_ID_HEADER]; ids.push(id);
+      // Yield so both first requests used the same original ID; no network access.
+      return id === device ? conflictResponse() : Response.json({ ok:true });
+    }, () => Promise.all([request(ADAPTER_URL, { headers: AUTH }), request(ADAPTER_URL, { headers: AUTH })]));
+    assert.equal(ids.length, 4);
+    assert.deepEqual(ids.slice(0,2), [device,device]);
+    assert.notEqual(ids[2],device);
+    assert.deepEqual(ids.slice(2), [ids[2],ids[2]]);
+    assert.equal(JSON.parse(values.get(key)), ids[2]);
+    assert.deepEqual(writes, [ids[2]]);
+    assert.deepEqual(extensionWrites, [{ [key]: ids[2] }]);
+    // Simulate hydration from another extension tab; the old in-memory ID must not win.
+    values.set(key, JSON.stringify('fixture-profile-synchronized'));
+    assert.equal(getDeviceIdentity().deviceId, 'fixture-profile-synchronized');
+  } finally { globalThis.localStorage = before; globalThis.chrome = previousChrome; reset(); }
+});
+
+test('when the shared device write does not take effect, a conflict surfaces without replaying the old ID', async () => {
+  const key = 'common.settings.device-id', device = 'fixture-read-only-profile';
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => k === key ? JSON.stringify(device) : null,
+    setItem() { throw new Error('fixture storage is read only'); } };
+  const { getDeviceIdentity, __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const ids = [];
+  try {
+    await withFetch(async (_url, init) => { ids.push(init.headers[DEVICE_ID_HEADER]); return conflictResponse(); }, async () => {
+      await assert.rejects(request(ADAPTER_URL, { headers: AUTH }), error => error.status === 409);
+    });
+    assert.deepEqual(ids, [device]);
+    assert.equal(getDeviceIdentity().deviceId, device);
+  } finally { globalThis.localStorage = before; reset(); }
+});
+
+test('a caller-owned explicit device header is not replayed or reidentified by the ordinary profile', async () => {
+  const calls = [];
+  await withFetch(async (_url, init) => { calls.push(init); return conflictResponse(); }, async () => {
+    await assert.rejects(request(ADAPTER_URL, {
+      headers: { ...AUTH, [DEVICE_ID_HEADER]: 'fixture-external-owner-device' }
+    }), error => error.status === 409);
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers[DEVICE_ID_HEADER], 'fixture-external-owner-device');
+});

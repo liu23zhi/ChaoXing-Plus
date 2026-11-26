@@ -109,7 +109,6 @@ typedef struct HOME_STATE {
     BOOL operationOK;
     /* ---- 设备槽位（141 §5/§8） ---- */
     WCHAR deviceId[CX_DEVICE_ID_CAP];
-    WCHAR diagnosticLaunchId[CX_DEVICE_ID_CAP];
     /* 会话注入上下文：只在「启动临时浏览器会话」那一次调用前由 home_work 填好。
        injectDeviceKeys 为 FALSE 时 home_build_settings 不写设备两键 ——
        考试模式与设置对话框的预览/校验路径因此天然不参与设备判定（红线 2）。 */
@@ -1584,16 +1583,22 @@ static DWORD WINAPI home_run_owned_diagnostic(void *arg) {
     SecureZeroMemory(j,sizeof(*j));HeapFree(GetProcessHeap(),0,j);InterlockedExchange(&home_diag_running,0);return 0;
 }
 static void home_owned_launcher_ready(HOME_STATE *state) {
-    HOME_DIAGNOSTIC_JOB *j; HANDLE thread;
-    if (!state->deviceId[0] || InterlockedCompareExchange(&home_diag_running,1,0))return;
-    if (!state->diagnosticLaunchId[0] && !cx_device_uuid_v4(state->diagnosticLaunchId,CX_DEVICE_ID_CAP)) goto failed;
-    j=(HOME_DIAGNOSTIC_JOB*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*j));if(!j)goto failed;
-    CopyMemory(&j->grant,&state->config->verifiedExam,sizeof(j->grant));lstrcpynW(j->device,state->deviceId,CX_DEVICE_ID_CAP);
-    lstrcpynW(j->launch,state->diagnosticLaunchId,CX_DEVICE_ID_CAP);
-    thread=CreateThread(NULL,0,home_run_owned_diagnostic,j,0,NULL);
-    if(thread){CloseHandle(thread);return;}
-    SecureZeroMemory(j,sizeof(*j));HeapFree(GetProcessHeap(),0,j);
-failed: InterlockedExchange(&home_diag_running,0);
+    HOME_DIAGNOSTIC_JOB *j;
+    HANDLE thread;
+    if (InterlockedCompareExchange(&home_diag_running, 1, 0)) return;
+    j = (HOME_DIAGNOSTIC_JOB *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*j));
+    if (!j) goto failed;
+    /* This authorized run is not a managed browser. These IDs are diagnostic-only
+       and remain identical across the HTTP adapter's bounded retry. */
+    if (cx_device_uuid_v4(j->device, ARRAYSIZE(j->device)) && cx_device_uuid_v4(j->launch, ARRAYSIZE(j->launch))) {
+        CopyMemory(&j->grant, &state->config->verifiedExam, sizeof(j->grant));
+        thread = CreateThread(NULL, 0, home_run_owned_diagnostic, j, 0, NULL);
+        if (thread) { CloseHandle(thread); return; }
+    }
+    SecureZeroMemory(j, sizeof(*j));
+    HeapFree(GetProcessHeap(), 0, j);
+failed:
+    InterlockedExchange(&home_diag_running, 0);
 }
 static void home_authorized_exam(void *context) {
     HOME_STATE *state=(HOME_STATE *)context;

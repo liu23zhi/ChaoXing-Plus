@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as wait } from 'node:timers/promises';
-import { BASE, KEY, DEVICE, BROWSER, LAUNCH, createDiagnostics, serviceURL } from '../src/extension-diagnostics.js';
+import { BASE, KEY, DEVICE, BROWSER, LAUNCH, KIND, createDiagnostics, registerDiagnostics, serviceURL } from '../src/extension-diagnostics.js';
 
 function store(initial = {}) {
   const values = { ...initial };
@@ -47,10 +47,10 @@ test('default enabled starts before ordinary events; only structured fields reac
   assert.deepEqual(await f.d.status(),{service:'https://service.invalid/team',state:'enabled'});
 });
 test('worker wake reuses a session, browser restart starts a new file',async()=>{
-  const session=store(),f=fixture({session}); await f.d.wake(); const id=f.calls[1].body.launch_id;
+  const session=store(),f=fixture({session}); await f.d.record('extension.ready'); await f.d.status(); const id=f.calls[1].body.launch_id;
   const resumed=fixture({session}); await resumed.d.wake(); await resumed.d.record('network.offline'); await resumed.d.status();
   assert.deepEqual(resumed.paths(),['/policy','']); assert.equal(resumed.calls[1].body.launch_id,id);
-  const restarted=fixture(); await restarted.d.wake(); assert.notEqual(restarted.calls[1].body.launch_id,id);
+  const restarted=fixture(); await restarted.d.record('extension.ready'); await restarted.d.status(); assert.notEqual(restarted.calls[1].body.launch_id,id);
 });
 test('admin stop clears the buffer; re-enabling requires a successful handshake',async()=>{
   let enabled=false;
@@ -68,12 +68,12 @@ test('server stop during an upload takes effect; an aged file triggers only one 
   assert.equal(new Set(f.calls.filter(c=>c.body).map(c=>c.body.launch_id)).size,1);
   assert.equal((await f.d.status()).state,'disabled');
 });
-test('offline startup retries with the original launch ID and bounds failed sends',async()=>{
+test('the first event retries a failed start with the original launch ID and bounds failed sends',async()=>{
   let ok=false;
   const f=fixture({handler:c=>{
     if(c.path==='/start'&&!ok) throw Error('offline'); if(c.path==='') return response(503);
   }});
-  await f.d.wake(); await wait(42); assert.deepEqual(f.paths(),['/policy','/start','/start']);
+  await f.d.record('extension.ready'); await f.d.status(); await wait(42); assert.deepEqual(f.paths(),['/policy','/start','/start']);
   const launch=f.session.values[LAUNCH]; ok=true; await f.d.wake(); await f.d.record('sync.failed'); await wait(52);
   assert.equal(f.calls.filter(c=>c.path==='').length,2);
   assert.equal(f.calls.filter(c=>c.body).every(c=>c.body.launch_id===launch),true);
@@ -82,7 +82,7 @@ test('a change of account and device purges old events before first send',async(
   const f=fixture({batchDelay:15}); await f.d.wake(); await f.d.record('sync.failed');
   await f.local.set({[KEY]:'second-fixture',[DEVICE]:'fixture-profile-2'}); f.d.onStorageChanged({[KEY]:{oldValue:'a',newValue:'b'}},'local');
   await wait(32); await f.d.record('runtime.error'); await f.d.status();
-  assert.deepEqual(f.paths(),['/policy','/start','/policy','/start','']);
+  assert.deepEqual(f.paths(),['/policy','/policy','/start','']);
   const b=f.calls.at(-1); assert.equal(b.headers.Authorization,'Bearer second-fixture');
   assert.equal(b.body.device_id,'fixture-profile-2'); assert.deepEqual(b.body.entries.map(e=>e.event),['runtime.error']);
 });
@@ -126,4 +126,94 @@ test('changing just the service origin never sends the old credential to that or
   await f.local.set({[KEY]:'new-service-fixture-key'});await f.d.wake();
   assert.equal(f.calls.at(-1).headers.Authorization,'Bearer new-service-fixture-key');
   assert.match(f.calls.at(-1).url,/new-service/);
+});
+
+test('quiet ordinary and managed profiles request policy only; they do not create an identity or register a launch before an event', async () => {
+  for (const browser of [undefined, crypto.randomUUID()]) {
+    const f = fixture({ local: store({ ...settings, ...(browser ? { [BROWSER]: browser } : {}) }) });
+    await f.d.wake();
+    await f.local.set({ 'common.settings.local-ui-value': 'changed before any target page opens' });
+    f.d.onStorageChanged({ 'common.settings.local-ui-value': { newValue: 'changed before any target page opens' } }, 'local');
+    assert.equal((await f.d.status()).state, 'enabled');
+    assert.deepEqual(f.paths(), ['/policy']);
+    assert.equal(f.session.values[LAUNCH], undefined);
+  }
+});
+
+test('a rejected or failed start for a real event leaves no acknowledgement and retries it with the same identity and event time', async () => {
+  let tick = Date.parse('2026-11-27T02:03:04.567Z');
+  let starts = 0;
+  const when = new Date(tick).toISOString();
+  const f = fixture({ now: () => tick, handler: c => {
+    if (c.path === '/start' && ++starts === 1) return response(503);
+  }});
+  await f.d.record('extension.ready');
+  tick += 1000;
+  assert.equal((await f.d.status()).state, 'unavailable');
+  assert.deepEqual(f.paths(), ['/policy', '/start']);
+  assert.equal(Object.keys(f.session.values).length, 1);
+  assert.equal((await f.d.status()).state, 'enabled');
+  assert.deepEqual(f.paths(), ['/policy', '/start', '/start', '']);
+  assert.deepEqual(f.calls[1].body, f.calls[2].body);
+  assert.equal(f.calls[3].body.entries[0].time, when);
+});
+
+
+test('worker accepts event records only from a top-frame target-page content script', async () => {
+  const local = store(settings), session = store(), calls = [];
+  let onMessage;
+  registerDiagnostics({
+    storage: { local, session, onChanged: { addListener() {} } },
+    runtime: {
+      id: 'fixture-extension', getManifest: () => ({ version: '6.3.0' }),
+      getURL: path => 'chrome-extension://fixture-extension/' + path,
+      onMessage: { addListener(listener) { onMessage = listener; } },
+      onStartup: { addListener() {} }, onInstalled: { addListener() {} }
+    }
+  }, async (_url, req) => { calls.push(req); return req.method === 'GET' ? response(200, { enabled: true }) : response(201); });
+  const msg = { kind: KIND, op: 'record', event: 'extension.ready', credentials: 'never accepted' };
+  const sender = { id: 'fixture-extension', tab: { id: 2 }, frameId: 0, url: 'https://learn.chaoxing.com/fixture' };
+  for (const changes of [
+    { url: 'chrome-extension://fixture-extension/popup.html' }, { url: 'https://chaoxing.com.fixture.invalid/' },
+    { url: 'about:blank' }, { frameId: 1 }, { id: 'other-extension' }
+  ]) {
+    assert.equal(onMessage(msg, { ...sender, ...changes }, () => {}), false);
+  }
+  await new Promise(resolve => assert.equal(onMessage(msg, sender, resolve), true));
+  const status = await new Promise(resolve => assert.equal(onMessage({ kind: KIND, op: 'inspect' },
+    { ...sender, url: 'chrome-extension://fixture-extension/popup.html' }, resolve), true));
+  assert.equal(status.state, 'enabled');
+  const entry = JSON.parse(calls.at(-1).body).entries[0];
+  assert.deepEqual(Object.keys(entry).sort(), ['event', 'level', 'time']);
+});
+
+
+test('explicitly bound Node host keeps its eager handshake and appends subsequent real events to that launch', async () => {
+  const key = 'sr_' + 'n'.repeat(36), identity = 'owned-node-fixture';
+  const f = fixture({ local: store({ ...settings, [KEY]: key }),
+    nativeExam: () => ({ key, identity, expires: Date.now() + 30000 }) });
+  await f.d.wake();
+  assert.deepEqual(f.paths(), ['/policy', '/start']);
+  await f.d.wake();
+  await f.d.record('extension.ready');
+  assert.equal((await f.d.status()).state, 'enabled');
+  assert.deepEqual(f.paths(), ['/policy', '/start', '/policy', '']);
+  assert.equal(f.calls[1].body.launch_id, f.calls[3].body.launch_id);
+  assert.equal(f.calls[3].body.entries[0].event, 'extension.ready');
+});
+
+test('a browser event retains its occurrence time even if reading profile settings is delayed', async () => {
+  let tick = Date.parse('2026-11-27T02:03:04.567Z');
+  const when = new Date(tick).toISOString();
+  const local = store(settings), get = local.get;
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  local.get = async keys => { await blocked; return get(keys); };
+  const f = fixture({ local, now: () => tick });
+  const recorded = f.d.record('extension.ready');
+  tick += 4000;
+  release();
+  await recorded;
+  assert.equal((await f.d.status()).state, 'enabled');
+  assert.equal(f.calls.at(-1).body.entries[0].time, when);
 });

@@ -108,9 +108,18 @@ static const WCHAR *test_browser_id(const CX_BROWSER_SESSION *session) {
     (void)session; return L"lcmeenlnjihhjcjoakekikoaldigonac";
 }
 static BOOL test_account_window(HWND parent, CX_HOME_CONFIG *config) { (void)parent; (void)config; return FALSE; }
+static BOOL captureExamDiagnostics;
+static DWORD capturedExamDiagnostics;
+static WCHAR diagnosticDevices[2][CX_DEVICE_ID_CAP], diagnosticLaunches[2][CX_DEVICE_ID_CAP];
 static BOOL test_owned_exam_ready(const CX_OWNED_RUN_GRANT *grant, const WCHAR *device, const WCHAR *launch) {
     /* This first-party UI fixture must never send diagnostics to a live service. */
-    (void)grant; (void)device; (void)launch; return FALSE;
+    (void)grant;
+    if (captureExamDiagnostics && capturedExamDiagnostics < ARRAYSIZE(diagnosticDevices)) {
+        lstrcpynW(diagnosticDevices[capturedExamDiagnostics], device, CX_DEVICE_ID_CAP);
+        lstrcpynW(diagnosticLaunches[capturedExamDiagnostics], launch, CX_DEVICE_ID_CAP);
+        ++capturedExamDiagnostics;
+    }
+    return FALSE;
 }
 
 /* 设备槽位的替身先声明、后定义（定义放在 #include "../home.c" 之后，
@@ -1094,6 +1103,35 @@ static void script_session_tests(void) {
     free_home(state);
 }
 
+static void exam_diagnostic_identity_tests(void) {
+    HOME_STATE *state = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*state));
+    DWORD i;
+    BOOL joined = TRUE;
+    if (!state) ExitProcess(8);
+    state->config = &shared;
+    captureExamDiagnostics = TRUE;
+    for (i = 0; i < ARRAYSIZE(diagnosticDevices); ++i) {
+        DWORD started;
+        /* Reuse the same in-memory home fixture; the first direct launch has no browser host ID. */
+        if (i) home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"fixture-browser-host");
+        home_owned_launcher_ready(state);
+        started = GetTickCount();
+        while (InterlockedCompareExchange(&home_diag_running, 0, 0) && GetTickCount() - started < 1500) Sleep(1);
+        if (InterlockedCompareExchange(&home_diag_running, 0, 0)) { joined = FALSE; break; }
+    }
+    captureExamDiagnostics = FALSE;
+    check(joined && capturedExamDiagnostics == 2 && !lstrcmpW(state->deviceId, L"fixture-browser-host")
+        && lstrlenW(diagnosticDevices[0]) == 36 && lstrlenW(diagnosticDevices[1]) == 36
+        && lstrcmpW(diagnosticDevices[0], state->deviceId) && lstrcmpW(diagnosticDevices[1], state->deviceId),
+        "authorized exam diagnostics use an independent device even without a browser host");
+    check(joined && capturedExamDiagnostics == 2 && lstrcmpW(diagnosticDevices[0], diagnosticDevices[1])
+        && lstrlenW(diagnosticLaunches[0]) == 36 && lstrlenW(diagnosticLaunches[1]) == 36
+        && lstrcmpW(diagnosticLaunches[0], diagnosticLaunches[1])
+        && lstrcmpW(diagnosticLaunches[0], diagnosticDevices[0]) && lstrcmpW(diagnosticLaunches[1], diagnosticDevices[1]),
+        "each new authorized exam diagnostic run gets a fresh device and launch identity");
+    HeapFree(GetProcessHeap(), 0, state);
+}
+
 void HomeTestMain(void) {
     WCHAR text[16]; BOOL ok;
     {
@@ -1108,6 +1146,7 @@ void HomeTestMain(void) {
     fetchEntered = CreateEventW(NULL, TRUE, FALSE, NULL); fetchRelease = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!fetchEntered || !fetchRelease) ExitProcess(2);
     cx_options_init(&options); cx_home_config_init(&shared);
+    exam_diagnostic_identity_tests();
     /* 测试跑在仓库里，绝不能让 cx_home_run 的启动登记段真的写出
        windows/data/config.json —— 那会在 git status 里留下未跟踪文件。
        noDiskWrite 同时保持了「设备 id 只在内存里」的语义，正好也是要验的一条。

@@ -8,6 +8,7 @@ import {
   TikuAdapterRequestError
 } from './tiku-adapter-error.js';
 import {
+  DEVICE_ID_HEADER,
   isDeviceIdConflict,
   regenerateDeviceId,
   tikuAdapterDeviceHeaders
@@ -61,6 +62,10 @@ export async function request<T extends 'json' | 'text'>(
   let deviceConflictRetried = false;
 
   const isTikuAdapterRequest = isTikuAdapterRequestUrl(url);
+  const callerIdentity = Object.keys(headers).some(name => {
+    const header = name.toLowerCase();
+    return header === 'x-script-identity' || header === 'x-device-id';
+  });
   const tikuIdentity = isTikuAdapterRequest ? resolveTikuAdapterRequestIdentity(url, headers) : undefined;
   if (tikuIdentity && isTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key)) {
     throw new TikuAdapterRequestError('INSUFFICIENT_BALANCE');
@@ -102,9 +107,9 @@ export async function request<T extends 'json' | 'text'>(
           let payload: unknown = text;
           try { payload = JSON.parse(text); } catch { /* legacy servers may return plain text */ }
           // 设备冲突优先于普通错误分类：它不是业务失败，而是「这个 ID 用不了」。
-          if (!deviceConflictRetried && isDeviceIdConflict(response.status, payload)) {
+          if (!deviceConflictRetried && !callerIdentity && isDeviceIdConflict(response.status, payload)
+            && regenerateDeviceId(attemptHeaders[DEVICE_ID_HEADER])) {
             deviceConflictRetried = true;
-            regenerateDeviceId();
             // attempt-- 配合 continue：这一轮不消耗重试预算，下一次仍用同一个 attempt 号。
             attempt--;
             continue;
