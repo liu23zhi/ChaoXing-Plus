@@ -5,6 +5,8 @@ const BASE = 'common.settings.tiku-adapter.baseurl';
 const KEY = 'common.settings.tiku-adapter.key';
 const APPROVED_SOURCE = 'agreement.approved-provider.v1';
 const LOCAL_DEVICE = 'common.settings.device-id';
+const BOOTSTRAP_DEVICE = 'agreement.local-device.v1'; // Agreement-owned; never exported through the shared settings bridge.
+const REPLACED_DEVICE = 'agreement.last-device-replacement.v1'; // Atomic with the ordinary device recovery write.
 const HOST_MODE_KEYS = ['common.settings.device-instance', 'common.settings.tiku-adapter.script-identity'];
 export const AGREEMENT_CONFIG_KEYS = [BASE, KEY, LOCAL_DEVICE, ...HOST_MODE_KEYS, 'common.settings.extension-enabled'];
 
@@ -72,11 +74,20 @@ export function createAgreementController({
   let lastViewContext;
   let configRevision = 0;
   let loadedCache;
+  let firstObservedDevice = '';
   let offlineDocument;
   const diagnosticInstance = crypto.randomUUID();
   let enrollmentWait = 0; // The server also rate-limits registration across all configured deployments.
 
-  function changed() {
+  function changed(changes) {
+    // The first business ID can be replaced before a queued read sees it.
+    // Use the trusted storage event's old value so a T07 replacement cannot inherit the fresh alias.
+    if (HOST_MODE_KEYS.some(key => text(changes?.[key]?.oldValue) || text(changes?.[key]?.newValue))
+      || changes?.['common.settings.extension-enabled']?.newValue === false) {
+      firstObservedDevice = '';
+    } else if (!firstObservedDevice && changes?.[LOCAL_DEVICE]) {
+      firstObservedDevice = text(changes[LOCAL_DEVICE].oldValue) || text(changes[LOCAL_DEVICE].newValue);
+    }
     configRevision++;
     readers.clear();
     lastViewContext = undefined;
@@ -96,28 +107,56 @@ export function createAgreementController({
     return view;
   }
   async function configuration() {
-    const config = await read(AGREEMENT_CONFIG_KEYS);
+    const config = await read([...AGREEMENT_CONFIG_KEYS, BOOTSTRAP_DEVICE, REPLACED_DEVICE]);
     const rawBase = typeof config[BASE] === 'string' ? config[BASE] : '';
     const key = text(config[KEY]);
     const base = normalizeAgreementBase(text(rawBase) || defaultBase);
-    return { base, rawBase, key, device: text(config[LOCAL_DEVICE]),
-      mode: HOST_MODE_KEYS.some(k => text(config[k])) ? 'host'
-        : config['common.settings.extension-enabled'] === false ? 'disabled' : 'extension' };
+    const mode = HOST_MODE_KEYS.some(k => text(config[k])) ? 'host'
+      : config['common.settings.extension-enabled'] === false ? 'disabled' : 'extension';
+    const sharedDevice = text(config[LOCAL_DEVICE]);
+    const stored = config[BOOTSTRAP_DEVICE];
+    const profile = uuidOK(stored?.id) && (stored.firstDevice === null || stored.firstDevice === false
+      || (text(stored.firstDevice) && text(stored.firstDevice) === stored.firstDevice)) ? stored : undefined;
+    const replacement = config[REPLACED_DEVICE];
+    // An atomic recovery can be visible before its onChanged event or after a worker restart.
+    // Retire an unbound alias even for a malformed/stale marker; it cannot prove a first ID.
+    const firstDevice = profile?.firstDevice ?? (replacement === undefined ? firstObservedDevice || sharedDevice : false);
+    const unresolvedReplacement = profile?.firstDevice === null && replacement !== undefined
+      && (!uuidOK(replacement) || replacement !== sharedDevice);
+    // Before the first business ID, the private seed is the subject. After binding it
+    // to that first ID, a real replacement uses its own scope; disappearance grants nothing.
+    const scopeDevice = unresolvedReplacement ? '' : profile ? (sharedDevice === firstDevice ? profile.id : sharedDevice)
+      : stored === undefined ? sharedDevice : '';
+    return { base, rawBase, key, mode, sharedDevice, profile, firstDevice, scopeDevice,
+      device: sharedDevice || scopeDevice, missingProfile: stored === undefined };
   }
   async function context() {
     const initial = await configuration();
-    if (!initial.base || initial.mode !== 'extension') return initial;
-    if (!initial.device) {
-      await write({ [LOCAL_DEVICE]: crypto.randomUUID() });
+    if (initial.mode !== 'extension') {
+      firstObservedDevice = '';
+      return initial;
+    }
+    if (!initial.base) return initial;
+    if (initial.missingProfile && !initial.sharedDevice) {
+      // A host may write the shared pair while this old snapshot is in flight.
+      // Writing only the private seed cannot touch that pair; re-read before any operation.
+      firstObservedDevice = '';
+      await write({ [BOOTSTRAP_DEVICE]: { id: crypto.randomUUID(), firstDevice: null } });
       return context();
     }
-    return { ...initial, keyHash: await digest(initial.key), scope: await digest(JSON.stringify([initial.base, initial.device])),
+    if (initial.profile?.firstDevice === null && (initial.firstDevice === false || initial.firstDevice)) {
+      await write({ [BOOTSTRAP_DEVICE]: { id: initial.profile.id, firstDevice: initial.firstDevice } });
+      return context();
+    }
+    if (!initial.scopeDevice) return initial;
+    return { ...initial, keyHash: await digest(initial.key), scope: await digest(JSON.stringify([initial.base, initial.scopeDevice])),
       revision: configRevision };
   }
   async function ensureCurrent(cfg) {
     const actual = await configuration();
     if (cfg.revision !== configRevision || actual.mode !== 'extension'
-      || actual.base !== cfg.base || actual.key !== cfg.key || actual.device !== cfg.device) throw new Error('configuration');
+      || actual.base !== cfg.base || actual.key !== cfg.key || actual.sharedDevice !== cfg.sharedDevice
+      || actual.scopeDevice !== cfg.scopeDevice) throw new Error('configuration');
   }
   async function api(cfg, endpoint, { method = 'GET', headers = {}, body, max = 16384 } = {}) {
     const signal = AbortSignal.timeout(8500);
@@ -338,7 +377,7 @@ export function createAgreementController({
     if (operation === 'diagnose') return diagnose(cfg);
     if (operation === 'clear-source-key' && cfg.mode !== 'host') {
       const latest = await configuration();
-      if (latest.rawBase !== cfg.rawBase || latest.mode !== cfg.mode || latest.key !== cfg.key || latest.device !== cfg.device) return { cleared: false };
+      if (latest.rawBase !== cfg.rawBase || latest.mode !== cfg.mode || latest.key !== cfg.key || latest.sharedDevice !== cfg.sharedDevice || latest.scopeDevice !== cfg.scopeDevice) return { cleared: false };
       await write({ [KEY]: '', [APPROVED_SOURCE]: null });
       changed();
       return { cleared: true }; // The worker storage listener refreshes without the removed key.
@@ -353,7 +392,8 @@ export function createAgreementController({
       const existing = boundKey ? (await read([boundKey]))[boundKey] : undefined;
       if (existing && existing !== newBase) return { ...lastView, sourceError: '该访问令牌已关联另一题库地址；请使用新地址签发的令牌。' };
       const original = await configuration();
-      if (original.rawBase !== cfg.rawBase || original.key !== cfg.key || original.mode !== cfg.mode || original.device !== cfg.device) {
+      if (original.rawBase !== cfg.rawBase || original.key !== cfg.key || original.mode !== cfg.mode
+        || original.sharedDevice !== cfg.sharedDevice || original.scopeDevice !== cfg.scopeDevice) {
         return { ...lastView, sourceError: '题库配置已变更，请核对后重试。' };
       }
       await write({ [BASE]: newBase, [KEY]: newKey, [APPROVED_SOURCE]: { base: newBase, rawBase: newBase, key: newKey },

@@ -58,7 +58,7 @@ export function registerAgreement(chrome, defaultBase) {
   chrome.tabs.onRemoved.addListener(tab => controller.abandonTab(tab));
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !AGREEMENT_CONFIG_KEYS.some(key => key in changes)) return;
-    controller.changed();
+    controller.changed(changes);
     // Queue behind (not share) any in-flight refresh that used the previous configuration.
     void controller.run('refresh');
   });
