@@ -25,6 +25,7 @@ globalThis.fetch = (url, init = {}) => {
 const { version } = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const settings = token => ({ [BASE]: f.origin, [KEY]: token, [DEVICE]: f.device });
+const eventTime = '2026-11-27T02:03:04.567Z';
 function storage(initial = {}) {
   const values = { ...initial };
   return {
@@ -80,7 +81,7 @@ function extension(local, session, token, browser) {
   return createDiagnostics({ storage: local, session, version,
     send: transport(browser ? 'native_browser' : 'extension', token, browser),
     // Flush explicitly via status(); a dormant browser must not keep this test process alive.
-    batchDelay: 60_000, schedule: (fn, ms) => setTimeout(fn, ms).unref(),
+    now: () => Date.parse(eventTime), batchDelay: 60_000, schedule: (fn, ms) => setTimeout(fn, ms).unref(),
   });
 }
 async function event(sender, code, duration) {
@@ -98,14 +99,25 @@ async function direct(op, token, identity, mode, body) {
 
 const local = storage(settings(f.normalA)), session = storage();
 let ext = extension(local, session, f.normalA);
-await onWire(fresh, async () => { await ext.record('not-an-allowed-event'); await ext.record('sync.success', 17); await event(ext, 'sync.success', 18); });
+await onWire(['policy:200'], () => ext.wake());
+assert.equal((await session.get(LAUNCH))[LAUNCH], undefined);
+assert.deepEqual(await readdir(f.dir), [], 'quiet profile must not leave files even on the legacy provider');
+if (f.current) {
+  const quiet = await direct('start', f.normalA, null, 'extension', {
+    mode: 'extension', device_id: f.device, launch_id: randomUUID(), version,
+  });
+  assert.deepEqual(quiet, { status: 201, body: { created: true } });
+  assert.deepEqual(await readdir(f.dir), [], 'registered Start alone must not publish a file');
+}
+await onWire(['start:201', 'entries:201'], async () => { await ext.record('not-an-allowed-event'); await ext.record('sync.success', 17); await event(ext, 'sync.success', 18); });
 const first = (await session.get(LAUNCH))[LAUNCH];
 const meta = { mode: 'extension', device_id: f.device, launch_id: first, version };
 const entries = [{ event: 'settings.saved', level: 'info', time: new Date().toISOString() }];
 ext = extension(local, session, f.normalA); // MV3 worker reconstructed, storage.session retained
 await onWire(['policy:200', 'entries:201'], () => event(ext, 'settings.saved'));
 await session.remove(ACK); // sender lost its acknowledgement; identify an actual server replay
-await onWire(['policy:200', 'start:200'], () => ext.wake());
+await onWire(['policy:200'], () => ext.wake());
+await onWire(['start:200', 'entries:201'], () => event(ext, 'runtime.error'));
 const nextSession = storage();
 await onWire(fresh, () => event(extension(local, nextSession, f.normalA), 'network.offline'));
 const next = (await nextSession.get(LAUNCH))[LAUNCH];
@@ -150,13 +162,13 @@ for (const [mode, token, id] of [['native_exam', f.normalA, f.identity], ['nativ
 // Independently read real store output, never a receiver maintained by this JS driver.
 const key = (owner, mode, launch, browser = null) => JSON.stringify([owner, mode, launch, browser]);
 const wanted = new Map([
-  [key(f.ownerA, 'extension', first), ['session.start', 'sync.success:17:2', 'settings.saved']],
-  [key(f.ownerA, 'extension', next), ['session.start', 'network.offline']],
-  [key(f.ownerB, 'extension', first), ['session.start', 'sync.failed']],
-  [key(f.ownerA, 'native_exam', examLaunch), ['session.start', 'extension.ready']],
-  ...browsers.map((browser, i) => [key(f.ownerA, 'native_browser', first, browser), ['session.start', 'sync.success:' + (100 + i)]]),
+  [key(f.ownerA, 'extension', first), ['sync.success:17:2', 'settings.saved', 'runtime.error']],
+  [key(f.ownerA, 'extension', next), ['network.offline']],
+  [key(f.ownerB, 'extension', first), ['sync.failed']],
+  [key(f.ownerA, 'native_exam', examLaunch), ['extension.ready']],
+  ...browsers.map((browser, i) => [key(f.ownerA, 'native_browser', first, browser), ['sync.success:' + (100 + i)]]),
 ]);
-const files = (await readdir(f.dir)).filter(name => name.endsWith('.jsonl'));
+const files = (await readdir(f.dir, { recursive: true })).filter(name => name.endsWith('.jsonl'));
 assert.equal(files.length, wanted.size);
 let rows = 0;
 for (const file of files) {
@@ -170,14 +182,29 @@ for (const file of files) {
     assert.equal(r.device_id, f.device);
     assert.equal(r.version, version);
     assert.equal(Object.hasOwn(r, 'browser_id'), r.mode === 'native_browser');
+    if (r.event !== 'session.start') {
+      assert.ok(Number.isFinite(Date.parse(r.received_at)), 'receipt timestamp must be present');
+      if (r.mode !== 'native_exam') assert.equal(Date.parse(r.time), Date.parse(eventTime));
+    }
   }
-  assert.deepEqual(records.map(r => [r.event, r.duration_ms, r.count].filter(n => n !== undefined).join(':')), wanted.get(scopes[0]));
+  if (f.current) {
+    const r = records[0];
+    const directory = r.mode === 'native_exam' ? 'client/Exam_Client_Injection'
+      : r.mode === 'native_browser' ? 'client/Browser_extensions/Multi-browser_mode/' + f.device : 'client/Browser_extensions';
+    const suffix = '_u' + r.user_id + '_m' + r.mode + '_d' + f.device
+      + (r.browser_id ? '_b' + r.browser_id : '') + '_s' + r.launch_id + '.jsonl';
+    assert.equal(file.slice(0, file.lastIndexOf('/')), directory);
+    assert.match(file.slice(file.lastIndexOf('/') + 1, -suffix.length), /^\d{19}$/);
+    assert.ok(file.endsWith(suffix), 'filename includes the whole mode-specific identity');
+  }
+  assert.deepEqual(records.map(r => [r.event, r.duration_ms, r.count].filter(n => n !== undefined).join(':')),
+    [...(f.current ? [] : ['session.start']), ...wanted.get(scopes[0])]);
   rows += records.length;
   wanted.delete(scopes[0]);
 }
 assert.equal(wanted.size, 0);
-assert.equal(rows, 15);
+assert.equal(rows, f.current ? 9 : 16);
 console.log('CONTRACT: extension = device only; worker resumed, lost ACK replay 200, restart created a new file');
 console.log('CONTRACT: native_browser = one device, three host-provided browser IDs; four foreign-scope appends rejected 409');
 console.log('CONTRACT: native_exam = pre-existing live lease + bound identity; ordinary/expired/mismatched sender input made zero requests');
-console.log('CONTRACT: 12 cross-family/binding HTTP denials (401); two accounts, seven physical JSONL files, 15 rows');
+console.log('CONTRACT: 12 cross-family/binding HTTP denials (401); two accounts, seven physical JSONL files, ' + rows + ' rows');

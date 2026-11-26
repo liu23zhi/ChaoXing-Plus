@@ -8,10 +8,12 @@ import {
   TikuAdapterRequestError
 } from './tiku-adapter-error.js';
 import {
+  DEVICE_ID_HEADER,
   isDeviceIdConflict,
-  regenerateDeviceId,
+  recoverDeviceIdAfterConflict,
   tikuAdapterDeviceHeaders
 } from '../../runtime/device-identity.js';
+import { hasTikuAgreement, usesBrowserAgreementGate } from '../../runtime/agreement-gate.js';
 
 export async function request<T extends 'json' | 'text'>(
   url: string,
@@ -46,21 +48,16 @@ export async function request<T extends 'json' | 'text'>(
   const deadlineAt = Date.now() + (opts?.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 60000);
   let lastError: unknown;
 
-  // 141 §6.3 / §4.2：device_id 冲突时换一个 ID 并**只重试一次**。
-  // 用独立的一次性开关，不走 attempt 预算：冲突重试对 POST 也要生效，
-  // 而 POST 的 maxAttempts 恒为 1（没有幂等键就不该重放业务请求）。
-  // ⚠️ 绝不能放开成循环 —— 每次冲突都换 ID 会把该账号的设备槽位一个个耗尽。
-  //
-  // ⚠️ 位置是有意的：必须声明在**余额封锁之前**。esbuild 会把
-  // `if (c) { throw ...; }` 压成 `if(c)throw ...;`，而
-  // scripts/build-output-request-logic.test.mjs 靠
-  // `throw new X(`INSUFFICIENT_BALANCE`);for(let` 这段**相邻性**来证明
-  // 进产物的是 request.ts 而不是 src/core 下的影子 .js。
-  // 把这个 let 塞到「余额封锁」与「for 循环」之间会把那对语句隔开，
-  // 该回归防线会假红（实测踩到）。要动这里先读那条测试。
-  let deviceConflictRetried = false;
+  // 141 §6.3 / §4.2: a structured conflict permits exactly one dedicated replay
+  // (even for POST), separate from the ordinary transport allowance.
+  // Keep this declaration above the balance guard; the bundle check matches that guard followed by the loop.
+  let conflictReplay: { deviceId: string; error: TikuAdapterRequestError } | undefined;
 
   const isTikuAdapterRequest = isTikuAdapterRequestUrl(url);
+  const callerIdentity = Object.keys(headers).some(name => {
+    const header = name.toLowerCase();
+    return header === 'x-script-identity' || header === 'x-device-id';
+  });
   const tikuIdentity = isTikuAdapterRequest ? resolveTikuAdapterRequestIdentity(url, headers) : undefined;
   if (tikuIdentity && isTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key)) {
     throw new TikuAdapterRequestError('INSUFFICIENT_BALANCE');
@@ -69,11 +66,12 @@ export async function request<T extends 'json' | 'text'>(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (opts?.signal?.aborted) throw opts.signal.reason || new DOMException('request aborted', 'AbortError');
     const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) throw new Error('request timeout');
+    if (remainingMs <= 0) throw conflictReplay?.error ?? new Error('request timeout');
     const controller = new AbortController();
     let attemptTimedOut = false;
+    let observedConflict: TikuAdapterRequestError | undefined;
     const attemptTimeoutMs = Number.isFinite(remainingMs)
-      ? Math.max(1, Math.min(30000, Math.floor(remainingMs / (maxAttempts - attempt + 1))))
+      ? Math.max(1, Math.min(30000, Math.floor(remainingMs / (conflictReplay ? 1 : maxAttempts - attempt + 1))))
       : undefined;
     const onAbort = () => controller.abort(opts.signal?.reason);
     opts?.signal?.addEventListener('abort', onAbort, { once: true });
@@ -89,6 +87,7 @@ export async function request<T extends 'json' | 'text'>(
       : headers;
 
     try {
+      if (conflictReplay && attemptHeaders[DEVICE_ID_HEADER] !== conflictReplay.deviceId) throw conflictReplay.error;
       const response = await fetch(url, {
         method: upperMethod,
         headers: Object.keys(attemptHeaders).length ? attemptHeaders : undefined,
@@ -101,16 +100,29 @@ export async function request<T extends 'json' | 'text'>(
         if (isTikuAdapterRequest) {
           let payload: unknown = text;
           try { payload = JSON.parse(text); } catch { /* legacy servers may return plain text */ }
-          // 设备冲突优先于普通错误分类：它不是业务失败，而是「这个 ID 用不了」。
-          if (!deviceConflictRetried && isDeviceIdConflict(response.status, payload)) {
-            deviceConflictRetried = true;
-            regenerateDeviceId();
-            // attempt-- 配合 continue：这一轮不消耗重试预算，下一次仍用同一个 attempt 号。
-            attempt--;
-            continue;
-          }
           const error = createTikuAdapterRequestError(payload, response.status) as TikuAdapterRequestError & { retryAfterMs?: number };
           error.retryAfterMs = readRetryAfterMs(response.headers.get('Retry-After'));
+          if (isDeviceIdConflict(response.status, payload)) {
+            observedConflict = error;
+            // The structured response was received in full. Local persistence and consent
+            // are bounded by the whole request, not the completed fetch's transport slice.
+            clearTimeout(timeout);
+            opts?.signal?.removeEventListener('abort', onAbort);
+            if (!conflictReplay && !callerIdentity) {
+              const signal = opts?.signal;
+              const deviceId = await beforeConflictDeadline(deadlineAt, signal,
+                () => recoverDeviceIdAfterConflict(attemptHeaders[DEVICE_ID_HEADER]));
+              const allowed = deviceId && (!usesBrowserAgreementGate() || (tikuIdentity
+                && await beforeConflictDeadline(deadlineAt, signal, () => hasTikuAgreement(tikuIdentity.baseurl, tikuIdentity.key,
+                  () => !signal?.aborted && Date.now() < deadlineAt))));
+              if (allowed && deviceId && Date.now() < deadlineAt) {
+                conflictReplay = { deviceId, error };
+                attempt--;
+                continue;
+              }
+            }
+            throw error;
+          }
           if (error.code === 'INSUFFICIENT_BALANCE' && tikuIdentity) {
             markTikuAdapterBalanceBlocked(tikuIdentity.baseurl, tikuIdentity.key);
           }
@@ -138,8 +150,9 @@ export async function request<T extends 'json' | 'text'>(
       return responseData as T extends 'json' ? any : string;
     } catch (err) {
       if (opts?.signal?.aborted) throw opts.signal.reason || new DOMException('request aborted', 'AbortError');
+      if (observedConflict) throw observedConflict;
       lastError = attemptTimedOut ? new Error('request timeout') : err;
-      if (attempt >= maxAttempts || !isRetryableRequestError(lastError)) {
+      if (conflictReplay || attempt >= maxAttempts || !isRetryableRequestError(lastError)) {
         throw lastError;
       }
       const errorWithStatus = lastError as { status?: number; retryAfterMs?: number };
@@ -157,6 +170,31 @@ export async function request<T extends 'json' | 'text'>(
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'request failed'));
+}
+
+// Return no confirmation if a local stage fails or runs out of budget. The caller
+// preserves the known 409; a caller-supplied abort remains cancellation, never a replay.
+function beforeConflictDeadline<T>(deadlineAt: number, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T | undefined> {
+  if (signal?.aborted) return Promise.reject(signal.reason || new DOMException('request aborted', 'AbortError'));
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      complete();
+    };
+    const onAbort = () => finish(() => reject(signal?.reason || new DOMException('request aborted', 'AbortError')));
+    const timer = Number.isFinite(remaining) ? setTimeout(() => finish(() => resolve(undefined)), remaining) : undefined;
+    signal?.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve()
+      .then(() => !settled && Date.now() < deadlineAt ? work() : undefined)
+      .then(value => finish(() => resolve(Date.now() < deadlineAt ? value : undefined)),
+        () => finish(() => resolve(undefined)));
+  });
 }
 
 function isRetryableStatus(status: number) {

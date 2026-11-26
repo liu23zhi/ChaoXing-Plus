@@ -95,3 +95,44 @@ test('★ 内置题库：/api/search 收到 409 冲突 → 换 device_id 后重�
   assert.notEqual(lastId, firstId,
     '冲突重试必须换一个新的 device_id，否则重试必然再次 409');
 });
+
+test('built-in client surfaces a managed browser conflict without rewriting its host ID', async () => {
+  const key = 'common.settings.device-id', marker = 'common.settings.device-instance';
+  const device = 'fixture-managed-owner', values = new Map([
+    [key, JSON.stringify(device)], [marker, JSON.stringify('06acb9b8-2fd2-46c3-b10c-dc8df32268d9')]
+  ]);
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v) };
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const calls = [];
+  try {
+    const [result] = await withFetch(async (url, init) => { calls.push({ url, init }); return conflictResponse(); },
+      () => requestTikuAdapterAIFallback(CONFIG, { title: 'owned-fixture' }, OPTS));
+    assert.equal(result.response.success, false);
+    assert.deepEqual(result.results, []);
+    assert.deepEqual(calls.map(deviceIdOf), [device]);
+    assert.equal(JSON.parse(values.get(key)), device);
+  } finally { globalThis.localStorage = before; reset(); }
+});
+
+test('built-in client with one generic attempt still makes one and only one confirmed conflict recovery request', async () => {
+  const key = 'common.settings.device-id', device = 'fixture-ordinary-profile';
+  const values = new Map([[key, JSON.stringify(device)]]);
+  const before = globalThis.localStorage;
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v) };
+  const { __resetDeviceIdentityCacheForTests: reset } = await import('../src/runtime/device-identity.js');
+  reset();
+  const calls = [];
+  try {
+    await withFetch(async (url, init) => { calls.push({ url, init }); return conflictResponse(); }, async () => {
+      const [result] = await requestTikuAdapterAIFallback(CONFIG, { title: 'owned-fixture' }, { ...OPTS, retryAttempts: 1 });
+      assert.equal(result.response.success, false);
+      assert.deepEqual(result.results, []);
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(deviceIdOf(calls[0]), device);
+    assert.notEqual(deviceIdOf(calls[0]), deviceIdOf(calls[1]));
+    assert.equal(JSON.parse(values.get(key)), deviceIdOf(calls[1]));
+  } finally { globalThis.localStorage = before; reset(); }
+});
