@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>深度思考设置 · 超星学习助手</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, sans-serif; color: #202337; background: #f6f5fc; }
+      body { margin: 0; padding: clamp(1rem, 5vw, 3rem); }
+      main {
+        box-sizing: border-box; margin: 0 auto; max-width: 36rem; padding: 1.5rem;
+        border: 1px solid #979db1; border-radius: 1rem; background: #fff;
+      }
+      h1 { margin-top: 0; font-size: 1.4rem; }
+      p { line-height: 1.6; }
+      .actions { display: flex; gap: .65rem; flex-wrap: wrap; }
+      button {
+        font: inherit; font-weight: 600; min-height: 2.75rem; padding: .35rem .9rem;
+        border: 1px solid #979db1; border-radius: .5rem; background: #f6f7fb; color: #202337; cursor: pointer;
+      }
+      button:focus-visible { outline: 3px solid #5039bf; outline-offset: 2px; }
+      button:disabled { opacity: .55; cursor: default; }
+      #deep-thinking-enable { color: #fff; background: #452bb3; border-color: #452bb3; }
+      .note { color: #4e5066; }
+    </style>
+  </head>
+  <body>
+    <main id="deep-thinking-settings" aria-labelledby="deep-thinking-title">
+      <h1 id="deep-thinking-title">深度思考设置</h1>
+      <p id="deep-thinking-description">开启后，AI 可能进行多轮模型调用与联网搜索，等待时间会更长，费用也可能更高。设置在已打开的超星标签页之间共享。</p>
+      <p id="deep-thinking-status" role="status">正在读取设置…</p>
+      <div class="actions">
+        <button id="deep-thinking-disable" aria-describedby="deep-thinking-description" type="button" disabled>暂不开启</button>
+        <button id="deep-thinking-enable" aria-describedby="deep-thinking-description" type="button" disabled>立即开启</button>
+      </div>
+      <p id="deep-thinking-notice" role="status"></p>
+      <p class="note">不想更改时直接关闭此页。</p>
+    </main>
+    <script type="module" src="./extension-deep-thinking-settings.js"></script>
+  </body>
+</html>

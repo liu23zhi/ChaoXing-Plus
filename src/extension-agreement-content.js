@@ -8,6 +8,11 @@
   const top = window === window.top;
   let active = false;
   let view, current, poll, refreshSerial = 0;
+  // Isolated, presentation-only signal. The guide waits behind this page's reader;
+  // this is not authorization and never exposes a credential or agreement document.
+  const presentation = new EventTarget();
+  presentation.isAccepted = () => active && current?.phase === 'accepted' && navigator.onLine;
+  if (top && !internal) globalThis.__CXPLUS_AGREEMENT_PRESENTATION__ = presentation;
 
   const send = (operation, data) => {
     try {
@@ -17,6 +22,7 @@
   function render(next) {
     current = next;
     view?.render(next);
+    presentation.dispatchEvent(new Event('change'));
   }
   async function refresh(online = false) {
     const serial = ++refreshSerial;
@@ -48,6 +54,7 @@
   function mount() {
     if (active) return;
     active = true;
+    current = undefined;
     if (!top && !internal) return;
     view = mountCxAgreement({ internal, send });
     chrome.storage.onChanged.addListener(changed);
