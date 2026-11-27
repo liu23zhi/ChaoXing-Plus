@@ -555,7 +555,7 @@ test('搜题24小时色带为单行288格，当前5分钟立即显色，无请�
     assert.match(section.textContentAll, /最近 24 小时/);
     assert.doesNotMatch(section.textContentAll, /999/);
     band.onkeydown({ key: 'Home', preventDefault() {} });
-    assert.match(section.querySelector('[data-cx-status-bucket-detail]').textContent, /没有搜题请求/);
+    assert.match(section.querySelector('[data-cx-status-bucket-detail]').textContent, /暂无采样/); // no point, not an observed zero.
     band.onkeydown({ key: 'End', preventDefault() {} });
     assert.match(section.querySelector('[data-cx-status-bucket-detail]').textContent, /20.*10 次/);
     const missing = panel.createStatusPanelSection({ theme: THEME, snapshot: panel.normalizeServiceStatusSnapshot(summaryResponse()), now });
@@ -570,7 +570,7 @@ test('搜题24小时色带为单行288格，当前5分钟立即显色，无请�
     assert.equal(emptyCells.length, 288);
     assert.equal([...emptyCells].every(cell => cell.style.background === '#d1d5db'), true,
       '没有搜题请求时所有格子必须是灰色');
-    assert.match(empty.textContentAll, /尚未采集/);
+    assert.match(empty.textContentAll, /暂无采样/);
   });
 });
 
@@ -976,4 +976,84 @@ test('the actual status mount keeps parallel reads and default redirects in the 
       assert.deepEqual(starts, ['default', 'default']);
     }
   }
+});
+
+test('search series has its own trusted clock and never borrows the summary clock or older generation', async () => {
+  const { http, panel } = await loadModules();
+  const at = '2026-11-27T05:04:30.123Z';
+  const minute = Math.floor(Date.parse(at) / 60000);
+  const restart = '2026-11-26T11:04:30+08:00';
+  const summary = { ...summaryResponse(), restartedAt: restart, asOf: '2026-11-27T05:04:00Z' };
+  const series = { asOf: at, restartedAt: restart, latestSampleAt: '2026-11-27T05:03:30.123Z',
+    searchPoints: [{ minute: minute - 2, totalRequests: 0, successRequests: 0, avgLatencyMs: 0 },
+      { minute: minute - 1, totalRequests: 2, successRequests: 1, avgLatencyMs: 0 }] };
+  let replies = { summary, series };
+  const fetcher = http.createServiceStatusHttpFetcher({
+    baseurl: 'http://127.0.0.1', accessKey: 'owned-fixture', includeSearchHistory: true,
+    requester: async url => url.endsWith('/series') ? replies.series : replies.summary
+  });
+  let snapshot = await fetcher({ now: Date.parse('2031-06-01T00:00:00Z') });
+  assert.equal(snapshot.searchHistoryTiming.asOfMs, Date.parse(at));
+  assert.equal(snapshot.searchHistoryTiming.latestMs, Date.parse(series.latestSampleAt));
+  assert.equal(snapshot.searchHistory[1].avgLatencyMs, 0);
+  await withMinimalDom(async () => {
+    const section = panel.createStatusPanelSection({ theme: THEME, snapshot, now: Date.parse('2031-06-01T00:00:00Z') });
+    const band = section.querySelector('[data-cx-status-band]');
+    const layer = section.querySelector('[data-cx-status-zoom]');
+    assert.equal(band.getAttribute('aria-expanded'), 'false');
+    band.onclick();
+    assert.equal(band.getAttribute('aria-expanded'), 'true');
+    assert.equal(layer.hidden, false);
+    assert.match(layer.textContentAll, /13:02.*已采样无请求/);
+    assert.match(layer.textContentAll, /13:03.*0 毫秒/);
+    assert.match(layer.textContentAll, /13:04.*暂无采样/);
+    assert.doesNotMatch(layer.textContentAll, /2031/);
+  });
+
+  const newer = '2026-11-27T05:04:31.123Z';
+  replies = { summary, series: { ...series, restartedAt: newer, asOf: newer, latestSampleAt: null,
+    endpoints: { search: { samples: 0, totalRequests: 0, successRequests: 0, avgLatencyMs: 0 } }, searchPoints: [] } };
+  snapshot = await fetcher({ now: Date.now() });
+  assert.equal(snapshot.restartedAtMs, Date.parse(newer));
+  assert.equal(snapshot.search.totalRequests, 0);
+  assert.deepEqual(snapshot.searchHistory, []);
+  replies = { summary: { ...summary, restartedAt: newer }, series };
+  snapshot = await fetcher({ now: Date.now() });
+  assert.equal(snapshot.searchHistory, null);
+  assert.equal(snapshot.searchHistoryTiming, undefined);
+});
+
+test('dedicated search decoder rejects malformed minutes, bogus zero and ambiguous duplicate coverage', async () => {
+  const { panel } = await loadModules();
+  const valid = { minute: 29929263, totalRequests: 1, successRequests: 0, avgLatencyMs: 17 };
+  for (const searchPoints of [
+    [valid, valid],
+    [{ ...valid, totalRequests: null, successRequests: null }],
+    [{ ...valid, successRequests: 2 }],
+    [{ ...valid, avgLatencyMs: -1 }],
+    [{ startMs: 1795752000000, requests: 1, succeeded: 1 }]
+  ]) {
+    const snap = panel.normalizeServiceStatusSnapshot({ searchPoints, points: [valid] });
+    assert.equal(snap.searchHistory, null);
+  }
+});
+
+test('recent summary cannot mistake last-day coverage for recent idle or nested admin search', async () => {
+  const { panel } = await loadModules();
+  const asOf = '2026-11-27T05:04:30Z';
+  const minute = Math.floor(Date.parse(asOf) / 60000);
+  const rows = offsets => offsets.map(offset => ({ minute: minute + offset, totalRequests: 0, successRequests: 0, avgLatencyMs: 0 }));
+  const wire = { ...summaryResponse({ searchTotalRequests: 0, searchSuccessRequests: 0 }), asOf };
+  await withMinimalDom(async () => {
+    const draw = value => panel.createStatusPanelSection({ theme: THEME, now: Date.parse('2031-01-01T00:00:00Z'),
+      snapshot: panel.normalizeServiceStatusSnapshot(value) }).querySelector('[data-cx-status-search]').textContentAll;
+    assert.match(draw({ ...wire, searchPoints: rows([-8]) }), /最近窗口暂无搜题采样/);
+    assert.match(draw({ ...wire, searchPoints: rows([-1]) }), /覆盖不足/);
+    assert.match(draw({ ...wire, searchPoints: rows([-4, -3, -2, -1, 0]) }), /最近采样窗口内没有搜题请求/);
+    assert.match(draw({ ...wire, searchPoints: rows([0]) }), /13:04:30（北京时间）/);
+    assert.match(draw({ ...wire, asOf: 'untrusted clock', searchPoints: rows([-1]) }), /覆盖未知/);
+    const adminOnly = { summary: { endpoints: wire.endpoints }, points: rows([0]), processPoints: [{ memory: 999 }] };
+    assert.match(draw(adminOnly), /暂未提供搜题接口统计/);
+    assert.doesNotMatch(draw(adminOnly), /999|全部成功/);
+  });
 });

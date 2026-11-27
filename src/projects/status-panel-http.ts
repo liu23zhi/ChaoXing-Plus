@@ -229,8 +229,17 @@ export function createServiceStatusHttpFetcher(options: ServiceStatusHttpFetcher
       if (history.status === 'rejected') options.onError?.(history.reason);
       const historySnapshot = history.status === 'fulfilled' ? normalizeServiceStatusSnapshot(history.value) : null;
       const snapshot = summary.status === 'fulfilled' ? normalizeServiceStatusSnapshot(summary.value) : null;
+      // The two public reads can straddle a restart. Never pair an older
+      // generation with a newer series or its sampling timestamp.
+      const historyRestart = historySnapshot?.restartedAtMs;
+      const summaryRestart = snapshot?.restartedAtMs;
+      if (snapshot && historySnapshot && summaryRestart != null && historyRestart != null && summaryRestart !== historyRestart) {
+        if (historyRestart > summaryRestart) return historySnapshot;
+        return { ...snapshot, searchHistory: null, searchHistoryTiming: undefined };
+      }
       const result = snapshot ?? (historySnapshot?.searchHistory !== null ? historySnapshot : null);
-      return result ? { ...result, searchHistory: historySnapshot?.searchHistory ?? null } : null;
+      return result ? { ...result, searchHistory: historySnapshot?.searchHistory ?? null,
+        searchHistoryTiming: historySnapshot?.searchHistoryTiming } : null;
     } catch (error) {
       if (!stillCurrent()) return null;
       // 401 与 403 必须分开：两者用户要做的事完全不同。
