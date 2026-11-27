@@ -809,7 +809,7 @@ export function getStoredTikuAdapterConfig() {
  * 幂等：重复调用只是覆盖同一个 fetcher，不会累积定时器或监听器。
  *
  * ⚠️ 失败与 403 都**不弹全局错误**：状态页是旁路展示，取数失败不能干扰答题。
- * 失败由 `refreshServiceStatusSnapshot` 保留旧快照；403 由渲染层显示「无权限查看」。
+ * 同一配置下取数失败保留旧快照；403 由渲染层显示「无权限查看」。
  */
 function mountServiceStatusHttpFetcher() {
   const common = {
@@ -818,14 +818,15 @@ function mountServiceStatusHttpFetcher() {
     includeSearchHistory: true
   };
   if (usesBrowserAgreementGate()) {
+    const readProviderRevision = () => runtimeStore.getProviderConfigRevision();
     setServiceStatusFetcher(createServiceStatusHttpFetcher({
       ...common,
       getConfig: () => {
         const config = getStoredTikuAdapterConfig();
         return { baseurl: resolveTikuAdapterBaseUrl(config.baseurl, DEFAULT_TIKU_BASE_URL),
-          accessKey: config.key, scriptIdentity: config.scriptIdentity, revision: runtimeStore.getProviderConfigRevision() };
+          accessKey: config.key, scriptIdentity: config.scriptIdentity, revision: readProviderRevision() };
       }
-    }));
+    }), readProviderRevision);
     return;
   }
   // Do not change the frozen injection clients' transport or settings behavior.
@@ -3699,12 +3700,19 @@ window.addEventListener('storage', (event) => {
 
 if (usesBrowserAgreementGate()) onBrowserDeepThinkingChanged(renderWorkResultsPanel);
 
+let lastStatusProviderRevision = runtimeStore.getProviderConfigRevision();
 document.addEventListener('chaoxing-plus:shared-store-hydrate', (event) => {
   const detail = typeof event === 'object' && event && 'detail' in event
     ? (event as CustomEvent<Record<string, unknown>>).detail
     : undefined;
   const sharedQuestionCaches = detail?.[QUESTION_CACHE_KEY];
   let shouldRefreshWorkResultsPanel = !detail || shouldRefreshPanelForSharedValues(detail);
+  // Private provider changes may carry no shared values, but still retire the rendered status.
+  const statusProviderRevision = runtimeStore.getProviderConfigRevision();
+  if (statusProviderRevision !== lastStatusProviderRevision) {
+    lastStatusProviderRevision = statusProviderRevision;
+    shouldRefreshWorkResultsPanel = true;
+  }
 
   if (applyQuestionCaches(sharedQuestionCaches)) {
     shouldRefreshWorkResultsPanel = true;

@@ -19,6 +19,7 @@ export type ServiceStatusSample = {
   startMs: number;
   requests: number;
   succeeded: number;
+  avgLatencyMs?: number | null;
 };
 
 /** 聚合后的一个 5 分钟格子。 `successRate` 为 `null` 表示该窗口没有任何请求。 */
@@ -384,6 +385,9 @@ export type ServiceStatusSnapshot = {
   search?: SearchEndpointStatus | null;
   /** 独立搜题分钟序列；null/缺失表示旧服务未提供或历史请求失败，[]表示尚无采样。 */
   searchHistory?: ServiceStatusSample[] | null;
+  searchHistoryTiming?: { asOfMs: number | null; restartMs: number | null; latestMs: number | null };
+  searchSummaryAsOfMs?: number | null;
+  searchSummaryWindowMinutes?: number;
 };
 
 export type ServiceStatusFetchOptions = { now: number };
@@ -461,6 +465,30 @@ function normalizeSamples(value: unknown): ServiceStatusSample[] {
   return samples;
 }
 
+function parseSearchHistory(value: unknown): ServiceStatusSample[] | null {
+  if (!Array.isArray(value) || value.length > STATUS_WINDOW_MS / 60_000) return null;
+  const byMinute = new Set<number>();
+  const samples: ServiceStatusSample[] = [];
+  for (const raw of value) {
+    const point = asRecord(raw);
+    if (!point) return null;
+    const { minute, totalRequests, successRequests, avgLatencyMs } = point;
+    const safe = (field: unknown): field is number => typeof field === 'number' && Number.isSafeInteger(field) && field >= 0;
+    if (!safe(minute) || !safe(totalRequests) || !safe(successRequests) ||
+      successRequests > totalRequests || byMinute.has(minute) || minute * 60_000 > 8.64e15 ||
+      (avgLatencyMs !== undefined && !safe(avgLatencyMs))) return null;
+    byMinute.add(minute);
+    samples.push({ startMs: minute * 60_000, requests: totalRequests, succeeded: successRequests,
+      avgLatencyMs: safe(avgLatencyMs) ? avgLatencyMs : null });
+  }
+  return samples;
+}
+
+function parseHistoryTime(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return null;
+  return parseIsoToMs(value);
+}
+
 /** ISO 字符串 → 毫秒。解析失败返回 null（渲染层据此不显示「自 1970 起」）。 */
 function parseIsoToMs(value: unknown): number | null {
   const text = String(value ?? '').trim();
@@ -471,10 +499,16 @@ function parseIsoToMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeSearchEndpointStatus(payload: Record<string, unknown>, summary: Record<string, unknown>): SearchEndpointStatus | null {
-  const endpoints = asRecord(payload.endpoints) ?? asRecord(summary.endpoints);
+function normalizeSearchEndpointStatus(payload: Record<string, unknown>, requireVerifiedSearch: boolean): SearchEndpointStatus | null {
+  const endpoints = asRecord(payload.endpoints); // Never borrow a nested admin summary.
   const search = asRecord(endpoints?.search);
   if (!search) return null;
+  if (requireVerifiedSearch) {
+    const { totalRequests, successRequests, avgLatencyMs, samples } = search;
+    const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+    if (!count(totalRequests) || !count(successRequests) || !count(avgLatencyMs) || !count(samples) ||
+      successRequests > totalRequests || (totalRequests > 0 && samples === 0)) return null;
+  }
 
   const totalRequests = Math.max(0, toFiniteNumber(search.totalRequests ?? search.total_requests) ?? 0);
   const successRequests = Math.min(totalRequests, Math.max(0, toFiniteNumber(search.successRequests ?? search.success_requests) ?? 0));
@@ -522,7 +556,7 @@ function normalizeSearchEndpointStatus(payload: Record<string, unknown>, summary
  * ⚠️ 为什么必须有 `successRateAvailable`：只给 `successRate: 0` 时前端无法区分
  * 「全失败」（要报警）与「没请求」（正常夜间）。这两个都必须能正确表达。
  */
-export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnapshot | null {
+export function normalizeServiceStatusSnapshot(raw: unknown, requireVerifiedSearch = false): ServiceStatusSnapshot | null {
   const record = asRecord(raw);
   if (!record) {
     return null;
@@ -530,7 +564,8 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
   const payload = asRecord(record.data) ?? record;
   const summary = asRecord(payload.summary) ?? {};
   const breakdownRecord = asRecord(summary.breakdown) ?? asRecord(payload.breakdown) ?? {};
-  const search = normalizeSearchEndpointStatus(payload, summary);
+  const search = normalizeSearchEndpointStatus(payload, requireVerifiedSearch);
+  const searchWindow = payload.windowMinutes;
 
   const successRate = toFiniteNumber(summary.successRate ?? payload.successRate ?? payload.success_rate);
   const samples = normalizeSamples(payload.points ?? payload.buckets ?? payload.history);
@@ -579,8 +614,15 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
     restartedAtMs: parseIsoToMs(payload.restartedAt ?? payload.restarted_at),
     updatedAt: toFiniteNumber(payload.updatedAt ?? payload.updated_at ?? payload.ts) ?? Date.now(),
     search,
+    searchSummaryAsOfMs: parseHistoryTime(payload.asOf),
+    searchSummaryWindowMinutes: typeof searchWindow === 'number' && Number.isSafeInteger(searchWindow) && searchWindow > 0 && searchWindow <= 1440
+      ? searchWindow : undefined,
     // points 是全站序列，不能用它为搜题接口补历史；当前窗口空也不丢失旧时段请求。
-    searchHistory: Array.isArray(payload.searchPoints) ? normalizeSamples(payload.searchPoints) : null
+    searchHistory: parseSearchHistory(payload.searchPoints),
+    searchHistoryTiming: Object.prototype.hasOwnProperty.call(payload, 'asOf') ? {
+      asOfMs: parseHistoryTime(payload.asOf), restartMs: parseHistoryTime(payload.restartedAt),
+      latestMs: parseHistoryTime(payload.latestSampleAt)
+    } : undefined
   };
 }
 
@@ -767,9 +809,19 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
 let serviceStatusFetcher: ServiceStatusFetcher = async (options) => createFixtureServiceStatusSnapshot(options.now);
 let cachedServiceStatusSnapshot: ServiceStatusSnapshot | null = null;
 let serviceStatusRefreshPromise: Promise<ServiceStatusSnapshot | null> | null = null;
+let readStatusProviderRevision: (() => number | undefined) | undefined;
+let cachedStatusProviderRevision: number | undefined;
 
-export function setServiceStatusFetcher(fetcher: ServiceStatusFetcher): void {
+export function setServiceStatusFetcher(
+  fetcher: ServiceStatusFetcher,
+  readProviderRevision?: () => number | undefined
+): void {
+  if (Boolean(readStatusProviderRevision) !== Boolean(readProviderRevision)) {
+    cachedServiceStatusSnapshot = null;
+    cachedStatusProviderRevision = undefined;
+  }
   serviceStatusFetcher = fetcher;
+  readStatusProviderRevision = readProviderRevision;
 }
 
 export function getServiceStatusFetcher(): ServiceStatusFetcher {
@@ -777,17 +829,25 @@ export function getServiceStatusFetcher(): ServiceStatusFetcher {
 }
 
 export function readCachedServiceStatusSnapshot(): ServiceStatusSnapshot | null {
+  if (readStatusProviderRevision) {
+    const revision = readStatusProviderRevision();
+    if (revision === undefined || revision !== cachedStatusProviderRevision) {
+      cachedServiceStatusSnapshot = null;
+      cachedStatusProviderRevision = undefined;
+    }
+  }
   return cachedServiceStatusSnapshot;
 }
 
 export function setCachedServiceStatusSnapshot(snapshot: ServiceStatusSnapshot | null): void {
   cachedServiceStatusSnapshot = snapshot;
+  cachedStatusProviderRevision = readStatusProviderRevision?.();
 }
 
 /**
  * 拉一次并写入缓存。并发调用共享同一个 Promise（避免首屏连发两次）。
  *
- * 失败**不清缓存**：状态页显示一份旧数据比显示空白有用得多，`updatedAt` 会说明它有多旧。
+ * 同一配置下失败不清缓存；换代后不能把旧统计当成当前题库的状态。
  */
 export function refreshServiceStatusSnapshot(
   options: Partial<ServiceStatusFetchOptions> = {}
@@ -796,15 +856,20 @@ export function refreshServiceStatusSnapshot(
     return serviceStatusRefreshPromise;
   }
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const scoped = Boolean(readStatusProviderRevision);
+  const revision = readStatusProviderRevision?.();
   serviceStatusRefreshPromise = (async () => {
     try {
       const snapshot = await serviceStatusFetcher({ now });
-      if (snapshot) {
+      if (snapshot && (scoped
+        ? revision !== undefined && revision === readStatusProviderRevision?.()
+        : !readStatusProviderRevision)) {
         cachedServiceStatusSnapshot = snapshot;
+        cachedStatusProviderRevision = revision;
       }
-      return cachedServiceStatusSnapshot;
+      return readCachedServiceStatusSnapshot();
     } catch {
-      return cachedServiceStatusSnapshot;
+      return readCachedServiceStatusSnapshot();
     } finally {
       serviceStatusRefreshPromise = null;
     }
@@ -907,6 +972,22 @@ function resolveStatusTone(snapshot: ServiceStatusSnapshot | null, theme: Servic
   return { color: theme.muted, text: '无数据' };
 }
 
+function describeRecentSearchIdle(snapshot: ServiceStatusSnapshot | null, windowMinutes: number): string {
+  const at = snapshot?.searchSummaryAsOfMs;
+  const seriesAt = snapshot?.searchHistoryTiming?.asOfMs;
+  // Samples span the entire retained day; that counter alone cannot prove
+  // current coverage. Compare only the independently anchored search series.
+  if (at == null || seriesAt == null || seriesAt < at || !snapshot?.searchHistory) {
+    return '最近窗口的搜题采样覆盖未知。';
+  }
+  const last = Math.floor(at / HISTORY_MINUTE_MS) * HISTORY_MINUTE_MS;
+  const first = last - (windowMinutes - 1) * HISTORY_MINUTE_MS;
+  const observed = snapshot.searchHistory.filter(point => point.startMs >= first && point.startMs <= last);
+  if (!observed.length) return '最近窗口暂无搜题采样。';
+  if (observed.some(point => point.requests !== 0)) return '最新搜题序列与摘要时点不同，请以对应时段明细为准。';
+  return observed.length === windowMinutes ? '最近采样窗口内没有搜题请求。' : '最近窗口覆盖不足；已采样分钟没有搜题请求。';
+}
+
 function createSearchStatusCard(
   snapshot: ServiceStatusSnapshot | null,
   theme: ServiceStatusPanelTheme,
@@ -967,11 +1048,11 @@ function createSearchStatusCard(
   } else if (search.samples === 0) {
     card.append(createHintLine(theme, '尚未采集到搜题接口状态数据。'));
   } else if (search.totalRequests === 0) {
-    card.append(createHintLine(theme, '最近采样窗口内没有搜题请求。'));
+    card.append(createHintLine(theme, describeRecentSearchIdle(snapshot, snapshot?.searchSummaryWindowMinutes ?? 5)));
   } else {
     const latency = search.avgLatencyMs === null ? '未知' : `${Math.round(search.avgLatencyMs)}ms`;
     card.append(createHintLine(theme, `成功率 ${formatServiceStatusPercent(search.successRate)} · 平均延迟 ${latency}`));
-    card.append(createHintLine(theme, `最近 5 分钟 · ${search.successRequests} 次成功 / ${search.totalRequests} 次请求`));
+    card.append(createHintLine(theme, `最近 ${snapshot?.searchSummaryWindowMinutes ?? 5} 分钟 · ${search.successRequests} 次成功 / ${search.totalRequests} 次请求`));
   }
 
   const footer = el('div');
@@ -982,7 +1063,8 @@ function createSearchStatusCard(
   footer.style.minWidth = '0';
   footer.style.flexWrap = 'wrap';
   footer.append(createHintLine(theme, snapshot
-    ? `数据更新于 ${formatServiceStatusClock(snapshot.updatedAt)}`
+    ? snapshot.searchSummaryAsOfMs != null ? '服务器统计截至 ' + historyTime(snapshot.searchSummaryAsOfMs, true) + '（北京时间）'
+      : '本机读取时间 ' + historyTime(snapshot.updatedAt, true) + '（北京时间）'
     : '尚未取到搜题接口状态数据。'));
 
   const refresh = el('button');
@@ -1005,105 +1087,260 @@ function createSearchStatusCard(
   return card;
 }
 
+type SearchHistoryBucket = ServiceStatusBucket & { points: ServiceStatusSample[] };
+type SearchHistoryView = {
+  available: boolean;
+  serverClock: boolean;
+  asOfMs: number;
+  restartMs: number | null;
+  latestMs: number | null;
+  buckets: SearchHistoryBucket[];
+};
+
+const HISTORY_MINUTE_MS = 60_000;
+const shanghaiDateTime = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+});
+
+function historyTime(ms: number, seconds = false): string {
+  const value = shanghaiDateTime.format(ms);
+  return seconds ? value : value.slice(0, -3);
+}
+
+function buildSearchHistoryView(snapshot: ServiceStatusSnapshot | null, fallbackNow: number): SearchHistoryView {
+  const timing = snapshot?.searchHistoryTiming;
+  const history = snapshot?.searchHistory;
+  const available = Array.isArray(history) && timing?.asOfMs !== null;
+  const asOfMs = timing?.asOfMs ?? fallbackNow;
+  const restartMs = timing?.restartMs ?? null;
+  const latestMs = available && timing?.latestMs != null && timing.latestMs <= asOfMs &&
+    (restartMs === null || timing.latestMs >= restartMs) ? timing.latestMs : null;
+  const currentMinute = Math.floor(asOfMs / HISTORY_MINUTE_MS) * HISTORY_MINUTE_MS;
+  // Use the exact provider minute window. Its newest five minutes are also
+  // the summary window; re-aligning to clock multiples of five drops data.
+  const start = currentMinute + HISTORY_MINUTE_MS - STATUS_WINDOW_MS;
+  const generationStart = restartMs !== null ? Math.floor(restartMs / HISTORY_MINUTE_MS) * HISTORY_MINUTE_MS : start;
+  const buckets: SearchHistoryBucket[] = Array.from({ length: STATUS_BUCKET_COUNT }, (_, index) => ({
+    startMs: start + index * STATUS_BUCKET_MS, points: [], requests: 0, succeeded: 0, successRate: null
+  }));
+  if (available) {
+    for (const point of history) {
+      if (point.startMs < Math.max(start, generationStart) || point.startMs > currentMinute) continue;
+      const bucket = buckets[Math.floor((point.startMs - start) / STATUS_BUCKET_MS)];
+      bucket.points.push(point);
+      bucket.requests += point.requests;
+      bucket.succeeded += point.succeeded;
+    }
+  }
+  for (const bucket of buckets) {
+    if (bucket.requests > 0) bucket.successRate = bucket.succeeded / bucket.requests;
+  }
+  return { available, serverClock: typeof timing?.asOfMs === 'number', asOfMs, restartMs, latestMs, buckets };
+}
+
+function searchHistoryLabel(view: SearchHistoryView, bucket: SearchHistoryBucket): string {
+  if (!view.available) return '历史暂不可用';
+  if (!bucket.points.length) return '暂无采样';
+  if (!bucket.requests) return '已采样无请求';
+  if (!bucket.succeeded) return '全失败';
+  return bucket.succeeded === bucket.requests ? '全部成功' : '部分失败';
+}
+
+function searchHistoryInterval(view: SearchHistoryView, bucket: SearchHistoryBucket): string {
+  return historyTime(bucket.startMs) + ' – ' + historyTime(Math.min(view.asOfMs, bucket.startMs + STATUS_BUCKET_MS));
+}
+
+let searchHistoryId = 0;
+
 function createSearchHistoryBand(snapshot: ServiceStatusSnapshot | null, theme: ServiceStatusPanelTheme, nowMs: number): HTMLElement {
   const card = createSectionCard(theme);
   card.dataset.cxStatusHistory = 'search';
   card.append(createSectionTitle(theme, '最近 24 小时'));
-  const history = snapshot?.searchHistory;
-  const available = Array.isArray(history);
-  const samples = (history ?? []).filter(sample => sample.startMs >= nowMs - STATUS_WINDOW_MS && sample.startMs <= nowMs);
-  // 右端包含当前未结束的 5 分钟；刚刚发生的请求不必再等整桶结束才显色。
-  const buckets = buildServiceStatusBuckets(samples, nowMs + STATUS_BUCKET_MS);
-  const band = el('div');
+  const view = buildSearchHistoryView(snapshot, nowMs);
+  const { buckets } = view;
+  const last = buckets.length - 1;
+  const zoomId = 'cx-search-history-' + (++searchHistoryId);
+  const band = el('button');
+  band.type = 'button';
   band.dataset.cxStatusBand = 'search';
-  band.setAttribute('role', 'group');
-  band.setAttribute('aria-label', '最近24小时搜题成功率，使用左右方向键查看时段，Home或End跳到最早或最新');
-  band.tabIndex = 0;
-  band.style.display = 'flex';
-  band.style.flexWrap = 'nowrap';
-  band.style.width = '100%';
-  band.style.minWidth = '0';
-  band.style.height = '18px';
-  band.style.borderRadius = '6px';
-  band.style.overflow = 'hidden';
-  band.style.background = SERVICE_STATUS_NO_DATA_TIER.color;
-  band.style.outlineOffset = '3px';
+  band.setAttribute('aria-label', '查看最近24小时搜题状态放大层，使用方向键和 Home 或 End 选择时段');
+  band.setAttribute('aria-controls', zoomId);
+  band.setAttribute('aria-describedby', zoomId + '-detail');
+  band.setAttribute('aria-expanded', 'false');
+  Object.assign(band.style, {
+    display: 'flex', flexWrap: 'nowrap', width: '100%', minWidth: '0',
+    height: '44px', alignItems: 'center', border: '0', borderRadius: '6px',
+    padding: '0', background: 'transparent', cursor: 'zoom-in', outlineOffset: '3px'
+  });
 
   const detail = createHintLine(theme, '');
+  detail.id = zoomId + '-detail';
   detail.dataset.cxStatusBucketDetail = 'true';
   detail.setAttribute('role', 'status');
   detail.setAttribute('aria-live', 'polite');
-  let selected = buckets.length - 1;
-  const describe = (bucket: ServiceStatusBucket): string => {
-    const day = new Date(bucket.startMs);
-    const interval = `${day.getMonth() + 1}/${day.getDate()} ${formatServiceStatusClock(bucket.startMs)}–${formatServiceStatusClock(Math.min(nowMs, bucket.startMs + STATUS_BUCKET_MS))}`;
-    if (!available) return `${interval} · 历史暂不可用`;
-    if (!history?.length) return `${interval} · 尚未采集到历史数据`;
-    if (bucket.requests === 0) return `${interval} · 没有搜题请求`;
-    return `${interval} · 成功率 ${formatServiceStatusPercent(bucket.successRate)} · ${bucket.requests} 次请求`;
+
+  const layer = el('section');
+  layer.id = zoomId;
+  layer.hidden = true;
+  layer.dataset.cxStatusZoom = 'true';
+  layer.setAttribute('aria-label', '放大时段与分钟样本');
+  Object.assign(layer.style, {
+    minWidth: '0', maxWidth: '100%', boxSizing: 'border-box',
+    border: '1px solid ' + theme.border, borderRadius: '8px', padding: '8px', overflowWrap: 'anywhere'
+  });
+  const zoomHeading = createSectionTitle(theme, '放大时段');
+  const axisText = createHintLine(theme, '');
+  const zoomSummary = createHintLine(theme, '');
+  const navigation = el('div');
+  Object.assign(navigation.style, { display: 'flex', justifyContent: 'space-between', gap: '4px', flexWrap: 'wrap' });
+  const zoomButton = (label: string): HTMLButtonElement => {
+    const button = el('button');
+    button.type = 'button';
+    button.textContent = label;
+    Object.assign(button.style, {
+      minHeight: '44px', minWidth: '0', border: '1px solid ' + theme.border,
+      borderRadius: '6px', padding: '4px 6px', background: theme.surface, color: theme.text, font: 'inherit',
+      fontSize: '12px', cursor: 'pointer'
+    });
+    return button;
   };
-  const select = (index: number) => {
-    selected = Math.min(buckets.length - 1, Math.max(0, index));
-    detail.textContent = describe(buckets[selected]);
+  const previous = zoomButton('上一时段');
+  const next = zoomButton('下一时段');
+  const closeButton = zoomButton('收起');
+  navigation.append(previous, next, closeButton);
+  const choices = el('div');
+  Object.assign(choices.style, { display: 'grid', gridTemplateColumns: 'repeat(5,minmax(0,1fr))', gap: '3px' });
+  const choiceButtons = Array.from({ length: 5 }, () => zoomButton(''));
+  choices.append(...choiceButtons);
+  const minuteRows = Array.from({ length: 5 }, () => createHintLine(theme, ''));
+  const minutes = el('div');
+  minutes.setAttribute('aria-label', '真实分钟观测');
+  minutes.append(...minuteRows);
+  layer.append(zoomHeading, axisText, navigation, choices, zoomSummary, minutes);
+
+  let selected = last;
+  let openedBy: 'hover' | 'focus' | 'click' | null = null;
+  let restoringFocus = false;
+  const choose = (index: number) => {
+    selected = Math.min(last, Math.max(0, index));
+    const bucket = buckets[selected];
+    const interval = searchHistoryInterval(view, bucket);
+    const summary = searchHistoryLabel(view, bucket);
+    const ratio = bucket.requests > 0
+      ? ' · 成功率 ' + formatServiceStatusPercent(bucket.successRate) + ' · ' + bucket.requests + ' 次请求'
+      : '';
+    const eligible = Math.min(5, Math.floor((view.asOfMs - bucket.startMs) / HISTORY_MINUTE_MS) + 1);
+    const beforeRestart = (at: number) => view.restartMs !== null &&
+      at < Math.floor(view.restartMs / HISTORY_MINUTE_MS) * HISTORY_MINUTE_MS;
+    const expected = Array.from({ length: eligible }, (_, i) => bucket.startMs + i * HISTORY_MINUTE_MS)
+      .filter(at => !beforeRestart(at)).length;
+    const incomplete = view.available && bucket.points.length > 0 && bucket.points.length < expected
+      ? ' · 覆盖不足' : '';
+    detail.textContent = interval + ' · ' + summary + ratio + incomplete;
+    if (!openedBy) return;
+    axisText.textContent = view.serverClock
+      ? '北京时间（UTC+8） · 近 5 自然分钟一格 · 截至 ' + historyTime(view.asOfMs, true)
+      : '北京时间（UTC+8） · 服务未提供服务器时钟，暂按本机时点定位';
+    const relativeStart = Math.min(last - 4, Math.max(0, selected - 2));
+    for (let i = 0; i < choiceButtons.length; i++) {
+      const slot = relativeStart + i;
+      const choice = buckets[slot];
+      const button = choiceButtons[i];
+      button.textContent = historyTime(choice.startMs).slice(-5);
+      button.setAttribute('aria-label', searchHistoryInterval(view, choice) + ' · ' + searchHistoryLabel(view, choice));
+      button.setAttribute('aria-pressed', String(slot === selected));
+      button.style.background = slot === selected ? theme.surfaceStrong : theme.surface;
+      button.style.borderBottom = '4px solid ' + resolveServiceStatusTier(choice.successRate).color;
+      button.onclick = () => choose(slot);
+    }
+    previous.disabled = selected === 0;
+    next.disabled = selected === last;
+    const generation = view.restartMs === null ? '' : ' · 重启采样自 ' + historyTime(view.restartMs, true);
+    const coverage = !view.available ? '' : expected === 0 ? ' · 重启前暂无采样'
+      : ' · 已采样 ' + bucket.points.length + '/' + expected + ' 分钟';
+    zoomSummary.textContent = detail.textContent + coverage + generation;
+    for (let i = 0; i < minuteRows.length; i++) {
+      const at = bucket.startMs + i * HISTORY_MINUTE_MS;
+      const point = bucket.points.find(item => item.startMs === at);
+      const row = minuteRows[i];
+      row.hidden = i >= eligible || !view.available;
+      const label = !point ? (beforeRestart(at) ? '重启前 · 暂无采样' : '暂无采样')
+        : !point.requests ? '已采样无请求 · 0 次请求'
+        : (point.succeeded === 0 ? '全失败' : point.succeeded === point.requests ? '全部成功' : '部分失败')
+          + ' · ' + point.succeeded + ' 次成功 / ' + point.requests + ' 次请求'
+          + (point.avgLatencyMs == null ? '' : ' · ' + point.avgLatencyMs + ' 毫秒');
+      row.textContent = row.hidden ? '' : historyTime(at) + ' · ' + label;
+    }
   };
-  for (let index = 0; index < buckets.length; index += 1) {
+  const open = (cause: 'hover' | 'focus' | 'click') => {
+    openedBy = cause;
+    layer.hidden = false;
+    band.setAttribute('aria-expanded', 'true');
+    choose(selected);
+  };
+  const close = (returnFocus = false) => {
+    openedBy = null;
+    layer.hidden = true;
+    band.setAttribute('aria-expanded', 'false');
+    if (returnFocus) {
+      restoringFocus = true;
+      band.focus?.();
+      restoringFocus = false;
+    }
+  };
+  previous.onclick = () => choose(selected - 1);
+  next.onclick = () => choose(selected + 1);
+  closeButton.onclick = () => close(true);
+  band.onfocus = () => {
+    if (!restoringFocus && band.matches?.(':focus-visible')) open('focus');
+  };
+  band.onpointerenter = event => {
+    if (event.pointerType === 'mouse' && !openedBy) open('hover');
+  };
+  card.onpointerleave = event => {
+    if (event.pointerType === 'mouse' && openedBy === 'hover') close();
+  };
+  card.addEventListener?.('focusout', (event: FocusEvent) => {
+    if (openedBy === 'focus' && !card.contains?.(event.relatedTarget as Node | null)) close();
+  });
+  band.onclick = () => { if (openedBy) close(); else open('click'); };
+  for (let index = 0; index < buckets.length; index++) {
     const bucket = buckets[index];
     const cell = el('span');
     cell.dataset.cxStatusBucket = String(index);
+    cell.dataset.cxStatusCoverage = bucket.points.length ? (bucket.requests ? 'traffic' : 'idle') : 'unknown';
     cell.style.flex = '1 1 0';
     cell.style.minWidth = '0';
-    cell.style.height = '100%';
+    cell.style.height = '18px';
     cell.style.background = resolveServiceStatusTier(bucket.successRate).color;
-    cell.title = describe(bucket);
+    cell.title = searchHistoryInterval(view, bucket) + ' · ' + searchHistoryLabel(view, bucket);
     cell.setAttribute('aria-hidden', 'true');
-    cell.onmouseenter = () => select(index);
-    cell.onclick = () => select(index);
+    cell.onpointerenter = event => { if (event.pointerType === 'mouse') choose(index); };
     band.append(cell);
   }
-  band.onkeydown = (event) => {
+  band.onkeydown = event => {
     let index = selected;
     if (event.key === 'ArrowLeft') index -= 1;
     else if (event.key === 'ArrowRight') index += 1;
     else if (event.key === 'Home') index = 0;
-    else if (event.key === 'End') index = buckets.length - 1;
+    else if (event.key === 'End') index = last;
     else return;
     event.preventDefault();
-    select(index);
+    choose(index);
   };
-  select(selected);
+  card.onkeydown = event => {
+    if (event.key === 'Escape' && openedBy) close(layer.contains?.(event.target as Node | null));
+  };
+  choose(selected);
+
   const axis = el('div');
   axis.style.display = 'flex';
   axis.style.justifyContent = 'space-between';
-  axis.append(createHintLine(theme, '24 小时前'), createHintLine(theme, '现在'));
-  const legend = el('div');
-  legend.style.display = 'flex';
-  legend.style.flexWrap = 'wrap';
-  legend.style.gap = '6px 12px';
-  for (const [color, label] of [
-    [resolveServiceStatusTier(1).color, '成功'], [resolveServiceStatusTier(0.7).color, '部分失败'],
-    [resolveServiceStatusTier(0).color, '全失败'], [SERVICE_STATUS_NO_DATA_TIER.color, '无请求']
-  ]) {
-    const item = el('div');
-    item.style.fontSize = '12px';
-    item.style.lineHeight = '1.6';
-    item.style.color = theme.subtle;
-    const dot = el('span');
-    dot.style.display = 'inline-block';
-    dot.style.width = '7px';
-    dot.style.height = '7px';
-    dot.style.marginRight = '5px';
-    dot.style.borderRadius = '50%';
-    dot.style.background = color;
-    const labelText = el('span');
-    labelText.textContent = label;
-    item.append(dot, labelText);
-    legend.append(item);
-  }
-  card.append(band, axis, detail, legend);
-  card.append(createHintLine(theme, !available
-    ? '历史暂不可用，请稍后刷新或更新题库服务。当前状态仍可单独查看。'
-    : !history.length ? '尚未采集到搜题历史，色带暂以灰色显示。'
-      : '每格 5 分钟，按请求总量加权；灰色表示无请求或尚无采样。'));
+  axis.append(createHintLine(theme, historyTime(buckets[0].startMs)), createHintLine(theme, historyTime(view.asOfMs)));
+  card.append(band, axis, detail, layer);
+  card.append(createHintLine(theme, '灰色可表示暂无采样或已采样无请求，请查看放大时段明细。'));
+  if (view.latestMs !== null) card.append(createHintLine(theme, '最新搜题采样：' + historyTime(view.latestMs, true)));
   return card;
 }
 

@@ -392,3 +392,42 @@ test('并发刷新共享同一次请求（首屏不会连发两次）', async ()
     mod.setCachedServiceStatusSnapshot(null);
   }
 });
+
+test('切换题库配置修订时隔离热缓存，同配置失败仍保留结果', async () => {
+  const mod = await loadStatusPanel();
+  const a = mod.createFixtureServiceStatusSnapshot(atLocal(14, 5));
+  const lateA = mod.createFixtureServiceStatusSnapshot(atLocal(14, 6));
+  const b = mod.createFixtureServiceStatusSnapshot(atLocal(14, 7));
+  let revision = 1;
+  let read = async () => a;
+  mod.setServiceStatusFetcher(() => read(), () => revision);
+
+  try {
+    assert.equal(await mod.refreshServiceStatusSnapshot(), a);
+    read = async () => { throw new Error('synthetic same-provider failure'); };
+    assert.equal(await mod.refreshServiceStatusSnapshot(), a, '同一配置故障时保留合法缓存');
+
+    let release;
+    const held = new Promise((resolveOld) => { release = resolveOld; });
+    read = () => held;
+    const previous = mod.refreshServiceStatusSnapshot();
+    revision += 1;
+    const afterSwitch = mod.readCachedServiceStatusSnapshot();
+    release(lateA);
+    const afterLate = await previous;
+
+    read = async () => null;
+    const afterFailure = await mod.refreshServiceStatusSnapshot();
+    read = async () => b;
+    const recovered = await mod.refreshServiceStatusSnapshot();
+
+    assert.equal(afterSwitch === null, true, '换源须立即退休旧题库的热缓存');
+    assert.equal(afterLate === null, true, '旧来源的在途结果不能重新写入缓存');
+    assert.equal(afterFailure === null, true, '新来源暂不可用也不能展示旧来源状态');
+    assert.equal(recovered, b);
+    assert.equal(mod.readCachedServiceStatusSnapshot(), b);
+  } finally {
+    mod.setServiceStatusFetcher(async (options) => mod.createFixtureServiceStatusSnapshot(options.now));
+    mod.setCachedServiceStatusSnapshot(null);
+  }
+});
