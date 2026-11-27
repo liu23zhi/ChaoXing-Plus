@@ -1057,3 +1057,67 @@ test('recent summary cannot mistake last-day coverage for recent idle or nested 
     assert.doesNotMatch(draw(adminOnly), /999|全部成功/);
   });
 });
+
+test('same-generation sequential rewind uses only the verified later series, not future summary or legacy fields', async () => {
+  const { http } = await loadModules();
+  const summaryAt = '2026-11-25T15:20:30Z';
+  const seriesAt = '2026-11-25T15:20:20Z';
+  const advance = '2026-11-25T15:20:40Z';
+  const generation = '2026-11-25T15:19:00Z';
+  const commonSummary = { ...summaryResponse({ searchTotalRequests: 2, searchSuccessRequests: 1, searchAvgLatencyMs: 11 }),
+    restartedAt: generation, asOf: summaryAt };
+  const search = { samples: 1, totalRequests: 1, successRequests: 1, avgLatencyMs: 3 };
+  const series = {
+    restartedAt: '2026-11-25T23:19:00+08:00', asOf: seriesAt,
+    endpoints: { search, other: { ...search, totalRequests: 99 } },
+    searchPoints: [{ minute: Math.floor(Date.parse(generation) / 60_000), totalRequests: 1, successRequests: 1, avgLatencyMs: 3 }]
+  };
+  let replies = { summary: commonSummary, series };
+  const calls = [];
+  const requester = async url => {
+    const key = url.endsWith('/series') ? 'series' : 'summary';
+    calls.push(key);
+    return replies[key];
+  };
+  const fetcher = http.createServiceStatusHttpFetcher({
+    includeSearchHistory: true, requester,
+    getConfig: () => ({ revision: 1, baseurl: 'http://127.0.0.1', accessKey: 'owned-fixture' })
+  });
+  const fetch = () => fetcher({ now: Date.parse('2031-06-01T00:00:00Z') });
+  const snapshot = await fetch();
+  assert.deepEqual(calls, ['summary', 'series']);
+  assert.deepEqual(snapshot.search, { status: 'healthy', successRate: 1,
+    totalRequests: 1, successRequests: 1, avgLatencyMs: 3, samples: 1 });
+  assert.equal(snapshot.searchSummaryAsOfMs, Date.parse(seriesAt));
+  assert.equal(snapshot.searchHistoryTiming.asOfMs, Date.parse(seriesAt));
+  assert.equal(snapshot.searchHistory.length, 1);
+
+  for (const suspect of [
+    undefined, { ...search, successRequests: 2 }, { ...search, avgLatencyMs: null },
+    { ...search, samples: 0 }, { ...search, totalRequests: '1' }, { ...search, totalRequests: NaN }
+  ]) {
+    replies = { summary: commonSummary, series: {
+      ...series, endpoints: { ...series.endpoints, search: suspect },
+      summary: { endpoints: { search: { ...search, totalRequests: 999 } } }
+    } };
+    const uncertain = await fetch();
+    assert.equal(uncertain.search, null);
+    assert.equal(uncertain.searchSummaryAsOfMs, Date.parse(seriesAt));
+    assert.equal(uncertain.searchHistory.length, 1, 'history coverage remains independently valid');
+  }
+
+  replies = { summary: commonSummary, series: { ...series, asOf: advance } };
+  const forward = await fetch();
+  assert.equal(forward.search.totalRequests, 2);
+  assert.equal(forward.searchSummaryAsOfMs, Date.parse(summaryAt));
+  assert.equal(forward.searchHistoryTiming.asOfMs, Date.parse(advance));
+
+  replies = { summary: { ...commonSummary, restartedAt: '1' }, series: { ...series, restartedAt: '1' } };
+  assert.equal((await fetch()).search.totalRequests, 2, 'unverified epoch cannot establish a same-generation rewind');
+
+  replies = { summary: commonSummary, series };
+  const parallel = http.createServiceStatusHttpFetcher({
+    baseurl: 'http://127.0.0.1', accessKey: 'owned-fixture', includeSearchHistory: true, requester
+  });
+  assert.equal((await parallel({ now: Date.now() })).search.totalRequests, 2, 'older parallel hosts do not claim read ordering');
+});

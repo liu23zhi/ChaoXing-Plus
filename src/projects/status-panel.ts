@@ -499,10 +499,16 @@ function parseIsoToMs(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeSearchEndpointStatus(payload: Record<string, unknown>): SearchEndpointStatus | null {
+function normalizeSearchEndpointStatus(payload: Record<string, unknown>, requireVerifiedSearch: boolean): SearchEndpointStatus | null {
   const endpoints = asRecord(payload.endpoints); // Never borrow a nested admin summary.
   const search = asRecord(endpoints?.search);
   if (!search) return null;
+  if (requireVerifiedSearch) {
+    const { totalRequests, successRequests, avgLatencyMs, samples } = search;
+    const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+    if (!count(totalRequests) || !count(successRequests) || !count(avgLatencyMs) || !count(samples) ||
+      successRequests > totalRequests || (totalRequests > 0 && samples === 0)) return null;
+  }
 
   const totalRequests = Math.max(0, toFiniteNumber(search.totalRequests ?? search.total_requests) ?? 0);
   const successRequests = Math.min(totalRequests, Math.max(0, toFiniteNumber(search.successRequests ?? search.success_requests) ?? 0));
@@ -550,7 +556,7 @@ function normalizeSearchEndpointStatus(payload: Record<string, unknown>): Search
  * ⚠️ 为什么必须有 `successRateAvailable`：只给 `successRate: 0` 时前端无法区分
  * 「全失败」（要报警）与「没请求」（正常夜间）。这两个都必须能正确表达。
  */
-export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnapshot | null {
+export function normalizeServiceStatusSnapshot(raw: unknown, requireVerifiedSearch = false): ServiceStatusSnapshot | null {
   const record = asRecord(raw);
   if (!record) {
     return null;
@@ -558,7 +564,7 @@ export function normalizeServiceStatusSnapshot(raw: unknown): ServiceStatusSnaps
   const payload = asRecord(record.data) ?? record;
   const summary = asRecord(payload.summary) ?? {};
   const breakdownRecord = asRecord(summary.breakdown) ?? asRecord(payload.breakdown) ?? {};
-  const search = normalizeSearchEndpointStatus(payload);
+  const search = normalizeSearchEndpointStatus(payload, requireVerifiedSearch);
   const searchWindow = payload.windowMinutes;
 
   const successRate = toFiniteNumber(summary.successRate ?? payload.successRate ?? payload.success_rate);
