@@ -809,9 +809,19 @@ export function createFixtureServiceStatusSnapshot(nowMs: number = Date.now()): 
 let serviceStatusFetcher: ServiceStatusFetcher = async (options) => createFixtureServiceStatusSnapshot(options.now);
 let cachedServiceStatusSnapshot: ServiceStatusSnapshot | null = null;
 let serviceStatusRefreshPromise: Promise<ServiceStatusSnapshot | null> | null = null;
+let readStatusProviderRevision: (() => number | undefined) | undefined;
+let cachedStatusProviderRevision: number | undefined;
 
-export function setServiceStatusFetcher(fetcher: ServiceStatusFetcher): void {
+export function setServiceStatusFetcher(
+  fetcher: ServiceStatusFetcher,
+  readProviderRevision?: () => number | undefined
+): void {
+  if (Boolean(readStatusProviderRevision) !== Boolean(readProviderRevision)) {
+    cachedServiceStatusSnapshot = null;
+    cachedStatusProviderRevision = undefined;
+  }
   serviceStatusFetcher = fetcher;
+  readStatusProviderRevision = readProviderRevision;
 }
 
 export function getServiceStatusFetcher(): ServiceStatusFetcher {
@@ -819,17 +829,25 @@ export function getServiceStatusFetcher(): ServiceStatusFetcher {
 }
 
 export function readCachedServiceStatusSnapshot(): ServiceStatusSnapshot | null {
+  if (readStatusProviderRevision) {
+    const revision = readStatusProviderRevision();
+    if (revision === undefined || revision !== cachedStatusProviderRevision) {
+      cachedServiceStatusSnapshot = null;
+      cachedStatusProviderRevision = undefined;
+    }
+  }
   return cachedServiceStatusSnapshot;
 }
 
 export function setCachedServiceStatusSnapshot(snapshot: ServiceStatusSnapshot | null): void {
   cachedServiceStatusSnapshot = snapshot;
+  cachedStatusProviderRevision = readStatusProviderRevision?.();
 }
 
 /**
  * 拉一次并写入缓存。并发调用共享同一个 Promise（避免首屏连发两次）。
  *
- * 失败**不清缓存**：状态页显示一份旧数据比显示空白有用得多，`updatedAt` 会说明它有多旧。
+ * 同一配置下失败不清缓存；换代后不能把旧统计当成当前题库的状态。
  */
 export function refreshServiceStatusSnapshot(
   options: Partial<ServiceStatusFetchOptions> = {}
@@ -838,15 +856,20 @@ export function refreshServiceStatusSnapshot(
     return serviceStatusRefreshPromise;
   }
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const scoped = Boolean(readStatusProviderRevision);
+  const revision = readStatusProviderRevision?.();
   serviceStatusRefreshPromise = (async () => {
     try {
       const snapshot = await serviceStatusFetcher({ now });
-      if (snapshot) {
+      if (snapshot && (scoped
+        ? revision !== undefined && revision === readStatusProviderRevision?.()
+        : !readStatusProviderRevision)) {
         cachedServiceStatusSnapshot = snapshot;
+        cachedStatusProviderRevision = revision;
       }
-      return cachedServiceStatusSnapshot;
+      return readCachedServiceStatusSnapshot();
     } catch {
-      return cachedServiceStatusSnapshot;
+      return readCachedServiceStatusSnapshot();
     } finally {
       serviceStatusRefreshPromise = null;
     }
