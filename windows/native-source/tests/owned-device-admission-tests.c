@@ -16,6 +16,7 @@
 
 static const WCHAR fixturePath[] = L"owned-device-config.json";
 static const WCHAR resource[] = L"https://fixture.invalid";
+static const WCHAR *expectedResource = resource;
 static const WCHAR fixtureKey[] = L"fixture-key-only";
 static const WCHAR oldID[] = L"exe:owned-confirmed";
 static const char oldFile[] = "{\"version\":9,\"opaque\":[{\"keep\":true}],\"settings\":{"
@@ -99,7 +100,10 @@ BOOL cx_adapter_request(const WCHAR *base, const WCHAR *method, const WCHAR *pat
     unsigned index = requests++;
     JT t[16]; char id[CX_DEVICE_ID_CAP]; int d, i;
     (void)error; (void)errorCap;
-    if (index >= ARRAYSIZE(devices) || lstrcmpW(base, resource) || lstrcmpW(method, L"POST")
+    /* For an unexpected destination, observe only the attempted call; do not
+       inspect the supplied authorization or model any binding. */
+    if (lstrcmpW(base, expectedResource)) return FALSE;
+    if (index >= ARRAYSIZE(devices) || lstrcmpW(method, L"POST")
         || lstrcmpW(path, L"/api/user/device-admission") || lstrcmpW(auth, L"Bearer fixture-key-only")
         || !timeout || limit > 4096 || !reply || !json ||
         jparse(json, lstrlenA(json), t, ARRAYSIZE(t)) < 1 || t[0].type != '{' || t[0].count != 4)
@@ -190,6 +194,51 @@ static int splitProcess(BOOL reopen) {
     return 0;
 }
 
+static int transportPolicy(void) {
+    static const WCHAR *const rejected[] = {
+        L"http://fixture.invalid", L"http://localhost", L"http://127.0.0.2",
+        L"http://127.0.0.1.fixture.invalid", L"http://127.1", L"http://2130706433",
+        L"http://127.000.000.001", L"http://[::ffff:127.0.0.1]",
+        L"http://127.0.0.1@fixture.invalid", L"http://fixture.invalid@127.0.0.1",
+        L"http://127.0.0.1:0", L"http://127.0.0.1:65536", L"http://127.0.0.1:+80",
+        L"http://127.0.0.1:0080", L"http://127.0.0.1:80:90", L"http://127.0.0.1:",
+        L"http://127.0.0.1/../api", L"http://127.0.0.1//api",
+        L"http://127.0.0.1/%2e%2e/api", L"http://127.0.0.1\\fixture.invalid",
+        L"http://127.0.0.1/api?origin=x",
+        L"https://user:pass@fixture.invalid/api", L"https://fixture.invalid#fragment",
+        L"https:///fixture.invalid", L"https://foo..invalid", L"https://[:::1]",
+        L"https://fixture.invalid/..", L"https://fixture.invalid/api%2Fextra",
+        L"https://fixture.invalid:443/./api", L"ftp://127.0.0.1", L"fixture.invalid"
+    };
+    static const WCHAR *const allowed[] = {
+        L"https://fixture.invalid", L"HTTPS://fixture.invalid:443/adapter-service/",
+        L"https://fixture.invalid/service/api", L"https://[2001:db8::1]:8443/api",
+        L"http://127.0.0.1:8123/api", L"http://127.0.0.1/",
+        L"http://[::1]:8123/adapter-service/", L"http://[::1]", L"http://127.0.0.1/owned/api"
+    };
+    char before[8192], after[8192];
+    WCHAR out[CX_DEVICE_ID_CAP];
+    unsigned i;
+    for (i = 0; i < ARRAYSIZE(rejected); ++i) {
+        phase(ACCEPT);
+        CHECK(writeFixture(oldFile) && readFixture(before, sizeof(before)));
+        lstrcpyW(out, oldID);
+        CHECK(!admit(rejected[i], fixtureKey, FALSE, FALSE, out));
+        CHECK(requests == 0 && !lstrcmpW(out, oldID) && readFixture(after, sizeof(after)) && !strcmp(before, after));
+        CHECK(GetFileAttributesW(L"owned-device-config.json.device-admission.lock") == INVALID_FILE_ATTRIBUTES);
+    }
+    for (i = 0; i < ARRAYSIZE(allowed); ++i) {
+        phase(ACCEPT); expectedResource = allowed[i];
+        CHECK(writeFixture(neverAdmitted));
+        CHECK(admit(allowed[i], fixtureKey, FALSE, FALSE, out));
+        CHECK(requests == 1 && committed == 1 && !lstrcmpW(out, devices[0]) && checkConfig(out, FALSE));
+    }
+    expectedResource = resource;
+    printf("admission address policy: rejected_no_side_effects=%u allowed_owned_receipt=%u\n",
+        (unsigned)ARRAYSIZE(rejected), (unsigned)ARRAYSIZE(allowed));
+    return 0;
+}
+
 int main(int argc, char **argv) {
     WCHAR out[CX_DEVICE_ID_CAP], chosen[CX_DEVICE_ID_CAP], instance[CX_DEVICE_INSTANCE_CAP];
     char before[8192], after[8192];
@@ -201,6 +250,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--stage-exit")) return splitProcess(FALSE);
     if (argc == 2 && !strcmp(argv[1], "--reopen")) return splitProcess(TRUE);
     CHECK(argc == 1);
+    CHECK(transportPolicy() == 0);
     CHECK(writeFixture(neverAdmitted));
     phase(ACCEPT);
     CHECK(admit(resource, fixtureKey, FALSE, FALSE, out));

@@ -373,6 +373,100 @@ static BOOL cx_admission_read_id(const char *text, const JT *t, int index, WCHAR
     return TRUE;
 }
 
+static BOOL cx_admission_span_equal(const WCHAR *first, const WCHAR *last, const WCHAR *literal) {
+    while (first < last && *literal && *first == *literal) { ++first; ++literal; }
+    return first == last && *literal == 0;
+}
+
+static BOOL cx_admission_alnum(WCHAR ch) {
+    return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9');
+}
+
+static BOOL cx_admission_dns_name(const WCHAR *first, const WCHAR *last) {
+    const WCHAR *p, *label = first;
+    if (first == last || last - first > 253) return FALSE;
+    for (p = first; p < last; ++p) {
+        if (*p == L'.') {
+            if (p == label || p[-1] == L'-') return FALSE;
+            label = p + 1;
+        } else if ((!cx_admission_alnum(*p) && !(*p == L'-' && p != label)) || p - label >= 63) {
+            return FALSE;
+        }
+    }
+    return last != label && last[-1] != L'-';
+}
+
+typedef LONG (NTAPI *CX_ADMISSION_PARSE_IPV6)(PCWSTR, PCWSTR *, void *);
+
+static BOOL cx_admission_ipv6(const WCHAR *first, const WCHAR *closingBracket) {
+    const WCHAR *p = first, *end = NULL;
+    USHORT address[8];
+    HMODULE ntdll;
+    CX_ADMISSION_PARSE_IPV6 parse;
+    if (first == closingBracket) return FALSE;
+    for (; p < closingBracket; ++p) {
+        WCHAR ch = *p;
+        if (!(ch == L':' || ch == L'.' || (ch >= L'0' && ch <= L'9') ||
+            (ch >= L'a' && ch <= L'f') || (ch >= L'A' && ch <= L'F'))) return FALSE;
+    }
+    /* Numeric-only OS parser. Does not resolve a hostname or open transport. */
+    ntdll = GetModuleHandleW(L"ntdll.dll");
+    parse = ntdll ? (CX_ADMISSION_PARSE_IPV6)(void *)GetProcAddress(ntdll, "RtlIpv6StringToAddressW") : NULL;
+    return parse && parse(first, &end, address) == 0 && end == closingBracket;
+}
+
+/* Admission is the only caller. The generic WinHTTP adapter remains
+   unchanged; its TLS validation, redirect policy and path joining still apply. */
+static BOOL cx_admission_base_allowed(const WCHAR *base) {
+    const WCHAR *host, *tail, *authorityEnd, *path, *segment;
+    DWORD length, digits, port;
+    BOOL tls;
+    if (!base) return FALSE;
+    length = (DWORD)lstrlenW(base);
+    if (!length || length >= CX_ADMISSION_ADDRESS_CAP) return FALSE;
+    if (length > 8 && CompareStringOrdinal(base, 8, L"https://", 8, TRUE) == CSTR_EQUAL) {
+        tls = TRUE; host = base + 8;
+    } else if (length > 7 && CompareStringOrdinal(base, 7, L"http://", 7, TRUE) == CSTR_EQUAL) {
+        tls = FALSE; host = base + 7;
+    } else return FALSE;
+
+    for (authorityEnd = host; *authorityEnd && *authorityEnd != L'/'; ++authorityEnd) { }
+    if (*host == L'[') {
+        for (tail = host + 1; tail < authorityEnd && *tail != L']'; ++tail) { }
+        if (tail == authorityEnd) return FALSE;
+        if (tls ? !cx_admission_ipv6(host + 1, tail) : !cx_admission_span_equal(host, tail + 1, L"[::1]"))
+            return FALSE;
+        ++tail;
+    } else {
+        for (tail = host; tail < authorityEnd && *tail != L':'; ++tail) { }
+        if (tls ? !cx_admission_dns_name(host, tail) : !cx_admission_span_equal(host, tail, L"127.0.0.1"))
+            return FALSE;
+    }
+    if (tail < authorityEnd) {
+        if (*tail++ != L':' || tail == authorityEnd || *tail < L'1' || *tail > L'9') return FALSE;
+        for (digits = port = 0; tail < authorityEnd; ++tail) {
+            if (++digits > 5 || *tail < L'0' || *tail > L'9') return FALSE;
+            port = port * 10 + (*tail - L'0');
+        }
+        if (port > 65535) return FALSE;
+    }
+
+    /* Only literal path segments; no userinfo, escapes, query, fragment,
+       backslashes, repeated slashes or dot segments to reinterpret later. */
+    path = authorityEnd;
+    while (*path) {
+        segment = ++path;
+        while (*path && *path != L'/') {
+            if (!cx_admission_alnum(*path) && *path != L'-' && *path != L'_' && *path != L'.' && *path != L'~')
+                return FALSE;
+            ++path;
+        }
+        if ((path == segment && *path) || cx_admission_span_equal(segment, path, L".") ||
+            cx_admission_span_equal(segment, path, L"..")) return FALSE;
+    }
+    return TRUE; /* Existing adapter handles unambiguous API or reverse-proxy prefixes. */
+}
+
 static BOOL cx_admission_scope(const WCHAR *baseUrl, const WCHAR *key,
     WCHAR scope[CX_ADMISSION_SCOPE_CAP]) {
     static const WCHAR hex[] = L"0123456789abcdef";
@@ -547,6 +641,8 @@ BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
     if (noDiskWrite || mode != CX_DEVICE_HOST_ORDINARY || !configPath || !configPath[0]
         || !publishedId || cap < CX_DEVICE_ID_CAP)
         return cx_admission_fail(error, errorCap, L"普通设备登记需要可写配置及明确的普通宿主模式");
+    if (!cx_admission_base_allowed(baseUrl))
+        return cx_admission_fail(error, errorCap, L"普通设备登记仅支持 HTTPS 或数字回环 HTTP");
     if (!cx_admission_scope(baseUrl, ordinaryApiKey, scope))
         return cx_admission_fail(error, errorCap, L"普通设备登记地址或凭据不可用");
     timeoutMs = timeoutMs ? timeoutMs : 8000;
