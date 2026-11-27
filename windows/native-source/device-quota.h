@@ -52,6 +52,24 @@ BOOL cx_device_uuid_v4(WCHAR *out, DWORD cap);
 BOOL cx_device_id_ensure(const WCHAR *configPath, BOOL noDiskWrite,
     WCHAR *out, DWORD cap, WCHAR *error, DWORD errorCap);
 
+/* Pending is private recovery state, never a confirmed device ID or permission. */
+#define CX_DEVICE_ADMISSION_PENDING_KEY "nativeDeviceAdmissionPending"
+
+typedef enum CX_DEVICE_HOST_MODE {
+    CX_DEVICE_HOST_ORDINARY = 1,
+    CX_DEVICE_HOST_SCRIPT = 2
+} CX_DEVICE_HOST_MODE;
+
+/* Explicit ordinary-host admission, not wired to startup. Callers must
+   independently establish consent and choose the ordinary credential.
+   TRUE only after a matched server receipt AND atomic local promotion.
+   On FALSE, publishedId is untouched; any staged identity may be reused
+   by the next call on this exact endpoint/credential. No remote cleanup.
+   Diskless/script mode exits without any file or HTTP request. */
+BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
+    const WCHAR *ordinaryApiKey, CX_DEVICE_HOST_MODE mode, BOOL noDiskWrite,
+    DWORD timeoutMs, WCHAR *publishedId, DWORD cap, WCHAR *error, DWORD errorCap);
+
 /* 每个浏览器会话一个新的实例标识（141 §4.3：不持久化，用于区分「同 id 不同实例」）。 */
 BOOL cx_device_instance_new(WCHAR *out, DWORD cap);
 

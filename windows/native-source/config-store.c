@@ -1,4 +1,5 @@
 #include "config-store.h"
+#include "device-quota.h"
 #include "json.h"
 
 #define CONFIG_PATH_CAP 32768
@@ -262,16 +263,27 @@ done:
     if (owned) DeleteFileW(temporary);
     HeapFree(GetProcessHeap(), 0, temporary); return ok;
 }
-BOOL cx_config_patch_file(const WCHAR *path, const char *settings,
-    DWORD settingsLen, WCHAR *error, DWORD errorCap) {
+static BOOL patch_file(const WCHAR *path, const char *settings,
+    DWORD settingsLen, BOOL admission, WCHAR *error, DWORD errorCap) {
     CONFIG_DOCUMENT patch = {0}, original = {0}; CONFIG_MAP shared = {0}, roots = {0}, merged = {0};
     CONFIG_TEXT result = {0}; WCHAR *fullPath = NULL; char *disk = NULL;
     HANDLE file = INVALID_HANDLE_VALUE; DWORD length, high, got, n, i, written = 0;
-    int settingsIndex; BOOL ok = FALSE;
+    int settingsIndex, pending = -1, patchSettings = 0; BOOL ok = FALSE;
     clear_error(error, errorCap);
-    if (!parse_document(&patch, settings, settingsLen, error, errorCap)
-        || !add_object(&shared, &patch, 0, TRUE, error, errorCap)) goto done;
-    if (!shared.count) { ok = TRUE; goto done; }
+    if (!parse_document(&patch, settings, settingsLen, error, errorCap)) goto done;
+    if (admission) {
+        pending = jkey(patch.text, patch.tokens, 0, CX_DEVICE_ADMISSION_PENDING_KEY);
+        patchSettings = jkey(patch.text, patch.tokens, 0, "settings");
+        if (pending < 0 || (patch.tokens[pending].type != '{' &&
+            !(patch.tokens[pending].type == 'p' && jeq(patch.text, patch.tokens, pending, "null"))) ||
+            patch.tokens[0].count != (patchSettings >= 0 ? 4 : 2) ||
+            (patchSettings >= 0 && patch.tokens[patchSettings].type != '{')) {
+            fail(error, errorCap, L"Invalid native device admission configuration envelope.");
+            goto done;
+        }
+    }
+    if (patchSettings >= 0 && !add_object(&shared, &patch, patchSettings, TRUE, error, errorCap)) goto done;
+    if (!admission && !shared.count) { ok = TRUE; goto done; }
     if (!path || !path[0]) { fail(error, errorCap, L"Configuration file path is empty."); goto done; }
     fullPath = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CONFIG_PATH_CAP * sizeof(WCHAR));
     disk = (char *)HeapAlloc(GetProcessHeap(), 0, CX_CONFIG_JSON_CAP);
@@ -303,18 +315,26 @@ BOOL cx_config_patch_file(const WCHAR *path, const char *settings,
         if (original.tokens[object].type != '{') {
             fail(error, errorCap, L"Existing configuration settings must be an object."); goto done;
         }
-        if (!add_object(&merged, &original, object, TRUE, error, errorCap)) goto done;
+        if (!add_object(&merged, &original, object, !admission, error, errorCap)) goto done;
     }
-    if (!add_object(&merged, &patch, 0, TRUE, error, errorCap)) goto done;
+    if (patchSettings >= 0 && !add_object(&merged, &patch, patchSettings, TRUE, error, errorCap)) goto done;
     result.capacity = CX_CONFIG_JSON_CAP; result.valid = TRUE; result.text[0] = 0;
     append(&result, "{", 1);
     for (i = 0; i < roots.count; ++i) {
-        if (equal_key(roots.entries[i].name, L"settings")) continue;
+        if (equal_key(roots.entries[i].name, L"settings") ||
+            (admission && equal_key(roots.entries[i].name, L"nativeDeviceAdmissionPending"))) continue;
         if (written++) append(&result, ",", 1);
         append_entry(&result, roots.entries + i);
     }
     if (written) append(&result, ",", 1);
-    append(&result, "\"settings\":", 11); serialize_map(&result, &merged, NULL); append(&result, "}", 1);
+    append(&result, "\"settings\":", 11); serialize_map(&result, &merged, NULL);
+    if (admission) {
+        static const char pendingKey[] = ",\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":";
+        const JT *value = patch.tokens + pending;
+        append(&result, pendingKey, sizeof(pendingKey) - 1);
+        append(&result, patch.text + value->start, (DWORD)(value->end - value->start));
+    }
+    append(&result, "}", 1);
     if (!result.valid) { fail(error, errorCap, L"Updated configuration exceeds the size limit."); goto done; }
     ok = replace_file(fullPath, result.text, result.length, error, errorCap);
 done:
@@ -324,4 +344,14 @@ done:
     if (result.text) HeapFree(GetProcessHeap(), 0, result.text);
     release_map(&shared); release_map(&roots); release_map(&merged);
     release_document(&patch); release_document(&original); return ok;
+}
+
+BOOL cx_config_patch_file(const WCHAR *path, const char *settings,
+    DWORD settingsLen, WCHAR *error, DWORD errorCap) {
+    return patch_file(path, settings, settingsLen, FALSE, error, errorCap);
+}
+
+BOOL cx_config_patch_device_admission_file(const WCHAR *path, const char *envelope,
+    DWORD envelopeLen, WCHAR *error, DWORD errorCap) {
+    return patch_file(path, envelope, envelopeLen, TRUE, error, errorCap);
 }
