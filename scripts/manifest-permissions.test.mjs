@@ -20,7 +20,10 @@ test('manifest packages the tab pause service worker without broadening permissi
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.deepEqual(manifest.background, { service_worker: 'extension-worker.js', type: 'module' });
   assert.equal(await readFile(resolve('dist/extension-worker.js'),'utf8'), await readFile(resolve('src/extension-worker.js'),'utf8'));
-  assert.equal(await readFile(resolve('dist/extension-diagnostics.js'),'utf8'), await readFile(resolve('windows/node-source/extension-log-core.mjs'),'utf8'));
+  for (const name of ['extension-diagnostic-receipt.js', 'runtime/diagnostic-outbox.js']) {
+    assert.equal(await readFile(resolve('dist', name), 'utf8'), await readFile(resolve('src', name), 'utf8'));
+  }
+  await assert.rejects(readFile(resolve('dist/extension-diagnostics.js')), { code: 'ENOENT' });
   assert.match(await readFile(resolve('dist/extension-worker.js'), 'utf8'), /import '\.\/extension-tab-pause\.js'/);
   assert.deepEqual(manifest.permissions, ['storage']);
   assert.equal(await readFile(resolve('dist/extension-tab-pause.js'), 'utf8'),

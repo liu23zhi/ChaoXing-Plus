@@ -1,6 +1,7 @@
 export const AGREEMENT_KIND = 'chaoxing-plus:agreement';
 export const AGREEMENT_VIEW_KEY = 'agreement.view.v1';
 export const AGREEMENT_INSTALL_KEY = 'agreement.install.v1';
+export const DIAGNOSTICS_OPT_OUT = 'extension.diagnostics.enabled.v2';
 const BASE = 'common.settings.tiku-adapter.baseurl';
 const KEY = 'common.settings.tiku-adapter.key';
 const APPROVED_SOURCE = 'agreement.approved-provider.v1';
@@ -256,6 +257,48 @@ export function createAgreementController({
       ...(cfg.key ? { Authorization: 'Bearer ' + cfg.key } : {})
     } };
   }
+  // Internal service-worker capability only. Unlike the agreement UI flow, a
+  // diagnostic check never enrolls a device or trusts a persisted display phase.
+  async function diagnosticAuthority() {
+    const cfg = await configuration();
+    if (cfg.mode !== 'extension') return { state: cfg.mode === 'host' ? 'host-unavailable' : 'unconfigured' };
+    if (!cfg.base || !cfg.key || !/^[!-~]{1,1024}$/.test(cfg.key) || cfg.key.startsWith('sr_')) return { state: 'unconfigured' };
+    if (!cfg.sharedDevice || !cfg.scopeDevice) return { state: 'waiting-agreement' };
+    cfg.revision = configRevision;
+    cfg.keyHash = await digest(cfg.key);
+    cfg.scope = await digest(JSON.stringify([cfg.base, cfg.scopeDevice]));
+    const { credentialsKey } = names(cfg);
+    const bound = 'agreement.key-base.' + cfg.keyHash;
+    const readScope = async () => {
+      try { await ensureCurrent(cfg); } catch { return null; }
+      const values = await read([credentialsKey, bound, APPROVED_SOURCE, DIAGNOSTICS_OPT_OUT]);
+      const saved = values[credentialsKey], choice = values[APPROVED_SOURCE];
+      if (values[DIAGNOSTICS_OPT_OUT] === false || values[bound] !== cfg.base
+        || choice?.base !== cfg.base || choice?.rawBase !== cfg.rawBase || choice?.key !== cfg.key
+        || !uuidOK(saved?.deviceId) || !/^agd_[A-Za-z0-9_-]{43}$/.test(text(saved?.deviceCredential))) return null;
+      return saved;
+    };
+    const saved = await readScope();
+    if (!saved) return { state: 'waiting-agreement' };
+    const binding = await digest(JSON.stringify([cfg.base, cfg.keyHash, cfg.scope, cfg.sharedDevice, saved.deviceId, saved.deviceCredential]));
+    return {binding, deviceId: cfg.sharedDevice, async send(packet, signal) {
+      const current = await readScope();
+      if (signal.aborted || !current || current.deviceId !== saved.deviceId
+        || current.deviceCredential !== saved.deviceCredential) return {status: 403};
+      const response = await request(cfg.base + '/api/extension-logs/' + (packet === null ? 'receipt-policy?mode=extension' : 'batches'), {
+        method: packet === null ? 'GET' : 'POST',
+        headers: {Authorization: 'Bearer ' + cfg.key, 'X-Agreement-Device': saved.deviceCredential,
+          ...(packet === null ? {} : {'Content-Type': 'application/json'})},
+        ...(packet === null ? {} : {body: JSON.stringify(packet)}), credentials: 'omit', redirect: 'error',
+        cache: 'no-store', referrerPolicy: 'no-referrer', signal: AbortSignal.any([signal, AbortSignal.timeout(5000)])
+      });
+      if (response.status === 200 || response.status === 201) {
+        return {status: response.status, body: await readAgreementJSON(response, 16384).catch(() => null)};
+      }
+      void response.body?.cancel().catch(() => {});
+      return {status: response.status};
+    }};
+  }
   async function cache(cfg) {
     if (loadedCache?.scope === cfg.scope) return loadedCache.data;
     const { cacheKey } = names(cfg);
@@ -453,7 +496,7 @@ export function createAgreementController({
       return display(cfg, previous, 'submit-failed');
     }
   }
-  return {
+  return { diagnosticAuthority,
     changed,
     abandonTab(tab) {
       for (const id of readers.keys()) if (id.startsWith(tab + ':')) readers.delete(id);
