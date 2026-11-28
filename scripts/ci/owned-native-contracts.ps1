@@ -59,7 +59,7 @@ try {
     Invoke-Checked 'ordinary result-only Win32 runtime' (Join-Path $scratch.FullName 'ordinary-result-only.exe') @()
 
     Build-OwnedFixture 'ordinary-receipts' @('tests/ordinary-receipts-tests.c', 'memory.c', 'json.c') @(
-        '/NODEFAULTLIB', '/SUBSYSTEM:CONSOLE', '/ENTRY:OrdinaryReceiptsTestMain', 'kernel32.lib', 'advapi32.lib'
+        '/NODEFAULTLIB', '/SUBSYSTEM:CONSOLE', '/ENTRY:OrdinaryReceiptsTestMain', 'kernel32.lib', 'advapi32.lib', 'shell32.lib'
     ) @('/GS-', '/Gs9999999', '/Zl')
     Invoke-Checked 'ordinary native diagnostic cold replay' (Join-Path $scratch.FullName 'ordinary-receipts.exe') @()
 
