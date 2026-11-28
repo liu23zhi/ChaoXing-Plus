@@ -96,6 +96,12 @@ jobs:
           ref: 724b497a03ad6b8d27377cd437e440007de70341
           path: .joint-service
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: liu23zhi/TiKuHelper
+          ref: 323227b75fa8ae2151a5f0cb361d1006a6c1aa2a
+          path: .t04-owned-provider
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: .joint-service/go.mod
@@ -115,6 +121,12 @@ jobs:
       - name: TiKu 实际 PS1 与原生启动配置和授权兼容
         shell: pwsh
         run: ./scripts/ci/tiku-launcher-native-contract.ps1 -TiKuHelperRoot ./.joint-service
+
+      - name: 普通 Windows 测试构建仅返回协议授权结果
+        shell: pwsh
+        env:
+          GOMAXPROCS: "2"
+        run: ./scripts/ci/ordinary-win-agreement.ps1 -TiKuHelperRoot ./.t04-owned-provider
 
       - name: 验证非交互提示与构建产物门禁
         shell: pwsh
