@@ -32,6 +32,8 @@ static ULONGLONG testAdvance;
 static int testGets, testPosts, testUUID;
 static char testOriginal[768], testLast[768];
 static char testDisk[65536];
+static const WCHAR *testToggleDuringPolicy;
+static volatile LONG testKeep = 1, testRevokeAfterPost;
 
 static void test_system_time(FILETIME *dst) {
     const SYSTEMTIME st = {2026, 11, 0, 28, 1, 2, 3, 456};
@@ -75,6 +77,14 @@ BOOL cx_device_uuid_v4(WCHAR *out, DWORD cap) {
     wsprintfW(out, L"00000000-0000-4000-8000-%012d", ++testUUID);
     return TRUE;
 }
+static DWORD WINAPI test_switch_off_while_pump_owns_queue(void *dir) {
+    CHECK(cx_ordinary_receipts_set_local_enabled(dir, FALSE));
+    CHECK(!cx_ordinary_receipts_local_enabled(dir));
+    CHECK(!cx_ordinary_receipts_set_local_enabled(dir, TRUE));
+    CHECK(!cx_ordinary_receipts_local_enabled(dir));
+    return 0;
+}
+
 BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const WCHAR *path,
     const WCHAR *authorization, const WCHAR *proof, const char *json, DWORD limit, CX_ADAPTER_REPLY *reply) {
     JT tok[48];
@@ -87,6 +97,13 @@ BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const 
     if (!lstrcmpW(method, L"GET")) {
         CHECK(!lstrcmpW(path, L"api/extension-logs/receipt-policy?mode=native_browser") && !json);
         ++testGets;
+        if (testToggleDuringPolicy) {
+            HANDLE off = CreateThread(NULL, 0, test_switch_off_while_pump_owns_queue,
+                (void *)testToggleDuringPolicy, 0, NULL);
+            CHECK(off && WaitForSingleObject(off, 1000) == WAIT_OBJECT_0);
+            CloseHandle(off);
+            testToggleDuringPolicy = NULL;
+        }
         switch (testPolicy) {
         case TEST_UNKNOWN: return FALSE;
         case TEST_DENIED: return test_response(reply, 401, NULL, limit);
@@ -114,6 +131,7 @@ BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const 
     CHECK((when = jkey(json, tok, entry, "time")) >= 0 && jeq(json, tok, when, "2026-11-28T01:02:03.456Z"));
     CHECK(jeq(json, tok, jkey(json, tok, entry, "event"), "extension.ready"));
     CHECK(jeq(json, tok, jkey(json, tok, entry, "level"), "info"));
+    if (InterlockedCompareExchange(&testRevokeAfterPost, 0, 0)) InterlockedExchange(&testKeep, 0);
     switch (testReceipt) {
     case TEST_LOST: return FALSE;
     case TEST_DENIED: return test_response(reply, 403, NULL, limit);
@@ -178,13 +196,13 @@ static void test_cold(const WCHAR *dir) {
     CHECK(test_run(dir, FALSE) && testPosts == 1 && testUUID == 0 && !test_read(dir));
     test_text("cold child replay matched exact stored packet and retired it\r\n");
 }
-static void test_cold_process(const WCHAR *dir) {
+static void test_cold_process(const WCHAR *dir, const WCHAR *operation) {
     WCHAR path[MAX_PATH], args[MAX_PATH * 2];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD result = 0;
     CHECK(GetModuleFileNameW(NULL, path, ARRAYSIZE(path)) > 0);
-    wsprintfW(args, L"\"%s\" --cold \"%s\"", path, dir);
+    wsprintfW(args, L"\"%s\" %s \"%s\"", path, operation, dir);
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     CHECK(CreateProcessW(path, args, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi));
@@ -193,6 +211,72 @@ static void test_cold_process(const WCHAR *dir) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     CHECK(!test_read(dir));
+}
+
+static BOOL test_keep(void *context) {
+    const int *beforeSaved = (const int *)context;
+    return InterlockedCompareExchange(&testKeep, 0, 0) && (!beforeSaved || testUUID == *beforeSaved);
+}
+
+static BOOL test_guarded(const WCHAR *dir, BOOL capture, int *untilBuild) {
+    return cx_ordinary_receipts_pump_guarded(dir, TEST_BASE, TEST_KEY, TEST_PROOF, TEST_DEVICE,
+        capture ? TEST_BROWSER : NULL, capture ? TEST_VERSION : NULL, capture, test_keep, untilBuild);
+}
+
+static void test_local_controls(const WCHAR *dir) {
+    int gets, posts, uuid;
+    HANDLE temp;
+    WCHAR tempPath[MAX_PATH], markerPath[MAX_PATH];
+    testOriginal[0] = 0;
+    CHECK(!cx_ordinary_receipts_local_enabled(NULL) && !cx_ordinary_receipts_set_local_enabled(NULL, TRUE));
+    CHECK(cx_ordinary_receipts_local_enabled(dir) && cx_ordinary_receipts_set_local_enabled(dir, TRUE));
+    testPolicy = TEST_MATCH;
+    testReceipt = TEST_LOST;
+    CHECK(!test_run(dir, TRUE) && test_read(dir));
+
+    gets = testGets; posts = testPosts;
+    wsprintfW(tempPath, L"%s\\%s.tmp", dir, TEST_OUTBOX);
+    temp = CreateFileW(tempPath, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(temp != INVALID_HANDLE_VALUE && CloseHandle(temp));
+    CHECK(cx_ordinary_receipts_set_local_enabled(dir, FALSE) && !cx_ordinary_receipts_local_enabled(dir));
+    CHECK(!test_run(dir, TRUE) && !test_read(dir) && GetFileAttributesW(tempPath) == INVALID_FILE_ATTRIBUTES);
+    CHECK(testGets == gets && testPosts == posts);
+    test_cold_process(dir, L"--off");
+    CHECK(cx_ordinary_receipts_set_local_enabled(dir, TRUE) && cx_ordinary_receipts_local_enabled(dir));
+    CHECK(!test_run(dir, FALSE) && testGets == gets && testPosts == posts); /* no resurrection */
+    wsprintfW(markerPath, L"%s\\%s", dir, CX_OR_OPT_OUT);
+    CHECK(CreateDirectoryW(markerPath, NULL));
+    CHECK(!cx_ordinary_receipts_local_enabled(dir) && !cx_ordinary_receipts_set_local_enabled(dir, TRUE));
+    CHECK(!test_run(dir, TRUE) && testGets == gets && testPosts == posts);
+    CHECK(RemoveDirectoryW(markerPath)); /* unexpected marker is not silently replaced or enabled */
+    test_text("local default-on, durable opt-out, outbox/temp purge and clean re-enable passed\r\n");
+
+    CHECK(!test_run(dir, TRUE) && test_read(dir));
+    gets = testGets; posts = testPosts;
+    testToggleDuringPolicy = dir;
+    CHECK(!test_run(dir, FALSE) && !test_read(dir)); /* legacy caller also observes disk OFF before POST */
+    CHECK(testGets == gets + 1 && testPosts == posts && !cx_ordinary_receipts_local_enabled(dir));
+    CHECK(cx_ordinary_receipts_set_local_enabled(dir, TRUE));
+    CHECK(!test_run(dir, FALSE) && testPosts == posts);
+    test_text("concurrent opt-out returned without waiting for network; no POST or replay\r\n");
+
+    InterlockedExchange(&testKeep, 1);
+    gets = testGets; posts = testPosts; uuid = testUUID;
+    CHECK(!test_guarded(dir, TRUE, &uuid) && !test_read(dir)); /* build began, stop before saving */
+    CHECK(testGets == gets + 1 && testPosts == posts && testUUID > uuid);
+
+    CHECK(!test_run(dir, TRUE) && test_read(dir));
+    gets = testGets; posts = testPosts;
+    InterlockedExchange(&testKeep, 0);
+    CHECK(!test_guarded(dir, FALSE, NULL) && !test_read(dir) && testGets == gets && testPosts == posts);
+
+    InterlockedExchange(&testKeep, 1);
+    InterlockedExchange(&testRevokeAfterPost, 1);
+    testReceipt = TEST_MATCH;
+    CHECK(!test_guarded(dir, TRUE, NULL) && !test_read(dir) && testPosts == posts + 1);
+    InterlockedExchange(&testRevokeAfterPost, 0);
+    CHECK(!test_run(dir, FALSE) && testPosts == posts + 1); /* in-flight POST happened; no retry */
+    test_text("guard stopped a new save, cleared pending packets and never replayed an in-flight POST\r\n");
 }
 
 void WINAPI OrdinaryReceiptsTestMain(void) {
@@ -205,6 +289,12 @@ void WINAPI OrdinaryReceiptsTestMain(void) {
     CHECK(argv);
     if (argc == 3 && !lstrcmpW(argv[1], L"--cold")) {
         test_cold(argv[2]);
+        LocalFree(argv);
+        ExitProcess(0);
+    }
+    if (argc == 3 && !lstrcmpW(argv[1], L"--off")) {
+        CHECK(!cx_ordinary_receipts_local_enabled(argv[2]) && !test_run(argv[2], TRUE));
+        CHECK(testGets == 0 && testPosts == 0 && !test_read(argv[2]));
         LocalFree(argv);
         ExitProcess(0);
     }
@@ -238,7 +328,7 @@ void WINAPI OrdinaryReceiptsTestMain(void) {
     posts = testPosts;
     CHECK(!test_run(dir, TRUE) && testPosts == posts);
     test_pending(dir);
-    test_cold_process(dir);
+    test_cold_process(dir, L"--cold");
     testOriginal[0] = 0;
 
     testPolicy = TEST_MATCH;
@@ -290,6 +380,7 @@ void WINAPI OrdinaryReceiptsTestMain(void) {
     CHECK(posts == 65);
     testPolicy = TEST_DENIED;
     CHECK(!test_run(dir, FALSE) && !test_read(dir));
+    test_local_controls(dir);
     CHECK(RemoveDirectoryW(dir));
     test_text("ordinary native receipts: policy, fixed safe data, exact receipts, cold retry, denial, scope, 24h and cap passed\r\n");
     ExitProcess(0);

@@ -14,6 +14,7 @@ BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const 
 #define CX_OR_DAY (24ULL * 60 * 60 * 10000000)
 #define CX_OR_HEADER "cx-ordinary-receipts-v1 "
 #define CX_OR_FILE L"ordinary-receipts.v1.outbox"
+#define CX_OR_OPT_OUT L"ordinary-receipts.v1.off"
 #define CX_OR_DISK_CAP (sizeof(CX_OR_HEADER) + 66 + CX_OR_LIMIT * CX_OR_PACKET_CAP)
 static const WCHAR cx_or_policy_path[] = L"api/extension-logs/receipt-policy?mode=native_browser";
 static const WCHAR cx_or_batches_path[] = L"api/extension-logs/batches";
@@ -317,48 +318,124 @@ static void cx_or_shift(CX_OR_QUEUE *queue) {
 }
 
 typedef struct CX_OR_LOCATION {
-    WCHAR path[MAX_PATH], temp[MAX_PATH];
+    WCHAR root[MAX_PATH], path[MAX_PATH], temp[MAX_PATH], optOut[MAX_PATH];
     HANDLE mutex;
 } CX_OR_LOCATION;
-static BOOL cx_or_lock(const WCHAR *dir, CX_OR_LOCATION *location) {
-    WCHAR root[MAX_PATH], folded[MAX_PATH], mutexName[96];
+
+static BOOL cx_or_locate(const WCHAR *dir, CX_OR_LOCATION *location) {
+    DWORD n, attrs;
+    const WCHAR *separator;
+    if (!dir || !*dir) return FALSE;
+    n = GetFullPathNameW(dir, ARRAYSIZE(location->root), location->root, NULL);
+    if (!n || n >= ARRAYSIZE(location->root) - ARRAYSIZE(CX_OR_FILE) - 6) return FALSE;
+    while (n > 3 && location->root[n - 1] == L'\\') location->root[--n] = 0;
+    attrs = GetFileAttributesW(location->root);
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)
+        || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) return FALSE;
+    separator = location->root[n - 1] == L'\\' ? L"" : L"\\";
+    wsprintfW(location->path, L"%s%s%s", location->root, separator, CX_OR_FILE);
+    wsprintfW(location->temp, L"%s.tmp", location->path);
+    wsprintfW(location->optOut, L"%s%s%s", location->root, separator, CX_OR_OPT_OUT);
+    location->mutex = NULL;
+    return TRUE;
+}
+
+static BOOL cx_or_lock(CX_OR_LOCATION *location, DWORD timeout) {
+    WCHAR folded[MAX_PATH], mutexName[96];
     char dirHash[65];
     const WCHAR *parts[] = {folded};
-    DWORD n, attrs, wait;
-    if (!dir || !*dir) return FALSE;
-    n = GetFullPathNameW(dir, ARRAYSIZE(root), root, NULL);
-    if (!n || n >= ARRAYSIZE(root) - ARRAYSIZE(CX_OR_FILE) - 6) return FALSE;
-    while (n > 3 && root[n - 1] == '\\') root[--n] = 0;
-    attrs = GetFileAttributesW(root);
-    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY) || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-        || !LCMapStringW(LOCALE_INVARIANT, LCMAP_UPPERCASE, root, -1, folded, ARRAYSIZE(folded))
+    DWORD wait;
+    if (!LCMapStringW(LOCALE_INVARIANT, LCMAP_UPPERCASE, location->root, -1, folded, ARRAYSIZE(folded))
         || !cx_or_hash(parts, ARRAYSIZE(parts), dirHash)) return FALSE;
     wsprintfW(mutexName, L"Local\\CXOrdinaryDiagnostic-%S", dirHash);
-    wsprintfW(location->path, L"%s%s%s", root, root[n - 1] == '\\' ? L"" : L"\\", CX_OR_FILE);
-    wsprintfW(location->temp, L"%s.tmp", location->path);
     location->mutex = CreateMutexW(NULL, FALSE, mutexName);
     if (!location->mutex) return FALSE;
-    wait = WaitForSingleObject(location->mutex, 1500);
+    wait = WaitForSingleObject(location->mutex, timeout);
     if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) return TRUE;
     CloseHandle(location->mutex);
+    location->mutex = NULL;
     return FALSE;
 }
+
 static void cx_or_unlock(CX_OR_LOCATION *location) {
     ReleaseMutex(location->mutex);
     CloseHandle(location->mutex);
+    location->mutex = NULL;
 }
-BOOL cx_ordinary_receipts_discard(const WCHAR *dir) {
-    CX_OR_LOCATION location;
-    BOOL removedTemp, removedOutbox;
-    if (!cx_or_lock(dir, &location)) return FALSE;
-    removedTemp = cx_or_drop(location.temp);
-    removedOutbox = cx_or_drop(location.path);
-    cx_or_unlock(&location);
+
+static BOOL cx_or_purge(const CX_OR_LOCATION *location) {
+    BOOL removedTemp = cx_or_drop(location->temp);
+    BOOL removedOutbox = cx_or_drop(location->path);
     return removedTemp && removedOutbox;
 }
 
-BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
-    const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser, const WCHAR *version, BOOL recordReady) {
+typedef enum CX_OR_MODE { CX_OR_MODE_UNREADABLE, CX_OR_MODE_ON, CX_OR_MODE_OFF } CX_OR_MODE;
+
+static CX_OR_MODE cx_or_local_mode(const CX_OR_LOCATION *location) {
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExW(location->optOut, GetFileExInfoStandard, &data))
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? CX_OR_MODE_ON : CX_OR_MODE_UNREADABLE;
+    return !(data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+        && !data.nFileSizeHigh && !data.nFileSizeLow ? CX_OR_MODE_OFF : CX_OR_MODE_UNREADABLE;
+}
+
+static void cx_or_try_off_cleanup(CX_OR_LOCATION *location) {
+    if (!cx_or_lock(location, 0)) return;
+    if (cx_or_local_mode(location) != CX_OR_MODE_ON) (void)cx_or_purge(location);
+    cx_or_unlock(location);
+}
+
+BOOL cx_ordinary_receipts_local_enabled(const WCHAR *dir) {
+    CX_OR_LOCATION location;
+    return cx_or_locate(dir, &location) && cx_or_local_mode(&location) == CX_OR_MODE_ON;
+}
+
+BOOL cx_ordinary_receipts_set_local_enabled(const WCHAR *dir, BOOL enabled) {
+    CX_OR_LOCATION location;
+    CX_OR_MODE mode;
+    BOOL ok;
+    if (!cx_or_locate(dir, &location)) return FALSE;
+    if (!enabled) {
+        HANDLE marker = CreateFileW(location.optOut, GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
+        if (marker != INVALID_HANDLE_VALUE) ok = CloseHandle(marker);
+        else {
+            DWORD error = GetLastError();
+            ok = (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+                && cx_or_local_mode(&location) == CX_OR_MODE_OFF;
+        }
+        if (ok) cx_or_try_off_cleanup(&location);
+        return ok;
+    }
+    mode = cx_or_local_mode(&location);
+    if (mode == CX_OR_MODE_ON) return TRUE;
+    /* Don't wait for a network call or let OFF -> ON hide it from an in-flight
+       worker. With the lock, purge before making the missing marker mean ON. */
+    if (mode != CX_OR_MODE_OFF || !cx_or_lock(&location, 0)) return FALSE;
+    mode = cx_or_local_mode(&location);
+    ok = mode == CX_OR_MODE_ON || (mode == CX_OR_MODE_OFF
+        && cx_or_purge(&location) && cx_or_drop(location.optOut));
+    cx_or_unlock(&location);
+    return ok;
+}
+
+BOOL cx_ordinary_receipts_discard(const WCHAR *dir) {
+    CX_OR_LOCATION location;
+    BOOL removed;
+    if (!cx_or_locate(dir, &location) || !cx_or_lock(&location, 1500)) return FALSE;
+    removed = cx_or_purge(&location);
+    cx_or_unlock(&location);
+    return removed;
+}
+
+static BOOL cx_or_running(const CX_OR_LOCATION *location, BOOL (*keep)(void *), void *context) {
+    return (!keep || keep(context)) && cx_or_local_mode(location) == CX_OR_MODE_ON;
+}
+
+BOOL cx_ordinary_receipts_pump_guarded(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
+    const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser, const WCHAR *version,
+    BOOL recordReady, BOOL (*keep)(void *), void *context) {
     CX_OR_LOCATION location;
     WCHAR *auth = NULL;
     char deviceId[129], browserId[129], release[28], binding[65];
@@ -369,14 +446,16 @@ BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR 
     CX_OR_FIELDS fields;
     CX_OR_QUEUE *queue = NULL;
     CX_OR_POLICY permission;
-    BOOL received = FALSE;
+    BOOL received = FALSE, sent;
     if (!base || lstrlenW(base) < 9 || lstrlenW(base) >= CX_ADAPTER_TOKEN_CAP
         || CompareStringOrdinal(base, 8, L"https://", 8, TRUE) != CSTR_EQUAL || !cx_or_key(ordinaryKey, agreementProof)
         || !cx_or_ascii(device, deviceId, sizeof(deviceId)) || !cx_or_identifier(deviceId)
         || (recordReady && (!cx_or_ascii(browser, browserId, sizeof(browserId)) || !cx_or_identifier(browserId)
             || !cx_or_ascii(version, release, sizeof(release)) || !cx_or_version(release)))) return FALSE;
     GetSystemTimeAsFileTime(&observed);
-    if (!cx_or_hash(scopeParts, ARRAYSIZE(scopeParts), binding) || !cx_or_lock(dir, &location)) return FALSE;
+    if (!cx_or_locate(dir, &location) || !cx_or_hash(scopeParts, ARRAYSIZE(scopeParts), binding)
+        || !cx_or_lock(&location, 1500)) return FALSE;
+    if (!cx_or_running(&location, keep, context)) goto cancelled;
     if (!cx_or_drop(location.temp)) goto done;
     queue = (CX_OR_QUEUE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*queue));
     if (!queue || !cx_or_load(location.path, location.temp, binding, deviceId, queue) || (!recordReady && !queue->count)) goto done;
@@ -386,11 +465,13 @@ BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR 
     if (!auth) goto done;
     lstrcpyW(auth, L"Bearer ");
     lstrcpyW(auth + 7, ordinaryKey);
+    if (!cx_or_running(&location, keep, context)) goto cancelled;
     permission = cx_or_check(base, auth, agreementProof);
-    if (permission == CX_OR_DENIED) { (void)cx_or_drop(location.path); goto done; }
+    if (!cx_or_running(&location, keep, context) || permission == CX_OR_DENIED) goto cancelled;
     if (permission != CX_OR_ALLOWED) goto done;
     if (recordReady && queue->count < CX_OR_LIMIT && cx_or_fresh(cx_or_ticks(&observed))
         && cx_or_make(&queue->packets[queue->count], deviceId, browserId, release, &observed)) {
+        if (!cx_or_running(&location, keep, context)) goto cancelled;
         ++queue->count;
         if (!cx_or_save(location.path, location.temp, binding, queue)) goto done;
     }
@@ -401,18 +482,40 @@ BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR 
         (void)cx_or_save(location.path, location.temp, binding, queue);
         goto done;
     }
-    if (cx_adapter_agreement_request(base, L"POST", cx_or_batches_path, auth, agreementProof,
-        queue->packets[0].wire, CX_OR_REPLY_CAP, &reply)) {
-        if (cx_or_denied(reply.status)) (void)cx_or_drop(location.path);
+    if (!cx_or_running(&location, keep, context)) goto cancelled;
+    sent = cx_adapter_agreement_request(base, L"POST", cx_or_batches_path, auth, agreementProof,
+        queue->packets[0].wire, CX_OR_REPLY_CAP, &reply);
+    /* Cancellation cannot un-send a request already handed to the transport.
+       Discard the local copy rather than acknowledge or retry it. */
+    if (!cx_or_running(&location, keep, context)) goto cancelled;
+    if (sent) {
+        if (cx_or_denied(reply.status)) goto cancelled;
         else if (cx_or_receipt(&reply, &fields)) {
             cx_or_shift(queue);
             received = cx_or_save(location.path, location.temp, binding, queue);
         }
     }
 done:
+    if (cx_or_running(&location, keep, context)) goto release;
+cancelled:
+    (void)cx_or_purge(&location);
+    received = FALSE;
+release:
     cx_adapter_reply_free(&reply);
     if (auth) { SecureZeroMemory(auth, authSize); HeapFree(GetProcessHeap(), 0, auth); }
     if (queue) HeapFree(GetProcessHeap(), 0, queue);
     cx_or_unlock(&location);
+    /* OFF could have been published just before we released the queue, after
+       our last in-lock check. Either we now purge, or its new owner will. */
+    if (cx_or_local_mode(&location) != CX_OR_MODE_ON) {
+        cx_or_try_off_cleanup(&location);
+        received = FALSE;
+    }
     return received;
+}
+
+BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
+    const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser, const WCHAR *version, BOOL recordReady) {
+    return cx_ordinary_receipts_pump_guarded(dir, base, ordinaryKey, agreementProof, device, browser,
+        version, recordReady, NULL, NULL);
 }
