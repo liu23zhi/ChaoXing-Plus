@@ -71,7 +71,9 @@ function copyStaticFiles() {
 
   writeFileSync('dist/extension-agreement-config.js', 'export const defaultBase = ' + JSON.stringify(defaultTikuBaseUrl) + ';\n');
 
-  copyFileSync('windows/node-source/extension-log-core.mjs', 'dist/extension-diagnostics.js');
+  copyFileSync('src/extension-diagnostic-receipt.js', 'dist/extension-diagnostic-receipt.js');
+  mkdirSync('dist/runtime', { recursive: true });
+  copyFileSync('src/runtime/diagnostic-outbox.js', 'dist/runtime/diagnostic-outbox.js');
 
   if (existsSync('icon/icon_512X512.png')) {
     copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');

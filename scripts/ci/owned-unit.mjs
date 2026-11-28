@@ -3,7 +3,7 @@
 import {spawnSync} from 'node:child_process';
 const files = [
   'answer-judgement-synonyms', 'answer-text-matching', 'check-coverage', 'coverage-ts-scope',
-  'device-identity', 'device-identity-headers', 'device-quota',
+  'device-identity', 'device-identity-headers', 'device-quota', 'diagnostic-outbox', 'extension-diagnostic-receipt',
   'cx-incident-announcement', 'extension-diagnostics', 'ime-spoofing-freeze', 'manifest-permissions', 'motion-preference', 'owned-script-authority',
   'panel-glass-dry', 'panel-runtime', 'pink-panel-ui', 'panel-status-tab', 'panel-status-visibility', 'panel-ui-contrast', 'panel-visibility',
   'runtime-request-error-classification', 'runtime-request-retry', 'runtime-store',

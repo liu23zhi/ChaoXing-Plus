@@ -18,5 +18,10 @@ BOOL cx_config_select_settings(const char *values, DWORD valuesLen,
     DWORD *outLen, WCHAR *error, DWORD errorCap);
 BOOL cx_config_patch_file(const WCHAR *path, const char *settings,
     DWORD settingsLen, WCHAR *error, DWORD errorCap);
+/* T07 only: atomically update private root recovery metadata and optional
+   canonical settings in an envelope. Never sync the pending state to the
+   settings object; preserve existing root and settings values. */
+BOOL cx_config_patch_device_admission_file(const WCHAR *path, const char *envelope,
+    DWORD envelopeLen, WCHAR *error, DWORD errorCap);
 
 #endif

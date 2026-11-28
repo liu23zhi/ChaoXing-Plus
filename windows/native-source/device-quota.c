@@ -93,16 +93,21 @@ static BOOL cx_config_device_id(const char *text, DWORD length, WCHAR *out, DWOR
     return ok;
 }
 
-static BOOL cx_config_read_file(const WCHAR *path, char **text, DWORD *length) {
+static BOOL cx_config_read_file(const WCHAR *path, char **text, DWORD *length, BOOL *missing) {
     HANDLE file;
     DWORD size, got, i;
     char *buffer;
     if (text) *text = NULL;
     if (length) *length = 0;
+    if (missing) *missing = FALSE;
     if (!path || !path[0] || !text || !length) return FALSE;
     file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (file == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        if (missing) *missing = code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND;
+        return FALSE;
+    }
     size = GetFileSize(file, NULL);
     if (size == INVALID_FILE_SIZE || size >= CX_CONFIG_JSON_CAP) { CloseHandle(file); return FALSE; }
     buffer = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size + 3);
@@ -201,7 +206,7 @@ BOOL cx_device_id_ensure(const WCHAR *configPath, BOOL noDiskWrite,
     out[0] = 0;
     generated[0] = 0;
 
-    read = cx_config_read_file(configPath, &text, &length);
+    read = cx_config_read_file(configPath, &text, &length, NULL);
     if (read) {
         BOOL found = cx_config_device_id(text, length, out, cap);
         HeapFree(GetProcessHeap(), 0, text);
@@ -299,6 +304,396 @@ static WCHAR *cx_device_auth(const WCHAR *apiKey) {
     for (i = 0; apiKey[i]; ++i) auth[7 + i] = apiKey[i];
     auth[7 + i] = 0;
     return auth;
+}
+
+/* ---- Explicit ordinary host admission ----------------------------------- */
+
+#define CX_ADMISSION_REPLY_CAP 4096
+#define CX_ADMISSION_ADDRESS_CAP 4096
+#define CX_ADMISSION_SCOPE_CAP 65
+#define CX_ADMISSION_PATH_CAP 32768
+
+typedef struct CX_ADMISSION_PENDING {
+    WCHAR id[CX_DEVICE_ID_CAP];
+    WCHAR instance[CX_DEVICE_INSTANCE_CAP];
+    BOOL retried;
+} CX_ADMISSION_PENDING;
+
+typedef BOOL (WINAPI *CX_ADMISSION_HASH)(LPCWSTR, DWORD, void *,
+    const BYTE *, DWORD, BYTE *, DWORD *);
+
+static BOOL cx_admission_fail(WCHAR *error, DWORD cap, const WCHAR *message) {
+    if (error && cap) lstrcpynW(error, message, (int)cap);
+    return FALSE;
+}
+
+static BOOL cx_admission_ascii(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == ':';
+}
+
+static BOOL cx_admission_token_eq(const char *text, const JT *t, int index, const WCHAR *expected) {
+    int i, length = lstrlenW(expected);
+    if (index < 0 || t[index].type != 's' || t[index].end - t[index].start != length) return FALSE;
+    for (i = 0; i < length; ++i)
+        if ((WCHAR)(BYTE)text[t[index].start + i] != expected[i]) return FALSE;
+    return TRUE;
+}
+
+static BOOL cx_admission_key_equal(const WCHAR *left, const WCHAR *right) {
+    while (*left && *left == *right) { ++left; ++right; }
+    return *left == *right;
+}
+
+/* Preserve detection of escaped/duplicate critical keys without accepting
+   ambiguous spellings. Ordinary unrelated keys are not inspected or changed. */
+static int cx_admission_member(const char *text, const JT *t, int object, const WCHAR *wanted) {
+    WCHAR name[128];
+    int i, found = -1;
+    if (object < 0 || t[object].type != '{') return -2;
+    for (i = object + 1; i < t[object].next; i = t[i + 1].next) {
+        if (!jwstr(text, t, i, name, ARRAYSIZE(name)) || !cx_admission_key_equal(name, wanted)) continue;
+        if (found >= 0 || !cx_admission_token_eq(text, t, i, wanted)) return -2;
+        found = i + 1;
+    }
+    return found;
+}
+
+static BOOL cx_admission_read_id(const char *text, const JT *t, int index, WCHAR *out, DWORD cap) {
+    int i, length;
+    if (index < 0 || t[index].type != 's') return FALSE;
+    length = t[index].end - t[index].start;
+    if (length <= 0 || (DWORD)length >= cap) return FALSE;
+    for (i = 0; i < length; ++i) {
+        char c = text[t[index].start + i];
+        if (!cx_admission_ascii(c)) return FALSE;
+        out[i] = (WCHAR)c;
+    }
+    out[length] = 0;
+    return TRUE;
+}
+
+static BOOL cx_admission_span_equal(const WCHAR *first, const WCHAR *last, const WCHAR *literal) {
+    while (first < last && *literal && *first == *literal) { ++first; ++literal; }
+    return first == last && *literal == 0;
+}
+
+static BOOL cx_admission_alnum(WCHAR ch) {
+    return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9');
+}
+
+static BOOL cx_admission_dns_name(const WCHAR *first, const WCHAR *last) {
+    const WCHAR *p, *label = first;
+    if (first == last || last - first > 253) return FALSE;
+    for (p = first; p < last; ++p) {
+        if (*p == L'.') {
+            if (p == label || p[-1] == L'-') return FALSE;
+            label = p + 1;
+        } else if ((!cx_admission_alnum(*p) && !(*p == L'-' && p != label)) || p - label >= 63) {
+            return FALSE;
+        }
+    }
+    return last != label && last[-1] != L'-';
+}
+
+typedef LONG (NTAPI *CX_ADMISSION_PARSE_IPV6)(PCWSTR, PCWSTR *, void *);
+
+static BOOL cx_admission_ipv6(const WCHAR *first, const WCHAR *closingBracket) {
+    const WCHAR *p = first, *end = NULL;
+    USHORT address[8];
+    HMODULE ntdll;
+    CX_ADMISSION_PARSE_IPV6 parse;
+    if (first == closingBracket) return FALSE;
+    for (; p < closingBracket; ++p) {
+        WCHAR ch = *p;
+        if (!(ch == L':' || ch == L'.' || (ch >= L'0' && ch <= L'9') ||
+            (ch >= L'a' && ch <= L'f') || (ch >= L'A' && ch <= L'F'))) return FALSE;
+    }
+    /* Numeric-only OS parser. Does not resolve a hostname or open transport. */
+    ntdll = GetModuleHandleW(L"ntdll.dll");
+    parse = ntdll ? (CX_ADMISSION_PARSE_IPV6)(void *)GetProcAddress(ntdll, "RtlIpv6StringToAddressW") : NULL;
+    return parse && parse(first, &end, address) == 0 && end == closingBracket;
+}
+
+/* Admission is the only caller. The generic WinHTTP adapter remains
+   unchanged; its TLS validation, redirect policy and path joining still apply. */
+static BOOL cx_admission_base_allowed(const WCHAR *base) {
+    const WCHAR *host, *tail, *authorityEnd, *path, *segment;
+    DWORD length, digits, port;
+    BOOL tls;
+    if (!base) return FALSE;
+    length = (DWORD)lstrlenW(base);
+    if (!length || length >= CX_ADMISSION_ADDRESS_CAP) return FALSE;
+    if (length > 8 && CompareStringOrdinal(base, 8, L"https://", 8, TRUE) == CSTR_EQUAL) {
+        tls = TRUE; host = base + 8;
+    } else if (length > 7 && CompareStringOrdinal(base, 7, L"http://", 7, TRUE) == CSTR_EQUAL) {
+        tls = FALSE; host = base + 7;
+    } else return FALSE;
+
+    for (authorityEnd = host; *authorityEnd && *authorityEnd != L'/'; ++authorityEnd) { }
+    if (*host == L'[') {
+        for (tail = host + 1; tail < authorityEnd && *tail != L']'; ++tail) { }
+        if (tail == authorityEnd) return FALSE;
+        if (tls ? !cx_admission_ipv6(host + 1, tail) : !cx_admission_span_equal(host, tail + 1, L"[::1]"))
+            return FALSE;
+        ++tail;
+    } else {
+        for (tail = host; tail < authorityEnd && *tail != L':'; ++tail) { }
+        if (tls ? !cx_admission_dns_name(host, tail) : !cx_admission_span_equal(host, tail, L"127.0.0.1"))
+            return FALSE;
+    }
+    if (tail < authorityEnd) {
+        if (*tail++ != L':' || tail == authorityEnd || *tail < L'1' || *tail > L'9') return FALSE;
+        for (digits = port = 0; tail < authorityEnd; ++tail) {
+            if (++digits > 5 || *tail < L'0' || *tail > L'9') return FALSE;
+            port = port * 10 + (*tail - L'0');
+        }
+        if (port > 65535) return FALSE;
+    }
+
+    /* Only literal path segments; no userinfo, escapes, query, fragment,
+       backslashes, repeated slashes or dot segments to reinterpret later. */
+    path = authorityEnd;
+    while (*path) {
+        segment = ++path;
+        while (*path && *path != L'/') {
+            if (!cx_admission_alnum(*path) && *path != L'-' && *path != L'_' && *path != L'.' && *path != L'~')
+                return FALSE;
+            ++path;
+        }
+        if ((path == segment && *path) || cx_admission_span_equal(segment, path, L".") ||
+            cx_admission_span_equal(segment, path, L"..")) return FALSE;
+    }
+    return TRUE; /* Existing adapter handles unambiguous API or reverse-proxy prefixes. */
+}
+
+static BOOL cx_admission_scope(const WCHAR *baseUrl, const WCHAR *key,
+    WCHAR scope[CX_ADMISSION_SCOPE_CAP]) {
+    static const WCHAR hex[] = L"0123456789abcdef";
+    HMODULE library = NULL;
+    CX_ADMISSION_HASH hash;
+    BYTE digest[32];
+    WCHAR *joined = NULL;
+    DWORD a, b, bytes, i, digestLength = sizeof(digest);
+    BOOL ok = FALSE;
+    if (!baseUrl || !baseUrl[0] || !key || !key[0]) return FALSE;
+    a = (DWORD)lstrlenW(baseUrl); b = (DWORD)lstrlenW(key);
+    if (a >= CX_ADMISSION_ADDRESS_CAP || b >= CX_ADAPTER_TOKEN_CAP) return FALSE;
+    for (i = 0; i < a; ++i) if (baseUrl[i] <= 0x20 || baseUrl[i] == 0x7f) return FALSE;
+    for (i = 0; i < b; ++i) if (key[i] <= 0x20 || key[i] >= 0x7f) return FALSE;
+    bytes = (a + b + 2) * sizeof(WCHAR);
+    joined = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, bytes);
+    if (!joined) goto done;
+    lstrcpyW(joined, baseUrl);
+    lstrcpyW(joined + a + 1, key);
+    library = LoadLibraryExW(L"crypt32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!library) goto done;
+    hash = (CX_ADMISSION_HASH)(void *)GetProcAddress(library, "CryptHashCertificate2");
+    if (!hash || !hash(L"SHA256", 0, NULL, (const BYTE *)joined, bytes, digest, &digestLength)
+        || digestLength != sizeof(digest)) goto done;
+    for (i = 0; i < sizeof(digest); ++i) {
+        scope[i * 2] = hex[digest[i] >> 4];
+        scope[i * 2 + 1] = hex[digest[i] & 15];
+    }
+    scope[CX_ADMISSION_SCOPE_CAP - 1] = 0;
+    ok = TRUE;
+done:
+    if (library) FreeLibrary(library);
+    if (joined) {
+        SecureZeroMemory(joined, bytes);
+        HeapFree(GetProcessHeap(), 0, joined);
+    }
+    SecureZeroMemory(digest, sizeof(digest));
+    return ok;
+}
+
+/* An exclusive, delete-on-close sidecar serializes participants in this
+   explicit flow for one config path. Never overwrite an existing sidecar. */
+static HANDLE cx_admission_lock(const WCHAR *configPath) {
+    static const WCHAR suffix[] = L".device-admission.lock";
+    WCHAR *lockPath;
+    DWORD length, used;
+    HANDLE lock = INVALID_HANDLE_VALUE;
+    lockPath = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CX_ADMISSION_PATH_CAP * sizeof(WCHAR));
+    if (!lockPath) return lock;
+    length = GetFullPathNameW(configPath, CX_ADMISSION_PATH_CAP, lockPath, NULL);
+    used = (DWORD)ARRAYSIZE(suffix);
+    if (length && length < CX_ADMISSION_PATH_CAP && used <= CX_ADMISSION_PATH_CAP - length) {
+        lstrcatW(lockPath, suffix);
+        lock = CreateFileW(lockPath, GENERIC_READ | DELETE, 0, NULL, CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    }
+    HeapFree(GetProcessHeap(), 0, lockPath);
+    return lock;
+}
+
+static BOOL cx_admission_load(const WCHAR *path, const WCHAR *scope,
+    CX_ADMISSION_PENDING *pending, BOOL *resume) {
+    char *text = NULL;
+    JT *t = NULL;
+    DWORD length = 0;
+    BOOL missing = FALSE, ok = FALSE;
+    int settings, id, state, retried, count;
+    *resume = FALSE;
+    if (!cx_config_read_file(path, &text, &length, &missing)) return missing;
+    if (!length || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)length, NULL, 0)) goto done;
+    t = (JT *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)length + 1) * sizeof(JT));
+    if (!t) goto done;
+    count = jparse(text, (int)length, t, (int)length + 1);
+    if (count <= 0 || t[0].type != '{') goto done;
+    settings = cx_admission_member(text, t, 0, L"settings");
+    if (settings < -1 || (settings >= 0 && t[settings].type != '{')) goto done;
+    if (settings >= 0) {
+        id = cx_admission_member(text, t, settings, L"common.settings.device-id");
+        if (id < -1 || (id >= 0 && !cx_admission_read_id(text, t, id, pending->id, ARRAYSIZE(pending->id)))) goto done;
+    }
+    state = cx_admission_member(text, t, 0, L"nativeDeviceAdmissionPending");
+    if (state == -1 || (state >= 0 && t[state].type == 'p' && jeq(text, t, state, "null"))) {
+        ok = TRUE; goto done;
+    }
+    if (state < 0 || t[state].type != '{' || t[state].count != 8 ||
+        !cx_admission_token_eq(text, t, cx_admission_member(text, t, state, L"scope"), scope) ||
+        !cx_admission_read_id(text, t, cx_admission_member(text, t, state, L"deviceId"), pending->id, ARRAYSIZE(pending->id)) ||
+        !cx_admission_read_id(text, t, cx_admission_member(text, t, state, L"clientInstance"), pending->instance, ARRAYSIZE(pending->instance)))
+        goto done;
+    retried = cx_admission_member(text, t, state, L"retried");
+    if (retried < 0 || t[retried].type != 'p' || (!jeq(text, t, retried, "true") && !jeq(text, t, retried, "false"))) goto done;
+    pending->retried = jeq(text, t, retried, "true");
+    *resume = TRUE; ok = TRUE;
+done:
+    if (t) HeapFree(GetProcessHeap(), 0, t);
+    HeapFree(GetProcessHeap(), 0, text);
+    return ok;
+}
+
+/* All wide fields here are already bounded, validated ASCII, and cannot
+   require JSON escaping. Buffers below include worst-case fixed syntax. */
+static void cx_admission_literal(char *out, DWORD *used, const char *text) {
+    while (*text) out[(*used)++] = *text++;
+}
+static void cx_admission_field(char *out, DWORD *used, const WCHAR *text) {
+    while (*text) out[(*used)++] = (char)*text++;
+}
+static BOOL cx_admission_save(const WCHAR *path, const WCHAR *scope, const CX_ADMISSION_PENDING *pending,
+    BOOL publish, WCHAR *error, DWORD errorCap) {
+    char patch[CX_DEVICE_ID_CAP + CX_DEVICE_INSTANCE_CAP + CX_ADMISSION_SCOPE_CAP + 192];
+    DWORD n = 0;
+    if (publish) {
+        cx_admission_literal(patch, &n, "{\"settings\":{\"" CX_DEVICE_ID_KEY "\":\"");
+        cx_admission_field(patch, &n, pending->id);
+        cx_admission_literal(patch, &n, "\"},\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":null}");
+    } else {
+        cx_admission_literal(patch, &n, "{\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":{\"scope\":\"");
+        cx_admission_field(patch, &n, scope);
+        cx_admission_literal(patch, &n, "\",\"deviceId\":\"");
+        cx_admission_field(patch, &n, pending->id);
+        cx_admission_literal(patch, &n, "\",\"clientInstance\":\"");
+        cx_admission_field(patch, &n, pending->instance);
+        cx_admission_literal(patch, &n, pending->retried ? "\",\"retried\":true}}" : "\",\"retried\":false}}");
+    }
+    return cx_config_patch_device_admission_file(path, patch, n, error, errorCap);
+}
+
+/* Only the fixed existing endpoint and the exact native-host contract. */
+static BOOL cx_admission_request(const WCHAR *base, const WCHAR *auth, const CX_ADMISSION_PENDING *pending,
+    DWORD timeout, BOOL *conflict) {
+    char json[CX_DEVICE_ID_CAP + CX_DEVICE_INSTANCE_CAP + 64];
+    DWORD n = 0;
+    CX_ADAPTER_REPLY reply = {0};
+    JT t[64];
+    int value;
+    BOOL admitted = FALSE;
+    *conflict = FALSE;
+    cx_admission_literal(json, &n, "{\"deviceId\":\"");
+    cx_admission_field(json, &n, pending->id);
+    cx_admission_literal(json, &n, "\",\"clientInstance\":\"");
+    cx_admission_field(json, &n, pending->instance);
+    cx_admission_literal(json, &n, "\"}");
+    json[n] = 0;
+    if (!cx_adapter_request(base, L"POST", L"/api/user/device-admission", auth, json,
+        timeout, CX_ADMISSION_REPLY_CAP, &reply, NULL, 0)) goto done;
+    if ((reply.status != 200 && reply.status != 409) || !reply.body || !reply.length ||
+        reply.length > CX_ADMISSION_REPLY_CAP ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, reply.body, (int)reply.length, NULL, 0) ||
+        jparse(reply.body, (int)reply.length, t, ARRAYSIZE(t)) <= 0 || t[0].type != '{') goto done;
+    if (reply.status == 409) {
+        value = cx_admission_member(reply.body, t, 0, L"code");
+        *conflict = cx_admission_token_eq(reply.body, t, value, L"DEVICE_ID_CONFLICT");
+        goto done;
+    }
+    value = cx_admission_member(reply.body, t, 0, L"admitted");
+    admitted = value >= 0 && t[value].type == 'p' && jeq(reply.body, t, value, "true")
+        && cx_admission_token_eq(reply.body, t, cx_admission_member(reply.body, t, 0, L"deviceId"), pending->id);
+done:
+    cx_adapter_reply_free(&reply);
+    return admitted;
+}
+
+BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
+    const WCHAR *ordinaryApiKey, CX_DEVICE_HOST_MODE mode, BOOL noDiskWrite,
+    DWORD timeoutMs, CX_DEVICE_HOST_CONSENT verifyConsent, void *consentContext,
+    WCHAR *publishedId, DWORD cap, WCHAR *error, DWORD errorCap) {
+    CX_ADMISSION_PENDING pending = {0};
+    WCHAR scope[CX_ADMISSION_SCOPE_CAP], previousId[CX_DEVICE_ID_CAP], previousInstance[CX_DEVICE_INSTANCE_CAP];
+    WCHAR *auth = NULL;
+    HANDLE lock = INVALID_HANDLE_VALUE;
+    BOOL resume, conflict, ok = FALSE;
+    if (error && errorCap) error[0] = 0;
+    if (noDiskWrite || mode != CX_DEVICE_HOST_ORDINARY || !configPath || !configPath[0]
+        || !publishedId || cap < CX_DEVICE_ID_CAP)
+        return cx_admission_fail(error, errorCap, L"普通设备登记需要可写配置及明确的普通宿主模式");
+    if (!verifyConsent)
+        return cx_admission_fail(error, errorCap, L"无法复核当前设备的协议确认");
+    if (!cx_admission_base_allowed(baseUrl))
+        return cx_admission_fail(error, errorCap, L"普通设备登记仅支持 HTTPS 或数字回环 HTTP");
+    if (!cx_admission_scope(baseUrl, ordinaryApiKey, scope))
+        return cx_admission_fail(error, errorCap, L"普通设备登记地址或凭据不可用");
+    timeoutMs = timeoutMs ? timeoutMs : 8000;
+    lock = cx_admission_lock(configPath);
+    if (lock == INVALID_HANDLE_VALUE)
+        return cx_admission_fail(error, errorCap, L"无法锁定普通设备登记配置，请稍后重试");
+    if (!cx_admission_load(configPath, scope, &pending, &resume)) {
+        cx_admission_fail(error, errorCap, L"设备登记配置无效，或待确认记录与当前普通凭据不匹配");
+        goto done;
+    }
+    auth = cx_device_auth(ordinaryApiKey);
+    if (!auth) { cx_admission_fail(error, errorCap, L"普通设备登记凭据不可用"); goto done; }
+    if (!resume &&
+        ((!pending.id[0] && !cx_device_uuid_v4(pending.id, ARRAYSIZE(pending.id))) ||
+         !cx_device_instance_new(pending.instance, ARRAYSIZE(pending.instance)))) goto random_failed;
+    if (!verifyConsent(pending.id, consentContext)) goto consent_failed;
+    if (!resume && !cx_admission_save(configPath, scope, &pending, FALSE, error, errorCap)) goto done;
+    if (!cx_admission_request(baseUrl, auth, &pending, timeoutMs, &conflict)) {
+        if (!conflict || pending.retried) goto receipt_failed;
+        lstrcpyW(previousId, pending.id);
+        lstrcpyW(previousInstance, pending.instance);
+        if (!cx_device_uuid_v4(pending.id, ARRAYSIZE(pending.id)) ||
+            !cx_device_instance_new(pending.instance, ARRAYSIZE(pending.instance)) ||
+            !lstrcmpW(previousId, pending.id) || !lstrcmpW(previousInstance, pending.instance)) goto random_failed;
+        if (!verifyConsent(pending.id, consentContext)) goto consent_failed;
+        pending.retried = TRUE;
+        if (!cx_admission_save(configPath, scope, &pending, FALSE, error, errorCap)) goto done;
+        if (!cx_admission_request(baseUrl, auth, &pending, timeoutMs, &conflict)) goto receipt_failed;
+    }
+    if (!cx_admission_save(configPath, scope, &pending, TRUE, error, errorCap)) goto done;
+    lstrcpynW(publishedId, pending.id, CX_DEVICE_ID_CAP);
+    ok = TRUE;
+    goto done;
+consent_failed:
+    cx_admission_fail(error, errorCap, L"当前候选设备尚无有效协议确认");
+    goto done;
+random_failed:
+    cx_admission_fail(error, errorCap, L"无法生成新的设备登记标识");
+    goto done;
+receipt_failed:
+    cx_admission_fail(error, errorCap, L"普通设备登记未取得有效回执");
+done:
+    if (auth) {
+        SecureZeroMemory(auth, (CX_ADAPTER_TOKEN_CAP + 8) * sizeof(WCHAR));
+        HeapFree(GetProcessHeap(), 0, auth);
+    }
+    CloseHandle(lock);
+    return ok;
 }
 
 BOOL cx_device_quota_fetch(const WCHAR *baseUrl, const WCHAR *apiKey,

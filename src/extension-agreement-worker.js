@@ -73,4 +73,5 @@ export function registerAgreement(chrome, defaultBase) {
       await chrome.tabs.create({ url: internalPage }).catch(() => {});
     })().catch(() => {});
   });
+  return controller.diagnosticAuthority;
 }

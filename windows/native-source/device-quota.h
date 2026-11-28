@@ -52,6 +52,30 @@ BOOL cx_device_uuid_v4(WCHAR *out, DWORD cap);
 BOOL cx_device_id_ensure(const WCHAR *configPath, BOOL noDiskWrite,
     WCHAR *out, DWORD cap, WCHAR *error, DWORD errorCap);
 
+/* Pending is private recovery state, never a confirmed device ID or permission. */
+#define CX_DEVICE_ADMISSION_PENDING_KEY "nativeDeviceAdmissionPending"
+
+typedef enum CX_DEVICE_HOST_MODE {
+    CX_DEVICE_HOST_ORDINARY = 1,
+    CX_DEVICE_HOST_SCRIPT = 2
+} CX_DEVICE_HOST_MODE;
+
+/* A trusted native verifier must check the current agreement for this exact
+   candidate, account and configured service. Do not use page/local display
+   state as authority. Called under the config lock; must not reenter it. */
+#define CX_DEVICE_HOST_CONSENT_REQUIRED 1
+typedef BOOL (*CX_DEVICE_HOST_CONSENT)(const WCHAR *candidate, void *context);
+
+/* Explicit ordinary-host admission; not wired to release startup.
+   TRUE only after candidate consent, a matched server receipt and atomic
+   local promotion. A rotated candidate needs its own consent; it does not
+   inherit the prior candidate's result. FALSE leaves publishedId untouched.
+   No verifier, diskless or script mode exits before file or HTTP activity. */
+BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
+    const WCHAR *ordinaryApiKey, CX_DEVICE_HOST_MODE mode, BOOL noDiskWrite,
+    DWORD timeoutMs, CX_DEVICE_HOST_CONSENT verifyConsent, void *consentContext,
+    WCHAR *publishedId, DWORD cap, WCHAR *error, DWORD errorCap);
+
 /* 每个浏览器会话一个新的实例标识（141 §4.3：不持久化，用于区分「同 id 不同实例」）。 */
 BOOL cx_device_instance_new(WCHAR *out, DWORD cap);
 
