@@ -9,6 +9,11 @@ BOOL cx_browser_extension_verify(const BYTE *data, DWORD size,
                                  const WCHAR *expectedExtensionId,
                                  WCHAR *error, DWORD errorCapacity);
 
+/* Also checks the signed ordinary-native manifest capability, before choosing cached bytes. */
+BOOL cx_browser_extension_verify_ordinary(const BYTE *data, DWORD size,
+    const WCHAR *expectedExtensionId, WCHAR *error, DWORD errorCapacity);
+BOOL cx_browser_extension_ordinary_manifest(const BYTE *bytes, DWORD size, WCHAR *version, DWORD versionCapacity);
+
 /* Extracts a signed CRX3 into a newly created, private session directory.
    The caller owns that directory. Archive paths, CRCs, sizes and the CRX
    developer signature are checked before any browser loads the result. */

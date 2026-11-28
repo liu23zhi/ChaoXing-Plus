@@ -1,6 +1,7 @@
 import { AGREEMENT_CONFIG_KEYS, AGREEMENT_KIND, createAgreementController } from './extension-agreement-core.js';
+import { isNativeContent, readNativeAuthorization } from './ordinary-native-authority.js';
 
-export function registerAgreement(chrome, defaultBase) {
+export function registerAgreement(chrome, defaultBase, { ordinaryNative = false, timeoutMs } = {}) {
   const writes = chrome.storage.local;
   const controller = createAgreementController({
     read: keys => writes.get(keys), write: data => writes.set(data), remove: keys => writes.remove(keys), defaultBase
@@ -22,7 +23,19 @@ export function registerAgreement(chrome, defaultBase) {
     const topContent = !internal && Number.isInteger(sender.tab?.id) && sender.frameId === 0
       && /^https?:\/\/(?:[^/]+\.)?chaoxing\.com(?::\d+)?(?:\/|$)/i.test(sender.url ?? '');
     let result;
-    if (op === 'authorize' && !internal && Number.isInteger(sender.tab?.id)
+    if (ordinaryNative) {
+      // On a native build never fall back to an extension-side consent, identity or log sender.
+      if (op === 'authorize' && !internal) {
+        result = isNativeContent(sender) && Object.keys(message).length === 2
+          ? readNativeAuthorization(chrome, timeoutMs) : Promise.resolve({ allowed: false });
+      } else if (op === 'refresh' && (internal || (topContent && isNativeContent(sender)))) {
+        result = readNativeAuthorization(chrome, timeoutMs).then(({ allowed }) => ({
+          phase: allowed ? 'accepted' : 'host-pending', canSign: false, document: null, pendingVersion: null
+        }));
+      } else if (op === 'abandon') {
+        result = Promise.resolve(null);
+      }
+    } else if (op === 'authorize' && !internal && Number.isInteger(sender.tab?.id)
       && typeof message.base === 'string' && message.base.length <= 2048
       && typeof message.keyHash === 'string' && /^[a-f0-9]{64}$/.test(message.keyHash)) {
       const check = message.base + '\n' + message.keyHash;
@@ -55,6 +68,7 @@ export function registerAgreement(chrome, defaultBase) {
     return true;
   });
 
+  if (ordinaryNative) return async () => null;
   chrome.tabs.onRemoved.addListener(tab => controller.abandonTab(tab));
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !AGREEMENT_CONFIG_KEYS.some(key => key in changes)) return;

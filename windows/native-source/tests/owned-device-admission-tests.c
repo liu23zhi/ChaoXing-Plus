@@ -270,6 +270,16 @@ static int splitProcess(BOOL reopen) {
     CHECK(admit(resource, fixtureKey, FALSE, FALSE, out));
     CHECK(requests == 1 && committed == 1 && !lstrcmpW(previous, devices[0]) &&
         !lstrcmpW(priorInstance, instances[0]) && !lstrcmpW(previous, out) && checkConfig(out, FALSE));
+    {
+        WCHAR confirmed[CX_DEVICE_ID_CAP];
+        unsigned totalPosts = requests;
+        CHECK(cx_device_host_confirmed(fixturePath, resource, fixtureKey, confirmed, ARRAYSIZE(confirmed))
+            && !lstrcmpW(confirmed, out) && requests == totalPosts);
+        CHECK(!cx_device_host_confirmed(fixturePath, resource, L"another-owned-key", confirmed, ARRAYSIZE(confirmed))
+            && !cx_device_host_confirmed(fixturePath, L"https://other.invalid", fixtureKey, confirmed, ARRAYSIZE(confirmed))
+            && requests == totalPosts);
+        puts("confirmed marker is private to the exact source/key and can be read without a POST");
+    }
     CHECK(DeleteFileW(stateFile) && DeleteFileW(fixturePath));
     puts("second native process: same id and instance; modeled binding still one");
     return 0;

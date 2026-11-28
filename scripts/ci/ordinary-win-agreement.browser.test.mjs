@@ -120,7 +120,8 @@ test('rollback restores a copied test package to stock files and bytes without c
   const stock = {
     manifest: { version: '1.0.0', permissions: ['storage'] },
     worker: await readFile(resolveTestPath('src/extension-agreement-worker.js'), 'utf8'),
-    core: await readFile(resolveTestPath('src/extension-agreement-core.js'), 'utf8')
+    core: await readFile(resolveTestPath('src/extension-agreement-core.js'), 'utf8'),
+    ordinaryNativeAuthority: await readFile(resolveTestPath('src/ordinary-native-authority.js'), 'utf8')
   };
   const owned = { origin: 'http://127.0.0.1:12345', url: 'http://127.0.0.1:12345/owned-t04/active',
     protectedPath: '/owned-t04/protected' };
@@ -131,6 +132,9 @@ test('rollback restores a copied test package to stock files and bytes without c
   await restoreExtension(candidate, original, restored);
   assert.deepEqual(await readFile(join(candidate, 'manifest.json')), before);
   await access(join(candidate, 'host-result.js'));
+  for (const edition of [original, candidate, restored]) {
+    assert.equal(await readFile(join(edition, 'ordinary-native-authority.js'), 'utf8'), stock.ordinaryNativeAuthority);
+  }
 });
 
 async function requiredFile(name) {

@@ -4,7 +4,7 @@ import {spawnSync} from 'node:child_process';
 const files = [
   'answer-judgement-synonyms', 'answer-text-matching', 'check-coverage', 'coverage-ts-scope',
   'device-identity', 'device-identity-headers', 'device-quota', 'diagnostic-outbox', 'extension-diagnostic-receipt',
-  'cx-incident-announcement', 'extension-diagnostics', 'ime-spoofing-freeze', 'manifest-permissions', 'motion-preference', 'owned-script-authority',
+  'cx-incident-announcement', 'extension-diagnostics', 'ime-spoofing-freeze', 'manifest-permissions', 'motion-preference', 'ordinary-native-activation', 'ordinary-native-authority', 'owned-script-authority',
   'panel-glass-dry', 'panel-runtime', 'pink-panel-ui', 'panel-status-tab', 'panel-status-visibility', 'panel-ui-contrast', 'panel-visibility',
   'runtime-request-error-classification', 'runtime-request-retry', 'runtime-store',
   'status-panel', 'status-panel-http', 'test-temp-directories',

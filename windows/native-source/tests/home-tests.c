@@ -6,6 +6,7 @@
 #include "../adapter-account.h"
 #include "../account-window.h"
 #include "../device-quota.h"
+#include "../ordinary-channel.h"
 
 #define SETTINGS_PANEL_ENABLED 1510
 #define SETTINGS_PANEL_COLLAPSED 1511
@@ -107,6 +108,14 @@ static DWORD test_browser_pid(const CX_BROWSER_SESSION *session) { (void)session
 static const WCHAR *test_browser_id(const CX_BROWSER_SESSION *session) {
     (void)session; return L"lcmeenlnjihhjcjoakekikoaldigonac";
 }
+static const WCHAR *test_browser_version(const CX_BROWSER_SESSION *session) { (void)session; return L"2.0.0"; }
+static BOOL test_channel_open(const WCHAR *instance, const WCHAR *id, const WCHAR *kind,
+    CX_ORDINARY_RESULT verify, void *context, CX_ORDINARY_CHANNEL **out) {
+    (void)instance; (void)id; (void)kind; (void)verify; (void)context; *out = NULL; return TRUE;
+}
+static BOOL test_channel_attach(CX_ORDINARY_CHANNEL *channel, HANDLE job) { (void)channel; (void)job; return FALSE; }
+static void test_channel_close(CX_ORDINARY_CHANNEL *channel) { (void)channel; }
+static const WCHAR *test_channel_name(const CX_ORDINARY_CHANNEL *channel) { (void)channel; return L"owned-test-no-registry"; }
 static BOOL test_account_window(HWND parent, CX_HOME_CONFIG *config) { (void)parent; (void)config; return FALSE; }
 static BOOL captureExamDiagnostics;
 static DWORD capturedExamDiagnostics;
@@ -147,10 +156,16 @@ static BOOL test_extension_verify(const BYTE *data, DWORD size, const WCHAR *id,
 #define cx_browser_poll test_browser_poll
 #define cx_browser_pid test_browser_pid
 #define cx_browser_extension_id test_browser_id
+#define cx_browser_extension_version test_browser_version
+#define cx_ordinary_channel_open test_channel_open
+#define cx_ordinary_channel_attach_job test_channel_attach
+#define cx_ordinary_channel_close test_channel_close
+#define cx_ordinary_channel_name test_channel_name
 #define cx_account_window test_account_window
 #define cx_adapter_report_owned_exam_ready test_owned_exam_ready
 #define cx_adapter_request test_script_request
 #define cx_browser_extension_verify test_extension_verify
+#define cx_browser_extension_verify_ordinary test_extension_verify
 /* 设备槽位：网络一律不真的发出去，只记录「该发的都发了」。 */
 #define cx_device_quota_fetch test_device_quota_fetch
 #define cx_device_sessions_report test_device_sessions_report
@@ -696,10 +711,10 @@ static void device_injection_tests(void) {
        后者绕过了 home_work 的真实注入路径，把实现改成固定值时用例仍会绿（假钉子）。 */
     {
         WCHAR first[CX_DEVICE_INSTANCE_CAP], second[CX_DEVICE_INSTANCE_CAP];
-        BOOL made = home_device_begin_injection(state);
+        BOOL made = home_device_begin_injection(state, state->deviceId);
         home_copy(first, CX_DEVICE_INSTANCE_CAP, state->injectInstance);
         home_device_end_injection(state);
-        made = home_device_begin_injection(state) && made;
+        made = home_device_begin_injection(state, state->deviceId) && made;
         home_copy(second, CX_DEVICE_INSTANCE_CAP, state->injectInstance);
         home_device_end_injection(state);
         check(made && first[0] && second[0] && lstrcmpW(first, second) != 0,
@@ -735,6 +750,14 @@ static void drain_device(HOME_STATE *state) {
     clear_messages();
 }
 
+static void test_attach_admitted_device(HOME_STATE *state) {
+    state->deviceInitialized = TRUE;
+    home_copy(state->admittedOwner.base, ARRAYSIZE(state->admittedOwner.base), L"https://fixture.invalid");
+    home_copy(state->admittedOwner.key, ARRAYSIZE(state->admittedOwner.key), L"owned-count-fixture");
+    home_copy(state->admittedOwner.device, ARRAYSIZE(state->admittedOwner.device), L"host-device-id");
+    home_copy(state->deviceId, CX_DEVICE_ID_CAP, state->admittedOwner.device);
+}
+
 static void device_report_tests(void) {
     HOME_STATE *state;
     DWORD start;
@@ -742,7 +765,7 @@ static void device_report_tests(void) {
     reportCalls = 0; lastReportCount = -1; lastReportDeviceId[0] = 0;
     closedSessions = 0; destroyedSessions = 0;
     state = make_home();
-    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    test_attach_admitted_device(state);
 
     /* 时机 1：会话启动成功（HOME_OPERATION_DONE 里 pendingSession 落位）。 */
     state->sessions[0].session = NULL;
@@ -774,7 +797,7 @@ static void device_report_tests(void) {
     /* 时机 2：进程自己退出（cx_browser_poll 报 not running）。 */
     reportCalls = 0; lastReportCount = -1;
     state = make_home();
-    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    test_attach_admitted_device(state);
     state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)8;
     state->sessions[1].session = (CX_BROWSER_SESSION *)(UINT_PTR)9;
     runningSession = 8; /* 第 8 号会话「已退出」，第 9 号仍在跑 */
@@ -789,7 +812,7 @@ static void device_report_tests(void) {
     reportCalls = 0; lastReportCount = -1;
     closedSessions = 0; destroyedSessions = 0;
     state = make_home();
-    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    test_attach_admitted_device(state);
     state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)10;
     state->sessions[1].session = (CX_BROWSER_SESSION *)(UINT_PTR)11;
     state->sessions[2].session = (CX_BROWSER_SESSION *)(UINT_PTR)12;
@@ -807,7 +830,7 @@ static void device_report_tests(void) {
     reportCalls = 0; lastReportCount = -1;
     closedSessions = 0; destroyedSessions = 0;
     state = make_home();
-    home_copy(state->deviceId, CX_DEVICE_ID_CAP, L"host-device-id");
+    test_attach_admitted_device(state);
     state->sessions[0].session = (CX_BROWSER_SESSION *)(UINT_PTR)13;
     home_refresh_list(state);
     reportFails = TRUE;

@@ -3,7 +3,10 @@ import { registerReceiptDiagnostics } from './extension-diagnostic-receipt.js';
 
 import { registerAgreement } from './extension-agreement-worker.js';
 import { registerDeepThinking } from './extension-deep-thinking-worker.js';
-import { defaultBase } from './extension-agreement-config.js';
+import * as config from './extension-agreement-config.js';
 
-registerReceiptDiagnostics(chrome, registerAgreement(chrome, defaultBase));
+const { defaultBase, ordinaryNative = false } = config;
+
+const authority = registerAgreement(chrome, defaultBase, { ordinaryNative });
+if (!ordinaryNative) registerReceiptDiagnostics(chrome, authority);
 registerDeepThinking(chrome);

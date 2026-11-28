@@ -386,6 +386,31 @@ static BOOL be_version(const char *version) {
     return FALSE;
 }
 
+static BOOL be_ordinary(const char *text, const JT *tokens) {
+    int i, permissions = jkey(text, tokens, 0, "permissions");
+    int variant = jkey(text, tokens, 0, "version_name");
+    WCHAR name[40];
+    if (permissions < 0 || tokens[permissions].type != '['
+        || !jwstr(text, tokens, variant, name, ARRAYSIZE(name))
+        || lstrcmpW(name, L"普通 Windows 原生通道 v1")) return FALSE;
+    for (i = permissions + 1; i < tokens[permissions].next; i = tokens[i].next)
+        if (tokens[i].type == 's' && jeq(text, tokens, i, "nativeMessaging")) return TRUE;
+    return FALSE;
+}
+
+BOOL cx_browser_extension_ordinary_manifest(const BYTE *bytes, DWORD size, WCHAR *version, DWORD versionCapacity) {
+    JT *tokens;
+    const char *text = (const char *)bytes;
+    BOOL ok = FALSE;
+    if (!bytes || size < 2 || size > 262144 || !version || !versionCapacity) return FALSE;
+    tokens = (JT *)HeapAlloc(GetProcessHeap(), 0, 8192 * sizeof(JT));
+    if (!tokens) return FALSE;
+    if (jparse(text, (int)size, tokens, 8192) > 0 && tokens[0].type == '{' && be_ordinary(text, tokens))
+        ok = jwstr(text, tokens, jkey(text, tokens, 0, "version"), version, (int)versionCapacity);
+    HeapFree(GetProcessHeap(), 0, tokens);
+    return ok;
+}
+
 static BOOL be_manifest(const BYTE *bytes, DWORD size, const BYTE *publicKey, DWORD publicLength, BYTE **output, DWORD *outputSize) {
     char *text = NULL, *base64 = NULL, *result = NULL; DWORD base64Size = 0, i, used; JT *tokens = NULL; int count;
     char name[1024], version[128];
@@ -491,7 +516,7 @@ fail:
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file); if (path) HeapFree(GetProcessHeap(), 0, path); if (parent) HeapFree(GetProcessHeap(), 0, parent); if (!error || !errorCap || !error[0]) be_error(error, errorCap, L"无法写入扩展临时文件。"); return FALSE;
 }
 
-static BOOL be_process(const BYTE *data, DWORD size, const WCHAR *directory, const WCHAR *expectedId, WCHAR *extensionId, DWORD idCapacity, WCHAR *error, DWORD errorCapacity) {
+static BOOL be_process(const BYTE *data, DWORD size, const WCHAR *directory, const WCHAR *expectedId, WCHAR *extensionId, DWORD idCapacity, WCHAR *error, DWORD errorCapacity, BOOL ordinary) {
     DWORD headerSize, zipOffset, count, i, k, publicLength = 0; BE_ENTRY *entries = NULL; const BYTE *zip, *publicKey = NULL; BOOL manifest = FALSE, result = FALSE;
     WCHAR verifiedId[33]; WCHAR *names = NULL; BYTE *expanded = NULL, *rewritten = NULL;
     if (error && errorCapacity) error[0] = 0; if (extensionId && idCapacity) extensionId[0] = 0;
@@ -529,6 +554,13 @@ static BOOL be_process(const BYTE *data, DWORD size, const WCHAR *directory, con
         if (lstrcmpiW(name, L"manifest.json") == 0) {
             manifest = TRUE;
             if (!be_manifest(expanded, entries[i].expanded, publicKey, publicLength, directory ? &rewritten : NULL, &outputSize)) { be_error(error, errorCapacity, L"扩展清单格式或开发者密钥无效。"); goto done; }
+            if (ordinary) {
+                WCHAR version[64];
+                if (!cx_browser_extension_ordinary_manifest(expanded, entries[i].expanded, version, ARRAYSIZE(version))) {
+                    be_error(error, errorCapacity, L"已签名的扩展包不支持普通 Windows 授权通道，未启动浏览器。");
+                    goto done;
+                }
+            }
             if (rewritten) output = rewritten;
         }
         if (directory && lstrcmpiW(name, L"_metadata\\verified_contents.json") != 0 && entries[i].name[entries[i].nameLength - 1] != '/' && entries[i].name[entries[i].nameLength - 1] != '\\' && !be_write_entry(name, output, outputSize, directory, error, errorCapacity)) goto done;
@@ -542,12 +574,17 @@ done:
 }
 
 BOOL cx_browser_extension_verify(const BYTE *data, DWORD size, const WCHAR *expectedExtensionId, WCHAR *error, DWORD errorCapacity) {
-    return be_process(data, size, NULL, expectedExtensionId, NULL, 0, error, errorCapacity);
+    return be_process(data, size, NULL, expectedExtensionId, NULL, 0, error, errorCapacity, FALSE);
+}
+
+BOOL cx_browser_extension_verify_ordinary(const BYTE *data, DWORD size, const WCHAR *expectedExtensionId,
+    WCHAR *error, DWORD errorCapacity) {
+    return be_process(data, size, NULL, expectedExtensionId, NULL, 0, error, errorCapacity, TRUE);
 }
 
 BOOL cx_browser_extension_extract(const BYTE *data, DWORD size, const WCHAR *directory, WCHAR *extensionId, DWORD idCapacity, WCHAR *error, DWORD errorCapacity) {
     if (!directory) { be_error(error, errorCapacity, L"扩展临时目录无效。"); return FALSE; }
-    return be_process(data, size, directory, NULL, extensionId, idCapacity, error, errorCapacity);
+    return be_process(data, size, directory, NULL, extensionId, idCapacity, error, errorCapacity, FALSE);
 }
 
 BOOL cx_browser_extension_extract_file(const WCHAR *file, const WCHAR *directory, WCHAR *extensionId, DWORD idCapacity, WCHAR *error, DWORD errorCapacity) {

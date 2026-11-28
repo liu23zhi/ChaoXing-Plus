@@ -268,15 +268,18 @@ static BOOL patch_file(const WCHAR *path, const char *settings,
     CONFIG_DOCUMENT patch = {0}, original = {0}; CONFIG_MAP shared = {0}, roots = {0}, merged = {0};
     CONFIG_TEXT result = {0}; WCHAR *fullPath = NULL; char *disk = NULL;
     HANDLE file = INVALID_HANDLE_VALUE; DWORD length, high, got, n, i, written = 0;
-    int settingsIndex, pending = -1, patchSettings = 0; BOOL ok = FALSE;
+    int settingsIndex, pending = -1, confirmed = -1, patchSettings = 0; BOOL ok = FALSE;
     clear_error(error, errorCap);
     if (!parse_document(&patch, settings, settingsLen, error, errorCap)) goto done;
     if (admission) {
         pending = jkey(patch.text, patch.tokens, 0, CX_DEVICE_ADMISSION_PENDING_KEY);
         patchSettings = jkey(patch.text, patch.tokens, 0, "settings");
+        confirmed = jkey(patch.text, patch.tokens, 0, CX_DEVICE_ADMISSION_CONFIRMED_KEY);
         if (pending < 0 || (patch.tokens[pending].type != '{' &&
             !(patch.tokens[pending].type == 'p' && jeq(patch.text, patch.tokens, pending, "null"))) ||
-            patch.tokens[0].count != (patchSettings >= 0 ? 4 : 2) ||
+            patch.tokens[0].count != (patchSettings >= 0 ? 4 : 2) + (confirmed >= 0 ? 2 : 0) ||
+            (confirmed >= 0 && (patchSettings < 0 || patch.tokens[confirmed].type != '{' ||
+              patch.tokens[pending].type != 'p')) ||
             (patchSettings >= 0 && patch.tokens[patchSettings].type != '{')) {
             fail(error, errorCap, L"Invalid native device admission configuration envelope.");
             goto done;
@@ -322,7 +325,8 @@ static BOOL patch_file(const WCHAR *path, const char *settings,
     append(&result, "{", 1);
     for (i = 0; i < roots.count; ++i) {
         if (equal_key(roots.entries[i].name, L"settings") ||
-            (admission && equal_key(roots.entries[i].name, L"nativeDeviceAdmissionPending"))) continue;
+            (admission && equal_key(roots.entries[i].name, L"nativeDeviceAdmissionPending")) ||
+            (confirmed >= 0 && equal_key(roots.entries[i].name, L"nativeDeviceAdmissionConfirmed"))) continue;
         if (written++) append(&result, ",", 1);
         append_entry(&result, roots.entries + i);
     }
@@ -333,6 +337,12 @@ static BOOL patch_file(const WCHAR *path, const char *settings,
         const JT *value = patch.tokens + pending;
         append(&result, pendingKey, sizeof(pendingKey) - 1);
         append(&result, patch.text + value->start, (DWORD)(value->end - value->start));
+        if (confirmed >= 0) {
+            static const char confirmedKey[] = ",\"" CX_DEVICE_ADMISSION_CONFIRMED_KEY "\":";
+            value = patch.tokens + confirmed;
+            append(&result, confirmedKey, sizeof(confirmedKey) - 1);
+            append(&result, patch.text + value->start, (DWORD)(value->end - value->start));
+        }
     }
     append(&result, "}", 1);
     if (!result.valid) { fail(error, errorCap, L"Updated configuration exceeds the size limit."); goto done; }

@@ -67,7 +67,8 @@ export async function readStockFiles(dist) {
   return {
     manifest,
     worker: await readFile(join(dist, 'extension-agreement-worker.js'), 'utf8'),
-    core: await readFile(join(dist, 'extension-agreement-core.js'), 'utf8')
+    core: await readFile(join(dist, 'extension-agreement-core.js'), 'utf8'),
+    ordinaryNativeAuthority: await readFile(join(dist, 'ordinary-native-authority.js'), 'utf8')
   };
 }
 
@@ -104,6 +105,7 @@ export async function makeExtension(directory, stock, identity, owned, hostName)
     'manifest.json': JSON.stringify(manifest),
     'extension-agreement-worker.js': worker,
     'extension-agreement-core.js': stock.core,
+    'ordinary-native-authority.js': stock.ordinaryNativeAuthority,
     'fixture-worker.js': "import { registerAgreement } from './extension-agreement-worker.js';\nregisterAgreement(chrome, " + JSON.stringify(shapeBase) + ");\n",
     'extension-agreement.html': '<!doctype html><title>Owned ordinary agreement settings fixture</title>',
     'probe.js': probe

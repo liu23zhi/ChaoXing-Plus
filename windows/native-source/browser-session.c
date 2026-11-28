@@ -20,7 +20,7 @@ struct CX_BROWSER_SESSION {
     WCHAR root[BS_PATH_CAP];
     WCHAR profile[BS_PATH_CAP];
     WCHAR extension[BS_PATH_CAP];
-    WCHAR extensionId[64];
+    WCHAR extensionId[64], version[64];
     char *receive;
     BOOL cleaned;
     BOOL handshakeReady;
@@ -302,12 +302,43 @@ static BOOL bs_launch(CX_BROWSER_SESSION *s, const CX_BROWSER_OPTIONS *options, 
     flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
     if (!CreateProcessW(options->browserPath, command + 1, NULL, NULL, TRUE, flags, NULL, NULL, &startup.StartupInfo, &info)) goto done;
     s->process = info.hProcess; s->pid = info.dwProcessId;
-    if (!AssignProcessToJobObject(s->job, info.hProcess)) { TerminateProcess(info.hProcess, 1); CloseHandle(info.hThread); goto done; }
-    ResumeThread(info.hThread); CloseHandle(info.hThread); result = TRUE;
+    if (!AssignProcessToJobObject(s->job, info.hProcess)
+        || (options->ordinary && !options->ordinary->attach(options->ordinary->context, s->job))) {
+        TerminateProcess(info.hProcess, 1); CloseHandle(info.hThread); goto done;
+    }
+    result = ResumeThread(info.hThread) != (DWORD)-1;
+    if (!result) TerminateProcess(info.hProcess, 1);
+    CloseHandle(info.hThread);
 done:
     if (startup.lpAttributeList) { if (attributesReady) DeleteProcThreadAttributeList(startup.lpAttributeList); HeapFree(GetProcessHeap(), 0, startup.lpAttributeList); }
     if (childRead) CloseHandle(childRead); if (childWrite) CloseHandle(childWrite); if (command) HeapFree(GetProcessHeap(), 0, command);
     if (!result) bs_error(error, cap, L"无法启动所选浏览器的独立临时会话。"); return result;
+}
+
+/* Inspect only the already checked package. Never add permissions to a downloaded CRX. */
+static BOOL bs_native_manifest(CX_BROWSER_SESSION *s) {
+    enum { LIMIT = 262145 };
+    WCHAR *path = NULL;
+    char *bytes = NULL;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    DWORD at, size, read = 0;
+    BOOL allowed = FALSE;
+    path = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, BS_PATH_CAP * sizeof(WCHAR));
+    bytes = (char *)HeapAlloc(GetProcessHeap(), 0, LIMIT);
+    if (!path || !bytes) goto done;
+    path[0] = 0;
+    at = bs_add(path, BS_PATH_CAP, 0, s->extension);
+    if (bs_add(path, BS_PATH_CAP, at, L"\\manifest.json") != at + 14) goto done;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto done;
+    size = GetFileSize(file, NULL);
+    if (!size || size >= LIMIT || !ReadFile(file, bytes, size, &read, NULL) || read != size) goto done;
+    allowed = cx_browser_extension_ordinary_manifest((const BYTE *)bytes, size, s->version, ARRAYSIZE(s->version));
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+    if (path) HeapFree(GetProcessHeap(), 0, path);
+    return allowed;
 }
 
 static BOOL bs_prepare(CX_BROWSER_SESSION *s, const CX_BROWSER_OPTIONS *options, WCHAR *error, DWORD cap) {
@@ -320,6 +351,10 @@ static BOOL bs_prepare(CX_BROWSER_SESSION *s, const CX_BROWSER_OPTIONS *options,
         if (!cx_browser_extension_extract(options->crxData, options->crxSize, s->extension, s->extensionId, 64, error, cap)) return FALSE;
     } else if (!cx_browser_extension_extract_file(options->crxPath, s->extension, s->extensionId, 64, error, cap)) return FALSE;
     if (lstrcmpW(s->extensionId, options->expectedExtensionId && options->expectedExtensionId[0] ? options->expectedExtensionId : L"lcmeenlnjihhjcjoakekikoaldigonac") != 0) { bs_error(error, cap, L"扩展包身份与所选商店扩展不一致。"); return FALSE; }
+    if (options->ordinary && !bs_native_manifest(s)) {
+        bs_error(error, cap, L"已签名的扩展包不支持普通 Windows 授权通道，未启动浏览器。");
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -327,6 +362,9 @@ BOOL cx_browser_start(const CX_BROWSER_OPTIONS *options, CX_BROWSER_SESSION **se
     CX_BROWSER_SESSION *s; char *reply = NULL, *params = NULL; char extensionId[64], targetId[128], sessionId[128]; DWORD at; BOOL result = FALSE;
     if (session) *session = NULL; if (error && errorCapacity) error[0] = 0;
     if (!options || !session || !options->browserPath || (!options->crxPath && (!options->crxData || !options->crxSize)) || !bs_settings(options->settingsJsonUTF8)) { bs_error(error, errorCapacity, L"浏览器路径、扩展包或共享设置无效。"); return FALSE; }
+    if (options->ordinary && (!options->ordinary->attach || !options->ordinary->hostName || !options->ordinary->instance)) {
+        bs_error(error, errorCapacity, L"普通 Windows 授权通道未就绪。"); return FALSE;
+    }
     s = (CX_BROWSER_SESSION *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*s)); if (!s) return FALSE;
     s->receive = (char *)HeapAlloc(GetProcessHeap(), 0, BS_REPLY_CAP); params = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, BS_COMMAND_CAP * 2);
     if (!s->receive || !params || !bs_prepare(s, options, error, errorCapacity) || !bs_launch(s, options, error, errorCapacity)) goto done;
@@ -346,6 +384,18 @@ BOOL cx_browser_start(const CX_BROWSER_OPTIONS *options, CX_BROWSER_SESSION **se
     if (!bs_wait_extension(s, sessionId, error, errorCapacity)) goto done;
     at = 0; if (!bs_text_add(params, BS_COMMAND_CAP * 2, &at, "{\"id\":") || !bs_quote(params, BS_COMMAND_CAP * 2, &at, extensionId) || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, ",\"storageArea\":\"local\",\"values\":") || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, options->settingsJsonUTF8 && options->settingsJsonUTF8[0] ? options->settingsJsonUTF8 : "{}") || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, "}")) goto done;
     if (!bs_command(s, "Extensions.setStorageItems", params, sessionId, &reply, error, errorCapacity)) goto done; HeapFree(GetProcessHeap(), 0, reply); reply = NULL;
+    if (options->ordinary) {
+        at = 0;
+        if (!bs_text_add(params, BS_COMMAND_CAP * 2, &at, "{\"id\":")
+            || !bs_quote(params, BS_COMMAND_CAP * 2, &at, extensionId)
+            || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, ",\"storageArea\":\"session\",\"values\":{\"cxplus.ordinary.native.v1\":{\"hostName\":")
+            || !bs_wquote(params, BS_COMMAND_CAP * 2, &at, options->ordinary->hostName)
+            || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, ",\"instance\":")
+            || !bs_wquote(params, BS_COMMAND_CAP * 2, &at, options->ordinary->instance)
+            || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, "}}}")) goto done;
+        if (!bs_command(s, "Extensions.setStorageItems", params, sessionId, &reply, error, errorCapacity)) goto done;
+        HeapFree(GetProcessHeap(), 0, reply); reply = NULL;
+    }
     at = 0; if (!bs_text_add(params, BS_COMMAND_CAP * 2, &at, "{\"url\":") || !bs_wquote(params, BS_COMMAND_CAP * 2, &at, options->initialUrl && options->initialUrl[0] ? options->initialUrl : L"https://www.chaoxing.com/") || !bs_text_add(params, BS_COMMAND_CAP * 2, &at, "}")) goto done;
     if (!bs_command(s, "Page.navigate", params, sessionId, &reply, error, errorCapacity)) goto done;
     { char navigationError[256]; if (bs_reply_string(reply, "errorText", navigationError, sizeof(navigationError)) && navigationError[0]) { bs_error(error, errorCapacity, L"浏览器无法打开所选学习页面。"); goto done; } }
@@ -392,6 +442,7 @@ void cx_browser_destroy(CX_BROWSER_SESSION *s) {
 DWORD cx_browser_pid(const CX_BROWSER_SESSION *s) { return s ? s->pid : 0; }
 const WCHAR *cx_browser_profile(const CX_BROWSER_SESSION *s) { return s ? s->profile : L""; }
 const WCHAR *cx_browser_extension_id(const CX_BROWSER_SESSION *s) { return s ? s->extensionId : L""; }
+const WCHAR *cx_browser_extension_version(const CX_BROWSER_SESSION *s) { return s ? s->version : NULL; }
 
 BOOL cx_browser_read_settings(CX_BROWSER_SESSION *s, char **json, WCHAR *error, DWORD cap) {
     char *params = NULL, *reply = NULL; char id[64], target[128], targetSession[128]; DWORD at; BOOL ok = FALSE;

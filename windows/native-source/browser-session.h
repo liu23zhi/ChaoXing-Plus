@@ -5,6 +5,11 @@
 #include <windows.h>
 
 typedef struct CX_BROWSER_SESSION CX_BROWSER_SESSION;
+typedef struct CX_BROWSER_ORDINARY {
+    const WCHAR *hostName, *instance; /* public locator only; not an authorization */
+    BOOL (*attach)(void *context, HANDLE job);
+    void *context;
+} CX_BROWSER_ORDINARY;
 typedef struct CX_BROWSER_OPTIONS {
     const WCHAR *browserPath;
     const WCHAR *crxPath;
@@ -19,6 +24,7 @@ typedef struct CX_BROWSER_OPTIONS {
     const char *settingsJsonUTF8;
     /* Test-only headless mode. Normal sessions always show the browser. */
     BOOL headless;
+    const CX_BROWSER_ORDINARY *ordinary;
 } CX_BROWSER_OPTIONS;
 
 BOOL cx_browser_start(const CX_BROWSER_OPTIONS *options, CX_BROWSER_SESSION **session,
@@ -32,6 +38,7 @@ void cx_browser_destroy(CX_BROWSER_SESSION *session);
 DWORD cx_browser_pid(const CX_BROWSER_SESSION *session);
 const WCHAR *cx_browser_profile(const CX_BROWSER_SESSION *session);
 const WCHAR *cx_browser_extension_id(const CX_BROWSER_SESSION *session);
+const WCHAR *cx_browser_extension_version(const CX_BROWSER_SESSION *session);
 /* Owned UTF-8 CDP response; release with HeapFree(GetProcessHeap(), 0, json). */
 BOOL cx_browser_read_settings(CX_BROWSER_SESSION *session, char **json,
                               WCHAR *error, DWORD errorCapacity);

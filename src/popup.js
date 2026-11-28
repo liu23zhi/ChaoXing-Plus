@@ -47,7 +47,13 @@ readExtensionEnabled();
 
 const diagnosticState = document.getElementById('diagnostics-state');
 const diagnosticsToggle = document.getElementById('diagnostics-enabled');
-if (diagnosticState && diagnosticsToggle) {
+const ordinaryNative = chrome.runtime.getManifest?.()?.version_name === '普通 Windows 原生通道 v1';
+if (diagnosticState && diagnosticsToggle && ordinaryNative) {
+  diagnosticsToggle.hidden = true;
+  const hint = document.getElementById('diagnostics-hint');
+  if (hint) hint.hidden = true;
+  diagnosticState.textContent = '普通 Windows 诊断回传请在宿主窗口管理；浏览器不发送诊断。';
+} else if (diagnosticState && diagnosticsToggle) {
   let revision = 0;
   const statusText = {
     checking: '正在确认协议及服务策略…', enabled: '已启用，尚无待传日志', received: '已接收日志',
