@@ -145,7 +145,8 @@ const mountCxAgreement = ({ internal, send }) => {
       configuration: '无法验证当前题库配置或设备。请核对配置并重试。',
       'source-unconfirmed': '自定义题库地址尚未确认。请在扩展内部设置页核对并确认地址；尚未发送令牌。',
       disabled: '扩展已停用。',
-      host: '此运行模式不使用普通扩展协议页。'
+      host: '此运行模式不使用普通扩展协议页。',
+      'host-pending': 'Windows 宿主尚未确认当前授权。请返回 Windows 窗口检查。'
     })[phase] ?? '正在获取当前协议…';
     tick();
     if (next?.canSign && (identity !== previousIdentity || readAt === undefined)) requestAnimationFrame(noteBottom);

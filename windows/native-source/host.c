@@ -21,6 +21,7 @@
 #include "home.h"
 #include "script-lease.h"
 #include "resource.h"
+#include "ordinary-channel.inc"
 
 /* 前置声明：定义在文件后部，早期调用点需要原型，避免隐式声明（C4013）。 */
 static BOOL h_same(const WCHAR *a, const WCHAR *b);
@@ -3512,6 +3513,8 @@ static BOOL h_wants_console(void) {
     return FALSE;
 }
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, int show) {
+    int nativeResult;
+    if (cx_ordinary_channel_broker(&nativeResult)) return nativeResult;
     /* GUI 子系统进程默认没有控制台；调试入口从 cmd 启动时必须附加父控制台，
        否则 GetStdHandle 无效，h_print 的日志会被全部丢弃。 */
     {

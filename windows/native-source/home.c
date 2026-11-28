@@ -10,6 +10,8 @@
 #include "json.h"
 #include "resource.h"
 #include "script-lease.h"
+#include "ordinary-channel.h"
+#include "ordinary-receipts.inc"
 
 #define HOME_CLASS L"CXPlusNativeHome"
 #define SETTINGS_CLASS L"CXPlusNativeHomeSettings"
@@ -34,6 +36,9 @@
 #define HOME_EXAM_START 1417
 #define HOME_EXAM_BACK 1418
 #define HOME_EXAM_STATUS 1419
+#define HOME_ORDINARY_ADMIT 1420
+#define HOME_NATIVE_DIAGNOSTICS 1421
+#define HOME_ORDINARY_EXTENSION_ID L"lcmeenlnjihhjcjoakekikoaldigonac"
 #define HOME_OPERATION_DONE (WM_APP + 24)
 /* 设备线程完成一次配额查询/会话上报后回到 UI 线程的唯一通道：
    所有 state->quota 的读取都发生在 UI 线程，与设备线程之间只经这条消息交接。 */
@@ -73,14 +78,29 @@
 #define SETTINGS_EXAM_AUTO_SUBMIT 1530
 #define SETTINGS_LOCAL_CACHE 1531
 
+typedef struct HOME_NATIVE_SCOPE HOME_NATIVE_SCOPE;
 typedef struct HOME_SESSION_SLOT {
     CX_BROWSER_SESSION *session;
+    HOME_NATIVE_SCOPE *native;
     WCHAR browser[16];
     WCHAR version[64];
     /* 该会话独有的 client_instance（141 §4.3：不持久化、不跨会话复用）。
        注入到 chrome.storage.local 的 common.settings.device-instance。 */
     WCHAR instance[CX_DEVICE_INSTANCE_CAP];
 } HOME_SESSION_SLOT;
+
+/* Trusted, never serialized to a profile, CDP or the shared settings bridge. */
+typedef struct HA_NATIVE_OWNER {
+    WCHAR base[CX_HOME_ADAPTER_URL_CAP];
+    WCHAR key[CX_HOME_API_KEY_CAP];
+    WCHAR device[CX_DEVICE_ID_CAP];
+    WCHAR logicalDevice[37], proof[48];
+    char version[49], hash[65];
+} HA_NATIVE_OWNER;
+
+typedef struct HOME_NATIVE_READY {
+    WCHAR instance[CX_DEVICE_INSTANCE_CAP], version[64];
+} HOME_NATIVE_READY;
 
 typedef struct HOME_STATE {
     CX_OPTIONS *options;
@@ -94,6 +114,9 @@ typedef struct HOME_STATE {
     WCHAR error[512];
     BOOL closing;
     volatile LONG agreementCancelled;
+    volatile LONG diagnosticEpoch;
+    HOME_NATIVE_READY diagnosticReady[HOME_MAX_SESSIONS];
+    DWORD diagnosticReadyCount;
     struct HA_RECORD *agreementMemory;
     WCHAR agreementMemoryScope[65];
     HANDLE worker;
@@ -112,6 +135,9 @@ typedef struct HOME_STATE {
     BOOL operationOK;
     /* ---- 设备槽位（141 §5/§8） ---- */
     WCHAR deviceId[CX_DEVICE_ID_CAP];
+    HA_NATIVE_OWNER admittedOwner, pendingOwner;
+    BOOL pendingAdmitted;
+    WCHAR injectDeviceId[CX_DEVICE_ID_CAP];
     /* 会话注入上下文：只在「启动临时浏览器会话」那一次调用前由 home_work 填好。
        injectDeviceKeys 为 FALSE 时 home_build_settings 不写设备两键 ——
        考试模式与设置对话框的预览/校验路径因此天然不参与设备判定（红线 2）。 */
@@ -129,6 +155,40 @@ typedef struct HOME_STATE {
     BOOL devicePending;         /* TRUE = 有设备操作在飞，UI 线程不再派新的 */
     DWORD heartbeatAt;          /* 上次心跳的 GetTickCount，0 = 还没跑过 */
 } HOME_STATE;
+
+typedef enum { HOME_NATIVE_UNKNOWN, HOME_NATIVE_DENIED, HOME_NATIVE_CURRENT } HOME_NATIVE_DECISION;
+struct HOME_NATIVE_SCOPE {
+    HOME_STATE *home;
+    HA_NATIVE_OWNER owner;
+    CX_ORDINARY_CHANNEL *channel;
+    volatile LONG revoked;
+};
+static HOME_NATIVE_DECISION home_ordinary_owner_decision(const HA_NATIVE_OWNER *owner);
+typedef struct HOME_RECEIPT_GUARD {
+    HOME_STATE *home;
+    LONG epoch;
+} HOME_RECEIPT_GUARD;
+static LONG home_diagnostic_epoch(HOME_STATE *state) {
+    return InterlockedCompareExchange(&state->diagnosticEpoch, 0, 0);
+}
+static BOOL home_diagnostic_current(void *opaque) {
+    const HOME_RECEIPT_GUARD *guard = (const HOME_RECEIPT_GUARD *)opaque;
+    return guard->epoch == home_diagnostic_epoch(guard->home);
+}
+static void home_diagnostic_revoke(HOME_STATE *state) {
+    InterlockedIncrement(&state->diagnosticEpoch);
+    (void)cx_ordinary_receipts_discard(state->options->dataDir);
+}
+
+static void home_ordinary_close_channel(HOME_SESSION_SLOT *slot) {
+    HOME_NATIVE_SCOPE *scope = slot->native;
+    if (!scope) return;
+    InterlockedExchange(&scope->revoked, 1);
+    cx_ordinary_channel_close(scope->channel);
+    SecureZeroMemory(scope, sizeof(*scope));
+    HeapFree(GetProcessHeap(), 0, scope);
+    slot->native = NULL;
+}
 
 typedef struct SETTINGS_STATE {
     HOME_STATE *home;
@@ -192,6 +252,7 @@ static BOOL home_json_append_pair(char *out, DWORD cap, DWORD *at, const char *k
 static void home_show_exam(HOME_STATE *state);
 static void home_show_main(HOME_STATE *state);
 static void home_exam(HOME_STATE *state);
+static void home_initialize_device(HOME_STATE *state);
 
 static BOOL home_build_script_identity(WCHAR *out, DWORD cap) { return cx_script_identity(out, cap); }
 
@@ -567,7 +628,7 @@ static BOOL home_device_patch(const HOME_STATE *state, char *patch, DWORD cap) {
     BOOL first = TRUE;
     if (!state || !patch || cap < 8 || !home_json_append_char(patch, cap, &n, '{')) return FALSE;
     if (!state->injectDeviceKeys) return home_json_append_char(patch, cap, &n, '}');
-    if (!home_json_append_pair(patch, cap, &n, CX_DEVICE_ID_KEY, state->deviceId, &first)) return FALSE;
+    if (!home_json_append_pair(patch, cap, &n, CX_DEVICE_ID_KEY, state->injectDeviceId, &first)) return FALSE;
     if (!home_json_append_pair(patch, cap, &n, CX_DEVICE_INSTANCE_KEY, state->injectInstance, &first)) return FALSE;
     return home_json_append_char(patch, cap, &n, '}');
 }
@@ -636,8 +697,14 @@ static void home_status(HOME_STATE *state, const WCHAR *text) {
 
 #define HOME_DEVICE_FETCH  0x1u
 #define HOME_DEVICE_REPORT 0x2u
+#define HOME_DEVICE_RECEIPTS 0x4u
 
 typedef struct HOME_DEVICE_JOB {
+    HA_NATIVE_OWNER owner;
+    DWORD operation;
+    LONG count;
+    HOME_RECEIPT_GUARD diagnosticGuard;
+    HOME_NATIVE_READY ready;
     CX_DEVICE_QUOTA quota;
     BOOL quotaOk;
     BOOL reportOk;
@@ -687,19 +754,24 @@ static DWORD WINAPI home_device_work(LPVOID context) {
     HOME_STATE *state = (HOME_STATE *)context;
     HOME_DEVICE_JOB *job = state ? state->deviceJob : NULL;
     if (!state || !job) { if (state) PostMessageW(state->window, HOME_DEVICE_DONE, 0, 0); return 0; }
-    if (state->deviceOperation & HOME_DEVICE_FETCH) {
-        job->quotaOk = cx_device_quota_fetch(state->config ? state->config->adapterBaseUrl : L"",
-            state->config ? state->config->apiKey : L"", 8000, &job->quota);
+    if (job->operation & HOME_DEVICE_FETCH) {
+        job->quotaOk = cx_device_quota_fetch(job->owner.base, job->owner.key, 8000, &job->quota);
     }
-    if (state->deviceOperation & HOME_DEVICE_REPORT) {
+    if (job->operation & HOME_DEVICE_REPORT) {
         WCHAR error[256];
         error[0] = 0;
-        /* count 取 state->deviceReportCount（home_device_kick 在派活前写好），
-           不是 job 自己的字段 —— job 由调用方保留，count 由 UI 线程按「当前会话数」更新，
-           混用会让上报值永远停在第一次分配时的 0。 */
-        job->reportOk = cx_device_sessions_report(state->config ? state->config->adapterBaseUrl : L"",
-            state->config ? state->config->apiKey : L"", state->deviceId, state->deviceReportCount, 8000, error, 256);
+        /* UI snapshots the current count. Any newer report is queued for the next worker. */
+        job->reportOk = cx_device_sessions_report(job->owner.base, job->owner.key, job->owner.device, job->count, 8000, error, 256);
         home_copy(job->reportError, 256, error);
+    }
+    if ((job->operation & HOME_DEVICE_RECEIPTS) && home_diagnostic_current(&job->diagnosticGuard)
+        && cx_ordinary_receipts_local_enabled(state->options->dataDir)) {
+        HOME_NATIVE_DECISION decision = home_ordinary_owner_decision(&job->owner);
+        if (decision == HOME_NATIVE_DENIED && home_diagnostic_current(&job->diagnosticGuard)) home_diagnostic_revoke(state);
+        else if (decision == HOME_NATIVE_CURRENT && home_diagnostic_current(&job->diagnosticGuard))
+            (void)cx_ordinary_receipts_pump_guarded(state->options->dataDir, job->owner.base, job->owner.key,
+                job->owner.proof, job->owner.device, job->ready.instance, job->ready.version,
+                job->ready.instance[0] != 0, home_diagnostic_current, &job->diagnosticGuard);
     }
     PostMessageW(state->window, HOME_DEVICE_DONE, 0, 0);
     return 0;
@@ -711,7 +783,7 @@ static DWORD WINAPI home_device_work(LPVOID context) {
    最新的一次天然覆盖旧的。
 */
 static void home_device_kick(HOME_STATE *state, DWORD operation, int count) {
-    if (!state) return;
+    if (!state || !state->deviceInitialized || !state->admittedOwner.key[0]) return;
     if (operation & HOME_DEVICE_REPORT) {
         /* 没有 device_id 时上报无意义（服务端无从定位设备）；查询配额仍可做。 */
         if (!state->deviceId[0]) operation &= ~HOME_DEVICE_REPORT;
@@ -723,6 +795,20 @@ static void home_device_kick(HOME_STATE *state, DWORD operation, int count) {
     if (!state->deviceJob) {
         state->deviceJob = (HOME_DEVICE_JOB *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HOME_DEVICE_JOB));
         if (!state->deviceJob) { state->deviceOperation = 0; return; }
+    }
+    ZeroMemory(state->deviceJob, sizeof(*state->deviceJob));
+    CopyMemory(&state->deviceJob->owner, &state->admittedOwner, sizeof(state->admittedOwner));
+    state->deviceJob->operation = state->deviceOperation;
+    state->deviceJob->count = state->deviceReportCount;
+    state->deviceJob->diagnosticGuard.home = state;
+    state->deviceJob->diagnosticGuard.epoch = home_diagnostic_epoch(state);
+    state->deviceOperation = 0;
+    if ((state->deviceJob->operation & HOME_DEVICE_RECEIPTS) && state->diagnosticReadyCount) {
+        DWORD i;
+        state->deviceJob->ready = state->diagnosticReady[0];
+        for (i = 1; i < state->diagnosticReadyCount; ++i) state->diagnosticReady[i - 1] = state->diagnosticReady[i];
+        --state->diagnosticReadyCount;
+        if (state->diagnosticReadyCount) state->deviceOperation |= HOME_DEVICE_RECEIPTS;
     }
     state->devicePending = TRUE;
     state->deviceWorker = CreateThread(NULL, 0, home_device_work, state, 0, NULL);
@@ -763,23 +849,24 @@ static void home_device_wait(HOME_STATE *state) {
 */
 static void home_device_flush_exit(HOME_STATE *state) {
     WCHAR error[256];
-    if (!state || !state->deviceId[0]) return;
-    /* 先把在飞的线程收干净，避免它随后又用旧 count 覆盖掉我们刚发的 0。 */
+    if (!state || !state->deviceInitialized || !state->admittedOwner.device[0]) return;
+    /* The worker owns the job until exit, even when its deadline elapsed. */
     home_device_wait(state);
+    if (state->deviceWorker) return;
     if (state->deviceJob) {
         SecureZeroMemory(state->deviceJob, sizeof(*state->deviceJob));
         HeapFree(GetProcessHeap(), 0, state->deviceJob);
         state->deviceJob = NULL;
     }
     error[0] = 0;
-    (void)cx_device_sessions_report(state->config ? state->config->adapterBaseUrl : L"",
-        state->config ? state->config->apiKey : L"", state->deviceId, 0, 3000, error, 256);
+    (void)cx_device_sessions_report(state->admittedOwner.base, state->admittedOwner.key, state->admittedOwner.device, 0, 3000, error, 256);
     if (error[0]) home_device_notice(state, error);
 }
 
 /* HOME_DEVICE_DONE：把设备线程结果搬到 UI 线程的 state 上。 */
-static void home_device_settle(HOME_STATE *state) {    HOME_DEVICE_JOB *job = state->deviceJob;
-    DWORD operation = state->deviceOperation;
+static void home_device_settle(HOME_STATE *state) {
+    HOME_DEVICE_JOB *job = state->deviceJob;
+    DWORD operation = job ? job->operation : 0, queued = state->deviceOperation;
     if (state->deviceWorker) { WaitForSingleObject(state->deviceWorker, INFINITE); CloseHandle(state->deviceWorker); state->deviceWorker = NULL; }
     state->devicePending = FALSE;
     state->deviceOperation = 0;
@@ -809,6 +896,7 @@ static void home_device_settle(HOME_STATE *state) {    HOME_DEVICE_JOB *job = st
     }
     /* 刷新配额失败后重试一次心跳（心跳本身也会刷新配额）。 */
     if (!(operation & HOME_DEVICE_FETCH)) home_refresh_status(state);
+    if (queued && !state->closing) home_device_kick(state, queued, home_open_sessions(state));
 }
 
 /*
@@ -943,8 +1031,9 @@ static BOOL home_device_confirm_over_limit(HOME_STATE *state) {
    来断言「不同会话不同 instance」—— 若测试自己去调 cx_device_instance_new，
    把这里改成固定值时用例仍会绿（假钉子，2026-11-13 t143 踩过）。
 */
-static BOOL home_device_begin_injection(HOME_STATE *state) {
-    if (!state) return FALSE;
+static BOOL home_device_begin_injection(HOME_STATE *state, const WCHAR *confirmedId) {
+    if (!state || !confirmedId || !confirmedId[0] || lstrlenW(confirmedId) >= ARRAYSIZE(state->injectDeviceId)) return FALSE;
+    home_copy(state->injectDeviceId, ARRAYSIZE(state->injectDeviceId), confirmedId);
     state->injectDeviceKeys = TRUE;
     if (!cx_device_instance_new(state->injectInstance, CX_DEVICE_INSTANCE_CAP)) {
         /* 拿不到随机源时宁可不注入，也不要让多个会话共用同一个 instance
@@ -960,6 +1049,7 @@ static void home_device_end_injection(HOME_STATE *state) {
     if (!state) return;
     state->injectDeviceKeys = FALSE;
     SecureZeroMemory(state->injectInstance, sizeof(state->injectInstance));
+    SecureZeroMemory(state->injectDeviceId, sizeof(state->injectDeviceId));
 }
 
 static void home_refresh_list(HOME_STATE *state) {
@@ -1008,6 +1098,7 @@ static void home_poll_sessions(HOME_STATE *state) {
             if (error[0]) home_status(state, error);
         } else if (!running) {
             /* 时机 2/4（141 §5.3）：进程自己退出 → 会话数 -1 后立即上报。 */
+            home_ordinary_close_channel(&state->sessions[i]);
             cx_browser_destroy(state->sessions[i].session);
             state->sessions[i].session = NULL;
             state->sessions[i].instance[0] = 0;
@@ -1022,16 +1113,17 @@ static void home_poll_sessions(HOME_STATE *state) {
     }
     /* 时机 5：心跳。复用本 500ms 的 poll 循环做 60 秒分频（不新开 timer）。
        心跳同时刷新配额，服务端 3 分钟收不到就把它记 0（141 §5.4）。 */
-    if (state->deviceInitialized) {
+    if (state->deviceInitialized && !state->examPage && !state->closing) {
         DWORD now = GetTickCount();
         if (!state->heartbeatAt || now - state->heartbeatAt >= HOME_HEARTBEAT_MS) {
             state->heartbeatAt = now;
-            home_device_kick(state, HOME_DEVICE_REPORT | HOME_DEVICE_FETCH, home_open_sessions(state));
+            home_device_kick(state, HOME_DEVICE_REPORT | HOME_DEVICE_FETCH | HOME_DEVICE_RECEIPTS, home_open_sessions(state));
         }
     }
 }
 
 #include "home-agreement.inc"
+#include "home-native-admission.inc"
 
 static DWORD WINAPI home_work(LPVOID context) {
     HOME_STATE *state = (HOME_STATE *)context;
@@ -1039,6 +1131,8 @@ static DWORD WINAPI home_work(LPVOID context) {
     char *settings = NULL;
     BYTE *data = NULL; DWORD size = 0, settingsLength = 0, i;
     CX_BROWSER_OPTIONS options;
+    CX_BROWSER_ORDINARY native;
+    HOME_NATIVE_SCOPE *scope = NULL;
     BOOL forceRefresh;
     state->operationOK = FALSE; state->error[0] = 0;
     if (state->operation == HOME_SCRIPT_CHECK) {
@@ -1057,10 +1151,16 @@ static DWORD WINAPI home_work(LPVOID context) {
         for (i = 0; i < HOME_MAX_SESSIONS; ++i) {
             if (state->operation == HOME_CLOSE_SESSION && i != state->pendingSlot) continue;
             if (!state->sessions[i].session) continue;
+            home_ordinary_close_channel(&state->sessions[i]);
             if (cx_browser_close(state->sessions[i].session, state->error, 512)) {
                 cx_browser_destroy(state->sessions[i].session); state->sessions[i].session = NULL;
             } else state->operationOK = FALSE;
         }
+        goto done;
+    }
+    if (state->operation == HOME_ORDINARY_ADMIT) {
+        if (!home_ordinary_device_admit(state)) goto done;
+        state->operationOK = TRUE;
         goto done;
     }
     browserPath = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, CX_HOME_EXTENSION_PATH_CAP * sizeof(WCHAR));
@@ -1085,32 +1185,55 @@ static DWORD WINAPI home_work(LPVOID context) {
     if (!cx_adapter_extension_fetch_cached(state->pendingConfig.adapterBaseUrl, L"edge", cacheDir,
         state->options->noDiskWrite, forceRefresh, &data, &size, state->extensionVersion, 64,
         state->error, 512)) goto done;
-    if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) {
+    if (forceRefresh ? !cx_browser_extension_verify(data, size, HOME_ORDINARY_EXTENSION_ID, state->error, 512)
+        : !cx_browser_extension_verify_ordinary(data, size, HOME_ORDINARY_EXTENSION_ID, state->error, 512)) {
         if (forceRefresh) goto done;
         if (data) { HeapFree(GetProcessHeap(), 0, data); data = NULL; size = 0; }
         state->error[0] = 0;
         if (!cx_adapter_extension_fetch_cached(state->pendingConfig.adapterBaseUrl, L"edge", cacheDir,
             state->options->noDiskWrite, TRUE, &data, &size, state->extensionVersion, 64,
             state->error, 512)) goto done;
-        if (!cx_browser_extension_verify(data, size, L"lcmeenlnjihhjcjoakekikoaldigonac", state->error, 512)) goto done;
+        if (!cx_browser_extension_verify_ordinary(data, size, HOME_ORDINARY_EXTENSION_ID, state->error, 512)) goto done;
     }
     if (state->operation == HOME_UPDATE) { state->operationOK = TRUE; goto done; }
+    if (!home_ordinary_device_admit(state)) goto done;
     /* 注入上下文只在这里填：这就是「临时浏览器会话」那一次构造。
        考试模式（home_exam）与设置对话框的预览/校验都走 home_build_settings，
        但它们不会置 injectDeviceKeys，所以天然不带设备两键（红线 2）。
        实例标识每次点击都新生成 —— 不同会话一定不同值（141 §4.3）。 */
-    /* 注入上下文只在这里填：这就是「临时浏览器会话」那一次构造。
-       考试模式（home_exam）与设置对话框的预览/校验都走 home_build_settings，
-       但它们不会置 injectDeviceKeys，所以天然不带设备两键（红线 2）。
-       实例标识每次点击都新生成 —— 不同会话一定不同值（141 §4.3）。 */
-    (void)home_device_begin_injection(state);
+    if (ha_cancelled(state) || !home_device_begin_injection(state, state->pendingOwner.device)) goto done;
     if (!home_build_settings(state, &state->pendingConfig, settings, CX_OPTIONS_JSON_CAP, &settingsLength, state->error, 512)) goto done;
     ZeroMemory(&options, sizeof(options)); options.browserPath = browserPath;
     options.crxData = data; options.crxSize = size; options.initialUrl = L"https://www.chaoxing.com/";
     options.settingsJsonUTF8 = settings;
-    if (!cx_script_lease_valid() || !home_agreement_admit(state) || ha_cancelled(state) || !cx_script_lease_valid()) goto done;
+    if (!cx_script_lease_valid() || ha_cancelled(state) || !home_ordinary_owner_current(&state->pendingOwner)) goto done;
+    scope = (HOME_NATIVE_SCOPE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*scope));
+    if (!scope || state->pendingSlot >= HOME_MAX_SESSIONS) goto done;
+    scope->home = state;
+    CopyMemory(&scope->owner, &state->pendingOwner, sizeof(scope->owner));
+    if (!cx_ordinary_channel_open(state->injectInstance, HOME_ORDINARY_EXTENSION_ID, state->pendingBrowser,
+        home_ordinary_verify_channel, scope, &scope->channel)) {
+        home_copy(state->error, ARRAYSIZE(state->error), L"无法启动独立的 Windows 授权通道。"); goto done;
+    }
+    native.hostName = cx_ordinary_channel_name(scope->channel);
+    native.instance = state->injectInstance;
+    native.attach = home_ordinary_attach_channel;
+    native.context = scope->channel;
+    options.ordinary = &native;
     state->operationOK = cx_browser_start(&options, &state->pendingSession, state->error, 512);
+    if (state->operationOK) {
+        HOME_SESSION_SLOT *slot = &state->sessions[state->pendingSlot];
+        slot->native = scope;
+        scope = NULL;
+        home_copy(slot->instance, ARRAYSIZE(slot->instance), state->injectInstance);
+        home_copy(state->extensionVersion, ARRAYSIZE(state->extensionVersion), cx_browser_extension_version(state->pendingSession));
+    }
 done:
+    if (scope) {
+        cx_ordinary_channel_close(scope->channel);
+        SecureZeroMemory(scope, sizeof(*scope));
+        HeapFree(GetProcessHeap(), 0, scope);
+    }
     /* 注入上下文只在本次调用内有效：任何后续（设置对话框预览、考试模式）
        都不得意外带上设备两键。 */
     home_device_end_injection(state);
@@ -1134,7 +1257,11 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     if (state->worker) return;
     isNewSession = operation == HOME_EDGE || operation == HOME_CHROME;
     if (isNewSession && !cx_script_lease_valid()) { SendMessageW(state->window, WM_CLOSE, 0, 0); return; }
-    if (isNewSession) InterlockedExchange(&state->agreementCancelled, 0);
+    if (isNewSession || operation == HOME_ORDINARY_ADMIT) {
+        InterlockedExchange(&state->agreementCancelled, 0);
+        ZeroMemory(&state->pendingOwner, sizeof(state->pendingOwner));
+        state->pendingAdmitted = FALSE;
+    }
     state->pendingSlot = HOME_MAX_SESSIONS;
     if (operation == HOME_CLOSE_SESSION) {
         selected = SendMessageW(state->list, LB_GETCURSEL, 0, 0);
@@ -1157,7 +1284,8 @@ static void home_begin(HOME_STATE *state, DWORD operation, const WCHAR *browser,
     if (config) CopyMemory(&state->pendingConfig, config, sizeof(*config));
     home_copy(state->pendingBrowser, 16, browser); state->operation = operation;
     home_buttons(state, FALSE);
-    home_status(state, operation == HOME_SCRIPT_CHECK ? L"正在获取脚本授权…"
+    home_status(state, operation == HOME_ORDINARY_ADMIT ? L"正在确认普通宿主协议与设备登记…"
+        : operation == HOME_SCRIPT_CHECK ? L"正在获取脚本授权…"
         : operation == HOME_EXIT || operation == HOME_CLOSE_SESSION ? L"正在关闭并清理临时会话..." : L"正在从 tikuAdapter 获取扩展，请稍候...");
     state->worker = CreateThread(NULL, 0, home_work, state, 0, NULL);
     if (!state->worker) { home_buttons(state, TRUE); state->closing = FALSE; home_status(state, L"无法创建工作线程"); }
@@ -1678,13 +1806,31 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
             if (state->closing) home_begin(state, HOME_EXIT, NULL, NULL);
             return 0;
         }
+        if (state->pendingAdmitted) {
+            BOOL scopeChanged = !home_ordinary_same_owner(&state->admittedOwner, &state->pendingOwner);
+            if (scopeChanged) ZeroMemory(&state->quota, sizeof(state->quota));
+            CopyMemory(&state->admittedOwner, &state->pendingOwner, sizeof(state->admittedOwner));
+            home_copy(state->deviceId, ARRAYSIZE(state->deviceId), state->admittedOwner.device);
+            state->deviceInitialized = TRUE; state->pendingAdmitted = FALSE;
+        }
+        SecureZeroMemory(&state->pendingOwner, sizeof(state->pendingOwner));
+        if (state->operation == HOME_ORDINARY_ADMIT && state->operationOK && !state->closing)
+            home_device_kick(state, HOME_DEVICE_FETCH | HOME_DEVICE_RECEIPTS, 0);
         if (state->pendingSession) {
             state->sessions[state->pendingSlot].session = state->pendingSession;
             home_copy(state->sessions[state->pendingSlot].browser, 16, state->pendingBrowser); state->pendingSession = NULL;
             home_copy(state->sessions[state->pendingSlot].version, 64, state->extensionVersion);
             /* 时机 1（141 §5.3）：cx_browser_start 成功 → 会话数 +1，立即上报。
                只有真拿到 session 才计数，失败路径不虚增。 */
-            home_device_report(state);
+            if (!state->closing && state->sessions[state->pendingSlot].native
+                && cx_ordinary_receipts_local_enabled(state->options->dataDir)
+                && state->diagnosticReadyCount < ARRAYSIZE(state->diagnosticReady)) {
+                HOME_NATIVE_READY *ready = &state->diagnosticReady[state->diagnosticReadyCount++];
+                const HOME_SESSION_SLOT *slot = &state->sessions[state->pendingSlot];
+                home_copy(ready->instance, ARRAYSIZE(ready->instance), slot->instance);
+                home_copy(ready->version, ARRAYSIZE(ready->version), slot->version);
+                home_device_kick(state, HOME_DEVICE_REPORT | HOME_DEVICE_RECEIPTS, home_open_sessions(state));
+            } else home_device_report(state);
         }
         cx_home_config_clear(&state->pendingConfig); home_buttons(state, TRUE); home_refresh_list(state);
         if (!state->operationOK) {
@@ -1703,6 +1849,7 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
             home_copy(state->error, 512, L"已校验在线扩展 "); home_append(state->error, 512, state->extensionVersion);
             home_append(state->error, 512, L"；新会话将获取当前发布版本。"); home_status(state, state->error);
         } else home_status(state, state->operation == HOME_CLOSE_SESSION ? L"已关闭并清理临时会话"
+            : state->operation == HOME_ORDINARY_ADMIT ? L"普通宿主协议与设备登记已确认"
             : L"临时会话已启动；关闭浏览器窗口后资料会自动清理");
         home_refresh_status(state);
         if (state->closing) home_begin(state, HOME_EXIT, NULL, NULL);
@@ -1712,7 +1859,7 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
     if (message == HOME_DEVICE_DONE) { home_device_settle(state); return 0; }
     if (message == WM_COMMAND && HIWORD(wParam) == BN_CLICKED) {
         CX_HOME_CONFIG *separate; WCHAR browser[16];
-        if (state->worker && LOWORD(wParam) != HOME_EXIT) return 0;
+        if (state->worker && LOWORD(wParam) != HOME_EXIT && LOWORD(wParam) != HOME_NATIVE_DIAGNOSTICS) return 0;
         switch (LOWORD(wParam)) {
         case HOME_SCRIPT_CHECK:
             GetDlgItemTextW(window, HOME_SCRIPT_URL, state->pendingScriptUrl, CX_HOME_ADAPTER_URL_CAP);
@@ -1732,11 +1879,52 @@ static LRESULT CALLBACK home_proc(HWND window, UINT message, WPARAM wParam, LPAR
             cx_home_config_clear(separate); HeapFree(GetProcessHeap(), 0, separate);
             return 0;
         case HOME_CLOSE_SESSION: home_begin(state, HOME_CLOSE_SESSION, NULL, NULL); return 0;
-        case HOME_SETTINGS: home_settings_dialog(state, TRUE, L"edge", NULL, NULL, 0); return 0;
-        case HOME_ACCOUNT:
-            if (cx_account_window(window, state->config)) home_status(state, L"账号凭据已准备好，新会话将使用该 API key。");
+        case HOME_NATIVE_DIAGNOSTICS: {
+            BOOL enabled;
+            if (!state->examRun || state->examPage || state->options->noDiskWrite || state->closing) return 0;
+            enabled = IsDlgButtonChecked(window, HOME_NATIVE_DIAGNOSTICS) == BST_CHECKED;
+            if (!cx_ordinary_receipts_set_local_enabled(state->options->dataDir, enabled)) {
+                CheckDlgButton(window, HOME_NATIVE_DIAGNOSTICS,
+                    cx_ordinary_receipts_local_enabled(state->options->dataDir) ? BST_CHECKED : BST_UNCHECKED);
+                home_status(state, L"无法保存原生诊断设置，请稍后重试。");
+                return 0;
+            }
+            if (!enabled) {
+                state->diagnosticReadyCount = 0;
+                home_diagnostic_revoke(state);
+            }
+            home_status(state, enabled ? L"已开启普通 Windows 诊断回传；仍需当前协议和服务允许。"
+                                      : L"已关闭普通 Windows 诊断回传，并停止新的发送。");
             return 0;
-        case HOME_EXAM: home_show_exam(state); return 0;
+        }
+        case HOME_SETTINGS:
+        case HOME_ACCOUNT: {
+            BOOL changed;
+            if (home_open_sessions(state)) {
+                home_status(state, L"请先关闭普通会话，再修改宿主设置或账号。"); return 0;
+            }
+            if (state->devicePending) {
+                home_status(state, L"正在核对设备与诊断回执，请稍后修改设置。"); return 0;
+            }
+            changed = LOWORD(wParam) == HOME_ACCOUNT ? cx_account_window(window, state->config)
+                : home_settings_dialog(state, TRUE, L"edge", NULL, NULL, 0);
+            if (changed) {
+                if (state->admittedOwner.key[0] && !home_ordinary_config_matches(&state->admittedOwner, state->config)) {
+                    state->diagnosticReadyCount = 0;
+                    home_diagnostic_revoke(state);
+                    SecureZeroMemory(&state->admittedOwner, sizeof(state->admittedOwner));
+                    SecureZeroMemory(state->deviceId, sizeof(state->deviceId));
+                    ZeroMemory(&state->quota, sizeof(state->quota));
+                    state->deviceInitialized = FALSE;
+                }
+                home_initialize_device(state);
+            }
+            return 0;
+        }
+        case HOME_EXAM:
+            if (home_open_sessions(state)) home_status(state, L"请先关闭普通会话。");
+            else home_show_exam(state);
+            return 0;
         case HOME_EXAM_BACK: home_show_main(state); return 0;
         case HOME_EXAM_START:
             GetDlgItemTextW(window, HOME_SCRIPT_URL, state->pendingScriptUrl, CX_HOME_ADAPTER_URL_CAP);
@@ -1793,16 +1981,12 @@ static BOOL CALLBACK home_restore_main_control(HWND child, LPARAM unused) {
     return TRUE;
 }
 static void home_initialize_device(HOME_STATE *state) {
-    WCHAR configPath[CX_HOME_EXTENSION_PATH_CAP], idError[256];
-    if (state->deviceInitialized) return;
-    state->deviceInitialized = TRUE; configPath[0] = idError[0] = 0;
-    if (home_device_config_path(state, configPath, CX_HOME_EXTENSION_PATH_CAP))
-        (void)cx_device_id_ensure(configPath, state->options->noDiskWrite, state->deviceId,
-            CX_DEVICE_ID_CAP, idError, 256);
-    if (!state->deviceId[0] && idError[0]) home_device_notice(state, idError);
-    home_refresh_status(state);
-    home_device_kick(state, HOME_DEVICE_FETCH | (state->deviceId[0] ? HOME_DEVICE_REPORT : 0), home_open_sessions(state));
+    if (!state || state->deviceInitialized || state->worker || state->examPage) return;
+    if (state->config->apiKey[0] && !state->options->noDiskWrite && !cx_script_lease_active())
+        home_begin(state, HOME_ORDINARY_ADMIT, NULL, state->config);
+    else home_refresh_status(state);
 }
+
 static void home_show_exam(HOME_STATE *state) {
     if (!state || state->examPage) return;
     state->mainStatus = state->status;
@@ -1884,17 +2068,19 @@ BOOL cx_home_run(CX_OPTIONS *options, CX_HOME_CONFIG *config,
     home_control(0, L"BUTTON", L"退出", WS_CHILD | WS_VISIBLE, 650, 395, 52, 32, window, HOME_EXIT);
     home_control(0, L"BUTTON", L"账号 / API key", WS_CHILD | WS_VISIBLE, 24, 435, 150, 30, window, HOME_ACCOUNT);
     home_control(0, L"BUTTON", L"检查扩展更新", WS_CHILD | WS_VISIBLE, 185, 435, 150, 30, window, HOME_UPDATE);
+    if (!options->noDiskWrite && !config->examTestPage && options->dataDir[0]
+        && GetFileAttributesW(options->dataDir) == INVALID_FILE_ATTRIBUTES)
+        (void)CreateDirectoryW(options->dataDir, NULL);
+    home_control(0, L"BUTTON", L"普通 Windows 诊断回传", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        360, 435, 250, 30, window, HOME_NATIVE_DIAGNOSTICS);
+    CheckDlgButton(window, HOME_NATIVE_DIAGNOSTICS,
+        !options->noDiskWrite && cx_ordinary_receipts_local_enabled(options->dataDir) ? BST_CHECKED : BST_UNCHECKED);
+    EnableWindow(GetDlgItem(window, HOME_NATIVE_DIAGNOSTICS), !options->noDiskWrite);
     if (config->examTestPage) home_show_exam(state);
     ShowWindow(window, SW_SHOW); ShowWindow(window, SW_SHOW); UpdateWindow(window); SetTimer(window, HOME_TIMER, 500, NULL);
     if (config->autoStartExam) PostMessageW(window, WM_COMMAND, MAKEWPARAM(HOME_EXAM_START, BN_CLICKED), 0);
     home_refresh_list(state);
-    /*
-       C4-1 + C4-2（141 §5.1 / R5）：
-         1) 取宿主 device_id（没有就生成并写回 windows/data/config.json）；
-         2) 立刻查一次 GET /api/user/device-quota —— 这一步同时完成「登记该槽位」，
-            所以 exe 一启动就占 1 个，哪怕用户从不点「新会话」。
-      两者都 fail-open：取不到 id 就不上报（只查配额），查不到配额只改状态栏文案。
-    */
+    /* A previously confirmed zero-browser slot is checked read-only on launch. */
     if (!config->examTestPage) home_initialize_device(state);
 message_loop:
     while ((got = GetMessageW(&message, NULL, 0, 0)) > 0) {
@@ -1905,7 +2091,10 @@ message_loop:
     if (examRun) home_device_flush_exit(state);
     if (state->deviceWorker) { WaitForSingleObject(state->deviceWorker, INFINITE); CloseHandle(state->deviceWorker); state->deviceWorker = NULL; }
     if (state->deviceJob) { SecureZeroMemory(state->deviceJob, sizeof(*state->deviceJob)); HeapFree(GetProcessHeap(), 0, state->deviceJob); state->deviceJob = NULL; }
-    for (i = 0; i < HOME_MAX_SESSIONS; ++i) if (state->sessions[i].session) cx_browser_destroy(state->sessions[i].session);
+    for (i = 0; i < HOME_MAX_SESSIONS; ++i) {
+        home_ordinary_close_channel(&state->sessions[i]);
+        if (state->sessions[i].session) cx_browser_destroy(state->sessions[i].session);
+    }
     if (state->pendingSession) cx_browser_destroy(state->pendingSession);
     if (IsWindow(window)) DestroyWindow(window);
     if (home_default_font) DeleteObject(home_default_font); home_default_font = NULL;

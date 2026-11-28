@@ -566,6 +566,34 @@ done:
     return ok;
 }
 
+BOOL cx_device_host_confirmed(const WCHAR *path, const WCHAR *base, const WCHAR *key, WCHAR *id, DWORD cap) {
+    char *text = NULL;
+    JT *t = NULL;
+    WCHAR scope[CX_ADMISSION_SCOPE_CAP], recorded[CX_DEVICE_ID_CAP];
+    DWORD length = 0;
+    BOOL missing = FALSE, ok = FALSE;
+    int state, settings, pending;
+    if (!path || !id || cap < CX_DEVICE_ID_CAP || !cx_admission_base_allowed(base)
+        || !cx_admission_scope(base, key, scope) || !cx_config_read_file(path, &text, &length, &missing)) return FALSE;
+    if (!length || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)length, NULL, 0)) goto done;
+    t = (JT *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)length + 1) * sizeof(JT));
+    if (!t || jparse(text, (int)length, t, (int)length + 1) <= 0 || t[0].type != '{') goto done;
+    pending = cx_admission_member(text, t, 0, L"nativeDeviceAdmissionPending");
+    if (pending != -1 && (pending < 0 || t[pending].type != 'p' || !jeq(text, t, pending, "null"))) goto done;
+    state = cx_admission_member(text, t, 0, L"nativeDeviceAdmissionConfirmed");
+    settings = cx_admission_member(text, t, 0, L"settings");
+    if (state < 0 || t[state].type != '{' || t[state].count != 4 || settings < 0
+        || !cx_admission_token_eq(text, t, cx_admission_member(text, t, state, L"scope"), scope)
+        || !cx_admission_read_id(text, t, cx_admission_member(text, t, state, L"deviceId"), recorded, ARRAYSIZE(recorded))
+        || !cx_admission_token_eq(text, t, cx_admission_member(text, t, settings, L"common.settings.device-id"), recorded)) goto done;
+    lstrcpynW(id, recorded, (int)cap);
+    ok = TRUE;
+done:
+    if (t) HeapFree(GetProcessHeap(), 0, t);
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    return ok;
+}
+
 /* All wide fields here are already bounded, validated ASCII, and cannot
    require JSON escaping. Buffers below include worst-case fixed syntax. */
 static void cx_admission_literal(char *out, DWORD *used, const char *text) {
@@ -581,7 +609,12 @@ static BOOL cx_admission_save(const WCHAR *path, const WCHAR *scope, const CX_AD
     if (publish) {
         cx_admission_literal(patch, &n, "{\"settings\":{\"" CX_DEVICE_ID_KEY "\":\"");
         cx_admission_field(patch, &n, pending->id);
-        cx_admission_literal(patch, &n, "\"},\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":null}");
+        cx_admission_literal(patch, &n, "\"},\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":null,\""
+            CX_DEVICE_ADMISSION_CONFIRMED_KEY "\":{\"scope\":\"");
+        cx_admission_field(patch, &n, scope);
+        cx_admission_literal(patch, &n, "\",\"deviceId\":\"");
+        cx_admission_field(patch, &n, pending->id);
+        cx_admission_literal(patch, &n, "\"}}");
     } else {
         cx_admission_literal(patch, &n, "{\"" CX_DEVICE_ADMISSION_PENDING_KEY "\":{\"scope\":\"");
         cx_admission_field(patch, &n, scope);

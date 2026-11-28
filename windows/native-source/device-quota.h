@@ -54,6 +54,7 @@ BOOL cx_device_id_ensure(const WCHAR *configPath, BOOL noDiskWrite,
 
 /* Pending is private recovery state, never a confirmed device ID or permission. */
 #define CX_DEVICE_ADMISSION_PENDING_KEY "nativeDeviceAdmissionPending"
+#define CX_DEVICE_ADMISSION_CONFIRMED_KEY "nativeDeviceAdmissionConfirmed"
 
 typedef enum CX_DEVICE_HOST_MODE {
     CX_DEVICE_HOST_ORDINARY = 1,
@@ -66,7 +67,12 @@ typedef enum CX_DEVICE_HOST_MODE {
 #define CX_DEVICE_HOST_CONSENT_REQUIRED 1
 typedef BOOL (*CX_DEVICE_HOST_CONSENT)(const WCHAR *candidate, void *context);
 
-/* Explicit ordinary-host admission; not wired to release startup.
+/* Read the private local marker for this scope. Not an authorization: callers
+   must revalidate the current binding and agreement and never auto-register on failure. */
+BOOL cx_device_host_confirmed(const WCHAR *configPath, const WCHAR *baseUrl, const WCHAR *ordinaryApiKey,
+    WCHAR *id, DWORD cap);
+
+/* Explicit ordinary-host admission.
    TRUE only after candidate consent, a matched server receipt and atomic
    local promotion. A rotated candidate needs its own consent; it does not
    inherit the prior candidate's result. FALSE leaves publishedId untouched.

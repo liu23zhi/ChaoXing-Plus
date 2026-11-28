@@ -349,7 +349,7 @@ static DWORD WINAPI cx_http_deadline_work(LPVOID context) {
     return 0;
 }
 
-static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, BOOL scriptAddressProbe, BOOL agreementRequest, const WCHAR *agreementProof) {
+static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap, BOOL scriptAddressProbe, BOOL agreementRequest, const WCHAR *agreementProof, const WCHAR *ordinaryDevice) {
     WCHAR *buffers = NULL, *url, *host, *object, *extra, *headers, *authHeader; URL_COMPONENTS parts; HINTERNET session = NULL, conn = NULL, req = NULL; DWORD status = 0, statusSize = sizeof(status), used = 0, got, cap, flags = 0, disabled = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS | WINHTTP_DISABLE_AUTHENTICATION; BYTE *body = NULL; BOOL ok = FALSE;
     DWORD started = GetTickCount();
     CX_HTTP_DEADLINE deadline; HANDLE watchdog = NULL;
@@ -391,6 +391,8 @@ static BOOL cx_http_url_internal(const WCHAR *base, const WCHAR *path, const WCH
     if (runIdentity && *runIdentity && (!cx_append_w(headers, 4608, &used, L"X-Script-Identity: ") || !cx_append_w(headers, 4608, &used, runIdentity) || !cx_append_w(headers, 4608, &used, L"\r\n"))) { cx_error(error, errorCap, L"脚本身份请求头过长。"); goto done; }
     if (agreementProof && (!cx_append_w(headers, 4608, &used, L"X-Agreement-Device: ")
         || !cx_append_w(headers, 4608, &used, agreementProof) || !cx_append_w(headers, 4608, &used, L"\r\n"))) goto done;
+    if (ordinaryDevice && (!cx_append_w(headers, 4608, &used, L"X-Device-Id: ")
+        || !cx_append_w(headers, 4608, &used, ordinaryDevice) || !cx_append_w(headers, 4608, &used, L"\r\n"))) goto done;
     if (!g_http.addHeaders(req, headers, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) { cx_error(error, errorCap, L"设置请求头失败。"); goto done; }
     if (!cx_http_remaining(req, started, timeout) || !g_http.send(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, (LPVOID)json, json ? cx_alen(json) : 0, json ? cx_alen(json) : 0, 0)
         || !cx_http_remaining(req, started, timeout) || !g_http.receive(req, NULL)) { cx_error(error, errorCap, L"扩展服务请求失败或超时。"); goto done; }
@@ -418,11 +420,11 @@ done:
     if (buffers) { SecureZeroMemory(buffers, (8192 + 512 + 8192 + 2048 + 4608 + 4300) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, buffers); } return ok;
 }
 static BOOL cx_http_url(const WCHAR *base, const WCHAR *path, const WCHAR *method, const WCHAR *auth, const WCHAR *runIdentity, const char *json, DWORD timeout, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) {
-    return cx_http_url_internal(base, path, method, auth, runIdentity, json, timeout, bodyLimit, reply, error, errorCap, FALSE, FALSE, NULL);
+    return cx_http_url_internal(base, path, method, auth, runIdentity, json, timeout, bodyLimit, reply, error, errorCap, FALSE, FALSE, NULL, NULL);
 }
 BOOL cx_adapter_script_address_check(const WCHAR *address, WCHAR *error, DWORD errorCap) {
     CX_ADAPTER_REPLY unusedReply;
-    return cx_http_url_internal(address, NULL, L"HEAD", NULL, NULL, NULL, 5000, 0, &unusedReply, error, errorCap, TRUE, FALSE, NULL);
+    return cx_http_url_internal(address, NULL, L"HEAD", NULL, NULL, NULL, 5000, 0, &unusedReply, error, errorCap, TRUE, FALSE, NULL, NULL);
 }
 BOOL cx_adapter_request(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, NULL, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
 BOOL cx_adapter_request_identity(const WCHAR *baseUrl, const WCHAR *method, const WCHAR *path, const WCHAR *authorization, const WCHAR *identity, const char *json, DWORD timeoutMs, DWORD bodyLimit, CX_ADAPTER_REPLY *reply, WCHAR *error, DWORD errorCap) { return cx_http_url(baseUrl, path, method, authorization, identity, json, timeoutMs ? timeoutMs : 10000, bodyLimit, reply, error, errorCap); }
@@ -470,11 +472,12 @@ BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const 
         if (lstrcmpW(method, L"POST") || authorization || proof || json) return FALSE;
     } else {
         if (!authorization || !proof) return FALSE;
-        if (!lstrcmpW(path, L"api/agreements/consents")) {
+        if (!lstrcmpW(path, L"api/agreements/consents") || !lstrcmpW(path, L"api/extension-logs/batches")) {
             if (lstrcmpW(method, L"POST") || !json) return FALSE;
         } else {
             if (lstrcmpW(method, L"GET") || json) return FALSE;
-            if (lstrcmpW(path, L"api/agreements/status")) {
+            if (lstrcmpW(path, L"api/agreements/status")
+                && lstrcmpW(path, L"api/extension-logs/receipt-policy?mode=native_browser")) {
                 DWORD prefix = ARRAYSIZE(pinned) - 1, n = cx_wlen(path);
                 if (n <= prefix || n - prefix > 48 || !cx_mem_equal(path, pinned, prefix * sizeof(WCHAR))) return FALSE;
                 for (i = prefix; path[i]; ++i) {
@@ -492,7 +495,22 @@ BOOL cx_adapter_agreement_request(const WCHAR *base, const WCHAR *method, const 
     }
     if (authorization) for (i = 0; authorization[i]; ++i) if (authorization[i] < 32 || authorization[i] > 126) return FALSE;
     return cx_http_url_internal(base, path, method, authorization, NULL, json, 8500, limit, reply, NULL, 0,
-        FALSE, TRUE, proof);
+        FALSE, TRUE, proof, NULL);
+}
+/* The native authorization check is read-only: never use admission POST as a probe. */
+BOOL cx_adapter_ordinary_device_probe(const WCHAR *base, const WCHAR *authorization, const WCHAR *device,
+    BOOL quota, CX_ADAPTER_REPLY *reply) {
+    DWORD i;
+    if (reply) ZeroMemory(reply, sizeof(*reply));
+    if (!base || !authorization || !device || cx_wlen(device) != 36) return FALSE;
+    for (i = 0; device[i]; ++i) {
+        WCHAR c = device[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != L'-') return FALSE; }
+        else if (!((c >= L'a' && c <= L'f') || (c >= L'0' && c <= L'9'))) return FALSE;
+    }
+    for (i = 0; authorization[i]; ++i) if (authorization[i] < 32 || authorization[i] > 126) return FALSE;
+    return cx_http_url_internal(base, quota ? L"api/user/device-quota" : L"api/search/health", L"GET",
+        authorization, NULL, NULL, 2500, 131072, reply, NULL, 0, FALSE, TRUE, NULL, device);
 }
 void cx_adapter_reply_free(CX_ADAPTER_REPLY *reply) { if (reply && reply->body) HeapFree(GetProcessHeap(), 0, reply->body); if (reply) { reply->body = NULL; reply->length = 0; reply->status = 0; } }
 void cx_adapter_account_clear(CX_ADAPTER_ACCOUNT *account) { if (account) { SecureZeroMemory(account, sizeof(*account)); account->accessTokenId = 0; } }

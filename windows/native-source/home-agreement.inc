@@ -153,16 +153,23 @@ static BOOL ha_enroll(const WCHAR *base, HA_RECORD *out) {
         && ha_copy_w(&r, t, "deviceCredential", out->proof, ARRAYSIZE(out->proof)) && ha_proof(out->proof);
     ha_release(&r); return ok;
 }
-static BOOL ha_status(const WCHAR *base, const WCHAR *auth, const HA_RECORD *r, HA_STATUS *out, BOOL *unauthorized) {
+static BOOL ha_status_subject(const WCHAR *base, const WCHAR *auth, const WCHAR *proof,
+    const WCHAR *logicalDevice, HA_STATUS *out, DWORD *httpStatus) {
     CX_ADAPTER_REPLY reply = {0}; JT t[64]; WCHAR device[37]; BOOL ok;
-    ok = CX_HOME_AGREEMENT_REQUEST(base, L"GET", L"api/agreements/status", auth, r->proof, NULL, HA_SMALL_LIMIT, &reply)
+    ok = CX_HOME_AGREEMENT_REQUEST(base, L"GET", L"api/agreements/status", auth, proof, NULL, HA_SMALL_LIMIT, &reply)
         && reply.status == 200 && ha_object(&reply, t, ARRAYSIZE(t))
-        && ha_copy_w(&reply, t, "deviceId", device, ARRAYSIZE(device)) && !lstrcmpW(device, r->device)
+        && ha_copy_w(&reply, t, "deviceId", device, ARRAYSIZE(device)) && !lstrcmpW(device, logicalDevice)
         && ha_copy_s(&reply, t, "version", out->version, ARRAYSIZE(out->version)) && ha_version(out->version)
         && ha_copy_s(&reply, t, "content_hash", out->hash, ARRAYSIZE(out->hash)) && ha_digest(out->hash)
         && ha_bool(&reply, t, "needsAcceptance", &out->pending);
-    if (unauthorized) *unauthorized = reply.status == 401;
+    if (httpStatus) *httpStatus = reply.status;
     ha_release(&reply); return ok;
+}
+static BOOL ha_status(const WCHAR *base, const WCHAR *auth, const HA_RECORD *r, HA_STATUS *out, BOOL *unauthorized) {
+    DWORD status = 0;
+    BOOL ok = ha_status_subject(base, auth, r->proof, r->device, out, &status);
+    if (unauthorized) *unauthorized = status == 401;
+    return ok;
 }
 static BOOL ha_current(const WCHAR *base, const WCHAR *auth, HA_RECORD *r, const HA_STATUS *status) {
     CX_ADAPTER_REPLY reply = {0}; JT t[80]; WCHAR path[120]; char type[32], date[48], *summary;
@@ -368,7 +375,7 @@ typedef struct HA_WORK {
     WCHAR auth[CX_HOME_API_KEY_CAP + 8], scope[65], guardName[96], anchor[HA_PATH_CAP], account[HA_PATH_CAP];
     char hash[65], token[65];
 } HA_WORK;
-static BOOL home_agreement_admit(HOME_STATE *home) {
+static BOOL home_agreement_admit_for(HOME_STATE *home, const WCHAR *candidate, HA_NATIVE_OWNER *owner) {
     HA_RECORD *r = NULL, *stage = NULL;
     HA_WORK *work = NULL;
     HA_STATUS status = {0};
@@ -380,14 +387,14 @@ static BOOL home_agreement_admit(HOME_STATE *home) {
     if (ha_cancelled(home)) goto done;
     work = (HA_WORK *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*work));
     if (!work) goto done;
-    if (!home->deviceId[0] || !config->apiKey[0] || !cx_adapter_agreement_base(config->adapterBaseUrl, work->base, ARRAYSIZE(work->base))) {
+    if (!candidate || !ha_device(candidate) || !config->apiKey[0] || !cx_adapter_agreement_base(config->adapterBaseUrl, work->base, ARRAYSIZE(work->base))) {
         error = L"普通浏览器需要 HTTPS 题库地址、有效账号配置和宿主设备标识才能确认用户协议。"; goto done;
     }
     /* With the configured ordinary bearer only; no host/grant identity, cookies or fallback authorization. */
     for (i = 0; config->apiKey[i]; ++i) if (config->apiKey[i] <= 32 || config->apiKey[i] > 126) goto done;
     lstrcpyW(work->auth, L"Bearer "); lstrcatW(work->auth, config->apiKey);
     lstrcpyW(work->input, work->base); length = (DWORD)lstrlenW(work->input) + 1;
-    lstrcpyW(work->input + length, home->deviceId); length += (DWORD)lstrlenW(home->deviceId) + 1;
+    lstrcpyW(work->input + length, candidate); length += (DWORD)lstrlenW(candidate) + 1;
     if (!ha_hash_text(config->apiKey, work->token)
         || !cx_adapter_agreement_sha256((BYTE *)work->input, length * sizeof(WCHAR), work->hash)
         || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, work->hash, -1, work->scope, ARRAYSIZE(work->scope))) goto done;
@@ -462,6 +469,14 @@ static BOOL home_agreement_admit(HOME_STATE *home) {
     ok = !ha_cancelled(home) && ha_status(work->base, work->auth, r, &status, NULL)
         && ha_same(&status, r) && !status.pending && !ha_cancelled(home);
 done:
+    if (ok && owner) {
+        home_copy(owner->base, ARRAYSIZE(owner->base), work->base);
+        home_copy(owner->key, ARRAYSIZE(owner->key), config->apiKey);
+        home_copy(owner->device, ARRAYSIZE(owner->device), candidate);
+        home_copy(owner->logicalDevice, ARRAYSIZE(owner->logicalDevice), r->device);
+        home_copy(owner->proof, ARRAYSIZE(owner->proof), r->proof);
+        lstrcpyA(owner->version, r->version); lstrcpyA(owner->hash, r->hash);
+    }
     if (locked) ReleaseMutex(guard);
     if (guard) CloseHandle(guard);
     if (!ok) {

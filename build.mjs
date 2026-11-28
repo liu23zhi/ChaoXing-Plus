@@ -9,10 +9,13 @@ const { build } = _require('vite');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const watchMode = process.argv.includes('--watch');
+const ordinaryNative = process.argv.includes('--ordinary-native');
+const outDir = ordinaryNative ? 'dist-native-ordinary' : 'dist';
+const output = path => resolve(__dirname, outDir, path);
 const defaultTikuBaseUrl = process.env.DEFAULT_TIKU_BASE_URL ?? 'https://tiku.zelly.cn/';
 
 function copyStaticFiles() {
-  mkdirSync('dist', { recursive: true });
+  mkdirSync(output(''), { recursive: true });
 
   const chaoxingHosts = [
     '*://*.chaoxing.com/*'
@@ -30,7 +33,8 @@ function copyStaticFiles() {
     icons: {
       '512': 'icon_512X512.png'
     },
-    permissions: ['storage'],
+    ...(ordinaryNative ? { version_name: '普通 Windows 原生通道 v1' } : {}),
+    permissions: ordinaryNative ? ['storage', 'nativeMessaging'] : ['storage'],
     background: { service_worker: 'extension-worker.js', type: 'module' },
     host_permissions: chaoxingHosts,
     action: {
@@ -52,49 +56,49 @@ function copyStaticFiles() {
     ]
   };
 
-  writeFileSync('dist/manifest.json', JSON.stringify(manifest, null, 2));
-  mkdirSync('dist/_locales/zh_CN', { recursive: true });
-  writeFileSync('dist/_locales/zh_CN/messages.json', JSON.stringify({}, null, 2));
+  writeFileSync(output('manifest.json'), JSON.stringify(manifest, null, 2));
+  mkdirSync(output('_locales/zh_CN'), { recursive: true });
+  writeFileSync(output('_locales/zh_CN/messages.json'), JSON.stringify({}, null, 2));
 
   if (existsSync('src/extension-entry.js')) {
-    copyFileSync('src/extension-entry.js', 'dist/extension-entry.js');
+    copyFileSync('src/extension-entry.js', output('extension-entry.js'));
   }
   for (const file of [
     'extension-tab-pause.js', 'extension-worker.js', 'extension-agreement-core.js',
-    'extension-agreement-worker.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
+    'extension-agreement-worker.js', 'ordinary-native-authority.js', 'extension-agreement-view.js', 'extension-agreement-content.js',
     'extension-agreement.html', 'extension-course-metadata.js',
     'extension-deep-thinking.js', 'extension-deep-thinking-worker.js',
     'extension-deep-thinking-settings.html', 'extension-deep-thinking-settings.js'
   ]) {
-    copyFileSync('src/' + file, 'dist/' + file);
+    copyFileSync('src/' + file, output(file));
   }
 
-  writeFileSync('dist/extension-agreement-config.js', 'export const defaultBase = ' + JSON.stringify(defaultTikuBaseUrl) + ';\n');
+  writeFileSync(output('extension-agreement-config.js'), 'export const defaultBase = ' + JSON.stringify(defaultTikuBaseUrl) + ';\nexport const ordinaryNative = ' + ordinaryNative + ';\n');
 
-  copyFileSync('src/extension-diagnostic-receipt.js', 'dist/extension-diagnostic-receipt.js');
-  mkdirSync('dist/runtime', { recursive: true });
-  copyFileSync('src/runtime/diagnostic-outbox.js', 'dist/runtime/diagnostic-outbox.js');
+  copyFileSync('src/extension-diagnostic-receipt.js', output('extension-diagnostic-receipt.js'));
+  mkdirSync(output('runtime'), { recursive: true });
+  copyFileSync('src/runtime/diagnostic-outbox.js', output('runtime/diagnostic-outbox.js'));
 
   if (existsSync('icon/icon_512X512.png')) {
-    copyFileSync('icon/icon_512X512.png', 'dist/icon_512X512.png');
+    copyFileSync('icon/icon_512X512.png', output('icon_512X512.png'));
   }
 
   if (existsSync('src/popup.html')) {
-    copyFileSync('src/popup.html', 'dist/popup.html');
+    copyFileSync('src/popup.html', output('popup.html'));
   }
 
   if (existsSync('src/popup.js')) {
-    copyFileSync('src/popup.js', 'dist/popup.js');
+    copyFileSync('src/popup.js', output('popup.js'));
   }
 
   if (existsSync('node_modules/sweetalert2/dist/sweetalert2.min.css')) {
-    mkdirSync('dist/vendor', { recursive: true });
-    copyFileSync('node_modules/sweetalert2/dist/sweetalert2.min.css', 'dist/vendor/sweetalert2.min.css');
+    mkdirSync(output('vendor'), { recursive: true });
+    copyFileSync('node_modules/sweetalert2/dist/sweetalert2.min.css', output('vendor/sweetalert2.min.css'));
   }
 
   if (existsSync('node_modules/sweetalert2/dist/sweetalert2.all.min.js')) {
-    mkdirSync('dist/vendor', { recursive: true });
-    copyFileSync('node_modules/sweetalert2/dist/sweetalert2.all.min.js', 'dist/vendor/sweetalert2.all.min.js');
+    mkdirSync(output('vendor'), { recursive: true });
+    copyFileSync('node_modules/sweetalert2/dist/sweetalert2.all.min.js', output('vendor/sweetalert2.all.min.js'));
   }
 }
 
@@ -113,7 +117,8 @@ async function main() {
     define: {
       __DEFAULT_TIKU_BASE_URL__: JSON.stringify(defaultTikuBaseUrl),
       __CXPLUS_WINDOWS_INJECTION_LOG__: 'false',
-      __CXPLUS_BROWSER_AGREEMENT_GATE__: 'true'
+      __CXPLUS_BROWSER_AGREEMENT_GATE__: 'true',
+      __CXPLUS_ORDINARY_NATIVE__: JSON.stringify(ordinaryNative)
     },
     build: {
       watch: watchMode ? {} : null,
@@ -132,7 +137,7 @@ async function main() {
           footer: '});'
         }
       },
-      outDir: 'dist',
+      outDir,
       emptyOutDir: true
     }
   });

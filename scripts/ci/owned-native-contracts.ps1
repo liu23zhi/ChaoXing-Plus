@@ -30,10 +30,10 @@ if (-not $vs) { throw 'Visual Studio with the MSVC x86/x64 tools and Windows SDK
 if ($env:VSCMD_ARG_TGT_ARCH -ne 'x86') { throw 'Failed to initialize MSVC for x86.' }
 $cl = (Get-Command cl.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 
-function Build-OwnedFixture([string]$Name, [string[]]$Units, [string[]]$ExtraLink = @()) {
+function Build-OwnedFixture([string]$Name, [string[]]$Units, [string[]]$ExtraLink = @(), [string[]]$ExtraCompile = @()) {
     $sources = @($Units | ForEach-Object { (Get-Item -LiteralPath (Join-Path $src $_)).FullName })
     $flags = @('/nologo', '/TC', '/utf-8', '/DUNICODE', '/D_UNICODE', '/O1', '/Gy', '/MT', "/Fe:$Name.exe")
-    Invoke-Checked "compile $Name (x86)" $cl ($flags + $sources + @(
+    Invoke-Checked "compile $Name (x86)" $cl ($flags + $ExtraCompile + $sources + @(
         '/link', '/INCREMENTAL:NO', '/OPT:REF', '/MACHINE:X86', 'user32.lib', 'gdi32.lib'
     ) + $ExtraLink)
 }
@@ -54,6 +54,43 @@ try {
     Invoke-Checked 'ordinary host admission receipt contract' $admission @()
     Invoke-Checked 'ordinary host admission lost receipt before exit' $admission @('--stage-exit')
     Invoke-Checked 'ordinary host admission cold recovery' $admission @('--reopen')
+
+    Build-OwnedFixture 'ordinary-result-only' @('tests/ordinary-channel-tests.c') @('shell32.lib', 'advapi32.lib')
+    Invoke-Checked 'ordinary result-only Win32 runtime' (Join-Path $scratch.FullName 'ordinary-result-only.exe') @()
+
+    Build-OwnedFixture 'ordinary-receipts' @('tests/ordinary-receipts-tests.c', 'memory.c', 'json.c') @(
+        '/NODEFAULTLIB', '/SUBSYSTEM:CONSOLE', '/ENTRY:OrdinaryReceiptsTestMain', 'kernel32.lib', 'advapi32.lib'
+    ) @('/GS-', '/Gs9999999', '/Zl')
+    Invoke-Checked 'ordinary native diagnostic cold replay' (Join-Path $scratch.FullName 'ordinary-receipts.exe') @()
+
+    if ($env:GITHUB_ACTIONS -ceq 'true') {
+        if ($env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
+            throw 'Real ordinary browser contracts require the disposable hosted Windows runner.'
+        }
+        Push-Location -LiteralPath $repo
+        $oldCwd = [Environment]::CurrentDirectory
+        try {
+            [Environment]::CurrentDirectory = $repo
+            Invoke-Checked 'build the distinct signed-package input variant' $node @('build.mjs', '--ordinary-native')
+        } finally {
+            [Environment]::CurrentDirectory = $oldCwd
+            Pop-Location
+        }
+
+        Build-OwnedFixture 'ordinary-browser' @('tests/ordinary-browser-tests.c', 'browser-extension.c', 'json.c') @(
+            'shell32.lib', 'advapi32.lib'
+        )
+        Push-Location -LiteralPath $repo
+        try {
+            [Environment]::CurrentDirectory = $repo
+            Invoke-Checked 'real ordinary Chrome and Edge result-only native channel' $node @(
+                'scripts/ci/ordinary-native-browser.mjs', (Join-Path $scratch.FullName 'ordinary-browser.exe')
+            )
+        } finally {
+            [Environment]::CurrentDirectory = $oldCwd
+            Pop-Location
+        }
+    }
 
     Build-OwnedFixture 'owned-authority' @('tests/owned-script-authority-tests.c')
     Invoke-Checked 'authorization callback stub' (Join-Path $scratch.FullName 'owned-authority.exe') @()
