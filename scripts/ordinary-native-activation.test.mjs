@@ -36,3 +36,12 @@ test('a cold host only probes the previous exact receipt; no background re-regis
   assert.ok(cold >= 0 && cold < noFirstPost && noFirstPost < register)
   assert.match(wiring.slice(cold, noFirstPost), /home_ordinary_owner_current/)
 })
+
+test('a separate browser keeps the main host registration scope even before first admission', () => {
+  const settings = inside('static BOOL home_settings_dialog(', 'typedef struct HOME_DIAGNOSTIC_JOB')
+  assert.match(settings, /EnableWindow\(state->baseUrl, FALSE\)/)
+  assert.match(settings, /EnableWindow\(state->apiKey, FALSE\)/)
+  assert.match(settings, /home_copy\(out->apiKey,[^;]*home->config->apiKey\)/)
+  const wiring = readFileSync(new URL('../windows/native-source/home-native-admission.inc', import.meta.url), 'utf8')
+  assert.match(wiring, /lstrcmpW\(cfg->apiKey, home->config->apiKey\)/)
+})

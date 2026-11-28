@@ -1683,11 +1683,18 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     settings_populate(state);
     SendMessageW(state->baseUrl, EM_SETLIMITTEXT, CX_HOME_ADAPTER_URL_CAP - 1, 0);
     SendMessageW(state->apiKey, EM_SETLIMITTEXT, CX_HOME_API_KEY_CAP - 1, 0);
+    if (!persist) {
+        EnableWindow(state->baseUrl, FALSE);
+        EnableWindow(state->apiKey, FALSE);
+    }
     SendMessageW(state->answerKey, EM_SETLIMITTEXT, CX_OPTIONS_SHORT_CAP - 1, 0);
     SendMessageW(state->panelTop, EM_SETLIMITTEXT, 5, 0); SendMessageW(state->panelRight, EM_SETLIMITTEXT, 5, 0);
     SendMessageW(state->panelWidth, EM_SETLIMITTEXT, 3, 0); SendMessageW(state->answerThreads, EM_SETLIMITTEXT, 1, 0);
     SendMessageW(state->answerCountdown, EM_SETLIMITTEXT, 4, 0); SendMessageW(state->answerRetry, EM_SETLIMITTEXT, 2, 0);
-    state->status = home_control(0, L"STATIC", L"设置仅保留在当前进程。表单值会合并进共享设置；单独会话不会覆盖公共设置。", WS_CHILD | WS_VISIBLE, 24, 410, 886, 42, state->window, SETTINGS_STATUS);
+    state->status = home_control(0, L"STATIC", persist
+        ? L"设置保留在当前进程，表单值会并入公共设置。"
+        : L"单独会话只改变此会话的浏览器和非鉴权偏好；题库地址与账号沿用 Windows 宿主公共设置。",
+        WS_CHILD | WS_VISIBLE, 24, 410, 886, 42, state->window, SETTINGS_STATUS);
     home_control(0, L"BUTTON", persist ? L"保存" : L"启动此会话", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 670, 470, 110, 30, state->window, SETTINGS_SAVE);
     home_control(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE, 800, 470, 110, 30, state->window, SETTINGS_CANCEL);
     ShowWindow(state->window, SW_SHOW); ShowWindow(state->window, SW_SHOW); UpdateWindow(state->window); EnableWindow(parent, FALSE);
@@ -1700,7 +1707,13 @@ static BOOL home_settings_dialog(HOME_STATE *home, BOOL persist, const WCHAR *br
     accepted = state->accepted;
     if (accepted) {
         if (persist) settings_copy(home->config, &state->value);
-        if (out) settings_copy(out, &state->value);
+        if (out) {
+            settings_copy(out, &state->value);
+            if (!persist) {
+                home_copy(out->adapterBaseUrl, ARRAYSIZE(out->adapterBaseUrl), home->config->adapterBaseUrl);
+                home_copy(out->apiKey, ARRAYSIZE(out->apiKey), home->config->apiKey);
+            }
+        }
         if (browserOut) home_copy(browserOut, browserCap, state->browserKind);
     }
     SecureZeroMemory(state, sizeof(*state)); HeapFree(GetProcessHeap(), 0, state);

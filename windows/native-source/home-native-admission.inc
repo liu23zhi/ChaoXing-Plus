@@ -88,7 +88,9 @@ static BOOL home_ordinary_device_admit(HOME_STATE *home) {
         home_copy(home->error, ARRAYSIZE(home->error), L"普通会话需要可写配置、HTTPS 题库地址、普通账号凭据及当前协议。");
         return FALSE;
     }
-    if (home->admittedOwner.key[0] && !home_ordinary_config_matches(&home->admittedOwner, cfg)) {
+    if (lstrcmpW(cfg->adapterBaseUrl, home->config->adapterBaseUrl)
+        || lstrcmpW(cfg->apiKey, home->config->apiKey)
+        || (home->admittedOwner.key[0] && !home_ordinary_config_matches(&home->admittedOwner, cfg))) {
         home_copy(home->error, ARRAYSIZE(home->error), L"请先关闭会话并在 Windows 宿主账号或设置中切换账号或题库地址。");
         return FALSE;
     }
