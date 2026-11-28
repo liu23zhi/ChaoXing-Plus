@@ -48,6 +48,13 @@ try {
     Build-OwnedFixture 'owned-quota' @('tests/owned-device-quota-tests.c', 'device-quota.c', 'config-store.c', 'json.c')
     Invoke-Checked 'device quota' (Join-Path $scratch.FullName 'owned-quota.exe') @()
 
+    Build-OwnedFixture 'owned-device-admission' @('tests/owned-device-admission-tests.c', 'device-quota.c', 'config-store.c', 'json.c')
+    $admission = Join-Path $scratch.FullName 'owned-device-admission.exe'
+    Invoke-Checked 'ordinary host current candidate consent' $admission @('--consent-gate')
+    Invoke-Checked 'ordinary host admission receipt contract' $admission @()
+    Invoke-Checked 'ordinary host admission lost receipt before exit' $admission @('--stage-exit')
+    Invoke-Checked 'ordinary host admission cold recovery' $admission @('--reopen')
+
     Build-OwnedFixture 'owned-authority' @('tests/owned-script-authority-tests.c')
     Invoke-Checked 'authorization callback stub' (Join-Path $scratch.FullName 'owned-authority.exe') @()
 

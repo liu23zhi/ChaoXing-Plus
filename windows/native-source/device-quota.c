@@ -631,7 +631,8 @@ done:
 
 BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
     const WCHAR *ordinaryApiKey, CX_DEVICE_HOST_MODE mode, BOOL noDiskWrite,
-    DWORD timeoutMs, WCHAR *publishedId, DWORD cap, WCHAR *error, DWORD errorCap) {
+    DWORD timeoutMs, CX_DEVICE_HOST_CONSENT verifyConsent, void *consentContext,
+    WCHAR *publishedId, DWORD cap, WCHAR *error, DWORD errorCap) {
     CX_ADMISSION_PENDING pending = {0};
     WCHAR scope[CX_ADMISSION_SCOPE_CAP], previousId[CX_DEVICE_ID_CAP], previousInstance[CX_DEVICE_INSTANCE_CAP];
     WCHAR *auth = NULL;
@@ -641,6 +642,8 @@ BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
     if (noDiskWrite || mode != CX_DEVICE_HOST_ORDINARY || !configPath || !configPath[0]
         || !publishedId || cap < CX_DEVICE_ID_CAP)
         return cx_admission_fail(error, errorCap, L"普通设备登记需要可写配置及明确的普通宿主模式");
+    if (!verifyConsent)
+        return cx_admission_fail(error, errorCap, L"无法复核当前设备的协议确认");
     if (!cx_admission_base_allowed(baseUrl))
         return cx_admission_fail(error, errorCap, L"普通设备登记仅支持 HTTPS 或数字回环 HTTP");
     if (!cx_admission_scope(baseUrl, ordinaryApiKey, scope))
@@ -655,11 +658,11 @@ BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
     }
     auth = cx_device_auth(ordinaryApiKey);
     if (!auth) { cx_admission_fail(error, errorCap, L"普通设备登记凭据不可用"); goto done; }
-    if (!resume) {
-        if ((!pending.id[0] && !cx_device_uuid_v4(pending.id, ARRAYSIZE(pending.id))) ||
-            !cx_device_instance_new(pending.instance, ARRAYSIZE(pending.instance))) goto random_failed;
-        if (!cx_admission_save(configPath, scope, &pending, FALSE, error, errorCap)) goto done;
-    }
+    if (!resume &&
+        ((!pending.id[0] && !cx_device_uuid_v4(pending.id, ARRAYSIZE(pending.id))) ||
+         !cx_device_instance_new(pending.instance, ARRAYSIZE(pending.instance)))) goto random_failed;
+    if (!verifyConsent(pending.id, consentContext)) goto consent_failed;
+    if (!resume && !cx_admission_save(configPath, scope, &pending, FALSE, error, errorCap)) goto done;
     if (!cx_admission_request(baseUrl, auth, &pending, timeoutMs, &conflict)) {
         if (!conflict || pending.retried) goto receipt_failed;
         lstrcpyW(previousId, pending.id);
@@ -667,6 +670,7 @@ BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
         if (!cx_device_uuid_v4(pending.id, ARRAYSIZE(pending.id)) ||
             !cx_device_instance_new(pending.instance, ARRAYSIZE(pending.instance)) ||
             !lstrcmpW(previousId, pending.id) || !lstrcmpW(previousInstance, pending.instance)) goto random_failed;
+        if (!verifyConsent(pending.id, consentContext)) goto consent_failed;
         pending.retried = TRUE;
         if (!cx_admission_save(configPath, scope, &pending, FALSE, error, errorCap)) goto done;
         if (!cx_admission_request(baseUrl, auth, &pending, timeoutMs, &conflict)) goto receipt_failed;
@@ -674,6 +678,9 @@ BOOL cx_device_host_admit(const WCHAR *configPath, const WCHAR *baseUrl,
     if (!cx_admission_save(configPath, scope, &pending, TRUE, error, errorCap)) goto done;
     lstrcpynW(publishedId, pending.id, CX_DEVICE_ID_CAP);
     ok = TRUE;
+    goto done;
+consent_failed:
+    cx_admission_fail(error, errorCap, L"当前候选设备尚无有效协议确认");
     goto done;
 random_failed:
     cx_admission_fail(error, errorCap, L"无法生成新的设备登记标识");

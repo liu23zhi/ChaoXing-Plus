@@ -37,6 +37,23 @@ static HANDLE writeBarrier = INVALID_HANDLE_VALUE;
 static char fileBeforePromotion[8192], response[512];
 static BOOL reentered;
 
+/* Synthetic authority client for the native contract, not a page state or a
+   production consent result. A subject-scoped result cannot be reused after
+   rotation, even if the current candidate was explicitly admitted for check. */
+static enum { CONSENT_EACH_FIXTURE_CANDIDATE, CONSENT_NONE, CONSENT_OLD_SUBJECT } consentMode;
+static unsigned consentChecks;
+static WCHAR checkedCandidate[CX_DEVICE_ID_CAP];
+
+#ifdef CX_DEVICE_HOST_CONSENT_REQUIRED
+static BOOL ownedConsent(const WCHAR *candidate, void *ctx) {
+    (void)ctx;
+    ++consentChecks;
+    lstrcpynW(checkedCandidate, candidate, ARRAYSIZE(checkedCandidate));
+    return consentMode == CONSENT_EACH_FIXTURE_CANDIDATE ||
+        (consentMode == CONSENT_OLD_SUBJECT && !lstrcmpW(candidate, oldID));
+}
+#endif
+
 static BOOL writeFixture(const char *json) {
     DWORD written = 0, len = (DWORD)strlen(json);
     HANDLE file = CreateFileW(fixturePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -56,7 +73,11 @@ static BOOL readFixture(char *out, DWORD cap) {
 
 static BOOL admit(const WCHAR *url, const WCHAR *key, BOOL diskless, BOOL script, WCHAR *out) {
     WCHAR err[128];
-#ifdef CX_DEVICE_ADMISSION_PENDING_KEY
+#if defined(CX_DEVICE_HOST_CONSENT_REQUIRED)
+    return cx_device_host_admit(fixturePath, url, key, script ? CX_DEVICE_HOST_SCRIPT : CX_DEVICE_HOST_ORDINARY,
+        diskless, 4000, ownedConsent, NULL, out, CX_DEVICE_ID_CAP, err, ARRAYSIZE(err));
+#elif defined(CX_DEVICE_ADMISSION_PENDING_KEY)
+    /* Real pre-gate core so the regression can demonstrate a behavioral red. */
     return cx_device_host_admit(fixturePath, url, key, script ? CX_DEVICE_HOST_SCRIPT : CX_DEVICE_HOST_ORDINARY,
         diskless, 4000, out, CX_DEVICE_ID_CAP, err, ARRAYSIZE(err));
 #else
@@ -162,6 +183,66 @@ static void phase(enum SCENARIO next) {
     requests = committed = 0; remoteDevice[0] = 0; scenario = next; reentered = FALSE;
 }
 
+static int consentGate(void) {
+    WCHAR out[CX_DEVICE_ID_CAP];
+    char before[8192], after[8192];
+    BOOL ok;
+
+    phase(ACCEPT);
+    consentMode = CONSENT_NONE;
+    consentChecks = 0;
+    CHECK(writeFixture(neverAdmitted) && readFixture(before, sizeof(before)));
+    lstrcpyW(out, L"unchanged");
+    ok = admit(resource, fixtureKey, FALSE, FALSE, out);
+    CHECK(readFixture(after, sizeof(after)));
+    printf("unconfirmed: admitted=%d posts=%u config_unchanged=%d\n",
+        (int)ok, requests, !strcmp(before, after));
+    CHECK(!ok && requests == 0 && consentChecks == 1 && !lstrcmpW(out, L"unchanged") &&
+        !strcmp(before, after) && !strstr(after, CX_DEVICE_ID_KEY) &&
+        !strstr(after, "nativeDeviceAdmissionPending"));
+
+#ifdef CX_DEVICE_HOST_CONSENT_REQUIRED
+    {
+        WCHAR error[256];
+        CHECK(!cx_device_host_admit(fixturePath, resource, fixtureKey, CX_DEVICE_HOST_ORDINARY, FALSE, 4000,
+            NULL, NULL, out, CX_DEVICE_ID_CAP, error, ARRAYSIZE(error)));
+        CHECK(requests == 0 && !lstrcmpW(out, L"unchanged") &&
+            readFixture(after, sizeof(after)) && !strcmp(before, after));
+    }
+#endif
+
+    phase(ACCEPT);
+    consentMode = CONSENT_OLD_SUBJECT;
+    consentChecks = 0;
+    CHECK(writeFixture(oldFile));
+    CHECK(admit(resource, fixtureKey, FALSE, FALSE, out));
+    CHECK(requests == 1 && committed == 1 && consentChecks == 1 && !lstrcmpW(out, oldID) &&
+        !lstrcmpW(checkedCandidate, devices[0]) && checkConfig(out, FALSE));
+    printf("confirmed same subject: admitted=1 posts=%u exact_id_persisted=1\n", requests);
+
+    phase(CONFLICT_ONCE);
+    consentChecks = 0;
+    CHECK(writeFixture(oldFile));
+    lstrcpyW(out, L"unchanged");
+    CHECK(!admit(resource, fixtureKey, FALSE, FALSE, out));
+    CHECK(requests == 1 && committed == 0 && consentChecks == 2 && !lstrcmpW(devices[0], oldID) &&
+        lstrcmpW(checkedCandidate, devices[0]) && !lstrcmpW(out, L"unchanged") && checkConfig(oldID, TRUE));
+    CHECK(readFixture(after, sizeof(after)) && strstr(after, "\"deviceId\":\"exe:owned-confirmed\"") != NULL);
+    printf("conflict without current consent for replacement: admitted=0 posts=%u candidate_not_promoted=1\n", requests);
+    /* A persisted pending identity is not permission after a restart or
+       after loss of current agreement; leave an exact retry state intact. */
+    memcpy(before, after, strlen(after) + 1);
+    phase(ACCEPT);
+    consentMode = CONSENT_NONE;
+    consentChecks = 0;
+    CHECK(!admit(resource, fixtureKey, FALSE, FALSE, out));
+    CHECK(requests == 0 && consentChecks == 1 && !lstrcmpW(out, L"unchanged") &&
+        readFixture(after, sizeof(after)) && !strcmp(before, after));
+    puts("pending without current consent: admitted=0 posts=0 config_unchanged=1");
+    CHECK(DeleteFileW(fixturePath));
+    return 0;
+}
+
 static int splitProcess(BOOL reopen) {
     const WCHAR *stateFile = L"owned-modeled-remote.bin";
     WCHAR out[CX_DEVICE_ID_CAP], previous[CX_DEVICE_ID_CAP], priorInstance[CX_DEVICE_INSTANCE_CAP];
@@ -247,6 +328,7 @@ int main(int argc, char **argv) {
         BAD_GATEWAY, WRONG_ID, WRONG_STATUS, ABSENT, CORRUPT, ESCAPED_NUL, FALSE_ADMITTED, STRING_ADMITTED,
         DUPLICATE_ID, MALFORMED_UTF8};
 
+    if (argc == 2 && !strcmp(argv[1], "--consent-gate")) return consentGate();
     if (argc == 2 && !strcmp(argv[1], "--stage-exit")) return splitProcess(FALSE);
     if (argc == 2 && !strcmp(argv[1], "--reopen")) return splitProcess(TRUE);
     CHECK(argc == 1);
