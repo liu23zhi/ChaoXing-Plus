@@ -161,7 +161,7 @@ export async function launchOwnedBrowser(puppeteer, directory, profile, identity
     // on CDP Extensions.loadUnpacked availability or its asynchronous install.
     enableExtensions: true,
     userDataDir: profile,
-    executablePath: process.env.CX_BROWSER_EXECUTABLE || puppeteer.executablePath(),
+    executablePath: process.env.CX_BROWSER_EXECUTABLE || undefined,
     env: browserEnvironment(),
     args: [...diagnosticBrowserArgs, '--load-extension=' + directory],
     timeout: 25_000,
