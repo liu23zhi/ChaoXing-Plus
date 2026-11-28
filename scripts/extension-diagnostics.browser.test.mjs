@@ -219,11 +219,29 @@ test('packaged ordinary browser: authenticated consent, exact durable receipt, s
   assert.equal([...durable.values()][4].device_id, initial.device_id);
 
   stage = 'admin default-off and personal withdrawal';
+  await eventually(async () => await pendingCount(popup) === 0, 'prior authorized batch is not yet confirmed');
+  // Observe the fresh event before asking the (previously authorized) popup
+  // to refresh. Sending it later or storing it briefly both violate policy.
+  await popup.evaluate(key => {
+    globalThis.ownedForbiddenWrites = 0;
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes[key]?.newValue?.streams.some(s => s.snapshot.entries.length)) {
+        globalThis.ownedForbiddenWrites++;
+      }
+    });
+  }, outboxKey);
+  const policiesBeforeDisable = deniedPolicies.length;
+  const attemptsBeforeDisable = packets.length;
   adminEnabled = false;
+  await openDiagnosticPage(browser);
+  await eventually(() => deniedPolicies.length > policiesBeforeDisable && deniedPolicies.at(-1) === 'admin',
+    'disabled server did not see the current policy check for the target event');
+  assert.equal(await popup.evaluate(() => globalThis.ownedForbiddenWrites), 0, 'disabled event was captured even though it was later purged');
   await popup.reload(); await status(popup, '管理员已关闭');
-  assert.ok(deniedPolicies.includes('admin'));
   assert.equal(durable.size,5);
   adminEnabled = true;
+  await popup.reload(); await status(popup, '已启用');
+  assert.equal(packets.length, attemptsBeforeDisable, 'enabling diagnostics must not replay the denied event');
   await popup.bringToFront();
   await popup.click('#diagnostics-enabled');
   await status(popup, '已关闭诊断回传');

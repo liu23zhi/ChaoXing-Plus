@@ -14,7 +14,7 @@ const LEVELS = new Map([
 
 export function createReceiptDiagnostics({storage, session, version, authority, now = Date.now,
   schedule = setTimeout, cancel = clearTimeout}) {
-  let queue = Promise.resolve(), timer, epoch = 0, inFlight, granted, state = 'checking', failures = 0, queuedRecords = 0, wakeFlight;
+  let queue = Promise.resolve(), timer, epoch = 0, inFlight, state = 'checking', failures = 0, queuedRecords = 0, wakeFlight;
   const inspect = () => ({state});
   const ordered = work => {
     const generation = epoch;
@@ -27,6 +27,14 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
   };
   const setting = async (area, key) => (await area.get(key))[key];
   const optedOut = async () => (await setting(storage, DIAGNOSTICS_OPT_OUT)) === false;
+  const fresh = at => {
+    const age = now() - at;
+    return age >= 0 && age < DAY;
+  };
+  function clearEntries(stream) {
+    stream.firstAt = 0;
+    stream.snapshot = {...stream.snapshot, entries: [], batch: null};
+  }
   function stopTimer() { if (timer !== undefined) cancel(timer); timer = undefined; }
   function later(retrying = false) {
     if (timer !== undefined) return;
@@ -41,7 +49,7 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
       await storage.remove(OUTBOX_KEY);
     }
   }
-  async function deny(reason) { granted = undefined; failures = 0; state = reason; await discard(); }
+  async function deny(reason) { failures = 0; state = reason; await discard(); }
   async function authorityOrDeny(live) {
     if (await optedOut()) {
       if (live()) await deny('opted-out');
@@ -56,12 +64,13 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
     }
     return result;
   }
-  async function request(a, packet, live) {
+  async function request(a, packet, live, canDispatch = () => true) {
     if (!live() || await optedOut() || !live()) return {status: 403};
+    if (!canDispatch()) return {status: 410};
     const ctrl = new AbortController();
     inFlight = ctrl;
     try {
-      const result = await a.send(packet, ctrl.signal);
+      const result = await a.send(packet, ctrl.signal, canDispatch);
       return live() ? result : {status: 403};
     } finally { if (inFlight === ctrl) inFlight = undefined; }
   }
@@ -76,11 +85,10 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
     const b = r?.body;
     if (r?.status === 200 && b?.transport === 'receipt-v1' && typeof b.enabled === 'boolean') {
       if (!b.enabled) { await deny('policy-disabled'); return false; }
-      granted = {binding: a.binding, at: now()};
       return true;
     }
     state = 'unavailable';
-    return false; // An unknown response never authorizes upload or starts a grant.
+    return false; // Unknown policy never authorizes collection or upload.
   }
   async function load(a, live) {
     const [value, launch] = await Promise.all([setting(storage, OUTBOX_KEY), setting(session, LAUNCH_KEY)]);
@@ -95,11 +103,10 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
     const result = value ?? {schema: 1, binding: a.binding, streams: []};
     let changed = false;
     result.streams = result.streams.filter(s => {
-      const at = now(), current = s.snapshot.scope.launch_id === launch;
-      if (s.snapshot.entries.length && (at < s.firstAt || at - s.firstAt >= DAY)) {
+      const current = s.snapshot.scope.launch_id === launch;
+      if (s.snapshot.entries.length && !fresh(s.firstAt)) {
         changed = true;
-        s.firstAt = 0;
-        s.snapshot = {...s.snapshot, entries: [], batch: null};
+        clearEntries(s);
       }
       const keep = current || s.snapshot.entries.length > 0;
       if (!keep) changed = true;
@@ -139,19 +146,18 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
     queuedRecords++;
     return ordered(async live => {
       const a = await authorityOrDeny(live);
-      if (!a) return;
-      const previous = granted;
-      const grantStillKnown = previous?.binding === a.binding && at >= previous.at && at - previous.at < DAY;
-      if (!grantStillKnown && !await policy(a, live)) return;
+      // Reconfirm the live server policy before collecting any new event.
+      // An unavailable check may delay an existing batch but cannot admit new data.
+      if (!a || !await policy(a, live)) return;
       const data = await load(a, live);
-      if (!data || count(data) >= DIAGNOSTIC_OUTBOX_PENDING_LIMIT || !live() || now() - at >= DAY) return;
+      if (!data || count(data) >= DIAGNOSTIC_OUTBOX_PENDING_LIMIT || !live() || !fresh(at)) return;
       let launch_id = await setting(session, LAUNCH_KEY);
       if (!live()) return;
       if (!UUID.test(launch_id ?? '')) {
         launch_id = crypto.randomUUID();
         await session.set({[LAUNCH_KEY]: launch_id});
       }
-      if (!live()) return;
+      if (!live() || !fresh(at)) return;
       const scope = {mode: 'extension', version, device_id: a.deviceId, launch_id};
       const entry = {time: new Date(at).toISOString(), event, level};
       if (Number.isSafeInteger(duration) && duration >= 0 && duration <= 60000) entry.duration_ms = duration;
@@ -168,24 +174,38 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
       stopTimer();
       const a = await authorityOrDeny(live);
       if (!a) return;
+      const enabled = await policy(a, live);
+      if (!live() || (!enabled && state !== 'unavailable')) return;
       const data = await load(a, live);
       if (!data) return;
-      if (!await policy(a, live)) {
-        if (live() && state === 'unavailable' && count(data)) later(true);
+      if (!enabled) {
+        if (count(data)) later(true);
         return;
       }
-      if (!live()) return;
       const next = data.streams.find(s => s.snapshot.entries.length);
       if (!next) { failures = 0; if (state !== 'received') state = 'enabled'; return; }
       const scope = next.snapshot.scope;
       if (scope.device_id !== a.deviceId || scope.mode !== 'extension') { await deny('waiting-agreement'); return; }
+      let expired = false;
+      const canDispatch = () => {
+        expired ||= !fresh(next.firstAt);
+        return live() && !expired;
+      };
       const r = await outbox(data, scope, live).flush({enabled: true,
         transport: async packet => {
-          const reply = await request(a, packet, live);
+          const reply = await request(a, packet, live, canDispatch);
           return {status: reply?.status, receipt: reply?.body};
         }});
       if (!live()) return;
-      if (r.state === 'accepted') {
+      if (expired) {
+        // The durable staging write or last trusted credential read may have
+        // crossed the deadline. Drop this parked batch, never post a partial one.
+        clearEntries(next);
+        await save(data);
+        failures = 0;
+        state = count(data) ? 'pending' : 'enabled';
+        if (count(data)) later();
+      } else if (r.state === 'accepted') {
         failures = 0; state = 'received';
         if (count(data)) later();
       } else if (r.state === 'unauthorized' || r.state === 'forbidden') await deny('waiting-agreement');
@@ -198,7 +218,7 @@ export function createReceiptDiagnostics({storage, session, version, authority, 
     if (area !== 'local') return;
     if ([...AGREEMENT_CONFIG_KEYS, 'agreement.approved-provider.v1', 'agreement.last-device-replacement.v1', DIAGNOSTICS_OPT_OUT]
       .some(key => Object.hasOwn(changes, key))) {
-      epoch++; granted = undefined; failures = 0; inFlight?.abort(); stopTimer();
+      epoch++; failures = 0; inFlight?.abort(); stopTimer();
       void ordered(async live => { if (live()) await discard(); });
       void wake();
     } else if (Object.hasOwn(changes, AGREEMENT_VIEW_KEY)) {

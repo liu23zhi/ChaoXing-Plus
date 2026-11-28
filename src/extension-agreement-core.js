@@ -281,10 +281,11 @@ export function createAgreementController({
     const saved = await readScope();
     if (!saved) return { state: 'waiting-agreement' };
     const binding = await digest(JSON.stringify([cfg.base, cfg.keyHash, cfg.scope, cfg.sharedDevice, saved.deviceId, saved.deviceCredential]));
-    return {binding, deviceId: cfg.sharedDevice, async send(packet, signal) {
+    return {binding, deviceId: cfg.sharedDevice, async send(packet, signal, canDispatch = () => true) {
       const current = await readScope();
       if (signal.aborted || !current || current.deviceId !== saved.deviceId
         || current.deviceCredential !== saved.deviceCredential) return {status: 403};
+      if (!canDispatch()) return {status: 410};
       const response = await request(cfg.base + '/api/extension-logs/' + (packet === null ? 'receipt-policy?mode=extension' : 'batches'), {
         method: packet === null ? 'GET' : 'POST',
         headers: {Authorization: 'Bearer ' + cfg.key, 'X-Agreement-Device': saved.deviceCredential,

@@ -17,6 +17,8 @@ function memory(seed = {}) {
 }
 function environment(mod) {
   let now = Date.parse('2026-11-28T07:00:00.000Z'), policy = false, allowed = true, binding = 'authorized-source-a';
+  let beforeBatch = () => {};
+  let policyResponse = () => ({status: 200, body: {enabled: policy, transport: 'receipt-v1'}});
   let reply = packet => ({
     status: 201,
     body: { scope: Object.fromEntries(Object.entries(packet).filter(([k]) => k !== 'batch_id' && k !== 'entries')),
@@ -25,10 +27,14 @@ function environment(mod) {
   const store = memory({'agreement.view.v1': { phase: 'accepted' }}), requests = [];
   const authority = async () => !allowed ? { state: 'waiting-agreement' } : {
     binding, deviceId: 'owned-device',
-    async send(packet, signal) {
+    async send(packet, signal, canDispatch = () => true) {
       assert.ok(signal instanceof AbortSignal);
+      if (packet !== null) {
+        await beforeBatch();
+        if (!canDispatch()) return {status: 410};
+      }
       requests.push(packet === null ? null : structuredClone(packet));
-      return packet === null ? {status: 200, body: {enabled: policy, transport: 'receipt-v1'}} : reply(packet, signal);
+      return packet === null ? policyResponse() : reply(packet, signal);
     }
   };
   const start = (session = memory()) => mod.createReceiptDiagnostics({
@@ -37,7 +43,8 @@ function environment(mod) {
   });
   const packets = () => requests.filter(Boolean);
   return { start, store, requests, packets, setPolicy(v) {policy=v;}, setReply(v) {reply=v;}, setBinding(v) {binding=v;},
-    setAllowed(v) {allowed=v;}, advance(v) {now+=v;}, correct: reply };
+    setAllowed(v) {allowed=v;}, advance(v) {now+=v;}, correct: reply,
+    setPolicyResponse(v) {policyResponse=v;}, setBeforeBatch(v) {beforeBatch=v;} };
 }
 
 test('default is authorized only after fresh policy; forged display or startup never stages a log', async () => {
@@ -154,6 +161,8 @@ test('private authority requires the approved source and existing device credent
   assert.equal(hits[0].opts.headers['X-Agreement-Device'],secret);
   assert.equal(hits[0].opts.redirect,'error');
   assert.equal(hits[0].opts.credentials,'omit');
+  assert.equal((await authority.send({entries: []},new AbortController().signal,() => false)).status,410);
+  assert.equal(hits.length,1,'expiry check is enforced by the actual private fetch boundary');
   await storage.set({'common.settings.tiku-adapter.baseurl':'https://127.0.0.1:12346'});
   assert.equal((await authority.send(null,new AbortController().signal)).status,403);
   assert.equal(hits.length,1);
@@ -191,4 +200,63 @@ test('a late receipt after local opt-out cannot clear data in a newer collection
   assert.equal((await d.wake()).state,'received');
   assert.notEqual(e.packets()[1].launch_id,old.launch_id);
   assert.deepEqual(e.packets()[1].entries.map(x=>x.event),['sync.success']);
+});
+
+test('slow policy crossing 24 hours expires the complete parked batch before POST', async () => {
+  const mod = await get(), e = environment(mod), d = e.start();
+  const day = 86_400_000;
+  e.setPolicy(true);
+  await d.record('network.timeout');
+  e.advance(day - 6);
+  e.setPolicyResponse(async () => {
+    await Promise.resolve();
+    e.advance(10); // age now 86,400,004 ms, despite the initial unexpired read
+    return {status:200,body:{enabled:true,transport:'receipt-v1'}};
+  });
+  await d.wake();
+  assert.equal(e.packets().length,0);
+  assert.deepEqual((await e.store.get(mod.OUTBOX_KEY))[mod.OUTBOX_KEY]?.streams.flatMap(s => s.snapshot.entries) ?? [], []);
+});
+
+test('the last authority read before dispatch cannot cross the 24h deadline and send a batch', async () => {
+  const mod = await get(), e = environment(mod), d = e.start();
+  e.setPolicy(true);
+  await d.record('sync.success');
+  e.advance(86_400_000 - 6);
+  e.setBeforeBatch(async () => { await Promise.resolve(); e.advance(10); });
+  await d.wake();
+  assert.equal(e.packets().length,0);
+  assert.deepEqual((await e.store.get(mod.OUTBOX_KEY))[mod.OUTBOX_KEY]?.streams.flatMap(s => s.snapshot.entries) ?? [], []);
+});
+
+test('record must freshly observe current policy; explicit disable drops data and later enable cannot restore it', async () => {
+  const mod = await get(), e = environment(mod), d = e.start();
+  e.setPolicy(true);
+  await d.record('sync.success');
+  await d.wake();
+  assert.deepEqual(e.packets().map(packet => packet.entries[0].event), ['sync.success']);
+  e.setPolicy(false);
+  const calls = e.requests.length;
+  assert.equal((await d.record('settings.saved')).state, 'policy-disabled');
+  assert.equal(e.requests.length, calls+1, 'remote changed without a local settings notification');
+  assert.equal((await e.store.get(mod.OUTBOX_KEY))[mod.OUTBOX_KEY], undefined);
+  e.setPolicy(true);
+  assert.equal((await d.wake()).state, 'enabled');
+  assert.deepEqual(e.packets().map(packet => packet.entries[0].event), ['sync.success']);
+});
+
+test('an unknown policy or a network failure cannot admit events, but preserves previously authorized batch for retry', async () => {
+  const mod = await get(), e = environment(mod), d = e.start();
+  e.setPolicy(true);
+  await d.record('sync.success');
+  const old = (await e.store.get(mod.OUTBOX_KEY))[mod.OUTBOX_KEY];
+  e.setPolicyResponse(() => { throw new Error('owned simulated network outage'); });
+  assert.equal((await d.record('runtime.error')).state, 'unavailable');
+  e.setPolicyResponse(() => ({status:503}));
+  assert.equal((await d.record('network.timeout')).state, 'unavailable');
+  assert.deepEqual((await e.store.get(mod.OUTBOX_KEY))[mod.OUTBOX_KEY],old);
+  assert.equal(e.packets().length,0);
+  e.setPolicyResponse(() => ({status:200,body:{enabled:true,transport:'receipt-v1'}}));
+  assert.equal((await d.wake()).state, 'received');
+  assert.deepEqual(e.packets().flatMap(packet => packet.entries.map(x => x.event)), ['sync.success']);
 });
