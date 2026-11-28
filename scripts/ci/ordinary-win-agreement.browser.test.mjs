@@ -22,6 +22,54 @@ const hostedWindows = process.platform === 'win32' && process.env.GITHUB_ACTIONS
 const requestedWindows = Boolean(process.env.CX_T04_PROVIDER_EXE || process.env.CX_T04_NATIVE_EXE);
 const providerFields = ['baseUrl', 'caPem', 'controlKey', 'deviceId', 'deviceCredential', 'accountToken', 'hostDeviceId', 'instance'];
 
+const safeNames = new Set(['Error', 'AggregateError', 'AssertionError', 'TypeError', 'RangeError',
+  'TimeoutError', 'ProtocolError', 'TargetCloseError', 'AbortError']);
+const safeCodes = new Set(['ERR_ASSERTION', 'ERR_INVALID_ARG_TYPE', 'ERR_MODULE_NOT_FOUND', 'ABORT_ERR',
+  'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'EBUSY', 'ENOTEMPTY', 'ECONNREFUSED', 'ETIMEDOUT']);
+const safeHints = [
+  'ERR_BLOCKED_BY_CLIENT', 'ERR_ABORTED', 'ERR_CONNECTION_REFUSED', 'Could not find Chrome',
+  'Failed to launch the browser process', 'Session closed', 'Target closed',
+  'Expected owned extension worker is unavailable', 'host mode not observed before forging display phase',
+  'the negative fixture must actually seed a forged display phase', 'browser storage contains a non-fixture field',
+  'authorization response', 'protected loopback operation count',
+  'Owned provider exited before exposing fixture configuration', 'Owned provider exit was not zero',
+  'Timed out waiting for owned provider configuration', 'Owned provider did not stop cleanly on stdin EOF',
+  'Provider did not produce its expected native-only configuration', 'Provider origin is not the scoped owned fixture',
+  'Provider origin/certificate is not the scoped owned fixture', 'Owned HTTPS control request failed',
+  'Owned HTTPS control response failed', 'owned test package must not contain provider configuration or credentials',
+  'Unexpected owned native-messaging manifest path.', 'Unexpected reparse point in the owned fixture.',
+  'Temporary native host name or receipt already exists.', 'Refusing to remove a changed registry key.',
+  'Native host registration did not round trip.', 'Unexpected owned registry key without a cleanup receipt.',
+  'Owned registry key remains.', 'Refusing to remove unexpected fixture path',
+  'ParameterBindingValidationException', 'UnauthorizedAccessException', 'MethodInvocationException'
+];
+
+function safeFailure(error, depth = 0) {
+  const name = safeNames.has(error?.name) ? error.name : 'Error';
+  const code = safeCodes.has(error?.code) || Number.isInteger(error?.code) ? ' code=' + error.code : '';
+  // Never print an arbitrary exception, child command, stdout/stderr, or cause:
+  // just static markers, exception codes, and the fixture script's line number.
+  const detail = [error?.message, error?.stderr].filter(value => typeof value === 'string').join('\n');
+  const hints = safeHints.filter(hint => detail.includes(hint));
+  const registryLine = /registry\.ps1:(\d{1,4})\s+char:\d+/i.exec(detail);
+  if (registryLine) hints.push('registry.ps1:' + registryLine[1]);
+  const controlStatus = /Owned action (accept|rotate) returned ([1-5]\d{2})(?!\d)/.exec(detail);
+  if (controlStatus) hints.push(controlStatus[1] + ' HTTP ' + controlStatus[2]);
+  const nested = depth < 2 && Array.isArray(error?.errors)
+    ? error.errors.slice(0, 4).map(item => safeFailure(item, depth + 1)) : [];
+  return name + code + (hints.length ? ' [' + hints.join(', ') + ']' : '')
+    + (nested.length ? ' {' + nested.join('; ') + '}' : '');
+}
+
+test('hosted diagnostics never forward commands, provider details or raw nested errors', () => {
+  const inner = Object.assign(new Error('command contains hidden-value ERR_BLOCKED_BY_CLIENT'), {
+    code: 1, stderr: 'registry.ps1:86 char:12 Contains hidden-value UnauthorizedAccessException'
+  });
+  const output = safeFailure(new AggregateError([inner, new Error('unlisted hidden-value')], 'hidden-value'));
+  assert.match(output, /AggregateError.*Error code=1.*ERR_BLOCKED_BY_CLIENT.*UnauthorizedAccessException.*registry\.ps1:86/);
+  assert.doesNotMatch(output, /hidden-value|command contains/);
+});
+
 test('owned host bridge accepts only the exact sender, request and one-field native reply', async () => {
   const scope = { hostName: 'org.cxplus.t04_unit', url: 'http://127.0.0.1:12345/owned-t04/active',
     origin: 'http://127.0.0.1:12345', shapeBase, shapeHash };
@@ -195,12 +243,21 @@ test('ordinary Windows native result controls an owned browser operation, stock 
 }, async t => {
   if (!hostedWindows) throw new Error('Requested test must run on an ephemeral GitHub-hosted Windows runner');
   const signal = t.signal;
-  const providerExe = await requiredFile('CX_T04_PROVIDER_EXE');
-  const nativeExe = await requiredFile('CX_T04_NATIVE_EXE');
-  const { default: puppeteer } = await import('puppeteer');
+  function reportFailure(stage, error) {
+    const message = 'Owned T04 ' + stage + ': ' + safeFailure(error);
+    t.diagnostic(message);
+    return new Error(message);
+  }
+  async function prepare(stage, operation) {
+    try { return await operation(); }
+    catch (error) { throw reportFailure(stage, error); }
+  }
+  const providerExe = await prepare('provider-executable', () => requiredFile('CX_T04_PROVIDER_EXE'));
+  const nativeExe = await prepare('broker-executable', () => requiredFile('CX_T04_NATIVE_EXE'));
+  const { default: puppeteer } = await prepare('puppeteer-import', () => import('puppeteer'));
   const dist = resolveTestPath('dist');
-  const stock = await readStockFiles(dist);
-  const scratch = await ownedScratch();
+  const stock = await prepare('stock-build-read', () => readStockFiles(dist));
+  const scratch = await prepare('scratch-create', ownedScratch);
   const hostName = 'org.cxplus.t04_' + randomUUID().replaceAll('-', '');
   const identity = extensionIdentity(), wrongIdentity = extensionIdentity();
   const candidate = join(scratch.root, 'candidate-ext'), original = join(scratch.root, 'stock-ext');
@@ -208,6 +265,8 @@ test('ordinary Windows native result controls an owned browser operation, stock 
   const wrongOrigin = join(scratch.root, 'wrong-origin-ext'), nativeDir = join(scratch.root, 'native');
   const manifest = join(nativeDir, 'native-host.json'), fixtureDir = join(scratch.root, 'provider');
   let owned, provider, browser, attemptedRegistration = false;
+  let stage = 'scratch-prepare';
+  const failures = [];
 
   async function unregister() {
     if (!attemptedRegistration) return;
@@ -215,21 +274,35 @@ test('ordinary Windows native result controls an owned browser operation, stock 
     attemptedRegistration = false;
   }
   async function check(dir, profile, id, want, label) {
-    const launched = await launchOwnedBrowser(puppeteer, dir, join(scratch.root, profile), id, signal);
-    try { await expectProbe(launched, owned, owned.url, want, label); }
-    finally { await launched.close(); }
+    const launched = await launchOwnedBrowser(puppeteer, dir, join(scratch.root, profile), id, signal,
+      action => { stage = profile + '-' + action; });
+    stage = profile + '-probe';
+    let observed = false;
+    try {
+      await expectProbe(launched, owned, owned.url, want, label);
+      observed = true;
+    } finally {
+      try { await launched.close(); }
+      catch (error) {
+        if (observed) { stage = profile + '-close'; throw error; }
+        failures.push(reportFailure(profile + '-close', error));
+      }
+    }
   }
-  const failures = [];
   try {
     await Promise.all([mkdir(nativeDir), mkdir(fixtureDir)]);
+    stage = 'owned-page-start';
     owned = await startOwnedPage();
+    stage = 'provider-start';
     provider = await startProvider(providerExe, fixtureDir, signal);
+    stage = 'extension-package';
     await Promise.all([
       makeExtension(candidate, stock, identity, owned, hostName),
       makeExtension(original, stock, identity, owned),
       makeExtension(wrongOrigin, stock, wrongIdentity, owned, hostName)
     ]);
     await assertNoAuthorityInPackages([candidate, original, wrongOrigin], providerFields.map(key => provider.info[key]));
+    stage = 'broker-package';
     const broker = join(nativeDir, 'broker.exe');
     await copyFile(nativeExe, broker);
     const nativeInfo = Object.fromEntries(providerFields.filter(key => key !== 'controlKey').map(key => [key, provider.info[key]]));
@@ -238,41 +311,59 @@ test('ordinary Windows native result controls an owned browser operation, stock 
       name: hostName, description: 'Disposable owned Windows agreement result fixture', path: broker,
       type: 'stdio', allowed_origins: [identity.origin]
     }), { flag: 'wx' });
+    stage = 'registry-register';
     attemptedRegistration = true;
     assert.equal(await registry('Register', hostName, manifest), 'registered');
 
-    browser = await launchOwnedBrowser(puppeteer, candidate, join(scratch.root, 'candidate-profile'), identity, signal);
+    browser = await launchOwnedBrowser(puppeteer, candidate, join(scratch.root, 'candidate-profile'), identity, signal,
+      action => { stage = 'candidate-browser-' + action; });
+    stage = 'candidate-pending-probe';
     await expectProbe(browser, owned, owned.url, false, 'pending + forged display cache');
     t.diagnostic('pending + forged display cache: denied; protected calls=0');
+    stage = 'provider-accept';
     await control(provider.info, 'accept', signal);
     await check(original, 'stock-baseline-profile', identity, false, 'stock baseline with accepted provider and same input');
+    stage = 'candidate-accepted-probe';
     await expectProbe(browser, owned, owned.url, true, 'accepted via owned provider');
+    stage = 'candidate-restore';
     await restoreExtension(candidate, original, restored);
     await check(restored, 'stock-restored-profile', identity, false, 'candidate restored to stock with same accepted provider and input');
     t.diagnostic('same accepted provider + input: BASELINE allowed=false calls=0; MODIFIED allowed=true calls=1; ROLLBACK allowed=false calls=0');
+    stage = 'wrong-page-probe';
     await expectProbe(browser, owned, owned.otherUrl, false, 'wrong owned page with current consent');
     await check(wrongOrigin, 'wrong-origin-profile', wrongIdentity, false, 'wrong extension origin with current consent');
     t.diagnostic('wrong page and wrong extension origin: denied; protected calls=0');
+    stage = 'provider-rotate';
     await control(provider.info, 'rotate', signal);
+    stage = 'candidate-rotated-probe';
     await expectProbe(browser, owned, owned.url, false, 'new release pending');
     t.diagnostic('release rotated: denied; protected calls=0');
+    stage = 'provider-reaccept';
     await control(provider.info, 'accept', signal);
+    stage = 'candidate-reaccepted-probe';
     await expectProbe(browser, owned, owned.url, true, 'fresh consent to rotated release');
+    stage = 'candidate-close';
     await browser.close();
     browser = undefined;
 
+    stage = 'registry-unregister';
     await unregister();
     await check(candidate, 'missing-host-profile', identity, false, 'native host removed with live accepted provider');
     t.diagnostic('native host removed, consent current: denied; protected calls=0');
+    stage = 'verify-stock-build';
     assert.deepEqual(await readStockFiles(dist), stock, 'ordinary build manifest and agreement files changed');
   } catch (error) {
-    failures.push(error);
+    failures.push(reportFailure(stage, error));
   } finally {
-    for (const cleanup of [() => browser?.close(), unregister, () => provider?.close(), () => owned?.close(), scratch.remove]) {
+    for (const [name, cleanup] of [
+      ['close-browser', () => browser?.close()], ['unregister', unregister], ['close-provider', () => provider?.close()],
+      ['close-owned-page', () => owned?.close()], ['remove-scratch', scratch.remove]
+    ]) {
       try { await cleanup(); }
-      catch (error) { failures.push(error); }
+      catch (error) { failures.push(reportFailure('cleanup-' + name, error)); }
     }
   }
-  if (failures.length) throw failures.length === 1 ? failures[0] : new AggregateError(failures, 'Owned T04 execution or cleanup failed');
+  if (failures.length) throw failures.length === 1 ? failures[0]
+    : new AggregateError(failures, failures.map(error => error.message).join('; '));
   t.diagnostic('disposable profiles, native files, registry key and fixture processes cleaned; ordinary dist unchanged');
 });

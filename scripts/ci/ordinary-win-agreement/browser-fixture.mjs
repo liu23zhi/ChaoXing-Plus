@@ -152,7 +152,8 @@ function browserEnvironment() {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => keys.has(name.toUpperCase())));
 }
 
-export async function launchOwnedBrowser(puppeteer, directory, profile, identity, signal) {
+export async function launchOwnedBrowser(puppeteer, directory, profile, identity, signal, note = () => {}) {
+  note('launch');
   const browser = await puppeteer.launch({
     headless: true,
     pipe: true,
@@ -166,37 +167,41 @@ export async function launchOwnedBrowser(puppeteer, directory, profile, identity
     signal
   });
   try {
-    await browser.waitForTarget(target => target.type() === 'service_worker'
+    note('worker-target');
+    const target = await browser.waitForTarget(target => target.type() === 'service_worker'
       && target.url() === identity.origin + 'fixture-worker.js', { timeout: 15_000 });
-    const settings = await browser.newPage();
-    try {
-      await settings.goto(identity.origin + 'extension-agreement.html', { waitUntil: 'domcontentloaded', timeout: 12_000 });
-      await settings.evaluate(async base => {
-        await chrome.storage.local.set({
-          'common.settings.tiku-adapter.baseurl': base,
-          'common.settings.device-instance': 'synthetic-ordinary-host',
-          'common.settings.extension-enabled': true
-        });
-      }, shapeBase);
-      await settings.waitForFunction(async () => {
-        const key = 'agreement.view.v1';
-        return (await chrome.storage.local.get(key))[key]?.phase === 'host';
-      }, { timeout: 5000 });
-      assert.equal(await settings.evaluate(async () => {
-        const key = 'agreement.view.v1';
-        await chrome.storage.local.set({ [key]: { phase: 'accepted', acceptedVersion: 'untrusted-display-only' } });
-        return (await chrome.storage.local.get(key))[key]?.phase;
-      }), 'accepted', 'the negative fixture must actually seed a forged display phase');
-      const localKeys = await settings.evaluate(async () => Object.keys(await chrome.storage.local.get(null)));
-      const inertSettings = new Set(['common.settings.tiku-adapter.baseurl', 'common.settings.device-instance',
-        'common.settings.extension-enabled', 'agreement.view.v1', 'agreement.install.v1']);
-      assert.ok(localKeys.every(key => inertSettings.has(key)), 'browser storage contains a non-fixture field');
-    } finally {
-      await settings.close();
-    }
+    const worker = await target.worker();
+    if (!worker) throw new Error('Expected owned extension worker is unavailable');
+    note('worker-seed');
+    // Only the exact owned fixture worker receives this fixed storage setup, not
+    // an arbitrary page or a private extension URL opened via page navigation.
+    const seeded = await worker.evaluate(async base => {
+      const storage = chrome.storage.local, viewKey = 'agreement.view.v1';
+      await storage.set({
+        'common.settings.tiku-adapter.baseurl': base,
+        'common.settings.device-instance': 'synthetic-ordinary-host',
+        'common.settings.extension-enabled': true
+      });
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        if ((await storage.get(viewKey))[viewKey]?.phase === 'host') {
+          await storage.set({ [viewKey]: { phase: 'accepted', acceptedVersion: 'untrusted-display-only' } });
+          const values = await storage.get(null);
+          return { host: true, forgedPhase: values[viewKey]?.phase, localKeys: Object.keys(values) };
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      return { host: false };
+    }, shapeBase);
+    assert.equal(seeded.host, true, 'host mode not observed before forging display phase');
+    assert.equal(seeded.forgedPhase, 'accepted', 'the negative fixture must actually seed a forged display phase');
+    const inertSettings = new Set(['common.settings.tiku-adapter.baseurl', 'common.settings.device-instance',
+      'common.settings.extension-enabled', 'agreement.view.v1', 'agreement.install.v1']);
+    assert.ok(seeded.localKeys.every(key => inertSettings.has(key)), 'browser storage contains a non-fixture field');
     return browser;
   } catch (error) {
-    await browser.close();
+    try { await browser.close(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Owned browser setup and cleanup failed'); }
     throw error;
   }
 }
