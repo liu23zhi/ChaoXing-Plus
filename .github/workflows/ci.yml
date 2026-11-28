@@ -113,6 +113,12 @@ jobs:
       # npm's locked Puppeteer installs Chrome for Testing, which can load an unpacked MV3 extension.
       - run: npm ci
       - run: npm run build
+      - name: 普通 Windows 测试构建仅返回协议授权结果
+        shell: pwsh
+        env:
+          GOMAXPROCS: "2"
+        run: ./scripts/ci/ordinary-win-agreement.ps1 -TiKuHelperRoot ./.t04-owned-provider
+
       - name: 实际扩展重启与同一宿主的三个隔离浏览器资料
         run: node --test --test-concurrency=1 scripts/extension-diagnostics.browser.test.mjs scripts/ci/owned-profiles.browser.test.mjs
       - name: 编译并运行自有 x86 名额、授权与回环 WinHTTP 夹具
@@ -121,12 +127,6 @@ jobs:
       - name: TiKu 实际 PS1 与原生启动配置和授权兼容
         shell: pwsh
         run: ./scripts/ci/tiku-launcher-native-contract.ps1 -TiKuHelperRoot ./.joint-service
-
-      - name: 普通 Windows 测试构建仅返回协议授权结果
-        shell: pwsh
-        env:
-          GOMAXPROCS: "2"
-        run: ./scripts/ci/ordinary-win-agreement.ps1 -TiKuHelperRoot ./.t04-owned-provider
 
       - name: 验证非交互提示与构建产物门禁
         shell: pwsh

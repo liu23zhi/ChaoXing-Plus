@@ -8,10 +8,10 @@ import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { resolveTestPath } from '../test-helpers/temp-directory.mjs';
+import { createTestDirectory, resolveTestPath } from '../test-helpers/temp-directory.mjs';
 import {
   assertNoAuthorityInPackages, expectProbe, extensionIdentity, launchOwnedBrowser, makeExtension, ownedMessage, readStockFiles,
-  shapeBase, shapeHash, startOwnedPage
+  restoreExtension, shapeBase, shapeHash, startOwnedPage
 } from './ordinary-win-agreement/browser-fixture.mjs';
 import { authorizeOwnedHostRequest, instrumentOwnedWorker } from './ordinary-win-agreement/host-result.mjs';
 
@@ -62,6 +62,25 @@ test('owned host bridge accepts only the exact sender, request and one-field nat
   const worker = await readFile(resolveTestPath('src/extension-agreement-worker.js'), 'utf8');
   assert.match(instrumentOwnedWorker(worker, scope), /if \(op === 'authorize'\) \{\n {6}void authorizeOwnedHostRequest/);
   assert.throws(() => instrumentOwnedWorker('missing seam', scope), /test seam changed/);
+});
+
+test('rollback restores a copied test package to stock files and bytes without changing the candidate', async () => {
+  const root = createTestDirectory('owned-t04-rollback');
+  const candidate = join(root, 'candidate'), original = join(root, 'original'), restored = join(root, 'restored');
+  const stock = {
+    manifest: { version: '1.0.0', permissions: ['storage'] },
+    worker: await readFile(resolveTestPath('src/extension-agreement-worker.js'), 'utf8'),
+    core: await readFile(resolveTestPath('src/extension-agreement-core.js'), 'utf8')
+  };
+  const owned = { origin: 'http://127.0.0.1:12345', url: 'http://127.0.0.1:12345/owned-t04/active',
+    protectedPath: '/owned-t04/protected' };
+  const identity = extensionIdentity();
+  await makeExtension(candidate, stock, identity, owned, 'org.cxplus.t04_unit');
+  await makeExtension(original, stock, identity, owned);
+  const before = await readFile(join(candidate, 'manifest.json'));
+  await restoreExtension(candidate, original, restored);
+  assert.deepEqual(await readFile(join(candidate, 'manifest.json')), before);
+  await access(join(candidate, 'host-result.js'));
 });
 
 async function requiredFile(name) {
@@ -185,6 +204,7 @@ test('ordinary Windows native result controls an owned browser operation, stock 
   const hostName = 'org.cxplus.t04_' + randomUUID().replaceAll('-', '');
   const identity = extensionIdentity(), wrongIdentity = extensionIdentity();
   const candidate = join(scratch.root, 'candidate-ext'), original = join(scratch.root, 'stock-ext');
+  const restored = join(scratch.root, 'restored-ext');
   const wrongOrigin = join(scratch.root, 'wrong-origin-ext'), nativeDir = join(scratch.root, 'native');
   const manifest = join(nativeDir, 'native-host.json'), fixtureDir = join(scratch.root, 'provider');
   let owned, provider, browser, attemptedRegistration = false;
@@ -227,7 +247,8 @@ test('ordinary Windows native result controls an owned browser operation, stock 
     await control(provider.info, 'accept', signal);
     await check(original, 'stock-baseline-profile', identity, false, 'stock baseline with accepted provider and same input');
     await expectProbe(browser, owned, owned.url, true, 'accepted via owned provider');
-    await check(original, 'stock-restored-profile', identity, false, 'stock restored with same accepted provider and input');
+    await restoreExtension(candidate, original, restored);
+    await check(restored, 'stock-restored-profile', identity, false, 'candidate restored to stock with same accepted provider and input');
     t.diagnostic('same accepted provider + input: BASELINE allowed=false calls=0; MODIFIED allowed=true calls=1; ROLLBACK allowed=false calls=0');
     await expectProbe(browser, owned, owned.otherUrl, false, 'wrong owned page with current consent');
     await check(wrongOrigin, 'wrong-origin-profile', wrongIdentity, false, 'wrong extension origin with current consent');

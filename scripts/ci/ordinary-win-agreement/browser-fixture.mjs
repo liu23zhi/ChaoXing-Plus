@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { AGREEMENT_KIND, instrumentOwnedWorker } from './host-result.mjs';
@@ -111,6 +111,26 @@ export async function makeExtension(directory, stock, identity, owned, hostName)
   if (hostName) files['host-result.js'] = await readFile(new URL('./host-result.mjs', import.meta.url), 'utf8');
   await Promise.all(Object.entries(files).map(([file, body]) => writeFile(join(directory, file), body, { flag: 'wx' })));
   if (!hostName) assert.equal(await readFile(join(directory, 'extension-agreement-worker.js'), 'utf8'), stock.worker);
+}
+
+export async function restoreExtension(candidate, original, restored) {
+  const entries = await readdir(candidate, { withFileTypes: true });
+  assert.ok(entries.every(entry => entry.isFile()), 'candidate package must be flat');
+  await mkdir(restored);
+  await Promise.all(entries.map(entry => copyFile(join(candidate, entry.name), join(restored, entry.name))));
+  for (const name of ['manifest.json', 'extension-agreement-worker.js']) {
+    const pristine = await readFile(join(original, name));
+    const copy = join(restored, name);
+    assert.ok(!(await readFile(copy)).equals(pristine), name + ': restored copy must start instrumented');
+    await writeFile(copy, pristine);
+  }
+  await unlink(join(restored, 'host-result.js'));
+  const names = (await readdir(original)).sort();
+  assert.deepEqual((await readdir(restored)).sort(), names, 'restored package file inventory');
+  for (const name of names) {
+    const [pristine, after] = await Promise.all([readFile(join(original, name)), readFile(join(restored, name))]);
+    assert.ok(after.equals(pristine), name + ': restored package bytes differ from original');
+  }
 }
 
 export async function assertNoAuthorityInPackages(directories, forbidden) {
