@@ -157,11 +157,13 @@ export async function launchOwnedBrowser(puppeteer, directory, profile, identity
   const browser = await puppeteer.launch({
     headless: true,
     pipe: true,
-    enableExtensions: [directory],
+    // Chrome for Testing loads this exact fixture at startup, without relying
+    // on CDP Extensions.loadUnpacked availability or its asynchronous install.
+    enableExtensions: true,
     userDataDir: profile,
     executablePath: process.env.CX_BROWSER_EXECUTABLE || puppeteer.executablePath(),
     env: browserEnvironment(),
-    args: diagnosticBrowserArgs,
+    args: [...diagnosticBrowserArgs, '--load-extension=' + directory],
     timeout: 25_000,
     protocolTimeout: 15_000,
     signal

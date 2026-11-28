@@ -73,7 +73,9 @@ try {
             if ((Get-Item -LiteralPath $receipt).Attributes -band [IO.FileAttributes]::ReparsePoint) {
                 throw 'Unexpected registry receipt reparse point.'
             }
-            $created = @([IO.File]::ReadAllText($receipt) | ConvertFrom-Json)
+            # Windows PowerShell 5.1 already returns the JSON array as one object.
+            # Re-wrapping its pipeline output nests it and breaks parent validation.
+            [string[]]$created = ([IO.File]::ReadAllText($receipt) | ConvertFrom-Json)
             Remove-Owned $created $true
             [IO.File]::Delete($receipt)
         } elseif ((Test-Key $narrow $leafPath) -or (Test-Key $wide $leafPath)) {

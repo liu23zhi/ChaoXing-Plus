@@ -28,7 +28,8 @@ const safeCodes = new Set(['ERR_ASSERTION', 'ERR_INVALID_ARG_TYPE', 'ERR_MODULE_
   'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'EBUSY', 'ENOTEMPTY', 'ECONNREFUSED', 'ETIMEDOUT']);
 const safeHints = [
   'ERR_BLOCKED_BY_CLIENT', 'ERR_ABORTED', 'ERR_CONNECTION_REFUSED', 'Could not find Chrome',
-  'Failed to launch the browser process', 'Session closed', 'Target closed',
+  'Failed to launch the browser process', 'Browser was not found at the configured executablePath',
+  'Extensions.loadUnpacked', 'Session closed', 'Target closed',
   'Expected owned extension worker is unavailable', 'host mode not observed before forging display phase',
   'the negative fixture must actually seed a forged display phase', 'browser storage contains a non-fixture field',
   'authorization response', 'protected loopback operation count',
@@ -39,6 +40,7 @@ const safeHints = [
   'Owned HTTPS control response failed', 'owned test package must not contain provider configuration or credentials',
   'Unexpected owned native-messaging manifest path.', 'Unexpected reparse point in the owned fixture.',
   'Temporary native host name or receipt already exists.', 'Refusing to remove a changed registry key.',
+  'Unexpected owned registry parent.',
   'Native host registration did not round trip.', 'Unexpected owned registry key without a cleanup receipt.',
   'Owned registry key remains.', 'Refusing to remove unexpected fixture path',
   'ParameterBindingValidationException', 'UnauthorizedAccessException', 'MethodInvocationException'
