@@ -11,12 +11,17 @@
    dir is the existing host-only, application-owned data directory. base is
    the verified HTTPS service; ordinaryKey is bare, agreementProof is private.
    Call with TRUE once per successful owned browser launch (never from web
-   input). FALSE retries prior work; browser and version may then be NULL.
+   input). version is the actual extension manifest version, not the agreement.
+   FALSE retries prior work; browser and version may then be NULL.
    TRUE result means one exact receipt was matched and its packet was retired.
    Diagnostics, including local or transport failure, never grant admission.
 */
 BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
     const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser,
     const WCHAR *version, BOOL recordReady);
+
+/* Worker-thread only. Drop this directory's pending diagnostics after an
+   explicit denial or unbinding, with no HTTP request or new disk state. */
+BOOL cx_ordinary_receipts_discard(const WCHAR *dir);
 
 #endif

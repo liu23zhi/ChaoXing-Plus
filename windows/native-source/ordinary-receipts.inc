@@ -316,45 +316,70 @@ static void cx_or_shift(CX_OR_QUEUE *queue) {
     --queue->count;
 }
 
-BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
-    const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser, const WCHAR *version, BOOL recordReady) {
-    WCHAR root[MAX_PATH], folded[MAX_PATH], path[MAX_PATH], temp[MAX_PATH], mutexName[96], *auth = NULL;
-    char deviceId[129], browserId[129], release[28], binding[65], dirHash[65];
-    const WCHAR *lockParts[] = {folded};
-    const WCHAR *scopeParts[] = {L"cx-ordinary-diagnostic-binding-v1", base, ordinaryKey, agreementProof, device};
-    FILETIME observed;
-    DWORD n, attrs, wait, authSize = 0;
-    CX_ADAPTER_REPLY reply = {0};
-    CX_OR_FIELDS fields;
-    CX_OR_QUEUE *queue = NULL;
-    CX_OR_POLICY permission;
-    HANDLE mutex = NULL;
-    BOOL held = FALSE, received = FALSE;
-    if (!dir || !*dir || !base || lstrlenW(base) < 9 || lstrlenW(base) >= CX_ADAPTER_TOKEN_CAP
-        || CompareStringOrdinal(base, 8, L"https://", 8, TRUE) != CSTR_EQUAL || !cx_or_key(ordinaryKey, agreementProof)
-        || !cx_or_ascii(device, deviceId, sizeof(deviceId)) || !cx_or_identifier(deviceId)
-        || (recordReady && (!cx_or_ascii(browser, browserId, sizeof(browserId)) || !cx_or_identifier(browserId)
-            || !cx_or_ascii(version, release, sizeof(release)) || !cx_or_version(release)))) return FALSE;
-    GetSystemTimeAsFileTime(&observed);
+typedef struct CX_OR_LOCATION {
+    WCHAR path[MAX_PATH], temp[MAX_PATH];
+    HANDLE mutex;
+} CX_OR_LOCATION;
+static BOOL cx_or_lock(const WCHAR *dir, CX_OR_LOCATION *location) {
+    WCHAR root[MAX_PATH], folded[MAX_PATH], mutexName[96];
+    char dirHash[65];
+    const WCHAR *parts[] = {folded};
+    DWORD n, attrs, wait;
+    if (!dir || !*dir) return FALSE;
     n = GetFullPathNameW(dir, ARRAYSIZE(root), root, NULL);
     if (!n || n >= ARRAYSIZE(root) - ARRAYSIZE(CX_OR_FILE) - 6) return FALSE;
     while (n > 3 && root[n - 1] == '\\') root[--n] = 0;
     attrs = GetFileAttributesW(root);
     if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY) || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
         || !LCMapStringW(LOCALE_INVARIANT, LCMAP_UPPERCASE, root, -1, folded, ARRAYSIZE(folded))
-        || !cx_or_hash(lockParts, ARRAYSIZE(lockParts), dirHash)
-        || !cx_or_hash(scopeParts, ARRAYSIZE(scopeParts), binding)) return FALSE;
+        || !cx_or_hash(parts, ARRAYSIZE(parts), dirHash)) return FALSE;
     wsprintfW(mutexName, L"Local\\CXOrdinaryDiagnostic-%S", dirHash);
-    wsprintfW(path, L"%s%s%s", root, root[n - 1] == '\\' ? L"" : L"\\", CX_OR_FILE);
-    wsprintfW(temp, L"%s.tmp", path);
-    mutex = CreateMutexW(NULL, FALSE, mutexName);
-    if (!mutex) goto done;
-    wait = WaitForSingleObject(mutex, 1500);
-    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) goto done;
-    held = TRUE;
-    if (!cx_or_drop(temp)) goto done;
+    wsprintfW(location->path, L"%s%s%s", root, root[n - 1] == '\\' ? L"" : L"\\", CX_OR_FILE);
+    wsprintfW(location->temp, L"%s.tmp", location->path);
+    location->mutex = CreateMutexW(NULL, FALSE, mutexName);
+    if (!location->mutex) return FALSE;
+    wait = WaitForSingleObject(location->mutex, 1500);
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) return TRUE;
+    CloseHandle(location->mutex);
+    return FALSE;
+}
+static void cx_or_unlock(CX_OR_LOCATION *location) {
+    ReleaseMutex(location->mutex);
+    CloseHandle(location->mutex);
+}
+BOOL cx_ordinary_receipts_discard(const WCHAR *dir) {
+    CX_OR_LOCATION location;
+    BOOL removedTemp, removedOutbox;
+    if (!cx_or_lock(dir, &location)) return FALSE;
+    removedTemp = cx_or_drop(location.temp);
+    removedOutbox = cx_or_drop(location.path);
+    cx_or_unlock(&location);
+    return removedTemp && removedOutbox;
+}
+
+BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR *ordinaryKey,
+    const WCHAR *agreementProof, const WCHAR *device, const WCHAR *browser, const WCHAR *version, BOOL recordReady) {
+    CX_OR_LOCATION location;
+    WCHAR *auth = NULL;
+    char deviceId[129], browserId[129], release[28], binding[65];
+    const WCHAR *scopeParts[] = {L"cx-ordinary-diagnostic-binding-v1", base, ordinaryKey, agreementProof, device};
+    FILETIME observed;
+    DWORD authSize = 0;
+    CX_ADAPTER_REPLY reply = {0};
+    CX_OR_FIELDS fields;
+    CX_OR_QUEUE *queue = NULL;
+    CX_OR_POLICY permission;
+    BOOL received = FALSE;
+    if (!base || lstrlenW(base) < 9 || lstrlenW(base) >= CX_ADAPTER_TOKEN_CAP
+        || CompareStringOrdinal(base, 8, L"https://", 8, TRUE) != CSTR_EQUAL || !cx_or_key(ordinaryKey, agreementProof)
+        || !cx_or_ascii(device, deviceId, sizeof(deviceId)) || !cx_or_identifier(deviceId)
+        || (recordReady && (!cx_or_ascii(browser, browserId, sizeof(browserId)) || !cx_or_identifier(browserId)
+            || !cx_or_ascii(version, release, sizeof(release)) || !cx_or_version(release)))) return FALSE;
+    GetSystemTimeAsFileTime(&observed);
+    if (!cx_or_hash(scopeParts, ARRAYSIZE(scopeParts), binding) || !cx_or_lock(dir, &location)) return FALSE;
+    if (!cx_or_drop(location.temp)) goto done;
     queue = (CX_OR_QUEUE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*queue));
-    if (!queue || !cx_or_load(path, temp, binding, deviceId, queue) || (!recordReady && !queue->count)) goto done;
+    if (!queue || !cx_or_load(location.path, location.temp, binding, deviceId, queue) || (!recordReady && !queue->count)) goto done;
 
     authSize = ((DWORD)lstrlenW(ordinaryKey) + 8) * sizeof(WCHAR);
     auth = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, authSize);
@@ -362,33 +387,32 @@ BOOL cx_ordinary_receipts_pump(const WCHAR *dir, const WCHAR *base, const WCHAR 
     lstrcpyW(auth, L"Bearer ");
     lstrcpyW(auth + 7, ordinaryKey);
     permission = cx_or_check(base, auth, agreementProof);
-    if (permission == CX_OR_DENIED) { (void)cx_or_drop(path); goto done; }
+    if (permission == CX_OR_DENIED) { (void)cx_or_drop(location.path); goto done; }
     if (permission != CX_OR_ALLOWED) goto done;
     if (recordReady && queue->count < CX_OR_LIMIT && cx_or_fresh(cx_or_ticks(&observed))
         && cx_or_make(&queue->packets[queue->count], deviceId, browserId, release, &observed)) {
         ++queue->count;
-        if (!cx_or_save(path, temp, binding, queue)) goto done;
+        if (!cx_or_save(location.path, location.temp, binding, queue)) goto done;
     }
     /* Recheck age immediately before dispatch; network policy lookup can cross the TTL. */
     if (!queue->count || !cx_or_packet_decode(queue->packets[0].wire, deviceId, &fields, &queue->packets[0].at)) goto done;
     if (!cx_or_fresh(queue->packets[0].at)) {
         cx_or_shift(queue);
-        (void)cx_or_save(path, temp, binding, queue);
+        (void)cx_or_save(location.path, location.temp, binding, queue);
         goto done;
     }
     if (cx_adapter_agreement_request(base, L"POST", cx_or_batches_path, auth, agreementProof,
         queue->packets[0].wire, CX_OR_REPLY_CAP, &reply)) {
-        if (cx_or_denied(reply.status)) (void)cx_or_drop(path);
+        if (cx_or_denied(reply.status)) (void)cx_or_drop(location.path);
         else if (cx_or_receipt(&reply, &fields)) {
             cx_or_shift(queue);
-            received = cx_or_save(path, temp, binding, queue);
+            received = cx_or_save(location.path, location.temp, binding, queue);
         }
     }
 done:
     cx_adapter_reply_free(&reply);
     if (auth) { SecureZeroMemory(auth, authSize); HeapFree(GetProcessHeap(), 0, auth); }
     if (queue) HeapFree(GetProcessHeap(), 0, queue);
-    if (held) ReleaseMutex(mutex);
-    if (mutex) CloseHandle(mutex);
+    cx_or_unlock(&location);
     return received;
 }

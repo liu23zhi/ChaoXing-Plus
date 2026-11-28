@@ -254,6 +254,12 @@ void WINAPI OrdinaryReceiptsTestMain(void) {
 
     testReceipt = TEST_LOST;
     CHECK(!test_run(dir, TRUE) && test_read(dir));
+    i = testGets;
+    posts = testPosts;
+    CHECK(cx_ordinary_receipts_discard(dir) && !test_read(dir));
+    CHECK(testPosts == posts && testGets == i);
+
+    CHECK(!test_run(dir, TRUE) && test_read(dir));
     posts = testPosts;
     testAdvance = TEST_DAY;
     CHECK(!test_run(dir, FALSE) && !test_read(dir) && testPosts == posts);
